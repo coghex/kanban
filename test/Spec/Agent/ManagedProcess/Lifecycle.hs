@@ -870,7 +870,10 @@ examples = do
                   let state =
                         (runningWorkerState spec.workerId selfIdentity.processIdentityPid (Just selfIdentity))
                           { workerStateHeartbeatAt = now,
-                            workerStateKnownProcesses = [descendantIdentity]
+                            workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                           }
                   LazyByteString.writeFile statePath (encode state)
                   let failingSnapshot = pure (Left "simulated ps outage")
@@ -924,7 +927,10 @@ examples = do
                 acquireWorkerLease descriptor `shouldReturn` Right ()
                 let state =
                       (runningWorkerState spec.workerId deadSupervisorIdentity.processIdentityPid (Just deadSupervisorIdentity))
-                        { workerStateKnownProcesses = [descendantIdentity]
+                        { workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                         }
                 LazyByteString.writeFile statePath (encode state)
                 callCount <- newIORef (0 :: Int)
@@ -1068,7 +1074,10 @@ examples = do
                 let liveTerminalState =
                       (runningWorkerState spec.workerId 999999 Nothing)
                         { workerStateStatus = WorkerTerminal SolveCompleted,
-                          workerStateKnownProcesses = [descendantIdentity]
+                          workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                         }
                 LazyByteString.writeFile statePath (encode liveTerminalState)
                 collected <- newIORef []
@@ -1116,7 +1125,10 @@ examples = do
                 let liveTerminalState =
                       (runningWorkerState spec.workerId 999999 Nothing)
                         { workerStateStatus = WorkerTerminal SolveCompleted,
-                          workerStateKnownProcesses = [descendantIdentity]
+                          workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                         }
                 LazyByteString.writeFile statePath (encode liveTerminalState)
                 earlier <- getCurrentTime
@@ -1257,7 +1269,10 @@ examples = do
                         state =
                           (runningWorkerState firstSpec.workerId ownPid (Just deadSupervisor))
                             { workerStateStatus = WorkerOrphaned SolveCompleted,
-                              workerStateKnownProcesses = []
+                              workerStateKnownProcesses = [],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                             }
                     LazyByteString.writeFile statePath (encode state)
                     -- Previously WorkerOrphaned unconditionally kept the
@@ -1404,7 +1419,10 @@ examples = do
                 let descendantOnlyTerminalState =
                       (runningWorkerState firstSpec.workerId 999999 Nothing)
                         { workerStateStatus = WorkerTerminal SolveCompleted,
-                          workerStateKnownProcesses = [descendantIdentity]
+                          workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                         }
                 LazyByteString.writeFile statePath (encode descendantOnlyTerminalState)
                 acquireWorkerLease second `shouldReturn` Left "issue #800 already has a live solve worker; open it from Processes or kill it before starting another"
@@ -1525,7 +1543,10 @@ examples = do
                 let liveTerminalState =
                       (runningWorkerState spec.workerId 999999 Nothing)
                         { workerStateStatus = WorkerTerminal SolveCompleted,
-                          workerStateKnownProcesses = [descendantIdentity]
+                          workerStateKnownProcesses = [descendantIdentity],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                         }
                 LazyByteString.writeFile statePath (encode liveTerminalState)
                 collected <- newIORef []

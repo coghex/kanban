@@ -38,6 +38,7 @@ module Kanban.Review.Types
     renderReviewResult,
     reviewResultHeading,
     reviewStageForLabels,
+    reviewTurnResumable,
     reviewWorkflowLabels,
   )
 where
@@ -45,14 +46,19 @@ where
 import Data.Aeson
   ( FromJSON (..),
     Result (..),
+    ToJSON (..),
     Value (..),
     eitherDecode,
     fromJSON,
+    object,
     withObject,
+    withText,
+    (.!=),
     (.:),
     (.:?),
-    (.!=),
+    (.=),
   )
+import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Maybe (fromMaybe)
@@ -61,7 +67,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import GHC.Generics (Generic)
 import Kanban.Domain (WorkflowConfig (..))
-import Kanban.Models (ProviderName)
+import Kanban.Models (ProviderName, parseProviderKey, providerKey)
 import Kanban.Review.Connection (ConnectionId, ReviewThreadId)
 
 -- | A request the provider sent /this/ client, which the user answers later
@@ -441,3 +447,271 @@ claudePromptLimit = 100000
 
 githubCommentLimit :: Int
 githubCommentLimit = 100000
+
+-- ---------------------------------------------------------------------------
+-- The durable encoding
+-- ---------------------------------------------------------------------------
+
+-- A review thread outlives the dashboard that opened it (SAG-10): its host
+-- journals every 'ReviewEvent' it produces, and a later dashboard replays that
+-- journal through the very same handler a live event reaches. These instances
+-- are that journal's schema.
+--
+-- The four payloads that already decode from the provider's wire get a
+-- 'ToJSON' that emits exactly the shape their existing 'FromJSON' reads,
+-- rather than a second parallel encoding. One decoder then serves both
+-- directions, so a durable record cannot drift from the wire shape it was
+-- built out of — the round trip is asserted, and the alternative (a private
+-- durable spelling beside the wire one) is two schemas that have to be kept
+-- equal by hand.
+
+instance ToJSON ReviewChoice where
+  toJSON choice =
+    object
+      [ "id" .= choice.reviewChoiceId,
+        "label" .= choice.reviewChoiceLabel,
+        "description" .= choice.reviewChoiceDescription
+      ]
+
+instance ToJSON ReviewQuestion where
+  toJSON question =
+    object
+      [ "id" .= question.reviewQuestionId,
+        "header" .= question.reviewQuestionHeader,
+        "question" .= question.reviewQuestionText,
+        "kind" .= questionKindText question.reviewQuestionKind,
+        "options" .= question.reviewQuestionChoices,
+        "allowOther" .= question.reviewQuestionAllowOther,
+        "multiple" .= question.reviewQuestionMultiple
+      ]
+
+questionKindText :: ReviewQuestionKind -> Text
+questionKindText QuestionChoice = "choice"
+questionKindText QuestionText = "text"
+
+instance ToJSON ReviewResult where
+  toJSON result =
+    object
+      [ "issue" .= result.reviewResultIssue,
+        "stage" .= reviewStageText result.reviewResultStage,
+        "approved" .= result.reviewResultApproved,
+        "reviewerRoute" .= result.reviewResultReviewerRoute,
+        "models" .= result.reviewResultModels,
+        "commentUrl" .= result.reviewResultCommentUrl,
+        "blockingReasons" .= result.reviewResultBlockingReasons
+      ]
+
+instance ToJSON CanonicalIssueReviewResult where
+  toJSON result =
+    object
+      [ "approved" .= result.canonicalReviewApproved,
+        "issue" .= result.canonicalReviewIssue,
+        "origin" .= result.canonicalReviewOrigin,
+        "required_reviewers" .= result.canonicalReviewRequiredReviewers,
+        "required_models" .= result.canonicalReviewRequiredModels,
+        "reasons" .= result.canonicalReviewReasons
+      ]
+
+-- | The wire spelling 'FromJSON' 'ReviewResult' already accepts, kept here as
+-- the one place the three stage names are written down for a durable record.
+reviewStageText :: ReviewStage -> Text
+reviewStageText InitialReview = "review"
+reviewStageText IssueRevision = "revision"
+reviewStageText IssueRereview = "rereview"
+
+parseReviewStageText :: Text -> Maybe ReviewStage
+parseReviewStageText "review" = Just InitialReview
+parseReviewStageText "revision" = Just IssueRevision
+parseReviewStageText "rereview" = Just IssueRereview
+parseReviewStageText _ = Nothing
+
+instance ToJSON ReviewStage where
+  toJSON = toJSON . reviewStageText
+
+instance FromJSON ReviewStage where
+  parseJSON = withText "ReviewStage" $ \value ->
+    maybe (fail "stage must be review, revision, or rereview") pure (parseReviewStageText value)
+
+-- | The wire id travels verbatim, as the 'Value' it arrived as. A request the
+-- provider named with a string and one it named with a number are different
+-- requests, and an answer written under a re-typed id reaches neither.
+instance ToJSON ReviewRequestId where
+  toJSON requestId =
+    object
+      [ "connection" .= requestId.reviewRequestConnection,
+        "wireId" .= requestId.reviewRequestWireId
+      ]
+
+instance FromJSON ReviewRequestId where
+  parseJSON = withObject "ReviewRequestId" $ \value ->
+    ReviewRequestId <$> value .: "connection" <*> value .: "wireId"
+
+instance ToJSON ReviewAnswer where
+  toJSON answer =
+    object
+      [ "selections" .= answer.reviewAnswerSelections,
+        "other" .= answer.reviewAnswerOther
+      ]
+
+instance FromJSON ReviewAnswer where
+  parseJSON = withObject "ReviewAnswer" $ \value ->
+    ReviewAnswer <$> value .:? "selections" .!= [] <*> value .:? "other"
+
+instance ToJSON ReviewApproval where
+  toJSON approval =
+    object
+      [ "command" .= approval.reviewApprovalCommand,
+        "reason" .= approval.reviewApprovalReason,
+        "fileChange" .= approval.reviewApprovalFileChange
+      ]
+
+instance FromJSON ReviewApproval where
+  parseJSON = withObject "ReviewApproval" $ \value ->
+    ReviewApproval <$> value .:? "command" <*> value .:? "reason" <*> value .:? "fileChange" .!= False
+
+instance ToJSON ReviewOutputKind where
+  toJSON AgentOutput = object ["kind" .= ("agent" :: Text)]
+  toJSON ReasoningOutput = object ["kind" .= ("reasoning" :: Text)]
+  toJSON CommandOutput = object ["kind" .= ("command" :: Text)]
+  toJSON (DiagnosticOutput provider) =
+    object ["kind" .= ("diagnostic" :: Text), "provider" .= providerKey provider]
+
+instance FromJSON ReviewOutputKind where
+  parseJSON = withObject "ReviewOutputKind" $ \value -> do
+    kind <- value .: "kind"
+    case kind :: Text of
+      "agent" -> pure AgentOutput
+      "reasoning" -> pure ReasoningOutput
+      "command" -> pure CommandOutput
+      "diagnostic" -> DiagnosticOutput <$> (value .: "provider" >>= parseProvider)
+      other -> fail ("unknown review output kind " <> Text.unpack other)
+    where
+      parseProvider key =
+        maybe (fail ("unknown provider " <> Text.unpack key)) pure (parseProviderKey key)
+
+instance ToJSON ReviewTurnOutcome where
+  toJSON TurnSucceeded = toJSON ("succeeded" :: Text)
+  toJSON TurnFailed = toJSON ("failed" :: Text)
+  toJSON TurnInterrupted = toJSON ("interrupted" :: Text)
+
+instance FromJSON ReviewTurnOutcome where
+  parseJSON = withText "ReviewTurnOutcome" $ \value -> case value of
+    "succeeded" -> pure TurnSucceeded
+    "failed" -> pure TurnFailed
+    "interrupted" -> pure TurnInterrupted
+    other -> fail ("unknown review turn outcome " <> Text.unpack other)
+
+-- | A tool result, whose failure half is a message and whose success half may
+-- carry nothing at all. Encoded as an object rather than a bare string so the
+-- two halves are told apart by shape rather than by content: a tool that
+-- succeeded with the text @"error"@ is not a tool that failed.
+encodeToolResult :: ToJSON success => Either Text success -> Value
+encodeToolResult (Left message) = object ["error" .= message]
+encodeToolResult (Right value) = object ["ok" .= value]
+
+parseToolResult :: FromJSON success => Value -> Parser (Either Text success)
+parseToolResult = withObject "tool result" $ \value -> do
+  failure <- value .:? "error"
+  case failure of
+    Just message -> pure (Left message)
+    Nothing -> Right <$> value .: "ok"
+
+instance ToJSON ReviewEvent where
+  toJSON reviewEvent = case reviewEvent of
+    ReviewThreadCreated issueNumber threadId ->
+      tagged "thread_created" ["issue" .= issueNumber, "thread" .= threadId]
+    ReviewTurnStarted threadId turnId ->
+      tagged "turn_started" ["thread" .= threadId, "turn" .= turnId]
+    ReviewOutput threadId outputKind text ->
+      tagged "output" ["thread" .= threadId, "outputKind" .= outputKind, "text" .= text]
+    ReviewQuestionRequested threadId requestId question ->
+      tagged "question_requested" ["thread" .= threadId, "request" .= requestId, "question" .= question]
+    ReviewApprovalRequested threadId requestId approval ->
+      tagged "approval_requested" ["thread" .= threadId, "request" .= requestId, "approval" .= approval]
+    ReviewClaudeStarted threadId display ->
+      tagged "claude_started" ["thread" .= threadId, "display" .= display]
+    ReviewClaudeFinished threadId result ->
+      tagged "claude_finished" ["thread" .= threadId, "result" .= encodeToolResult result]
+    ReviewGitHubStarted threadId summary ->
+      tagged "github_started" ["thread" .= threadId, "summary" .= summary]
+    ReviewGitHubFinished threadId result ->
+      tagged "github_finished" ["thread" .= threadId, "result" .= encodeToolResult result]
+    ReviewTurnCompleted threadId outcome message result ->
+      tagged
+        "turn_completed"
+        [ "thread" .= threadId,
+          "outcome" .= outcome,
+          "message" .= message,
+          "result" .= fmap encodeCompletedResult result
+        ]
+    ReviewStartFailed issueNumber message ->
+      tagged "start_failed" ["issue" .= issueNumber, "message" .= message]
+    ReviewClientStopped message -> tagged "client_stopped" ["message" .= message]
+    ReviewConnectionStopped connectionId message ->
+      tagged "connection_stopped" ["connection" .= connectionId, "message" .= message]
+    ReviewSteerUndelivered threadId turnId message ->
+      tagged "steer_undelivered" ["thread" .= threadId, "turn" .= turnId, "message" .= message]
+    ReviewInterruptFailed threadId cause message ->
+      tagged "interrupt_failed" ["thread" .= threadId, "cause" .= cause, "message" .= message]
+    ReviewProtocolWarning provider message ->
+      tagged "protocol_warning" ["provider" .= providerKey provider, "message" .= message]
+    where
+      tagged name fields = object (("event" .= (name :: Text)) : fields)
+      encodeCompletedResult (raw, result) = object ["raw" .= raw, "result" .= result]
+
+instance FromJSON ReviewEvent where
+  parseJSON = withObject "ReviewEvent" $ \value -> do
+    name <- value .: "event"
+    case name :: Text of
+      "thread_created" -> ReviewThreadCreated <$> value .: "issue" <*> value .: "thread"
+      "turn_started" -> ReviewTurnStarted <$> value .: "thread" <*> value .: "turn"
+      "output" -> ReviewOutput <$> value .: "thread" <*> value .: "outputKind" <*> value .: "text"
+      "question_requested" ->
+        ReviewQuestionRequested <$> value .: "thread" <*> value .: "request" <*> value .: "question"
+      "approval_requested" ->
+        ReviewApprovalRequested <$> value .: "thread" <*> value .: "request" <*> value .: "approval"
+      "claude_started" -> ReviewClaudeStarted <$> value .: "thread" <*> value .: "display"
+      "claude_finished" ->
+        ReviewClaudeFinished <$> value .: "thread" <*> (value .: "result" >>= parseToolResult)
+      "github_started" -> ReviewGitHubStarted <$> value .: "thread" <*> value .: "summary"
+      "github_finished" ->
+        ReviewGitHubFinished <$> value .: "thread" <*> (value .: "result" >>= parseToolResult)
+      "turn_completed" ->
+        ReviewTurnCompleted
+          <$> value .: "thread"
+          <*> value .: "outcome"
+          <*> value .:? "message"
+          <*> (value .:? "result" >>= traverse parseCompletedResult)
+      "start_failed" -> ReviewStartFailed <$> value .: "issue" <*> value .: "message"
+      "client_stopped" -> ReviewClientStopped <$> value .: "message"
+      "connection_stopped" -> ReviewConnectionStopped <$> value .: "connection" <*> value .: "message"
+      "steer_undelivered" ->
+        ReviewSteerUndelivered <$> value .: "thread" <*> value .: "turn" <*> value .: "message"
+      "interrupt_failed" ->
+        ReviewInterruptFailed <$> value .: "thread" <*> value .: "cause" <*> value .:? "message"
+      "protocol_warning" ->
+        ReviewProtocolWarning <$> (value .: "provider" >>= parseProvider) <*> value .: "message"
+      other -> fail ("unknown review event " <> Text.unpack other)
+    where
+      parseCompletedResult = withObject "completed result" $ \value ->
+        (,) <$> value .: "raw" <*> value .: "result"
+      parseProvider key =
+        maybe (fail ("unknown provider " <> Text.unpack key)) pure (parseProviderKey key)
+
+-- | Whether a completed turn leaves its review still able to take input.
+--
+-- The one spelling of that rule (SAG-10). Two very different consumers depend
+-- on it agreeing with itself: the overlay decides from it whether to keep
+-- offering an input line, and the repository review host decides from it
+-- whether the durable child action behind that line is still there to receive
+-- what is typed. An overlay that offered a line to a settled child, or a
+-- child kept alive for a line the overlay had already withdrawn, is what two
+-- copies of this rule produce the first time one of them is edited.
+--
+-- Only an interrupted revision is resumable. A canonical stage does not
+-- resume at all — it is a subprocess that ran the gate, and a fresh stage is
+-- a fresh run — and a revision whose turn actually completed has published
+-- its verdict.
+reviewTurnResumable :: ReviewStage -> ReviewTurnOutcome -> Bool
+reviewTurnResumable IssueRevision TurnInterrupted = True
+reviewTurnResumable _ _ = False

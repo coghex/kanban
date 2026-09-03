@@ -63,11 +63,10 @@ import Kanban.PullRequestFlow
     recordedPullRequestBrand,
     solveReviewerAssignment,
   )
-import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReviewProvider, githubToolName, questionToolName, reviewDeveloperInstructions)
+import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReviewCell, embeddedReviewProvider, githubToolName, questionToolName, reviewDeveloperInstructions)
 import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor, providerForBrand)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
-import Kanban.UI.Review (reviewBackendCell)
 import Kanban.UI.Solve (SolveChooserDecision (..), solveChooserDecision)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (withModelRoster)
@@ -290,17 +289,21 @@ reviewSpec = describe "the embedded review it starts" $ do
   it "leaves dual mode on the Codex app-server" $
     map backendLabelFor [DualMode, NoAgentMode] `shouldBe` [Just "codex app-server", Just "codex app-server"]
 
-  -- The dashboard boundary that resolves a cell and refuses before starting
-  -- anything. It must ask about the provider the spawn will actually route
-  -- to: a boundary fixed on Codex refuses a Claude-only install for want of a
-  -- cell it would never have run on, and its backend never starts at all.
+  -- The boundary that resolves a cell and refuses before starting anything.
+  -- It must ask about the provider the spawn will actually route to: a
+  -- boundary fixed on Codex refuses a Claude-only install for want of a cell
+  -- it would never have run on, and its backend never starts at all.
+  --
+  -- The repository review host is what starts that backend now (SAG-10), and
+  -- it consults this very function to do it — so the boundary and the spawn
+  -- are one expression rather than two that agree today.
   --
   -- Asserted as the same cell 'Kanban.Review.startReviewClient' resolves,
   -- rather than as "some Right", so a boundary that started resolving a
   -- different provider's cell would fail here even while still succeeding.
   it "resolves the launch boundary's cell on the provider the spawn will route to" $
     sequence_
-      [ (variant.variantName, snd <$> reviewBackendCell (Right variant.variantRoster))
+      [ (variant.variantName, embeddedReviewCell variant.variantRoster)
           `shouldBe` ( variant.variantName,
                        Right (cellOf (assignmentFor variant.variantRoster IssueReviewRole variant.variantProvider))
                      )
@@ -308,14 +311,14 @@ reviewSpec = describe "the embedded review it starts" $ do
       ]
 
   it "leaves that boundary on issue_review.codex in dual mode" $
-    (snd <$> reviewBackendCell (Right defaultRoster))
+    embeddedReviewCell defaultRoster
       `shouldBe` Right (cellOf (assignmentFor defaultRoster IssueReviewRole CodexProvider))
 
   -- The negative control the pair above needs: the boundary still refuses,
   -- and still names the provider it was asking about, when the routed cell is
   -- genuinely absent.
   it "still refuses when the routed provider has no issue_review cell" $
-    reviewBackendCell (Right noIssueReviewClaude)
+    embeddedReviewCell noIssueReviewClaude
       `shouldSatisfy` either (Data.Text.isInfixOf "claude") (const False)
 
   -- The integration half the pure arms cannot cover -- a Claude-only install

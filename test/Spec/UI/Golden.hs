@@ -132,7 +132,6 @@ import Kanban.UI.Types
     IncidentSelection (..),
     Overlay (..),
     ProcessSelection (..),
-    ReviewBackend (..),
     ReviewDetail (..),
     ReviewPhase (..),
     ReviewSession,
@@ -968,7 +967,8 @@ revisionSession press state =
             reviewSessionThreadId = Just (fixtureReviewThread "thread-515"),
             reviewSessionTurnId = Nothing,
             reviewSessionPending = Nothing,
-            reviewSessionUndelivered = []
+            reviewSessionUndelivered = [],
+            reviewSessionRestored = Nothing
           }
 
 -- | Replay a run of key presses through the overlay's own decoder and the
@@ -1547,12 +1547,10 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appBoardRefreshQueued = False,
       appRefreshCoordinator = refreshCoordinator,
       appQuitPending = False,
-      appReviewBackend = ReviewBackendStopped,
       appReviewSessions = Map.empty,
       appReviewUndelivered = Map.empty,
       appSolveSessions = Map.empty,
       appSolveProcesses = Map.empty,
-      appCanonicalReviewProcesses = Map.empty,
       appPullRequestReviewSessions = Map.empty,
       appPullRequestProcesses = Map.empty,
       appWorkers = Map.empty,

@@ -5,6 +5,8 @@ module Kanban.UI.Events
     OverlayExtent (..),
     OverlayMouseAction (..),
     QuitDecision (..),
+    QuitRequest (..),
+    dashboardQuitRequest,
     applyCardClick,
     applyIncidentsAction,
     applyRunningProcessClick,
@@ -49,10 +51,6 @@ import Kanban.GitHub
     )
 import Kanban.Models (saveModelRoster)
 import Kanban.Process (killManagedProcess )
-import Kanban.Review
-  ( interruptReview,
-    killReviewTools
-    )
 import Kanban.Solve
   ( SolveWorkflow (..),
     SolverBrand (..)
@@ -151,8 +149,6 @@ dispatchEvent event = do
     (_, AppEvent (ApprovalStatusRefreshed issuedUnder result)) -> applyApprovalStatus issuedUnder result
     (_, AppEvent (ApprovalToggleFinished transition result)) -> applyApprovalToggle transition result
     (_, AppEvent (DirectMergeFinished number result)) -> applyDirectMerge number result
-    (_, AppEvent (ReviewBackendStarted result)) -> applyReviewBackendStarted result
-    (_, AppEvent (ReviewProtocolEvent reviewEvent)) -> applyReviewEvent reviewEvent
     (_, AppEvent (ReviewAnimationTick issueNumber generation)) -> applySessionTick reviewSessionOps issueNumber generation
     (_, AppEvent (SolveProtocolEvent solveEvent)) -> applySolveEvent solveEvent
     (_, AppEvent (SolveAnimationTick issueNumber generation)) -> applySessionTick solveSessionOps issueNumber generation
@@ -162,11 +158,7 @@ dispatchEvent event = do
     (_, AppEvent (WorkerRegistered descriptor)) -> registerWorker descriptor
     (_, AppEvent (WorkerProtocolEvent descriptor workerEvent)) -> applyWorkerProtocolEvent descriptor workerEvent
     (_, AppEvent (WorkerDiscoveryFinished descriptors)) -> mapM_ attachDiscoveredWorker descriptors
-    (_, AppEvent (CanonicalIssueReviewProcessStarted issueNumber process)) -> do
-      modify (\current -> current {appCanonicalReviewProcesses = Map.insert issueNumber process current.appCanonicalReviewProcesses})
-      modifyReviewSession issueNumber (\session -> session {sessionActivity = "reviewing issue"})
-      armReviewTick issueNumber
-    (_, AppEvent (CanonicalIssueReviewFinished issueNumber stage result)) -> applyCanonicalIssueReview issueNumber stage result
+    (_, AppEvent (IssueActionRefused issueNumber notice)) -> applyIssueActionRefused issueNumber notice
     -- The tick clears only the instance it was armed for, and only once that
     -- instance's deadline has actually passed; everything else about the
     -- decision is 'Kanban.UI.Util.noticeExpiryApplied''s.
@@ -588,46 +580,55 @@ handleSearchInput input = modify (applySearchInput input)
 
 -- | The quit key's decision.
 --
--- A live interactive review still refuses the quit exactly as it did, and is
--- asked first: it is the one refusal the user can act on. Everything past it
--- is about the @gh@ this dashboard owns. With nothing queued or running there
--- is nothing to stop and the halt is immediate, which is what keeps an
--- ordinary quit instant; otherwise the queued work is cancelled and the
--- running fetch is put through the same verified cleanup a refresh timeout
--- puts it through, and the dashboard stops only once that has reached a
--- verdict.
+-- Nothing about an agent refuses it any more. A live issue review or revision
+-- used to, because its lifecycle was held in this process's memory and
+-- quitting would have thrown it away mid-turn; SAG-10 moved that lifecycle
+-- into the repository review host, so an issue action outlives the dashboard
+-- exactly as a solve or a pull-request worker always has (requirement 3).
+--
+-- What is left is about the @gh@ this dashboard owns. With nothing queued or
+-- running there is nothing to stop and the halt is immediate, which is what
+-- keeps an ordinary quit instant; otherwise the queued work is cancelled and
+-- the running fetch is put through the same verified cleanup a refresh
+-- timeout puts it through, and the dashboard stops only once that has reached
+-- a verdict.
 requestDashboardQuit :: EventM Name AppState ()
 requestDashboardQuit = do
   state <- get
-  let liveInteractiveReviews =
-        liveReviewSessions
-          (reviewBackendReady state.appReviewBackend)
-          (Map.keysSet state.appCanonicalReviewProcesses)
-          state.appReviewSessions
-  if not (null liveInteractiveReviews)
-    then
-      modify
-        ( \current ->
-            noticeSet
-              ( "Finish or kill the non-persistent issue review"
-                  <> (if length liveInteractiveReviews == 1 then " " else "s ")
-                  <> Text.intercalate ", " (map (("#" <>) . showText) liveInteractiveReviews)
-                  <> " before quitting; solve and PR workers may be safely left running"
-              )
-              current {appOverlay = Nothing}
-        )
-    else
-      if state.appQuitPending
-        then setNoticeFor QuitSettling stoppingGitHubWorkNotice
-        else do
-          mustSettle <- liftIO (coordinatorMustSettle state.appRefreshCoordinator)
-          if not mustSettle
-            then halt
-            else do
-              modify (\current -> noticeSetFor QuitSettling stoppingGitHubWorkNotice current {appOverlay = Nothing, appQuitPending = True})
-              void . liftIO . forkIO $
-                shutdownRefreshCoordinator state.appRefreshCoordinator
-                  >>= writeBChan state.appEventChannel . BoardRefreshShutdownFinished
+  mustSettle <- liftIO (coordinatorMustSettle state.appRefreshCoordinator)
+  case dashboardQuitRequest state mustSettle of
+    QuitAlreadySettling -> setNoticeFor QuitSettling stoppingGitHubWorkNotice
+    QuitImmediate -> halt
+    QuitMustSettle -> do
+      modify (\current -> noticeSetFor QuitSettling stoppingGitHubWorkNotice current {appOverlay = Nothing, appQuitPending = True})
+      void . liftIO . forkIO $
+        shutdownRefreshCoordinator state.appRefreshCoordinator
+          >>= writeBChan state.appEventChannel . BoardRefreshShutdownFinished
+
+-- | What the quit key does, as a value.
+--
+-- Pure so that requirement 3 is assertable: what has to be shown is that a
+-- dashboard holding a live issue action still quits, and the way to show it is
+-- to hand this function such a state and get 'QuitImmediate' back. The old
+-- refusal was reachable only from inside 'EventM', which is why the notice it
+-- raised outlived several attempts to describe it.
+--
+-- The coordinator's answer is a parameter rather than read here for the same
+-- reason it always was: it is the one input that needs IO.
+data QuitRequest
+  = -- | A settle this dashboard already started.
+    QuitAlreadySettling
+  | -- | Nothing is queued or running, so the halt is immediate.
+    QuitImmediate
+  | -- | GitHub work has to be stopped first.
+    QuitMustSettle
+  deriving stock (Eq, Show)
+
+dashboardQuitRequest :: AppState -> Bool -> QuitRequest
+dashboardQuitRequest state mustSettle
+  | state.appQuitPending = QuitAlreadySettling
+  | mustSettle = QuitMustSettle
+  | otherwise = QuitImmediate
 
 stoppingGitHubWorkNotice :: Text
 stoppingGitHubWorkNotice = "Stopping GitHub work…"
@@ -1045,37 +1046,22 @@ killSolveAgent issueNumber = do
         Nothing -> mapM_ killManagedProcess process
       setNotice ("Killing solve #" <> showText issueNumber <> " and its process tree…")
 
+-- | The @x@ gate's review arm.
+--
+-- One durable command, whatever the stage. The host settles the child it
+-- names: under a process-per-thread provider that is the thread's own process
+-- and its descendants, under a shared one the thread's turn and its tool
+-- subprocesses, and for a canonical stage the @approve_issues.py@ subprocess
+-- and everything it started. None of those touches the host or a sibling
+-- (requirement 11), which is exactly what a dashboard-side kill could not
+-- promise once the client stopped living here.
 killReviewAgent :: Int -> EventM Name AppState ()
 killReviewAgent issueNumber = do
   state <- get
-  let canonicalProcess = Map.lookup issueNumber state.appCanonicalReviewProcesses
-      activeTurn = do
-        session <- Map.lookup issueNumber state.appReviewSessions
-        client <- case state.appReviewBackend of
-          ReviewBackendReady value -> Just value
-          _ -> Nothing
-        threadId <- session.sessionDetail.reviewSessionThreadId
-        turnId <- session.sessionDetail.reviewSessionTurnId
-        if reviewTurnInterruptible session.sessionDetail.reviewSessionStage session.sessionPhase
-          then Just (client, threadId, turnId)
-          else Nothing
-  case (canonicalProcess, activeTurn) of
-    (Nothing, Nothing) -> setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
-    _ -> do
-      appendToReviewSession issueNumber
-        ( \session ->
-            session
-              { sessionPhase = ReviewFailed,
-                sessionActivity = "killing process tree",
-                sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-              }
-        )
-      mapM_ (\process -> void . liftIO . forkIO $ killManagedProcess process) canonicalProcess
-      case activeTurn of
-        Nothing -> pure ()
-        Just (client, threadId, turnId) -> do
-          void . liftIO . forkIO $ killReviewTools client threadId
-          void (liftIO (interruptReview client threadId turnId))
+  if not (issueActionLive state issueNumber)
+    then setNotice ("Issue review #" <> showText issueNumber <> " has no live process to kill")
+    else do
+      terminateIssueAction issueNumber
       setNotice ("Killing issue review #" <> showText issueNumber <> " and its process tree…")
 
 killSelectedWorkingProcess :: EventM Name AppState ()
@@ -1128,11 +1114,9 @@ killLiveItemWorkingProcess (IssueItem issue) = do
   let issueNumber = issue.issueNumber
       solveProcess = Map.lookup issueNumber state.appSolveProcesses
       solveWorker = solveWorkerFor state issueNumber
-      canonicalProcess = Map.lookup issueNumber state.appCanonicalReviewProcesses
-      reviewSession = Map.lookup issueNumber state.appReviewSessions
-      activeReview = reviewSession >>= activeReviewTurn state
-  case (solveWorker, solveProcess, canonicalProcess, activeReview) of
-    (Nothing, Nothing, Nothing, Nothing) -> setNotice ("Issue #" <> showText issueNumber <> " has no live process to kill")
+      liveReview = issueActionLive state issueNumber
+  case (solveWorker, solveProcess, liveReview) of
+    (Nothing, Nothing, False) -> setNotice ("Issue #" <> showText issueNumber <> " has no live process to kill")
     _ -> do
       case (solveWorker, solveProcess) of
         (Nothing, Nothing) -> pure ()
@@ -1148,33 +1132,8 @@ killLiveItemWorkingProcess (IssueItem issue) = do
           void . liftIO . forkIO $ case worker of
             Just descriptor -> terminateWorker descriptor
             Nothing -> mapM_ killManagedProcess process
-      case canonicalProcess of
-        Nothing -> pure ()
-        Just process -> do
-          appendToReviewSession issueNumber
-            ( \session ->
-                session
-                  { sessionPhase = ReviewFailed,
-                    sessionActivity = "killing process tree",
-                    sessionTranscript = appendTranscript session.sessionTranscript "\n[killed by user]\n"
-                  }
-            )
-          void . liftIO . forkIO $ killManagedProcess process
-      reviewInterruption <- case activeReview of
-        Nothing -> pure (Right ())
-        Just (client, threadId, turnId) -> do
-          void . liftIO . forkIO $ killReviewTools client threadId
-          liftIO (interruptReview client threadId turnId)
-      case reviewInterruption of
-        Left message -> setNotice ("Process-tree kill started, but review interruption failed: " <> message)
-        Right () -> setNotice ("Killing work for issue #" <> showText issueNumber <> " and its process tree…")
-  where
-    activeReviewTurn state session
-      | reviewSessionActive session,
-        ReviewBackendReady client <- state.appReviewBackend,
-        Just threadId <- session.sessionDetail.reviewSessionThreadId,
-        Just turnId <- session.sessionDetail.reviewSessionTurnId = Just (client, threadId, turnId)
-      | otherwise = Nothing
+      when liveReview (terminateIssueAction issueNumber)
+      setNotice ("Killing work for issue #" <> showText issueNumber <> " and its process tree…")
 
 scrollDetails :: Int -> EventM Name AppState ()
 scrollDetails = vScrollBy (viewportScroll DetailsViewport)
@@ -1279,7 +1238,7 @@ runningProcessOverlay state (IssueItem issue)
   where
     issueNumber = issue.issueNumber
     issueReviewIsActive =
-      Map.member issueNumber state.appCanonicalReviewProcesses
+      issueActionLive state issueNumber
         || maybe False reviewSessionActive (Map.lookup issueNumber state.appReviewSessions)
     boundAutoSolvePullRequest = do
       session <- Map.lookup issueNumber state.appSolveSessions

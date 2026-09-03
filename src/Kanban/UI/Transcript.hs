@@ -10,6 +10,7 @@ module Kanban.UI.Transcript
     scrollTranscript,
     scrollTranscriptToEnd,
     tailDisplayedTranscript,
+    tailReviewSession,
     tailReviewThread,
     tailTranscript,
     transcriptShouldTail,
@@ -124,6 +125,15 @@ tailTranscript session = do
 -- events are addressed by thread id while the overlay selects a session by
 -- issue number, so a background session's output must not move the
 -- displayed one.
+-- | Scroll one issue's review transcript to its tail.
+--
+-- By issue number rather than by thread, because a runner-owned action's
+-- events are delivered already addressed to the child they belong to
+-- (SAG-10) — and because a canonical stage has no thread at all, so a
+-- thread-keyed tail could never reach one.
+tailReviewSession :: Int -> EventM Name AppState ()
+tailReviewSession = tailTranscript . ReviewTranscript
+
 tailReviewThread :: ReviewThreadId -> EventM Name AppState ()
 tailReviewThread threadId = do
   state <- get

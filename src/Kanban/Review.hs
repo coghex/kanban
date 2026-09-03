@@ -67,6 +67,7 @@ module Kanban.Review
     canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    canonicalLaunchOutcome,
     claudeCommandBounds,
     claudeReviewArguments,
     claudeStartedEvent,
@@ -81,8 +82,10 @@ module Kanban.Review
     decodeStreamRecord,
     drainToolRegistry,
     embeddedReviewProvider,
+    embeddedReviewCell,
     embeddedReviewProviderFor,
     finalOutputSchema,
+    finishReviewThread,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
@@ -114,6 +117,7 @@ module Kanban.Review
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
+    reviewTurnResumable,
     settleInterrupt,
     streamInterruptRequest,
     streamUserMessage,
@@ -185,6 +189,7 @@ import Kanban.Review.Canonical
     canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    canonicalLaunchOutcome,
     issueReviewerNotFoundMessage,
     issueReviewerRecordFromBytes,
     issueReviewerRecordPath,
@@ -293,7 +298,7 @@ import Kanban.Review.Tools
     runGitHubIssueTool,
   )
 import Kanban.Review.Types
-  ( CanonicalIssueReviewResult (..),
+  ( reviewTurnResumable, CanonicalIssueReviewResult (..),
     ClaudeToolRequest (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
@@ -359,6 +364,20 @@ claudeStartedEvent client threadId =
 -- backend actually started. Those are the same cell for the backend an
 -- install routes to, and a second backend is exactly what would make two
 -- separate lookups drift apart.
+-- | The cell the embedded review backend will actually start on.
+--
+-- One expression, named, because three places have to agree about it and two
+-- of them are not the spawn: 'startReviewClient' refuses on it before any
+-- process exists, the processes overlay labels the repository review host and
+-- its children with it, and a test pins it. Resolving it separately anywhere
+-- is how a boundary comes to refuse a roster the spawn would have accepted,
+-- or to name a provider the host would never have started.
+--
+-- The provider half is 'embeddedReviewProviderFor', which is the adapter's
+-- routing and not a brand chosen here (requirement 8).
+embeddedReviewCell :: ModelRoster -> Either Text Assignment
+embeddedReviewCell roster = issueReviewAssignment (embeddedReviewProviderFor roster) roster
+
 issueReviewAssignment :: ProviderName -> ModelRoster -> Either Text Assignment
 issueReviewAssignment provider roster =
   either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole provider)
@@ -384,7 +403,7 @@ backendAssignment client =
 -- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
 -- so a roster it allowed cannot be one this refuses.
 startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment provider roster of
+startReviewClient roster workflowConfig repository eventSink = case embeddedReviewCell roster of
   -- Resolved before the backend is spawned, not after: a roster that loads
   -- no cell for the routed provider must start no process at all, and the
   -- backend's own failure surface already carries the reason to the UI. The
@@ -591,6 +610,40 @@ stopReviewConnection :: ReviewConnection -> IO ()
 stopReviewConnection connection = do
   killManagedProcess connection.connectionManaged
   ignoreIOException (hClose connection.connectionInput)
+
+-- | Settle one review thread and nothing else (SAG-10, requirement 11).
+--
+-- Which is the whole difficulty: what "one thread" owns depends on the
+-- backend's process shape, and the two shapes have no common answer.
+--
+-- Under 'ProcessPerThread' the thread /is/ a process, so ending it means
+-- taking its connection out of the pool and stopping it — the provider
+-- process, its input handle, its tool subprocesses, and the tool re-entry
+-- endpoint serving it. Under 'SharedProcess' every other live thread is
+-- multiplexed onto that same connection, so stopping it would end them too;
+-- there the thread owns only its tool subprocesses, and the connection is
+-- deliberately left running.
+--
+-- The tool kill is common to both and runs first either way, because a
+-- @kanban_run_claude@ CLI or a @gh@ call started by this thread is this
+-- thread's descendant under either shape.
+--
+-- Never the client. A child action ending must not end the host or a sibling
+-- (requirement 11), so this is the only teardown an action's termination is
+-- allowed to reach; 'stopReviewClient' belongs to the host's own shutdown.
+finishReviewThread :: ReviewClient -> ReviewThreadId -> IO ()
+finishReviewThread client threadId = do
+  killReviewTools client threadId
+  modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
+  modifyMVar_ client.reviewInterrupts (pure . Map.delete threadId)
+  modifyMVar_ client.reviewThreadIssues (pure . Map.delete threadId)
+  when (client.reviewBackend.backendProcessShape == ProcessPerThread) $ do
+    let identifier = threadId.reviewThreadConnection
+    found <- lookupConnection client.reviewConnections identifier
+    takeConnection client.reviewConnections identifier
+    mapM_ stopReviewConnection found
+    proxy <- takeReviewToolProxy client identifier
+    mapM_ destroyReviewToolProxy proxy
 
 clientShuttingDownMessage :: ReviewClient -> Text
 clientShuttingDownMessage client = backendSentence client <> " client is shutting down"

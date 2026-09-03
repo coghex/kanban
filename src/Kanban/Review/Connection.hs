@@ -48,6 +48,7 @@ where
 
 import Control.Concurrent (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, readMVar)
 import Control.Monad (when)
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -60,8 +61,13 @@ import System.Process (ProcessHandle)
 -- pool and never reused within one client's life, so an id that outlives
 -- the connection it named — on a request the user has not answered yet, say
 -- — resolves to nothing rather than to a later connection.
+-- The JSON instances are the durable half of that promise. A review thread
+-- outlives the dashboard that opened it (SAG-10), so both halves of the pair
+-- are journaled and read back, and a connection ordinal is exactly what the
+-- pool allocates.
 newtype ConnectionId = ConnectionId Int
   deriving stock (Eq, Ord, Show)
+  deriving newtype (FromJSON, ToJSON)
 
 -- | A review thread as Kanban knows it: the connection serving it, plus the
 -- thread id the provider on that connection chose.
@@ -76,6 +82,21 @@ data ReviewThreadId = ReviewThreadId
     reviewThreadProvider :: Text
   }
   deriving stock (Eq, Ord, Show)
+
+-- | Both halves, spelled out. A durable record that kept only the provider's
+-- own thread id would resolve to whichever connection a later dashboard
+-- happened to allocate first, which is the exact confusion the pair exists to
+-- prevent.
+instance ToJSON ReviewThreadId where
+  toJSON threadId =
+    object
+      [ "connection" .= threadId.reviewThreadConnection,
+        "provider" .= threadId.reviewThreadProvider
+      ]
+
+instance FromJSON ReviewThreadId where
+  parseJSON = withObject "ReviewThreadId" $ \value ->
+    ReviewThreadId <$> value .: "connection" <*> value .: "provider"
 
 -- | What a request this client sent is waiting for, so its response can be
 -- classified by more than its id.

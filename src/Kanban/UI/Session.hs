@@ -11,7 +11,6 @@ module Kanban.UI.Session
     incidentSourceLabel,
     incidentsFooterHints,
     itemReviewRefusal,
-    liveReviewSessions,
     locateBoardWork,
     processesFooterHints,
     pullRequestSessionReusable,
@@ -23,9 +22,12 @@ module Kanban.UI.Session
     resolveProcessSelection,
     reusableSolveSession,
     reviewAgentSessionEntry,
-    reviewBackendReady,
     reviewIncidentPhase,
     reviewOverlayVisible,
+    issueActionLive,
+    orphanMessage,
+    liveCanonicalIssueAction,
+    reviewPhaseActive,
     reviewSessionActive,
     reviewSessionInputLive,
     reviewSessionLive,
@@ -42,6 +44,8 @@ module Kanban.UI.Session
     solveSessionMode,
     solveProcessStatus,
     solveWorkerFor,
+    issueActionWorkerFor,
+    issueActionStageLabel,
   )
 where
 
@@ -50,7 +54,6 @@ import Data.List (find, findIndex, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -75,51 +78,82 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     recordedPullRequestBrand
     )
+import Kanban.Models
+  ( ModelRoster,
+    RecordedAssignment (..),
+    RosterLoadError,
+    recordAssignment,
+    unavailableAssignmentDisplay,
+  )
+import Kanban.ProviderAdapter (brandForProvider)
 import Kanban.Review
   ( ReviewStage (..),
-    ReviewThreadId (..)
+    ReviewThreadId (..),
+    embeddedReviewCell,
+    embeddedReviewProviderFor
     )
 import Kanban.Solve
-  ( SolveWorkflow (..),
+  ( SolveOutcome (..),
+    SolveWorkflow (..),
+    SolverBrand (..),
+    assignmentLabel,
     solveAssignment
   )
 import Kanban.Text (sanitizeText)
 import Kanban.Worker
-  ( PullRequestWorkerTask (..),
+  ( IssueActionWorkerTask (..),
+    PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerSpec (..),
     WorkerTask (..)
     )
-import Kanban.UI.Keys (BoardAction (..), binding, footerHint)
+import Kanban.UI.Keys (BoardAction (..), actionKeyText, binding, footerHint)
 import Kanban.UI.SessionCore (liveSessionMode)
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Selection
 
 -- | The single "is this review session live?" decision, shared by the
--- processes-overlay rows ('reviewAgentSessionEntry'), the @x@ gate that
--- dispatches on them ('killSelectedAgentSession'), and the dashboard quit
--- guard ('liveReviewSessions'). Live means /currently killable/: the
--- session has a kill target 'killReviewAgent' can actually act on, so the
--- overlay never reports a row live that the kill would then refuse, and @q@
--- is never refused for a session nothing can stop (issue #151).
+-- processes-overlay rows ('reviewAgentSessionEntry') and the @x@ gate that
+-- dispatches on them ('killSelectedAgentSession'). Live means /currently
+-- killable/: there is a kill target 'killReviewAgent' can actually act on, so
+-- the overlay never reports a row live that the kill would then refuse
+-- (issue #151).
 --
--- 'reviewPhaseActive' still expresses phase semantics elsewhere in the UI,
--- but it is not this decision. A canonical stage is inserted before its
--- process is registered, and an 'IssueRevision' session is phase-active
--- before its backend is ready and before it has both IDs; in those startup
--- intervals there is no kill target, so the session is not live and does
--- not block quitting.
-reviewSessionLive :: Bool -> Bool -> ReviewSession -> Bool
-reviewSessionLive backendReady hasCanonicalProcess session =
-  hasCanonicalProcess || hasInterruptibleTurn
-  where
-    hasInterruptibleTurn =
-      backendReady
-        && isJust session.sessionDetail.reviewSessionThreadId
-        && isJust session.sessionDetail.reviewSessionTurnId
-        && reviewTurnInterruptible session.sessionDetail.reviewSessionStage session.sessionPhase
+-- Under runner ownership that target is one thing: the durable child action
+-- this issue's review runs as. A child exists exactly while there is
+-- something to end, and ending it is a command its host applies — so the
+-- phase-and-thread reasoning this used to need is gone, along with the
+-- startup intervals it existed to cover. The session's own phase still
+-- expresses phase semantics elsewhere in the UI; it is not this decision.
+--
+-- It is no longer a quit guard either. A live issue action survives the
+-- dashboard (requirement 3), so nothing here refuses @q@.
+reviewSessionLive :: Bool -> Bool
+reviewSessionLive actionLive = actionLive
+
+-- | Whether this issue's durable action is registered and running.
+--
+-- Registered is the whole test. 'Kanban.UI.Worker.applyWorkerProtocolEvent'
+-- drops a worker from 'appWorkers' on its terminal envelope, so an action
+-- still in the map is one whose host has not yet reported it finished.
+issueActionLive :: AppState -> Int -> Bool
+issueActionLive state = isJust . issueActionWorkerFor state
+
+-- | Whether this issue's live action is a canonical stage.
+--
+-- The successor to the dashboard's old @appCanonicalReviewProcesses@
+-- membership test, and it answers the same two questions: whether Ctrl-C
+-- escalates to ending the child rather than interrupting a turn, and whether
+-- a session left 'ReviewInterrupted' may still be reused while that ending is
+-- in flight.
+liveCanonicalIssueAction :: AppState -> Int -> Bool
+liveCanonicalIssueAction state issueNumber = case issueActionWorkerFor state issueNumber of
+  Nothing -> False
+  Just descriptor -> case descriptor.workerDescriptorSpec.workerTask of
+    IssueActionWorkerTaskKind task -> task.issueActionStage /= IssueRevision
+    _ -> False
 
 -- | The stage/phase half of "has an interruptible turn", shared with
 -- 'killReviewAgent' so the liveness gate and the kill it dispatches to
@@ -133,17 +167,12 @@ reviewSessionLive backendReady hasCanonicalProcess session =
 reviewTurnInterruptible :: ReviewStage -> ReviewPhase -> Bool
 reviewTurnInterruptible stage phase = stage == IssueRevision && reviewPhaseActive phase
 
-reviewBackendReady :: ReviewBackend -> Bool
-reviewBackendReady backend = case backend of
-  ReviewBackendReady _ -> True
-  _ -> False
-
 -- | One processes-overlay row for a review session. Split out of
 -- 'agentSessionEntries' so the row a user actually sees -- in particular
 -- its liveness, which the @x@ gate dispatches on -- is decided by the
 -- shared 'reviewSessionLive' and is testable without an 'AppState'.
-reviewAgentSessionEntry :: Bool -> Bool -> Int -> ReviewSession -> AgentSessionEntry
-reviewAgentSessionEntry backendReady hasCanonicalProcess issueNumber session =
+reviewAgentSessionEntry :: Bool -> Int -> ReviewSession -> AgentSessionEntry
+reviewAgentSessionEntry actionLive issueNumber session =
   AgentSessionEntry
     { agentSessionRef = ReviewAgent issueNumber,
       agentSessionLabel = "issue " <> Text.toLower (reviewStageLabel session.sessionDetail.reviewSessionStage) <> " #" <> showText issueNumber,
@@ -154,7 +183,7 @@ reviewAgentSessionEntry backendReady hasCanonicalProcess issueNumber session =
       -- is what the provider's own logs and the transcript name, so
       -- qualifying it here would move what every review row displays.
       agentSessionId = shortSessionId . (.reviewThreadProvider) <$> session.sessionDetail.reviewSessionThreadId,
-      agentSessionLive = reviewSessionLive backendReady hasCanonicalProcess session,
+      agentSessionLive = reviewSessionLive actionLive,
       agentSessionProblem = session.sessionPhase == ReviewFailed
     }
 
@@ -200,8 +229,7 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
       ]
     reviewEntries =
       [ reviewAgentSessionEntry
-          (reviewBackendReady state.appReviewBackend)
-          (Map.member issueNumber state.appCanonicalReviewProcesses)
+          (issueActionLive state issueNumber)
           issueNumber
           session
         | (issueNumber, session) <- Map.toList state.appReviewSessions
@@ -223,12 +251,25 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
     workerHasSession descriptor = case descriptor.workerDescriptorSpec.workerTask of
       SolveWorkerTaskKind task -> Map.member task.solveWorkerIssueNumber state.appSolveSessions
       PullRequestWorkerTaskKind task -> Map.member task.pullRequestWorkerNumber state.appPullRequestReviewSessions
+      IssueActionWorkerTaskKind task -> Map.member task.issueActionIssueNumber state.appReviewSessions
+      -- The repository review host is never a session: it is the container
+      -- every issue action's session runs inside, so it gets a row of its own
+      -- and is not folded into any one action's.
+      IssueHostWorkerTaskKind _ -> False
     workerTaskLabel (SolveWorkerTaskKind task) = Text.toLower (workflowTitle task.solveWorkerWorkflow) <> " #" <> showText task.solveWorkerIssueNumber
     workerTaskLabel (PullRequestWorkerTaskKind task) = "pr " <> pullRequestActionText task.pullRequestWorkerAction <> " #" <> showText task.pullRequestWorkerNumber
+    workerTaskLabel (IssueActionWorkerTaskKind task) = issueActionStageLabel task.issueActionStage <> " #" <> showText task.issueActionIssueNumber
+    workerTaskLabel (IssueHostWorkerTaskKind _) = "issue review host"
     -- Read from the whole specification, not just its task: the row names
     -- the assignment that worker recorded, and only a specification written
     -- before that field existed falls through to the live cell.
     workerTaskProvider spec = case spec.workerTask of
+      -- Both issue kinds run on the embedded review backend, whose cell
+      -- 'Kanban.Review.startReviewClient' resolves through the adapter, so
+      -- the row names that cell rather than an assignment the specification
+      -- deliberately does not record.
+      IssueActionWorkerTaskKind _ -> embeddedReviewSessionLabel state.appModelRoster
+      IssueHostWorkerTaskKind _ -> embeddedReviewSessionLabel state.appModelRoster
       SolveWorkerTaskKind task ->
         agentSessionLabelFor
           task.solveWorkerBrand
@@ -539,6 +580,27 @@ resolveIncidentClick entries selection clickedRef =
           IncidentClickOpen
       | otherwise -> IncidentClickSelect (IncidentSelection (Just clickedRef) clickedIndex)
 
+-- | How an issue action's stage reads in a row a person looks at.
+issueActionStageLabel :: ReviewStage -> Text
+issueActionStageLabel InitialReview = "issue review"
+issueActionStageLabel IssueRereview = "issue rereview"
+issueActionStageLabel IssueRevision = "issue revision"
+
+-- | The cell the embedded review backend runs on, as a row label.
+--
+-- Resolved through 'embeddedReviewProviderFor', which is the same function
+-- 'Kanban.Review.startReviewClient' routes its backend by, so a row can never
+-- name a provider the host would not have started.
+embeddedReviewSessionLabel :: Either RosterLoadError ModelRoster -> Text
+embeddedReviewSessionLabel rosterResult = case rosterResult of
+  Left _ -> assignmentLabel CodexSolver unavailableAssignmentDisplay
+  Right roster -> case embeddedReviewCell roster of
+    Left _ -> assignmentLabel (brandForProvider (embeddedReviewProviderFor roster)) unavailableAssignmentDisplay
+    Right cell ->
+      assignmentLabel
+        (brandForProvider (embeddedReviewProviderFor roster))
+        (recordAssignment (embeddedReviewProviderFor roster) cell).recordedAssignmentDisplay
+
 -- | Where the board holds a numbered piece of work, and which tracker has to
 -- be expanded for that row to be visible.
 data BoardWorkLocation = BoardWorkLocation
@@ -561,9 +623,14 @@ agentSessionSubject _ (ReviewAgent issueNumber) = Just (IssueId issueNumber)
 agentSessionSubject _ (PullRequestAgent number) = Just (PullRequestId number)
 agentSessionSubject state (WorkerAgent identifier) = do
   descriptor <- Map.lookup identifier state.appWorkers
-  pure $ case descriptor.workerDescriptorSpec.workerTask of
-    SolveWorkerTaskKind task -> IssueId task.solveWorkerIssueNumber
-    PullRequestWorkerTaskKind task -> PullRequestId task.pullRequestWorkerNumber
+  case descriptor.workerDescriptorSpec.workerTask of
+    SolveWorkerTaskKind task -> Just (IssueId task.solveWorkerIssueNumber)
+    PullRequestWorkerTaskKind task -> Just (PullRequestId task.pullRequestWorkerNumber)
+    IssueActionWorkerTaskKind task -> Just (IssueId task.issueActionIssueNumber)
+    -- The repository review host acts on no one item, so there is no board
+    -- work to select for it. Reporting one of its children's would point a
+    -- lifecycle action at a sibling of whatever the operator meant.
+    IssueHostWorkerTaskKind _ -> Nothing
 
 -- | Finds the row a number names, in the four shapes the board can hold it.
 --
@@ -678,6 +745,14 @@ persistentProcessStatus now (Just descriptor) status =
       | remaining >= 60 = showText ((remaining + 59) `div` 60) <> "m"
       | otherwise = showText remaining <> "s"
 
+-- | The orphan-pending activity text for a still-unverified outcome: a
+-- deadline that left survivors behind reads distinctly from ordinary
+-- subprocesses surviving a solver/PR agent that ran to completion.
+orphanMessage :: SolveOutcome -> Text -> Text -> Text
+orphanMessage outcome count subject
+  | isDeadlineOutcome outcome = "deadline exceeded; " <> count <> " subprocesses survived termination; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
+  | otherwise = count <> " subprocesses survived " <> subject <> "; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
+
 reviewStageLabel :: ReviewStage -> Text
 reviewStageLabel InitialReview = "review"
 reviewStageLabel IssueRevision = "revision"
@@ -686,16 +761,6 @@ reviewStageLabel IssueRereview = "rereview"
 reviewProvider :: ReviewStage -> Text
 reviewProvider IssueRevision = "codex coordinator"
 reviewProvider _ = "canonical reviewer"
-
--- | The review sessions the quit guard refuses to leave running: exactly
--- those the shared 'reviewSessionLive' decision reports live, so the guard
--- and the processes overlay cannot disagree about the same session.
-liveReviewSessions :: Bool -> Set Int -> Map Int ReviewSession -> [Int]
-liveReviewSessions backendReady canonicalProcesses sessions =
-  [ issueNumber
-    | (issueNumber, session) <- Map.toList sessions,
-      reviewSessionLive backendReady (Set.member issueNumber canonicalProcesses) session
-  ]
 
 -- | The session a solve request for `issueNumber` must reuse rather than
 -- replace: one that is still running, or a finished one from the very
@@ -886,7 +951,21 @@ solveWorkerFor state issueNumber =
   where
     matches descriptor = case descriptor.workerDescriptorSpec.workerTask of
       SolveWorkerTaskKind task -> task.solveWorkerIssueNumber == issueNumber
-      PullRequestWorkerTaskKind _ -> False
+      _ -> False
+
+-- | The durable issue action registered for this issue, if one is.
+--
+-- The review overlay's counterpart to 'solveWorkerFor': what a press on an
+-- already-live review reattaches to, and what a command the overlay submits
+-- is addressed to. Keyed by issue number alone, which the child lease already
+-- makes unique — at most one issue action per issue is live at a time.
+issueActionWorkerFor :: AppState -> Int -> Maybe WorkerDescriptor
+issueActionWorkerFor state issueNumber =
+  find matches (Map.elems state.appWorkers)
+  where
+    matches descriptor = case descriptor.workerDescriptorSpec.workerTask of
+      IssueActionWorkerTaskKind task -> task.issueActionIssueNumber == issueNumber
+      _ -> False
 
 pullRequestWorkerFor :: AppState -> Int -> Maybe WorkerDescriptor
 pullRequestWorkerFor state number =
@@ -894,7 +973,7 @@ pullRequestWorkerFor state number =
   where
     matches descriptor = case descriptor.workerDescriptorSpec.workerTask of
       PullRequestWorkerTaskKind task -> task.pullRequestWorkerNumber == number
-      SolveWorkerTaskKind _ -> False
+      _ -> False
 
 selectedReviewIssue :: AppState -> Maybe Issue
 selectedReviewIssue state = selectedReviewItem state >>= boardItemIssue

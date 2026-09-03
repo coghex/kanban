@@ -66,7 +66,7 @@ import Kanban.ReviewToolServer (reviewToolServerConfig)
 import Kanban.UI.Review
   ( applyFailedInterrupt,
     carryUndelivered,
-    markReviewSessionsDisconnected,
+    markReviewSessionDisconnected,
     newReviewSession,
     reviewOutcomePhase,
     reviewSessionHoldsUnsentText,
@@ -785,7 +785,8 @@ spec = do
                   reviewSessionThreadId = Just (fixtureReviewThread "claude-session-1"),
                   reviewSessionTurnId = Just "turn-1",
                   reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = []
+                  reviewSessionUndelivered = [],
+                  reviewSessionRestored = Nothing
                 }
           )
             {sessionInput = input}
@@ -844,19 +845,11 @@ spec = do
     -- from. Any one of those four links missing loses the message.
     it "carries the message through the connection's end to a fresh review that can send it" $ do
       let opened = interruptedSession ""
-          -- The connection the session is actually running on, read off the
-          -- session rather than restated, so this cannot drift into
-          -- disconnecting a connection it was never served by and passing
-          -- because nothing happened.
-          serving = fmap (.reviewThreadConnection) opened.sessionDetail.reviewSessionThreadId
-          settled =
-            markReviewSessionsDisconnected
-              serving
-              "Claude stream-json session exited"
-              (Map.singleton 588 opened)
-      stranded <- case Map.lookup 588 settled of
-        Just session -> pure (applyFailedInterrupt cause (Just guidance) session)
-        Nothing -> fail "the connection's end dropped the session it served"
+          -- The host routes a connection's end only into the children that
+          -- connection was serving (SAG-10), so what reaches this session is
+          -- already known to be its own.
+          settled = markReviewSessionDisconnected "Claude stream-json session exited" opened
+      stranded <- pure (applyFailedInterrupt cause (Just guidance) settled)
       stranded.sessionPhase `shouldBe` ReviewFailed
       stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
       reviewSessionReusable
@@ -936,13 +929,12 @@ spec = do
     it "carries a message left on an interrupted session whose connection then stopped" $ do
       let interrupted = (interruptedSession "") {sessionPhase = ReviewInterrupted}
           held = applyFailedInterrupt cause (Just guidance) interrupted
-          serving = fmap (.reviewThreadConnection) held.sessionDetail.reviewSessionThreadId
-          settled = markReviewSessionsDisconnected serving "Claude stream-json session exited" (Map.singleton 588 held)
+          settled = markReviewSessionDisconnected "Claude stream-json session exited" held
       -- Live while the thread was merely interrupted, so the message is on
       -- the line ready to resend.
       reviewSessionInputLive IssueRevision ReviewInterrupted `shouldBe` True
       held.sessionInput `shouldBe` guidance
-      stopped <- maybe (fail "the connection's end dropped the session it served") pure (Map.lookup 588 settled)
+      let stopped = settled
       -- The connection's end is what makes it unresumable, and says so.
       stopped.sessionPhase `shouldBe` ReviewFailed
       reviewSessionReusable

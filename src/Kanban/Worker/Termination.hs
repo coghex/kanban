@@ -35,6 +35,7 @@ import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
 import Control.Monad (unless, void)
@@ -42,6 +43,7 @@ import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
     checkGroupMembershipWith,
+    checkIdentityPresenceWith,
     defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
@@ -51,15 +53,24 @@ import Kanban.Process
   )
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Worker.Census (processKey)
+import Kanban.Worker.Command
+  ( ReviewCommand (..),
+    ReviewCommandPayload (..),
+    appendReviewCommand,
+    newReviewCommandId,
+  )
 import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (ignoreFileOperation, readWorkerState, writeState)
 import Kanban.Worker.Types
-  ( ProviderSlot (..),
+  ( IssueActionWorkerTask (..),
+    ProviderSlot (..),
     WorkerDescriptor (..),
     WorkerEvent (..),
+    WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
+    issueActionTask,
   )
 import System.Directory (doesFileExist, removeFile)
 import System.Posix.Files (setFileMode)
@@ -75,11 +86,79 @@ terminateWorkerWith takeSnapshot descriptor = do
     Left _ -> pure ()
     Right state -> case state.workerStateStatus of
       WorkerTerminal _ -> pure ()
-      _ -> do
-        completed <- finalizeUserTermination takeSnapshot descriptor state
-        if completed
-          then releaseWorkerLease descriptor
-          else recordPendingTermination descriptor
+      _
+        | isJust (issueActionTask descriptor.workerDescriptorSpec.workerTask) ->
+            terminateIssueActionWith takeSnapshot descriptor state
+        | otherwise -> do
+            completed <- finalizeUserTermination takeSnapshot descriptor state
+            if completed
+              then releaseWorkerLease descriptor
+              else recordPendingTermination descriptor
+
+-- | Ending one issue action, which is never a signal to a process group.
+--
+-- A child action has no process of its own: its @workerStateWorkerPid@ is its
+-- /host's/, because the host is its supervisor. Signalling that group — which
+-- is what every other worker's termination does — would kill the host and
+-- every sibling action multiplexed onto it, the exact opposite of what
+-- requirement 11 asks for. So the ordinary path is a durable termination
+-- command, and the host settles this child alone.
+--
+-- The fallback is the case where there is nobody left to read it. A child
+-- whose host is provably gone is orphaned: nothing will ever apply the
+-- command, so leaving one behind would leave the action live in every
+-- discovery pass forever. Its own recorded descendants are settled — those
+-- are its canonical subprocess and that subprocess's children, never the
+-- host's — and its records are committed terminal here.
+--
+-- Fails closed on an unreadable snapshot, like every other judgement in this
+-- layer: a host that cannot be proven gone is treated as live, and the
+-- command waits for it.
+terminateIssueActionWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> WorkerState -> IO ()
+terminateIssueActionWith takeSnapshot descriptor state = do
+  hostPresence <- hostIdentityPresence
+  case hostPresence of
+    IdentityPresent -> submitTermination
+    IdentitySnapshotFailed _ -> submitTermination
+    IdentityAbsent -> do
+      recordedOk <- terminateRecordedStateProcessesWith takeSnapshot state
+      if recordedOk
+        then do
+          now <- getCurrentTime
+          let outcome = SolveFailed "killed by user"
+          writeState
+            descriptor
+            state
+              { workerStateStatus = WorkerTerminal outcome,
+                workerStateProviderPid = Nothing,
+                workerStateProviderIdentity = Nothing,
+                workerStateHeartbeatAt = now,
+                workerStateLastActivity = "killed by user"
+              }
+          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
+          releaseWorkerLease descriptor
+        else recordPendingTermination descriptor
+  where
+    hostIdentityPresence = case state.workerStateWorkerIdentity of
+      -- No recorded host identity is the pre-state window a child is created
+      -- in. Its host is the one that has not written its own state yet, not
+      -- one that is gone, so the command is what reaches it.
+      Nothing -> pure (IdentitySnapshotFailed "the owning host has not recorded an identity yet")
+      Just hostIdentity -> checkIdentityPresenceWith takeSnapshot [hostIdentity]
+    submitTermination = do
+      identifier <- newReviewCommandId
+      now <- getCurrentTime
+      let command =
+            ReviewCommand
+              { reviewCommandId = identifier,
+                reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
+                reviewCommandIssue = maybe 0 (.issueActionIssueNumber) (issueActionTask descriptor.workerDescriptorSpec.workerTask),
+                reviewCommandThread = state.workerStateReviewThread,
+                reviewCommandTurn = state.workerStateReviewTurn,
+                reviewCommandIssuedAt = now,
+                reviewCommandPayload = TerminateIssueAction
+              }
+      void (appendReviewCommand descriptor command)
 
 -- | Attempts to complete a requested termination: verifies the provider and
 -- recorded-descendant groups are gone, and only then signals the

@@ -22,6 +22,7 @@ import qualified Spec.Agent.Adapter as Adapter
 import qualified Spec.Agent.Capture as Capture
 import qualified Spec.Agent.Compatibility as Compatibility
 import qualified Spec.ApprovalService as ApprovalService
+import qualified Spec.Agent.IssueHost as IssueHost
 import qualified Spec.Agent.IssueReviewer as IssueReviewer
 import qualified Spec.Agent.ManagedProcess as ManagedProcess
 import qualified Spec.Agent.Ping as Ping
@@ -200,6 +201,7 @@ suiteGroups =
     -- along anywhere.
     SuiteGroup "Spec.Mission" UsageLane Mission.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
+    SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,
     SuiteGroup "Spec.Drainer" PingLane Drainer.spec, -- 17.6s
     SuiteGroup "Spec.ManagedPaths" PingLane ManagedPaths.spec,

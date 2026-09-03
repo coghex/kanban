@@ -22,6 +22,7 @@ import Kanban.Action
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..), ApprovalUnavailable (..))
 import Kanban.Domain
 import Kanban.Models (OperatingMode (..), RecordedAssignment (..), defaultRoster)
+import Kanban.Review (ReviewStage (..))
 import Kanban.Preflight
   ( IssueOrigin (..),
     PreflightAction (..),
@@ -49,7 +50,10 @@ import Kanban.Solve
     solveAssignment,
   )
 import Kanban.Worker
-  ( PullRequestWorkerTask (..),
+  ( IssueActionWorkerTask (..),
+    IssueHostWorkerTask (..),
+    issueActionTask,
+    PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -89,7 +93,7 @@ import Kanban.UI.Types
   )
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldNotBe, shouldReturn, shouldSatisfy)
 
 -- ---------------------------------------------------------------------------
@@ -1109,26 +1113,50 @@ spec = do
           either isCapabilityBlocked (const False) dispatched `shouldBe` True
           specifications repository >>= (`shouldBe` [])
 
-    -- Declared, and refused at the door. Nothing is spawned and nothing is
-    -- probed: the refusal precedes the capability query as well as the launch.
-    it "returns the not-yet-runner-owned refusal for the two issue verbs, starting nothing" $
-      withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory probeLog ->
+    -- The two verbs SAG-10 gave runners to. Both now dispatch to a durable
+    -- child action of this repository's review host rather than returning a
+    -- refusal, and both leave the durable evidence a later dashboard
+    -- reattaches from.
+    --
+    -- A live host is seeded first so nothing here spawns one: this test is
+    -- about what the registry writes, and the host's own lifecycle belongs to
+    -- "Spec.Agent.IssueHost".
+    it "dispatches both issue verbs to a durable child of the repository review host" $
+      withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory _ ->
         withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do
           let repository = Repository workingDirectory "coghex" "kanban"
-              issue = (baseIssue 844 []) {issueBody = "<!-- issue-origin:claude -->"}
-              catalog = (catalogOf [issue] [] emptyHistory) {catalogRepository = repository}
-              environment = (environmentOf catalog) {actionRepository = repository}
-          mapM_
-            ( \kind -> do
+          host <- seedLiveIssueHost repository
+          sequence_
+            [ do
+                let issue =
+                      (baseIssue number [])
+                        { issueBody = "<!-- issue-origin:claude -->",
+                          issueLabels = labels
+                        }
+                    catalog = (catalogOf [issue] [] emptyHistory) {catalogRepository = repository}
+                    environment = (environmentOf catalog) {actionRepository = repository}
                 dispatched <-
-                  dispatchAction environment (actionRequest kind identityUnderTest (TargetByNumber 844))
-                either Just (const Nothing) dispatched `shouldBe` Just (ActionNotRunnerOwned kind)
-            )
-            [ReviewIssue, ReviseIssue]
-          specifications repository >>= (`shouldBe` [])
-          probeInvocations probeLog >>= (`shouldBe` [])
+                  dispatchAction environment (actionRequest kind identityUnderTest (TargetByNumber number))
+                (kind, issueActionOf <$> either (const Nothing) Just dispatched)
+                  `shouldBe` (kind, Just (Just (number, stage, host)))
+            | (kind, number, labels, stage) <-
+                [ (ReviewIssue, 844 :: Int, [] :: [Label], InitialReview),
+                  (ReviseIssue, 845, [Label "reviewed:changes" ""], IssueRevision)
+                ]
+            ]
 
-    it "refuses an incompatible request before it reaches the not-yet-owned refusal" $
+    -- The lease an issue action takes, which requirement 13 keeps distinct
+    -- from the solve worker's: a solve and a review of the same issue may run
+    -- at once, and one key would make the second of them refuse.
+    it "leases an issue action apart from that issue's solve worker" $
+      withTemporaryCacheRoot $ \_ -> do
+        let repository = Repository "/tmp/kanban" "coghex" "kanban"
+        solve <- solveWorkerDescriptor repository 844 SolveOnly
+        action <- issueActionDescriptor repository 844 InitialReview (WorkerId "issue-host-1")
+        takeFileName solve.workerDescriptorLeasePath `shouldBe` "issue-844.lease"
+        takeFileName action.workerDescriptorLeasePath `shouldBe` "issue-action-844.lease"
+
+    it "refuses an incompatible request before it reaches the issue-action launch" $
       withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory _ ->
         withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do
           let repository = Repository workingDirectory "coghex" "kanban"
@@ -1258,7 +1286,7 @@ dispatchSolve environment brand =
 solveTaskBrandOf :: WorkerDescriptor -> Maybe SolverBrand
 solveTaskBrandOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
   SolveWorkerTaskKind task -> Just task.solveWorkerBrand
-  PullRequestWorkerTaskKind _ -> Nothing
+  _ -> Nothing
 
 -- | The baseline record a solve launch writes on the worker it starts.
 solveBaseline :: SolverBrand -> WorkerParent
@@ -1368,13 +1396,13 @@ specifications repository = do
 solveTaskOf :: WorkerSpec -> Maybe (Int, SolverBrand)
 solveTaskOf specification = case specification.workerTask of
   SolveWorkerTaskKind task -> Just (task.solveWorkerIssueNumber, task.solveWorkerBrand)
-  PullRequestWorkerTaskKind _ -> Nothing
+  _ -> Nothing
 
 pullRequestTaskOf :: WorkerSpec -> Maybe (Int, PullRequestOrigin, PullRequestAction)
 pullRequestTaskOf specification = case specification.workerTask of
   PullRequestWorkerTaskKind task ->
     Just (task.pullRequestWorkerNumber, task.pullRequestWorkerOrigin, task.pullRequestWorkerAction)
-  SolveWorkerTaskKind _ -> Nothing
+  _ -> Nothing
 
 -- | A descriptor for a solve worker that was never launched, so a test can
 -- address its durable files directly.
@@ -1401,6 +1429,66 @@ solveWorkerDescriptor repository issueNumber workflow = do
         workerWorkflowConfig = defaultWorkflowConfig,
         workerAssignment = Nothing
       }
+
+-- | A durable issue action's descriptor, with no file written yet.
+issueActionDescriptor :: Repository -> Int -> ReviewStage -> WorkerId -> IO WorkerDescriptor
+issueActionDescriptor repository issueNumber stage host = do
+  directory <- workerDirectory repository
+  createDirectoryIfMissing True directory
+  descriptorForSpec
+    WorkerSpec
+      { workerId = WorkerId ("issue-action-" <> Text.pack (show issueNumber)),
+        workerRepository = repository,
+        workerTask = IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage host IssueOriginClaude),
+        workerExistingSession = Nothing,
+        workerExistingLogPath = Nothing,
+        workerResumeProvenance = ResumeAnswer,
+        workerUserMessage = "",
+        workerParent = Nothing,
+        workerCreatedAt = epoch,
+        workerMaxRuntimeSeconds = 600,
+        workerConfigPath = Nothing,
+        workerWorkflowConfig = defaultWorkflowConfig,
+        workerAssignment = Nothing
+      }
+
+-- | Publishes a running repository review host, so a dispatch adopts it
+-- instead of spawning one. Returns its id, which is what a child's
+-- specification has to name.
+seedLiveIssueHost :: Repository -> IO WorkerId
+seedLiveIssueHost repository = do
+  directory <- workerDirectory repository
+  createDirectoryIfMissing True directory
+  descriptor <-
+    descriptorForSpec
+      WorkerSpec
+        { workerId = hostId,
+          workerRepository = repository,
+          workerTask = IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban"),
+          workerExistingSession = Nothing,
+          workerExistingLogPath = Nothing,
+          workerResumeProvenance = ResumeAnswer,
+          workerUserMessage = "",
+          workerParent = Nothing,
+          workerCreatedAt = epoch,
+          workerMaxRuntimeSeconds = 600,
+          workerConfigPath = Nothing,
+          workerWorkflowConfig = defaultWorkflowConfig,
+          workerAssignment = Nothing
+        }
+  publishWorkerSpec descriptor
+  publishWorkerState descriptor WorkerRunning
+  pure hostId
+  where
+    hostId = WorkerId "issue-host-under-test"
+
+-- | The issue number, stage, and owning host a dispatched handle's child
+-- records, or 'Nothing' for a handle that is not an issue action at all.
+issueActionOf :: ActionHandle -> Maybe (Int, ReviewStage, WorkerId)
+issueActionOf handle = do
+  descriptor <- actionHandleWorker handle
+  task <- issueActionTask descriptor.workerDescriptorSpec.workerTask
+  pure (task.issueActionIssueNumber, task.issueActionStage, task.issueActionHost)
 
 -- | A pull-request worker's descriptor, with no durable file written yet.
 --
@@ -1455,7 +1543,10 @@ publishWorkerState descriptor status = do
             workerStateLogPath = Nothing,
             workerStateHeartbeatAt = now,
             workerStateLastActivity = "repairing",
-            workerStateKnownProcesses = []
+            workerStateKnownProcesses = [],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
           }
     )
 
@@ -1480,7 +1571,10 @@ writeWorkerRecord repository issueNumber status activity = do
             workerStateLogPath = Nothing,
             workerStateHeartbeatAt = epoch,
             workerStateLastActivity = activity,
-            workerStateKnownProcesses = []
+            workerStateKnownProcesses = [],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
           }
     )
   pure descriptor

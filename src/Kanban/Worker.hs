@@ -26,6 +26,38 @@ module Kanban.Worker
     WorkerTask (..),
     SolveWorkerTask (..),
     PullRequestWorkerTask (..),
+    IssueHostWorkerTask (..),
+    IssueActionWorkerTask (..),
+    issueActionTask,
+    issueHostTask,
+    ReviewCommand (..),
+    ReviewCommandAcknowledgement (..),
+    ReviewCommandId (..),
+    ReviewCommandOutcome (..),
+    ReviewCommandPayload (..),
+    acknowledgeReviewCommand,
+    acknowledgementFor,
+    appendReviewCommand,
+    newReviewCommandId,
+    readReviewCommandAcknowledgements,
+    readReviewCommands,
+    reviewCommandPayloadSummary,
+    undeliveredReviewCommands,
+    ensureIssueReviewHost,
+    launchIssueAction,
+    liveIssueReviewHost,
+    issueHostIdleGraceSeconds,
+    -- | Re-exported for the suite, which pins the host's rules without
+    -- starting one: what settles a child, what a canonical result means, and
+    -- which preflight each stage owes.
+    canonicalStageOutcome,
+    childCommandOutcome,
+    issueActionPreflightAction,
+    revisionTurnOutcome,
+    IssueHostProvider (..),
+    IssueHostTuning (..),
+    defaultIssueHostTuning,
+    runIssueReviewHostWith,
     WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
@@ -43,6 +75,7 @@ module Kanban.Worker
     -- snapshot, the same way the termination and recovery paths are.
     collectWorkerCacheWith,
     consumeJournalLines,
+    readWorkerJournal,
     -- | Exported so the suite can address a hand-built spec's durable files.
     descriptorForSpec,
     discoverWorkers,
@@ -78,11 +111,14 @@ where
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
 import Control.Exception (Exception, IOException, SomeException, bracket, mask, throwIO, try, uninterruptibleMask_)
-import Control.Monad (unless, void, when)
+import Control.Monad (filterM, unless, void, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (find)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (addUTCTime, diffUTCTime, getCurrentTime)
+import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment (..), recordedAssignmentCell)
 import Kanban.Paths (createPrivateDirectory)
@@ -96,8 +132,10 @@ import Kanban.Process
     managedProcessPid,
     readProcessSnapshot,
   )
+import Kanban.Preflight (IssueOrigin)
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestFlowEvent (..), PullRequestOrigin, runPullRequestFlow)
-import Kanban.Solve (AgentEvent (..), ResumeProvenance, SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, brandForProvider, newUnknownAggregator, runSolve, sealUnknownAggregates)
+import Kanban.Review (ReviewStage)
+import Kanban.Solve (AgentEvent (..), ResumeProvenance (..), SolveEvent (..), SolveOutcome (..), SolveWorkflow, SolverBrand, UnknownAggregator, brandForProvider, newUnknownAggregator, runSolve, sealUnknownAggregates)
 import Kanban.Worker.Census (liveRecordedProcessesWith, recordProviderIdentity, refreshProcessCensus)
 import Kanban.Worker.Discovery
   ( acknowledgeSupersededWorkers,
@@ -108,7 +146,20 @@ import Kanban.Worker.Discovery
     discoverWorkers,
     workerHoldingTurn,
   )
-import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, consumeJournalLines, newEventJournalLock)
+import Kanban.Worker.IssueHost
+  ( IssueHostProvider (..),
+    IssueHostTuning (..),
+    canonicalStageOutcome,
+    defaultIssueHostTuning,
+    runIssueReviewHostWith,
+    childCommandOutcome,
+    issueActionPreflightAction,
+    issueActionStartingState,
+    issueHostIdleGraceSeconds,
+    revisionTurnOutcome,
+    runIssueReviewHost,
+  )
+import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, consumeJournalLines, newEventJournalLock, readWorkerJournal)
 import Kanban.Worker.Lease
   ( WorkerLeaseRefusal (..),
     acquireWorkerLease,
@@ -137,10 +188,30 @@ import Kanban.Worker.Termination
     workerTerminationAttempts,
     workerTerminationPollMicros,
   )
+import Kanban.Worker.Command
+  ( ReviewCommand (..),
+    acknowledgeReviewCommand,
+    ReviewCommandAcknowledgement (..),
+    ReviewCommandId (..),
+    ReviewCommandOutcome (..),
+    ReviewCommandPayload (..),
+    acknowledgeReviewCommand,
+    acknowledgementFor,
+    appendReviewCommand,
+    newReviewCommandId,
+    readReviewCommandAcknowledgements,
+    readReviewCommands,
+    reviewCommandPayloadSummary,
+    undeliveredReviewCommands,
+  )
 import Kanban.Worker.Types
-  ( ProviderSlot (..),
+  ( IssueActionWorkerTask (..),
+    IssueHostWorkerTask (..),
+    ProviderSlot (..),
     PullRequestWorkerTask (..),
     SolveWorkerTask (..),
+    issueActionTask,
+    issueHostTask,
     WorkerDescriptor (..),
     WorkerEnvelope (..),
     WorkerEvent (..),
@@ -204,6 +275,132 @@ launchPullRequestWorker assignment repository number origin action existingSessi
         workerWorkflowConfig = workflowConfig,
         workerAssignment = Just assignment
       }
+
+-- | The repository's live review host, if it has one.
+--
+-- Starting and running only. An orphaned or terminal host serves nobody, and
+-- adopting one as this action's owner would leave the child waiting forever
+-- for a process that is not going to read its specification.
+liveIssueReviewHost :: Repository -> IO (Maybe WorkerDescriptor)
+liveIssueReviewHost repository = do
+  history <- discoverWorkerHistory repository
+  hosts <- filterM running [descriptor | descriptor <- history, isJust (issueHostTask descriptor.workerDescriptorSpec.workerTask)]
+  pure (listToMaybe hosts)
+  where
+    running descriptor = do
+      stateResult <- readWorkerState descriptor
+      pure $ case stateResult of
+        Right state -> case state.workerStateStatus of
+          WorkerStarting -> True
+          WorkerRunning -> True
+          _ -> False
+        Left _ -> False
+
+-- | The host this repository's issue actions belong to, started if it has
+-- none.
+--
+-- Losing the host lease is the ordinary outcome, not a failure: two presses a
+-- moment apart both find no host and both try to start one, and exactly one
+-- wins. The loser is told who won, and that is the host to use — the same
+-- join the solve and pull-request launches make when they lose an item's
+-- lease. Only a loss whose winner cannot be named is a refusal, because then
+-- a host is running and this caller does not know which.
+ensureIssueReviewHost :: Repository -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerId)
+ensureIssueReviewHost repository configPath workflowConfig = do
+  existing <- liveIssueReviewHost repository
+  case existing of
+    Just descriptor -> pure (Right descriptor.workerDescriptorSpec.workerId)
+    Nothing -> do
+      now <- getCurrentTime
+      hostId <- newWorkerId "issue-host" 0
+      launched <-
+        launchWorker
+          WorkerSpec
+            { workerId = hostId,
+              workerRepository = repository,
+              workerTask = IssueHostWorkerTaskKind (IssueHostWorkerTask (normalizedRepositoryIdentity repository)),
+              workerExistingSession = Nothing,
+              workerExistingLogPath = Nothing,
+              workerResumeProvenance = ResumeAnswer,
+              workerUserMessage = "",
+              workerParent = Nothing,
+              workerCreatedAt = now,
+              -- Carried because every specification has one; never read,
+              -- because 'boundedByDeadline' exempts a host from the watchdog
+              -- and its children are bounded individually.
+              workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+              workerConfigPath = configPath,
+              workerWorkflowConfig = workflowConfig,
+              workerAssignment = Nothing
+            }
+      pure $ case launched of
+        Right descriptor -> Right descriptor.workerDescriptorSpec.workerId
+        Left (WorkerTurnAlreadyRunning (Just owner) _) -> Right owner
+        Left (WorkerTurnAlreadyRunning Nothing message) -> Left message
+        Left (WorkerLaunchFailed message) -> Left message
+
+-- | One durable issue action, as a child of the named host.
+--
+-- No process is spawned. A child is a durable action, not an operating-system
+-- process: its lease reserves the issue, its specification names the host that
+-- must run it, and its initial state records that host's identity so the very
+-- first discovery pass can classify it. The host adopts it on its next poll.
+--
+-- The lease is taken before the specification is written, and released if the
+-- write fails, exactly as every other launch orders those two — a
+-- specification a host could adopt while no lease reserved its issue is how
+-- two children for one issue would come to exist.
+launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchIssueAction repository issueNumber stage origin host configPath workflowConfig = do
+  now <- getCurrentTime
+  actionId <- newWorkerId "issue-action" issueNumber
+  let spec =
+        WorkerSpec
+          { workerId = actionId,
+            workerRepository = repository,
+            workerTask = IssueActionWorkerTaskKind (IssueActionWorkerTask issueNumber stage host origin),
+            workerExistingSession = Nothing,
+            workerExistingLogPath = Nothing,
+            workerResumeProvenance = ResumeAnswer,
+            workerUserMessage = "",
+            workerParent = Nothing,
+            workerCreatedAt = now,
+            workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+            workerConfigPath = configPath,
+            workerWorkflowConfig = workflowConfig,
+            -- An action starts no provider turn of its own to replay a cell
+            -- for. A canonical stage runs @approve_issues.py@, which selects
+            -- its own reviewers and models and reports them back on
+            -- 'WorkerCanonicalReviewFinished'; a revision runs on the host's
+            -- client, whose cell 'startReviewClient' resolved.
+            workerAssignment = Nothing
+          }
+  descriptor <- descriptorForSpec spec
+  directory <- workerDirectory repository
+  createPrivateDirectory XdgCache directory
+  leased <- acquireWorkerLeaseFor descriptor
+  case leased of
+    Left (WorkerLeaseHeld owner message) -> pure (Left (WorkerTurnAlreadyRunning owner message))
+    Left (WorkerLeaseUnavailable message) -> pure (Left (WorkerLaunchFailed message))
+    Right () -> do
+      hostState <- issueHostState repository host
+      writeState descriptor (issueActionStartingState (hostPidOf hostState) (hostState >>= (.workerStateWorkerIdentity)) now spec)
+      written <- writePrivateJson descriptor.workerDescriptorSpecPath spec
+      case written of
+        Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
+        Right () -> pure (Right descriptor)
+  where
+    -- A host whose state has not landed yet leaves the child recording pid 0
+    -- and no identity, which the startup grace window in 'discoverWorkers'
+    -- already covers and the host's first poll overwrites.
+    hostPidOf = maybe 0 (.workerStateWorkerPid)
+
+issueHostState :: Repository -> WorkerId -> IO (Maybe WorkerState)
+issueHostState repository host = do
+  history <- discoverWorkerHistory repository
+  case find ((== host) . (.workerId) . (.workerDescriptorSpec)) history of
+    Nothing -> pure Nothing
+    Just descriptor -> either (const Nothing) Just <$> readWorkerState descriptor
 
 -- | Spawns a detached supervisor in its own session with fds 0, 1, and 2
 -- attached to @\/dev\/null@ rather than closed.
@@ -344,13 +541,38 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 -- names itself, which is the same fail-closed shape the launch boundary's
 -- own refusal has.
 defaultRunTask :: WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-defaultRunTask spec aggregator rememberProvider emit = case spec.workerAssignment of
-  Nothing -> do
-    descriptor <- descriptorForSpec spec
-    let message = "worker specification " <> Text.pack descriptor.workerDescriptorSpecPath <> " records no model assignment"
+defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
+  -- The review host is asked for no assignment, and records none.
+  --
+  -- Every other worker replays a cell its launch boundary resolved, because
+  -- it spawns one provider turn and an edit to @models.toml@ in between must
+  -- not change what that turn runs on. A host spawns no turn: it starts the
+  -- embedded review client, and 'Kanban.Review.startReviewClient' resolves
+  -- that backend's provider and cell through the adapter — the one routing
+  -- site for it (requirement 8). A recorded cell here would be a second
+  -- answer to a question this worker never asks, and 'ActionIssueReview' is
+  -- routed to that same resolution at the launch boundary rather than to a
+  -- roster read of its own.
+  IssueHostWorkerTaskKind _ -> runIssueReviewHost spec emit
+  -- Unreachable in practice and refused rather than assumed impossible: a
+  -- child action has no supervisor process of its own — its host runs it —
+  -- so nothing ever spawns one with @--worker-spec@ naming a child. A
+  -- hand-built or upgraded-over specification that did would otherwise reach
+  -- the solve arm below and run nothing at all while looking live.
+  IssueActionWorkerTaskKind task -> do
+    let message =
+          "issue action #"
+            <> Text.pack (show task.issueActionIssueNumber)
+            <> " is owned by this repository's review host and has no supervisor of its own"
     emit (WorkerDiagnostic message)
     emit (WorkerFinished (SolveFailed message))
-  Just assignment -> runTaskWithAssignment spec assignment aggregator rememberProvider emit
+  _ -> case spec.workerAssignment of
+    Nothing -> do
+      descriptor <- descriptorForSpec spec
+      let message = "worker specification " <> Text.pack descriptor.workerDescriptorSpecPath <> " records no model assignment"
+      emit (WorkerDiagnostic message)
+      emit (WorkerFinished (SolveFailed message))
+    Just assignment -> runTaskWithAssignment spec assignment aggregator rememberProvider emit
 
 -- | Every one of the four recorded values is authoritative, the provider
 -- included: the brand each flow spawns comes from 'brandForProvider' on what
@@ -366,6 +588,11 @@ runTaskWithAssignment spec recorded aggregator rememberProvider emit = case spec
     runPullRequestFlow spec.workerRepository task.pullRequestWorkerNumber task.pullRequestWorkerOrigin task.pullRequestWorkerAction brand spec.workerConfigPath spec.workerWorkflowConfig cell spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       aggregator
       (translatePullRequestEvent rememberProvider emit)
+  -- 'defaultRunTask' routes both issue kinds before ever reaching an
+  -- assignment, so neither arrives here. Named rather than left to a
+  -- catch-all so adding a third kind is a compile error in both places.
+  IssueHostWorkerTaskKind _ -> emit (WorkerFinished (SolveFailed unassignedIssueTaskMessage))
+  IssueActionWorkerTaskKind _ -> emit (WorkerFinished (SolveFailed unassignedIssueTaskMessage))
   where
     brand = brandForProvider recorded.recordedAssignmentProvider
     cell = recordedAssignmentCell recorded
@@ -546,7 +773,10 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
               workerStateLogPath = Nothing,
               workerStateHeartbeatAt = now,
               workerStateLastActivity = "starting",
-              workerStateKnownProcesses = []
+              workerStateKnownProcesses = [],
+              workerStateReviewThread = Nothing,
+              workerStateReviewTurn = Nothing,
+              workerStateReviewRequest = Nothing
             }
       noticeAggregator <- newUnknownAggregator
       let registeredProvider slot = case slot of
@@ -798,7 +1028,23 @@ runWorkerWithTask takeSnapshot buildRunTask specPath = do
           result <- try @SomeException (restore runTask)
           uninterruptibleMask_ (putMVar cells.supervisorTaskResult result)
         writeIORef cells.supervisorTaskThreadId (Just taskThreadId)
-        void . forkIO $ watchdogLoop takeSnapshot spec cells completeBody emitRaw
+        -- The repository review host is the one worker with no fixed
+        -- deadline of its own (SAG-10).
+        --
+        -- The four-hour bound exists to stop a single provider turn running
+        -- forever, and firing it kills the provider group and commits a
+        -- terminal outcome for the whole worker. A host is not a turn: it is
+        -- a container for however many independently bounded child actions
+        -- are live, and applying that bound to it would settle children still
+        -- well inside their own — and, under a shared provider connection,
+        -- take every sibling's thread down with the process. So each child is
+        -- bounded individually by 'Kanban.Worker.IssueHost.enforceChildBounds'
+        -- against its own creation time, and the host's own life is derived:
+        -- it exits once it holds no live child, which is what stops it
+        -- retaining a lease or a discovery record that would block a later
+        -- start.
+        when (boundedByDeadline spec.workerTask) $
+          void . forkIO $ watchdogLoop takeSnapshot spec cells completeBody emitRaw
         taskResult <- takeMVar cells.supervisorTaskResult
         forcedOutcome <- readIORef cells.supervisorForcedOutcome
         case forcedOutcome of
@@ -988,6 +1234,18 @@ updateWorkerState descriptor stateLock event = modifyMVar_ stateLock $ \state ->
               workerStateProviderIdentity = Nothing,
               workerStateLastActivity = showProcessCount surviving <> " orphaned subprocesses"
             }
+        -- Only ever reaches a supervisor's own state through the review
+        -- host's journal, and only for an event that belongs to no child —
+        -- a protocol warning about traffic the client could not read. A
+        -- child's own review events are written to that child's records by
+        -- the host directly, never folded in here.
+        WorkerReviewEvent _ -> state {workerStateLastActivity = "review protocol event"}
+        -- Written only into a child action's journal, by the host applying a
+        -- dashboard's command. Present so the fold stays total.
+        WorkerReviewInput _ _ -> state {workerStateLastActivity = "review input applied"}
+        -- Written only into a child action's journal, by the host that ran
+        -- the canonical gate. Present so the fold stays total.
+        WorkerCanonicalReviewFinished _ _ -> state {workerStateLastActivity = "canonical gate finished"}
         WorkerFinished outcome -> state {workerStateStatus = WorkerTerminal outcome, workerStateProviderPid = Nothing, workerStateProviderIdentity = Nothing, workerStateLastActivity = terminalActivity outcome}
       heartbeat = updated {workerStateHeartbeatAt = now}
   writeState descriptor heartbeat
@@ -1316,6 +1574,14 @@ watchdogLoop takeSnapshot spec cells completeBody emitRaw = do
 -- journal events, and the UI's session/card and process-inspector
 -- projections so a deadline is never mistaken for a generic provider
 -- failure.
+-- | Whether the shared deadline watchdog bounds this task at all.
+boundedByDeadline :: WorkerTask -> Bool
+boundedByDeadline (IssueHostWorkerTaskKind _) = False
+boundedByDeadline _ = True
+
+unassignedIssueTaskMessage :: Text
+unassignedIssueTaskMessage = "an issue review task reached the assignment-replaying task runner"
+
 workerDeadlineReason :: Text
 workerDeadlineReason = "persistent worker deadline exceeded"
 

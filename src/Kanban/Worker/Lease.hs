@@ -35,7 +35,8 @@ import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid)
 import Kanban.Worker.Paths (decodeFile, ignoreFileOperation, writePrivateJson)
 import Kanban.Worker.Types
-  ( PullRequestWorkerTask (..),
+  ( IssueActionWorkerTask (..),
+    PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -231,10 +232,20 @@ releaseWorkerLease descriptor = do
           ignoreFileOperation (removeDirectory descriptor.workerDescriptorLeasePath)
     _ -> pure ()
 
+-- | What losing this item's lease means, in the words of the item.
+--
+-- The two issue-action arms are only ever /reached/ when the holder could not
+-- be joined. A press on an issue whose child is live reattaches to it and
+-- opens its overlay (requirement 4), exactly as it reopened a reusable
+-- in-memory session before; this is the fail-closed remainder, where a turn
+-- is running and the caller does not know which worker owns it, so starting a
+-- second one is precisely what must not happen.
 workerLeaseConflictMessage :: WorkerTask -> Text
 workerLeaseConflictMessage task = case task of
   SolveWorkerTaskKind solveTask -> "issue #" <> Text.pack (show solveTask.solveWorkerIssueNumber) <> " already has a live solve worker; open it from Processes or kill it before starting another"
   PullRequestWorkerTaskKind pullRequestTask -> "PR #" <> Text.pack (show pullRequestTask.pullRequestWorkerNumber) <> " already has a live worker; open it from Processes or kill it before starting another"
+  IssueActionWorkerTaskKind actionTask -> "issue #" <> Text.pack (show actionTask.issueActionIssueNumber) <> " already has a live review action; open it from Processes or kill it before starting another"
+  IssueHostWorkerTaskKind _ -> "this repository's issue review host is already running"
 
 -- | Durably records the freshly spawned supervisor's identity onto the
 -- lease this launch already holds, so a later recovery pass with no other

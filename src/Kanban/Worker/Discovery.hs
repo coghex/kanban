@@ -43,7 +43,8 @@ import Kanban.Worker.Paths
     workerDirectory,
   )
 import Kanban.Worker.Types
-  ( PullRequestWorkerTask (..),
+  ( IssueActionWorkerTask (..),
+    PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -150,15 +151,39 @@ acknowledgeSupersededWorkers current = do
         && candidate.workerDescriptorSpec.workerCreatedAt <= currentSpec.workerCreatedAt
         && taskSupersedes currentSpec candidate.workerDescriptorSpec
 
+-- | Whether a newly launched worker retires an older one, which is what
+-- decides the older one's records may be acknowledged and collected.
+--
+-- Same item, same kind, and nothing else. The one crossing is autosolve's
+-- own handoff, where the pull-request worker a run reaches supersedes the
+-- solver it came from.
+--
+-- An issue action supersedes only an older issue action for the same issue.
+-- It deliberately does not supersede that issue's solve worker and is not
+-- superseded by it: the two hold different leases and are expected to run at
+-- once (requirement 13), so treating either as retiring the other would
+-- acknowledge a worker that is still working.
+--
+-- A repository review host supersedes only an older host. It never
+-- supersedes a child — a host retiring the actions it exists to serve is the
+-- opposite of what requirement 11 asks for — and a child never supersedes its
+-- host.
 taskSupersedes :: WorkerSpec -> WorkerSpec -> Bool
 taskSupersedes current previous = case current.workerTask of
   SolveWorkerTaskKind task -> case previous.workerTask of
     SolveWorkerTaskKind oldTask -> oldTask.solveWorkerIssueNumber == task.solveWorkerIssueNumber
-    PullRequestWorkerTaskKind _ -> False
+    _ -> False
   PullRequestWorkerTaskKind task -> case previous.workerTask of
     PullRequestWorkerTaskKind oldTask -> oldTask.pullRequestWorkerNumber == task.pullRequestWorkerNumber
     SolveWorkerTaskKind oldTask ->
       maybe False ((== oldTask.solveWorkerIssueNumber) . (.workerParentIssueNumber)) current.workerParent
+    _ -> False
+  IssueActionWorkerTaskKind task -> case previous.workerTask of
+    IssueActionWorkerTaskKind oldTask -> oldTask.issueActionIssueNumber == task.issueActionIssueNumber
+    _ -> False
+  IssueHostWorkerTaskKind _ -> case previous.workerTask of
+    IssueHostWorkerTaskKind _ -> True
+    _ -> False
 
 -- | Bounds the per-repository worker cache, run from 'discoverWorkers' at
 -- startup rather than on a schedule of its own: the one moment the whole
@@ -300,7 +325,56 @@ collectTerminalArtifacts takeSnapshot directory history = do
             if acknowledged then supersededByDurableWorker history descriptor else pure False
       when eligible $ do
         collectable <- artifactsCollectable takeSnapshot directory descriptor state
-        when collectable (removeWorkerArtifacts descriptor)
+        held <- heldByHostTopology history descriptor
+        when (collectable && not held) (removeWorkerArtifacts descriptor)
+
+-- | The two host/child rules the collection pass owes on top of every rule it
+-- already applied (SAG-10).
+--
+-- A terminal child whose host is still live is kept. The host is what
+-- discovers children by scanning this directory for specifications naming it,
+-- so removing a child's records under a running host takes away the very
+-- evidence the host is reading — and the child's journal is what the next
+-- dashboard replays to show what that action did.
+--
+-- A terminal host with a live or unacknowledged-terminal child is kept for
+-- the mirror-image reason: a child records its host's id, and requirement 16
+-- reattaches a child only to its owning host. A host record collected out
+-- from under a child leaves that child naming an owner nothing can resolve,
+-- which is indistinguishable from a forged one.
+--
+-- Everything else about collection is unchanged, including the fail-closed
+-- reading of an unreadable record: 'withTerminalState' only ever offers a
+-- worker whose state decodes and says terminal, so a record that will not
+-- decode is not a candidate here any more than it was before.
+heldByHostTopology :: [WorkerDescriptor] -> WorkerDescriptor -> IO Bool
+heldByHostTopology history descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  IssueActionWorkerTaskKind task -> hostIsLive task.issueActionHost
+  IssueHostWorkerTaskKind _ -> anyChildOutstanding
+  _ -> pure False
+  where
+    hostIsLive owner = case find ((== owner) . (.workerId) . (.workerDescriptorSpec)) history of
+      Nothing -> pure False
+      Just host -> do
+        stateResult <- readWorkerState host
+        pure $ case stateResult of
+          Right hostState -> case hostState.workerStateStatus of
+            WorkerTerminal _ -> False
+            _ -> True
+          -- A host record that will not decode cannot prove the host is gone,
+          -- and this is a deletion: keep the child.
+          Left _ -> True
+    anyChildOutstanding = or <$> mapM childOutstanding (filter ownedByThisHost history)
+    ownedByThisHost candidate = case candidate.workerDescriptorSpec.workerTask of
+      IssueActionWorkerTaskKind task -> task.issueActionHost == descriptor.workerDescriptorSpec.workerId
+      _ -> False
+    childOutstanding child = do
+      stateResult <- readWorkerState child
+      case stateResult of
+        Left _ -> pure True
+        Right childState -> case childState.workerStateStatus of
+          WorkerTerminal _ -> not <$> doesFileExist child.workerDescriptorAckPath
+          _ -> pure True
 
 -- | Whether a newer worker is durable proof that this one's workflow step was
 -- superseded: a same-repository spec discovery already decoded, ordered after
@@ -374,7 +448,12 @@ companionArtifactPaths descriptor =
     descriptor.workerDescriptorRosterPath,
     descriptor.workerDescriptorStatePath,
     descriptor.workerDescriptorAckPath,
-    descriptor.workerDescriptorPendingTerminationPath
+    descriptor.workerDescriptorPendingTerminationPath,
+    -- Named for every worker, not only an issue action. Only an issue action
+    -- ever writes them, but deriving them unconditionally is what stops a
+    -- future kind acquiring a command ledger that nothing collects.
+    descriptor.workerDescriptorCommandPath,
+    descriptor.workerDescriptorCommandAckPath
   ]
 
 -- | Removes a collected worker's files, the @.spec.json@ anchor last on

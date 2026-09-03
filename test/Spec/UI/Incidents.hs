@@ -388,7 +388,7 @@ spec = do
             state.appBoard `shouldBe` base.appBoard
             Map.size state.appSolveProcesses `shouldBe` 0
             Map.size state.appPullRequestProcesses `shouldBe` 0
-            Map.size state.appCanonicalReviewProcesses `shouldBe` 0
+            Map.size state.appWorkers `shouldBe` 0
         )
         (opened : activations)
 

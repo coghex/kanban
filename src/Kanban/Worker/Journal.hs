@@ -19,6 +19,7 @@ module Kanban.Worker.Journal
     appendWorkerEvent,
     consumeJournalLines,
     readJournalSince,
+    readWorkerJournal,
     decodeJournalLine,
     isTerminalEnvelope,
     emitEnvelope,
@@ -126,6 +127,25 @@ readJournalSince descriptor consumedBytes = do
       | isDoesNotExistError err -> Right ([], consumedBytes)
       | otherwise -> Left err
     Right content -> Right (consumeJournalLines consumedBytes content)
+
+-- | Every complete envelope a worker has journaled so far, oldest first.
+--
+-- The whole journal rather than a suffix: this is what a caller asks when it
+-- needs the /evidence/ a worker recorded rather than the events it has not
+-- seen yet — an issue action's published verdict, a reattaching dashboard's
+-- replay. An unterminated trailing fragment is left out for the same reason
+-- 'consumeJournalLines' leaves it: it is an append still in flight.
+--
+-- A journal that cannot be read at all reads as empty. That is only ever a
+-- worker that has written nothing yet or a file that has been collected, and
+-- both are honestly "no evidence here"; every caller treats an absence of
+-- evidence as a non-result rather than as a result.
+readWorkerJournal :: WorkerDescriptor -> IO [WorkerEnvelope]
+readWorkerJournal descriptor = do
+  readResult <- readJournalSince descriptor 0
+  pure $ case readResult of
+    Left _ -> []
+    Right (journalLines, _) -> mapMaybe decodeJournalLine journalLines
 
 decodeJournalLine :: ByteString.ByteString -> Maybe WorkerEnvelope
 decodeJournalLine line = case eitherDecodeStrict' line :: Either String WorkerEnvelope of

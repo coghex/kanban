@@ -3841,16 +3841,26 @@ DASHBOARD_BOUNDARY_TOKENS = ("AppState", "EventM", "BChan")
 ACTION_REGISTRY_ADAPTERS = (
     "src/Kanban/UI/Solve.hs",
     "src/Kanban/UI/PullRequest.hs",
+    # SAG-10 gave the two issue verbs runners, so the board's review key is an
+    # adapter over the registry like every other launch. It reaches
+    # `launchIssueAction` through the registry and never directly, which is
+    # what the launch-function rule below asserts of it too.
+    "src/Kanban/UI/Review.hs",
 )
 
-WORKER_LAUNCH_FUNCTIONS = ("launchSolveWorker", "launchPullRequestWorker")
-
-# The board launches this slice deliberately leaves alone. `r` is one key over
-# both issues and pull requests, and the registry refuses its two issue verbs
-# as not-yet-runner-owned (SAG-10 supplies those runners), so routing the
-# board's own issue review through the registry would replace a working review
-# session with a refusal. Only the compatibility rules moved.
-ACTION_REGISTRY_UNROUTED_ADAPTERS = ("src/Kanban/UI/Review.hs",)
+WORKER_LAUNCH_FUNCTIONS = (
+    "launchSolveWorker",
+    "launchPullRequestWorker",
+    # The issue-action launch, which the registry reaches and the dashboard
+    # must not: a board that called it directly would create a child without
+    # the plan, the compatibility rules, and the capability probe the registry
+    # runs first.
+    "launchIssueAction",
+    # The host a child is launched under, ensured by the registry for the same
+    # reason. A second ensure site is a second answer to "which host owns this
+    # repository's actions".
+    "ensureIssueReviewHost",
+)
 
 # Autosolve's progression, as a fact about which modules may name it.
 #
@@ -4113,22 +4123,27 @@ class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
                 )
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_board_issue_review_does_not_reach_the_registry(self):
-        # Requirement 11's other half, as a fact about the source. The two
-        # issue verbs are declared and refused; the dashboard's own issue
-        # review and revision keep their existing EventM lifecycles until
-        # SAG-10 gives them runners, and pressing `r` on an issue still opens
-        # a review session rather than reporting a refusal.
-        for relative_path in ACTION_REGISTRY_UNROUTED_ADAPTERS:
-            with self.subTest(module=relative_path):
-                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-                self.assertEqual(
-                    haskell_import_names(content, "Kanban.Action"),
-                    set(),
-                    f"{relative_path} now imports Kanban.Action; the board's "
-                    "issue review would reach the not-yet-runner-owned "
-                    "refusal and stop opening a session",
-                )
+    def test_the_board_owns_no_review_client(self):
+        # SAG-10 requirement 2: the repository review host owns that
+        # repository's ReviewClient and its connection pool, and it is the only
+        # thing that does. A dashboard that started one of its own would be a
+        # second embedded backend for the same repository, running beside the
+        # host and answering to nobody's durable records.
+        #
+        # Named as the client-lifecycle functions rather than as the type, so a
+        # module that merely mentions a ReviewClient in a comment is not an
+        # offender while one that starts or stops a client is.
+        offenders = []
+        for token in ("startReviewClient", "startResolvedReviewClient", "stopReviewClient"):
+            for module in sorted(haskell_modules_naming(token)):
+                if module.startswith("src/Kanban/UI/"):
+                    offenders.append(f"{module} names {token}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a dashboard module starts or stops the embedded review client; "
+            "SAG-10 makes that the repository review host's alone",
+        )
 
     def test_autosolve_progression_has_one_owner(self):
         # Issue #593 requirement 12. Each token below is named by the module

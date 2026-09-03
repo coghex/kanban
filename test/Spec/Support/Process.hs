@@ -370,7 +370,10 @@ runningWorkerState identifier pid identity =
       workerStateLogPath = Nothing,
       workerStateHeartbeatAt = epoch,
       workerStateLastActivity = "running",
-      workerStateKnownProcesses = []
+      workerStateKnownProcesses = [],
+      workerStateReviewThread = Nothing,
+      workerStateReviewTurn = Nothing,
+      workerStateReviewRequest = Nothing
     }
 
 isDiagnosticEvent :: WorkerEvent -> Bool

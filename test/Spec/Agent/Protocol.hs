@@ -444,7 +444,8 @@ spec = do
                   reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
                   reviewSessionTurnId = Just "turn-2",
                   reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = undelivered
+                  reviewSessionUndelivered = undelivered,
+                  reviewSessionRestored = Nothing
                 }
           )
             {sessionInput = input}

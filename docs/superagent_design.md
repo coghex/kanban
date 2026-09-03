@@ -1487,6 +1487,47 @@ unless their typed contract exposes an override.
   automatic recommendation policy.
 - **Open questions:** `None`; provider-internal subagents remain opaque and
   owned by the parent.
+- **Topology as implemented:** one durable detached review host per canonical
+  repository, owning that repository's `ReviewClient` and its connection pool,
+  with each initial review, rereview, and revision an independently durable
+  child action of it.
+
+  The split is what lets both adapter process shapes coexist without either
+  being emulated. A `SharedProcess` backend multiplexes concurrent children
+  through the host's one connection; a `ProcessPerThread` backend gives each
+  child its own connection and process. Separate detached workers could not
+  share a connection at all, and independent per-issue processes could not
+  express the shared one, so the host holds the client and the children hold
+  everything that is theirs: specification, state, event journal and raw log,
+  dashboard-input command ledger and acknowledgements, lease
+  (`issue-action-<n>`, deliberately apart from the solver's `issue-<n>`),
+  termination state, and terminal result.
+
+  Isolation is child-scoped in both shapes. Ending or recovering one child
+  settles that child's thread or per-thread process and its descendants and
+  never the host, a sibling, a sibling's lease, or a sibling's events. Under a
+  shared connection that boundary is the owning thread and turn; under a
+  process-per-thread one it is the connection the thread owns.
+
+  The host takes no bound of its own. The four-hour persistent-worker deadline
+  bounds one provider turn, and applying it to a container of independently
+  bounded children would settle children still inside their own — and, on a
+  shared connection, take every sibling down with the process. So each child is
+  bounded individually from its own creation, and the host's life is derived:
+  it exits once it holds no live child, which is also what stops it retaining a
+  lease or a discovery record that would block a later start.
+
+  Startup collection follows the topology: a child whose host is live is never
+  collected, and a host with a live or unacknowledged-terminal child is never
+  collected either, on top of every rule the pass already applied.
+
+  Two retentions meet in the overlay and are not the same contract. The child's
+  journal and raw log keep every event, bounded only by the worker cache's own
+  retention; the overlay's transcript stays bounded. A reattaching dashboard
+  replays the whole journal through the same transitions a live event takes, so
+  it reconstructs the identical bounded suffix, pending interaction, activity,
+  and follow state — and no overlay bound ever truncates evidence the journal
+  still holds.
 
 ### SAG-3. Run and recover one mission outside the board selection
 

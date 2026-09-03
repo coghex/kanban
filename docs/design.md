@@ -941,16 +941,45 @@ successfully, so normal review transitions never present a generic command
 approval prompt.
 
 Review overlays contain a bounded, mouse-wheel-scrollable transcript, one-line
-input, structured questions, command approvals, and tabs for all in-memory
+input, structured questions, command approvals, and tabs for all open
 sessions. `Esc` from normal mode, a normal-mode `q`, or an outside click hides
 the overlay without interrupting work; selecting the issue
 and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
-follow-up turn, and Ctrl-C interrupts the active turn. Enter is live only while
+follow-up turn, and Ctrl-C interrupts the active turn of an interactive
+revision or ends a canonical stage's whole action, which does not resume.
+Enter is live only while
 something is still there to read the draft: a session in a terminal phase, and
 a canonical review stage in any phase, takes no follow-up at all, while an
 interrupted app-server revision remains resumable and does. Only running turns
 chain short spinner ticks; completed, hidden, and idle sessions schedule no
-redraws. Quitting terminates the owned app-server process.
+redraws.
+
+An issue review, rereview, and revision are runner-owned, so quitting stops
+none of them. Each is a durable child action of the repository review host
+described in the persistent-worker milestone below, and the host owns the
+app-server process, not the dashboard.
+
+Two different retentions meet in that overlay, and they are not the same
+contract. The child's event journal and raw log hold every event the action
+ever produced, bounded only by the worker cache's own retention. The overlay's
+transcript is bounded as it always was. A dashboard reattaching to a live
+action replays that whole journal through the same transitions a live event
+takes, so it arrives at the same bounded transcript suffix, the same pending
+question or approval, the same activity, and the same scroll-follow state a
+dashboard that never closed would be showing — and no overlay bound, replay
+path, or transcript reconstruction ever truncates evidence the journal still
+holds.
+
+Every input the overlay sends — a structured answer, an approval decision,
+feedback or steering, a deliberate resend of a refused steer, an active-turn
+interrupt, and ending the whole action — travels to that child as a durable,
+correlated command with an acknowledgement written back. A command is applied
+when its identifier carries no acknowledgement, and applying it writes one, so
+a retry, a replay, and a dashboard restart all deliver it exactly once. A
+question raised while no dashboard was running stays pending and is answerable
+by the one that arrives next; a command the owning session rejects is
+acknowledged as rejected and its text handed back to the input line rather
+than left looking sent.
 
 Solve, PR, and review overlays are three presentations of one session record.
 Everything not specific to the kind of agent behind them — status derivation,
@@ -2524,8 +2553,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   neither, possibly live with only this process's in-memory refusal covering it,
   refuses the quit and reports that instead: halting there would drop the one
   thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
-  and then end it from outside. A live interactive review still refuses the quit
-  exactly as it did, and is asked first.
+  and then end it from outside. That stray `gh` is the only thing that refuses
+  the quit at all: an issue review, revision, solve, or pull-request agent is
+  runner-owned and may safely be left running.
 - That in-memory refusal is the repository's for the rest of the process, not
   the finished job's. Any job may end holding a group back this way — a
   background history page spawns `gh` under the same durable record a
@@ -3613,7 +3643,12 @@ canonical-review interlock, and the board refresh a result requires — and the
 sidebar reaches that seam through an `approve_issues.py` control drawn directly
 above the drainer's, which `a` and a plain left click both press. Native GitHub
 sub-issue membership, canonical v2 issue-review sessions, embedded revision
-questions, and the first resumable issue-solve flow are implemented. The
+questions, and the first resumable issue-solve flow are implemented. Issue
+review, rereview, and revision are now durable as well: each runs as an
+independently leased child action of one detached review host per canonical
+repository, survives the dashboard, and is reattached to and replayed by the
+next one, with every dashboard input travelling to it as a correlated,
+acknowledged, exactly-once command. The
 external usage-command escape hatch is also implemented. Broader
 provider-version fixtures remain for subsequent slices.
 
@@ -3805,9 +3840,9 @@ The first solve/autosolve-compatible slice is implemented.
   carry their own literals.
 - Solver processes stream structured CLI output into a bounded, hideable
   overlay, retain their resumable session identifiers, and run as owned process
-  groups. Solve and PR providers are owned by detached, repository-scoped
-  supervisors, so quitting the TUI leaves explicitly started work visible and
-  bounded rather than terminating it.
+  groups. Solve, PR, and issue-review providers are owned by detached,
+  repository-scoped supervisors, so quitting the TUI leaves explicitly started
+  work visible and bounded rather than terminating it.
 - Each detached supervisor writes a private specification, atomic heartbeat
   state, and append-only event journal under the XDG cache. A restarted TUI
   discovers only workers for its repository, reconstructs the session and
@@ -3881,9 +3916,32 @@ The first solve/autosolve-compatible slice is implemented.
   state; if a snapshot failure leaves recorded descendants unverified, it
   reports a visible diagnostic and retains the lease instead, and a later
   successful snapshot completes the pending "killed by user" outcome.
-- App-server issue revisions and the synchronous canonical issue gate remain
-  TUI-owned for now. Quitting is refused while either has a live turn, avoiding
-  accidental invisible work until their protocol state is also durable.
+- Issue review, rereview, and revision are runner-owned too, under one durable
+  detached review host per canonical repository. That host owns the
+  repository's app-server client and its connection pool; each action is an
+  independently durable child of it, with its own specification, state, event
+  journal and raw log, dashboard-input command ledger and acknowledgements,
+  lease, and terminal result. A child's lease is `issue-action-<n>`, kept apart
+  from the solver's `issue-<n>` so a solve and a review of one issue still run
+  at once.
+  Quitting refuses none of them, and a later dashboard discovers the host,
+  reattaches to each child, and replays its evidence.
+  The host takes no deadline of its own: each child is bounded individually
+  from its own creation, and the host exits once it holds no live child, so no
+  host-level bound settles a child still inside its own bound and a host
+  serving nobody leaves neither a lease nor a discovery record behind.
+  The provider's process shape is the adapter's, unchanged: a shared-process
+  backend multiplexes concurrent children through the host's one connection,
+  and a process-per-thread backend gives each child its own. Ending or
+  recovering one child settles that child's thread or process and its
+  descendants and never the host, a sibling, a sibling's lease, or a sibling's
+  events.
+  Mutation authority is stage-specific and unchanged: `approve_issues.py` alone
+  publishes a canonical review comment or moves a verdict label, and the
+  revision's `kanban_github_issue` tool alone publishes the specification
+  amendment and moves `reviewed:changes` to `reviewed:revised`, never
+  approving. No worker, host, dashboard adapter, or recovery path posts a
+  verdict of its own or reports an unobserved canonical result as approval.
 - Live solve and PR overlays render the animated activity pip beside a
   provider-independent activity timer. Codex command events and Claude Bash
   tool calls expose their sanitized one-line command, keeping long silent
