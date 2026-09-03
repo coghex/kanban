@@ -143,7 +143,7 @@ where
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, threadDelay, withMVar)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (IOException, try)
-import Control.Monad (forever, void, when)
+import Control.Monad (forM_, forever, void, when)
 import Data.Aeson
   ( Result (..),
     Value (..),
@@ -404,8 +404,8 @@ backendAssignment client =
 -- resolved against two different rosters — and through the same
 -- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
 -- so a roster it allowed cannot be one this refuses.
-startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient roster workflowConfig repository eventSink = case embeddedReviewCell roster of
+startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startReviewClient roster workflowConfig repository processRegistered eventSink = case embeddedReviewCell roster of
   -- Resolved before the backend is spawned, not after: a roster that loads
   -- no cell for the routed provider must start no process at all, and the
   -- backend's own failure surface already carries the reason to the UI. The
@@ -414,7 +414,7 @@ startReviewClient roster workflowConfig repository eventSink = case embeddedRevi
   Left message -> pure (Left message)
   Right _ -> case (adapterFor provider).adapterEmbeddedReview of
     Nothing -> pure (Left (missingEmbeddedReviewMessage provider))
-    Just backend -> startResolvedReviewClient backend roster workflowConfig repository eventSink
+    Just backend -> startResolvedReviewClient backend roster workflowConfig repository processRegistered eventSink
   where
     provider = embeddedReviewProviderFor roster
 
@@ -422,8 +422,8 @@ startReviewClient roster workflowConfig repository eventSink = case embeddedRevi
 -- 'Kanban.ProviderAdapter.embeddedReviewProvider' resolves. Exported so a
 -- test can drive either process shape without a provider shipping it:
 -- nothing in production calls this except 'startReviewClient' above.
-startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startResolvedReviewClient backend roster workflowConfig repository eventSink = do
+startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startResolvedReviewClient backend roster workflowConfig repository processRegistered eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
     Left message -> eventSink (ReviewProtocolWarning backend.backendProvider message) >> pure Nothing
@@ -437,6 +437,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
   let client =
         ReviewClient
           { reviewBackend = backend,
+            reviewProcessRegistered = processRegistered,
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -525,6 +526,10 @@ spawnReviewConnection client identifier reviewIssue = case backendAssignment cli
             hSetBuffering inputHandle LineBuffering
             hSetBuffering outputHandle LineBuffering
             (processManaged, groupLeaderProblem) <- managedProcess processHandle
+            -- Registered with whoever owns this client before the connection
+            -- is even built, so no window exists in which this process is
+            -- running and nothing durable names it.
+            client.reviewProcessRegistered processManaged
             mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
             connection <- newReviewConnection identifier inputHandle processHandle processManaged
             -- What this connection's two readers share. Held beside the
@@ -635,6 +640,23 @@ stopReviewConnection connection = do
 -- allowed to reach; 'stopReviewClient' belongs to the host's own shutdown.
 finishReviewThread :: ReviewClient -> ReviewThreadId -> IO ()
 finishReviewThread client threadId = do
+  -- The remote turn first, and only under a shared process.
+  --
+  -- Killing tool subprocesses and dropping bookkeeping stops nothing the
+  -- provider is doing: under 'ProcessPerThread' that is fine, because the
+  -- thread's whole process is torn down below, but under 'SharedProcess' the
+  -- connection stays up by design and the turn simply keeps running. The
+  -- action would be marked terminal while its provider went on working —
+  -- spending quota, and reaching @kanban_github_issue@ — with no session left
+  -- that could stop it.
+  --
+  -- Interrupting is the only operation that ends one thread's turn without
+  -- touching the connection every sibling shares, which is why it is the one
+  -- used here. Best-effort: a turn that has already ended refuses the
+  -- interrupt, and that refusal is the outcome this wanted anyway.
+  when (client.reviewBackend.backendProcessShape == SharedProcess) $ do
+    running <- Map.lookup threadId <$> readMVar client.reviewActiveTurns
+    forM_ running (void . interruptReview client threadId)
   killReviewTools client threadId
   modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
   modifyMVar_ client.reviewInterrupts (pure . Map.delete threadId)
@@ -678,6 +700,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
+            reviewProcessRegistered = const (pure ()),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -812,6 +835,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
+            reviewProcessRegistered = const (pure ()),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,

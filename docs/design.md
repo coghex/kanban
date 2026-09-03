@@ -3954,7 +3954,9 @@ The first solve/autosolve-compatible slice is implemented.
   recorded provider process with no verifiable identity is what every
   termination path reads as unresolvable — and instead registers its client's
   actual connection processes with its own supervisor, so they are identified,
-  censused, and reachable by the ordinary kill and recovery paths.
+  censused, and reachable by the ordinary kill and recovery paths. The client
+  registers each connection as it creates one, because any later moment leaves
+  an interval in which a process is running and nothing durable names it.
   A child settled between asking for a provider thread and the provider
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical
@@ -3976,6 +3978,10 @@ The first solve/autosolve-compatible slice is implemented.
   restarted, because its provider session belonged to a host that is gone.
   Either way the specification is rewritten to name the host now serving it,
   since discovery and the collection pass both read ownership from there.
+  Ending a child settles its provider turn as well as its tooling: under a
+  shared connection the turn is interrupted, since dropping the bookkeeping
+  alone would leave the provider working for an action already marked
+  terminal.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or

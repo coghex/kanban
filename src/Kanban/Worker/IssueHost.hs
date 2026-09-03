@@ -73,6 +73,7 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.ApprovalService (ApprovalController, ApprovalUnavailable, discoverApprovalController)
 import Kanban.Cache (normalizedRepositoryIdentity)
+import Kanban.Domain (Repository)
 import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
 import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
@@ -180,6 +181,16 @@ data IssueHostProvider = IssueHostProvider
     -- 'ProcessPerThread' is its own process and under 'SharedProcess' is its
     -- tool descendants alone.
     providerFinishThread :: ReviewThreadId -> IO (),
+    -- | Runs one canonical stage's @approve_issues.py@ invocation, reporting
+    -- the subprocess it spawned through the callback.
+    --
+    -- On the seam because it is the only part of a canonical stage that
+    -- reaches outside this process. What surrounds it — the preflight, the
+    -- approval-service interlock re-asked immediately before the spawn, the
+    -- recording of the subprocess against this child — stays in the host,
+    -- where requirement 7 puts it. Production is
+    -- 'Kanban.Review.runCanonicalIssueReview' and nothing else.
+    providerRunCanonical :: ReviewStage -> Int -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult),
     -- | Every provider process the client currently holds, so the host can
     -- register them with its own supervisor. A host that died uncleanly
     -- otherwise leaves them orphaned with nothing durable naming them, and
@@ -196,8 +207,8 @@ data IssueHostProvider = IssueHostProvider
 -- 'startReviewClient' is what resolves the embedded backend through the
 -- adapter, so this function chooses no provider and no cell; it only names
 -- which of the client's operations the host is allowed to reach.
-embeddedIssueHostProvider :: ReviewClient -> IssueHostProvider
-embeddedIssueHostProvider client =
+embeddedIssueHostProvider :: Maybe FilePath -> Repository -> ReviewClient -> IssueHostProvider
+embeddedIssueHostProvider configPath repository client =
   IssueHostProvider
     { providerBeginReview = beginIssueReview client,
       providerAnswerQuestion = answerReviewQuestion client,
@@ -205,6 +216,7 @@ embeddedIssueHostProvider client =
       providerSendMessage = sendReviewMessage client,
       providerInterruptTurn = interruptReview client,
       providerFinishThread = finishReviewThread client,
+      providerRunCanonical = \stage issueNumber started -> runCanonicalIssueReview configPath repository issueNumber stage started,
       providerProcesses = reviewConnectionProcesses client,
       providerLogPath = reviewClientLogPath client,
       providerStop = stopReviewClient client
@@ -321,7 +333,7 @@ data IssueReviewHost = IssueReviewHost
 runIssueReviewHost :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
 runIssueReviewHost = runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider
   where
-    startEmbeddedProvider spec sink = do
+    startEmbeddedProvider spec register sink = do
       rosterResult <- loadModelRoster
       case rosterResult of
         -- The roster is what 'startReviewClient' resolves the embedded
@@ -330,12 +342,12 @@ runIssueReviewHost = runIssueReviewHostWith defaultIssueHostTuning startEmbedded
         -- here.
         Left _ -> pure (Left "the model roster could not be loaded, so no review backend could be started")
         Right roster ->
-          fmap embeddedIssueHostProvider
-            <$> startReviewClient roster spec.workerWorkflowConfig spec.workerRepository sink
+          fmap (embeddedIssueHostProvider spec.workerConfigPath spec.workerRepository)
+            <$> startReviewClient roster spec.workerWorkflowConfig spec.workerRepository register sink
 
 runIssueReviewHostWith ::
   IssueHostTuning ->
-  (WorkerSpec -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
+  (WorkerSpec -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
   WorkerSpec ->
   (ManagedProcess -> IO ()) ->
   (WorkerEvent -> IO ()) ->
@@ -372,11 +384,19 @@ runIssueReviewHostWith tuning startProvider spec rememberProvider emit = do
             hostStopped = stopped
           }
   emit (WorkerDiagnostic "starting the repository review host")
-  started <- startProvider spec (routeReviewEvent host)
+  started <- startProvider spec (registerHostProcess host) (routeReviewEvent host)
   case started of
     Left message -> finishHost host (SolveFailed message)
     Right provider -> do
       modifyMVar_ providerCell (pure . const (Just provider))
+      -- Before anything else, and before the first poll. A shared-process
+      -- backend's connection already exists by the time 'startProvider'
+      -- returns, and a host killed between here and the first poll would
+      -- leave it with no recorded identity for any recovery pass to verify or
+      -- terminate. The client registers each connection as it creates one
+      -- too; this covers the one it created before this host had a provider
+      -- to ask.
+      registerProviderProcesses host
       -- Deliberately not 'WorkerProviderStarted' with this host's own pid.
       -- The host is not a provider turn, and a recorded provider pid with no
       -- recorded identity is precisely the shape every termination path reads
@@ -759,19 +779,16 @@ runCanonicalChild :: IssueReviewHost -> HostChild -> ReviewStage -> IO ()
 runCanonicalChild host child stage = do
   let task = child.hostChildTask
       spec = child.hostChildDescriptor.workerDescriptorSpec
-  result <-
-    canonicalLaunchOutcome
-      stage
-      host.hostRepositoryIdentity
-      host.hostApprovalController
-      (preflightBlocker spec.workerRepository host.hostOperatingMode (issueActionPreflightAction stage task.issueActionOrigin))
-      ( runCanonicalIssueReview
-          spec.workerConfigPath
-          spec.workerRepository
-          task.issueActionIssueNumber
-          stage
-          (recordCanonicalProcess child)
-      )
+  provider <- readMVar host.hostProvider
+  result <- case provider of
+    Nothing -> pure (Left "the review backend is not connected")
+    Just connected ->
+      canonicalLaunchOutcome
+        stage
+        host.hostRepositoryIdentity
+        host.hostApprovalController
+        (preflightBlocker spec.workerRepository host.hostOperatingMode (issueActionPreflightAction stage task.issueActionOrigin))
+        (connected.providerRunCanonical stage task.issueActionIssueNumber (recordCanonicalProcess child))
   journalChild child (WorkerCanonicalReviewFinished stage result)
   writeIORef child.hostChildProcess Nothing
   settleChild host child (canonicalStageOutcome result)
@@ -798,17 +815,21 @@ canonicalStageOutcome (Right _) = SolveCompleted
 -- that group.
 recordCanonicalProcess :: HostChild -> ManagedProcess -> IO ()
 recordCanonicalProcess child process = do
-  -- The canonical spawn is the same race the late thread announcement is: a
-  -- termination between the interlock and the process existing would leave a
-  -- gate subprocess running under a child that is already terminal. Settling
-  -- first means this claim is already taken, and the process is ended here
-  -- rather than recorded onto a child nothing will settle again.
-  alreadySettled <- readIORef child.hostChildSettleClaim
-  if alreadySettled
-    then do
-      journalChild child (WorkerDiagnostic lateCanonicalProcessDiagnostic)
-      interruptThenKillManagedProcess process
-    else recordLiveCanonicalProcess child process
+  -- Installed first, then checked. Checking first and installing second is a
+  -- read that a termination can win behind: the settle would find no process
+  -- to kill and release the child, and this callback would then record a
+  -- subprocess nothing is ever going to settle.
+  --
+  -- Installing first makes the two orderings exhaustive instead. Either the
+  -- settle sees the process and kills it, or the settle ran before the
+  -- install and this re-read sees the claim taken and kills it here. There is
+  -- no interleaving in which neither does, and killing twice is harmless.
+  recordLiveCanonicalProcess child process
+  settled <- readIORef child.hostChildSettleClaim
+  when settled $ do
+    journalChild child (WorkerDiagnostic lateCanonicalProcessDiagnostic)
+    writeIORef child.hostChildProcess Nothing
+    interruptThenKillManagedProcess process
 
 lateThreadDiagnostic :: Text
 lateThreadDiagnostic = "the provider announced this action's thread after it had already been settled; the thread was closed"
@@ -1255,11 +1276,16 @@ settleChild host child outcome = do
         }
     journalChild child (WorkerFinished outcome)
     releaseWorkerLease child.hostChildDescriptor
-    modifyMVar_ host.hostChildren (pure . Map.delete child.hostChildDescriptor.workerDescriptorSpec.workerId)
-    -- Out of the live map and into the retired one in the same step, so a
-    -- thread or process the provider is still creating for this child has
-    -- somewhere to be closed against.
+    -- Retired first, live entry removed second. The two maps are separate
+    -- cells, so a lookup landing between the updates sees whichever order
+    -- they happen in — and in this order that is "both", never "neither". The
+    -- other order leaves a window in which an announcement for this action
+    -- resolves to nothing and its thread is never closed, which is the whole
+    -- thing retirement exists to prevent. Finding the live entry in that
+    -- window is harmless: the settle claim is already taken, so every reader
+    -- takes the settled branch.
     modifyMVar_ host.hostRetired (pure . Map.insert child.hostChildDescriptor.workerDescriptorSpec.workerId child)
+    modifyMVar_ host.hostChildren (pure . Map.delete child.hostChildDescriptor.workerDescriptorSpec.workerId)
     -- Last, and from outside the thread being stopped: a stage thread that
     -- reached here itself would otherwise kill itself before its own journal
     -- write landed.
@@ -1390,14 +1416,26 @@ persistChild child = readMVar child.hostChildState >>= writeState child.hostChil
 registerProviderProcesses :: IssueReviewHost -> IO ()
 registerProviderProcesses host = do
   provider <- readMVar host.hostProvider
-  forM_ provider $ \connected -> do
-    processes <- connected.providerProcesses
-    forM_ processes $ \process -> do
-      processId <- managedProcessPid process
-      forM_ processId $ \pid -> do
-        fresh <- atomicModifyIORef' host.hostRegisteredProcesses $ \known ->
-          if fromIntegral pid `elem` known then (known, False) else (fromIntegral pid : known, True)
-        when fresh (host.hostRememberProvider process)
+  forM_ provider $ \connected -> connected.providerProcesses >>= mapM_ (registerHostProcess host)
+
+-- | Registers one provider process with this host's supervisor, once.
+--
+-- The client calls this as it creates each connection, which is the only
+-- moment with no window: registering after the spawn returned, or at the
+-- host's next poll, leaves an interval in which the process is running and
+-- nothing durable names it. The poll still sweeps, as a backstop for anything
+-- the client created before this host had a provider to ask.
+--
+-- Idempotent by pid, because both callers reach the same processes and
+-- registering one twice would replace the recorded provider identity with
+-- itself for no reason.
+registerHostProcess :: IssueReviewHost -> ManagedProcess -> IO ()
+registerHostProcess host process = do
+  processId <- managedProcessPid process
+  forM_ processId $ \pid -> do
+    fresh <- atomicModifyIORef' host.hostRegisteredProcesses $ \known ->
+      if fromIntegral pid `elem` known then (known, False) else (fromIntegral pid : known, True)
+    when fresh (host.hostRememberProvider process)
 
 -- | Closes every child's raw log, live and retired alike.
 closeChildLogs :: IssueReviewHost -> IO ()

@@ -594,6 +594,68 @@ lifecycleSpec = describe "one running host" $ do
             ]
       owners `shouldBe` [hostIdUnderTest]
 
+  -- Round 6's first blocker. A shared-process connection exists by the time
+  -- the client is started, so registering it at the host's first poll leaves
+  -- an interval in which a host killed uncleanly loses the only durable
+  -- record of a process it spawned. The client registers each connection as
+  -- it creates one, which is before the host has even entered its loop.
+  it "has already registered its client's connection before its first poll" $
+    withRunningHostOutcome
+      ( \host -> do
+          -- No poll has necessarily run yet, and the registration is already
+          -- there: the client made it during creation.
+          registered <- readMVar host.hostRegistered
+          pids <- mapM managedProcessPid registered
+          pids `shouldBe` [Just 1]
+      )
+      >>= \outcome -> fst outcome `shouldBe` Just (WorkerFinished SolveCompleted)
+
+  -- Round 6's second blocker. Reading the settle claim before installing the
+  -- canonical subprocess is a read a termination can win behind: the settle
+  -- finds no process to kill, and the callback then records one nothing will
+  -- ever settle. Installing first makes the two orderings exhaustive, and the
+  -- loser of the race ends the process where it stands.
+  it "ends a canonical subprocess reported after its child was settled" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 InitialReview
+      -- The gate has started, so the interlock and preflight are behind us and
+      -- the child is live.
+      started <- awaitCallsFor host 1 isCanonicalCall
+      length (filter isCanonicalCall started) `shouldBe` 1
+      -- Settled while the gate is still running, which is the ordering the
+      -- race produces.
+      termination <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child termination
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      -- Only now does the gate report its subprocess.
+      putMVar host.hostCanonicalProcess (managedProcessGroup 1)
+      -- The child's own evidence records that the late process was ended
+      -- rather than installed onto an action nothing would settle again.
+      _ <- awaitJust "the late canonical subprocess was not ended" $ do
+        journaled <- journalEvents child
+        pure (find (== WorkerDiagnostic "the canonical gate started after this action had already been settled; the subprocess was ended") journaled)
+      pure ()
+
+  -- Round 6's third blocker. Retirement moves a settled child between two
+  -- separate cells, and an announcement arriving in the handoff window used
+  -- to find neither — logging to the host and leaving the thread unowned.
+  -- Retiring before removing the live entry makes the window show "both".
+  it "closes a late thread announced while its child is being retired" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      -- Settle and announce concurrently, so the announcement lands wherever
+      -- the retirement happens to be. Whichever ordering the run produces,
+      -- the thread must be closed.
+      let late = ReviewThreadId (ConnectionId 1) "thread-racing-retirement"
+      termination <- commandNumbered 1 child TerminateIssueAction
+      Right () <- appendReviewCommand child termination
+      void . forkIO $ deliver host (ReviewThreadCreated 594 late)
+      _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      awaitCalls host 1 isFinishCall
+      calls <- providerCalls host
+      filter isFinishCall calls `shouldBe` [FinishThread late]
+
   -- Round 5's second blocker. A delivery journals what it delivered before
   -- acknowledging it, so an acknowledgement write that fails leaves the
   -- ledger holding only the claim while the journal already holds the answer.
@@ -1175,8 +1237,13 @@ data ProviderCall
   | SendMessage ReviewThreadId Text
   | InterruptTurn ReviewThreadId Text
   | FinishThread ReviewThreadId
+  | RunCanonical ReviewStage Int
   | StopProvider
   deriving stock (Eq, Show)
+
+isCanonicalCall :: ProviderCall -> Bool
+isCanonicalCall RunCanonical {} = True
+isCanonicalCall _ = False
 
 isAnswerCall, isInterruptCall, isFinishCall, isSendCall, isBeginCall :: ProviderCall -> Bool
 isBeginCall (BeginReview _) = True
@@ -1201,7 +1268,10 @@ data HostUnderTest = HostUnderTest
     -- distinct threads on one connection — the shared-process shape.
     hostThreads :: MVar (Map.Map Int ReviewThreadId),
     -- | What the host handed its supervisor's provider registration.
-    hostRegistered :: MVar [ManagedProcess]
+    hostRegistered :: MVar [ManagedProcess],
+    -- | Filled by a test to hand the canonical gate's subprocess to the host,
+    -- at a moment the test chooses. Empty means the gate has not reported one.
+    hostCanonicalProcess :: MVar ManagedProcess
   }
 
 -- | Runs a real host against a provider this test controls, hands the body a
@@ -1228,15 +1298,21 @@ withRunningHostOutcome body =
       calls <- newMVar []
       threads <- newMVar Map.empty
       registeredProcesses <- newMVar []
+      canonicalProcess <- newEmptyMVar
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
       let hostSpecification =
             (specFor hostIdUnderTest (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
               {workerRepository = repository}
           record call = modifyMVar_ calls (pure . (<> [call]))
-          startProvider _ sink = do
+          -- The client's own registration, which a real one calls as it
+          -- creates each connection. Recorded here so a test can assert the
+          -- host registers a connection before its first poll rather than
+          -- after it.
+          startProvider _ register sink = do
             putMVar sinkCell sink
-            pure (Right (recordingProvider record))
+            register (managedProcessGroup 1)
+            pure (Right (recordingProvider record canonicalProcess))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -1261,7 +1337,8 @@ withRunningHostOutcome body =
             hostSink = sink,
             hostCalls = calls,
             hostThreads = threads,
-            hostRegistered = registeredProcesses
+            hostRegistered = registeredProcesses,
+            hostCanonicalProcess = canonicalProcess
           }
       -- The host exits when it holds no live child, so a body that left one
       -- running would wait forever. Ending them is done the way anything ends
@@ -1292,7 +1369,7 @@ withHostStartFailure message =
       emitted <- newMVar []
       runIssueReviewHostWith
         (IssueHostTuning 20000 1)
-        (\_ _ -> pure (Left message))
+        (\_ _ _ -> pure (Left message))
         (specFor hostIdUnderTest (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
         (\_ -> pure ())
         (\event -> modifyMVar_ emitted (pure . (<> [event])))
@@ -1314,8 +1391,8 @@ withHostStartFailure message =
 -- a fake that announced synchronously inside 'providerBeginReview' would make
 -- the settled-before-announced ordering unreachable, which is exactly the
 -- race round 1 found. Every test drives the announcement itself.
-recordingProvider :: (ProviderCall -> IO ()) -> IssueHostProvider
-recordingProvider record =
+recordingProvider :: (ProviderCall -> IO ()) -> MVar ManagedProcess -> IssueHostProvider
+recordingProvider record canonicalProcess =
   IssueHostProvider
     { providerBeginReview = \issueNumber -> Right () <$ record (BeginReview issueNumber),
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
@@ -1327,6 +1404,22 @@ recordingProvider record =
       -- One connection, as a shared-process backend holds. Identity 1 is
       -- init, which is always present, so registering it exercises the real
       -- path without spawning anything.
+      -- Records that the gate started, then waits for the test to hand it a
+      -- subprocess — which is what lets a test choose the moment, including
+      -- after the child has been settled.
+      providerRunCanonical = \stage issueNumber started -> do
+        record (RunCanonical stage issueNumber)
+        -- The callback runs on a thread of its own, because settling the
+        -- child kills the stage thread and the ordering under test happens
+        -- inside the recording rather than before it. In production the spawn
+        -- reports its subprocess and only then waits on it, so the recording
+        -- and a termination genuinely race; this reproduces that race without
+        -- depending on which of the two the scheduler runs first.
+        void . forkIO $ takeMVar canonicalProcess >>= started
+        -- Waits like a real gate waiting on its subprocess, until the settle
+        -- cancels it.
+        threadDelay maxBound
+        pure (Right canonicalReviewResultForFake),
       providerProcesses = pure [managedProcessGroup 1],
       -- The client's own transcript, which the host records as its log and
       -- which is deliberately not any child's.
@@ -1625,6 +1718,11 @@ sampleResult =
       reviewResultCommentUrl = Just "https://example.test/1",
       reviewResultBlockingReasons = []
     }
+
+-- | What the fake gate reports, so a canonical child settles on evidence
+-- rather than on a clean exit.
+canonicalReviewResultForFake :: CanonicalIssueReviewResult
+canonicalReviewResultForFake = canonicalResult
 
 canonicalResult :: CanonicalIssueReviewResult
 canonicalResult =

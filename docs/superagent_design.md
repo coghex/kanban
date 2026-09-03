@@ -1582,6 +1582,17 @@ unless their typed contract exposes an override.
   reconciles the two by command id rather than reporting a delivered message as
   one nobody observed.
 
+  The sixth round closed four orderings the first five left. The client
+  registers each connection at creation rather than at the owner's next poll.
+  A canonical subprocess is installed against its child before the settle
+  claim is re-read, so the two orderings are exhaustive instead of racing a
+  check against an install. Retirement inserts before it removes, so an
+  announcement in the handoff window finds both maps rather than neither. And
+  ending a child under a shared connection interrupts its turn: killing tool
+  subprocesses and dropping bookkeeping stops nothing the provider is doing,
+  so the action would have been marked terminal while its thread kept
+  working.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
