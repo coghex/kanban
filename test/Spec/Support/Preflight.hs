@@ -10,6 +10,7 @@ module Spec.Support.Preflight
     withClaudeProbe,
     blockedProblems,
     blockedProblemsIn,
+    blockedProblemsWith,
     isConflictingBackend,
     isMissingBackend,
     isReadyBackend,
@@ -36,7 +37,7 @@ where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Data.List (sortOn)
-import Kanban.Models (OperatingMode (..))
+import Kanban.Models (OperatingMode (..), RecordedAssignment (..))
 import Kanban.Preflight
   ( AuthObservation (..),
     BundleObservation (..),
@@ -50,9 +51,9 @@ import Kanban.Preflight
     ProviderProbe (..),
     ReviewBackendObservation (..),
     VersionObservation (..),
-    actionReport
+    actionReportFor
   )
-import Kanban.Solve (SolverBrand (..))
+import Kanban.Solve (SolverBrand (..), brandForProvider)
 import Spec.Support.Env
   ( installFakeExecutable,
     withEnvironmentValue,
@@ -109,9 +110,14 @@ blockedProblems environment action = blockedProblemsIn environment DualMode acti
 -- | 'blockedProblems' under a chosen operating mode, for the singleton
 -- installs that require a different provider set than dual routing does.
 blockedProblemsIn :: PreflightEnvironment -> OperatingMode -> PreflightAction -> [PreflightProblem]
-blockedProblemsIn environment mode action =
+blockedProblemsIn environment mode = blockedProblemsWith environment mode Nothing
+
+-- | 'blockedProblemsIn' for a launch a recorded assignment pins to one
+-- provider, which is what a resumed session's readiness is really about.
+blockedProblemsWith :: PreflightEnvironment -> OperatingMode -> Maybe RecordedAssignment -> PreflightAction -> [PreflightProblem]
+blockedProblemsWith environment mode recorded action =
   [ problem
-    | check <- (actionReport environment mode action).reportChecks,
+    | check <- (actionReportFor environment mode (brandForProvider . (.recordedAssignmentProvider) <$> recorded) action).reportChecks,
       PreflightBlocked problem _ _ <- [check.checkStatus]
   ]
 

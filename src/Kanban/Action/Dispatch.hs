@@ -208,7 +208,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
   ActionTargetItem resolved
     | Left refusal <- checkedAgainst environment plan -> pure (Left refusal)
     | otherwise -> do
-        capability <- actionCapabilityIO environment.actionRepository environment.actionRoster plan.planRoute
+        capability <- actionCapabilityIO environment.actionRepository environment.actionRoster request.requestRecordedAssignment plan.planRoute
         case capability of
           ActionIncapable detail -> pure (Left (ActionCapabilityBlocked plan.planKind detail))
           ActionCapable -> case assignmentFor plan of

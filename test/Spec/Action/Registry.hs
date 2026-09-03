@@ -620,26 +620,26 @@ spec = do
     it "agrees with actionReport for every applicable preflight action" $
       mapM_
         ( \action ->
-            actionCapability readyPreflightEnvironment DualMode (RouteProvider action)
+            actionCapability readyPreflightEnvironment DualMode Nothing (RouteProvider action)
               `shouldBe` capabilityFromReport readyPreflightEnvironment action
         )
         everyPreflightAction
 
     it "blocks only the actions that reach the missing provider" $ do
       let noCodex = withCodexProbe missingProbe
-      actionCapableMessage (actionCapability noCodex DualMode (RouteProvider (ActionSolve CodexSolver)))
+      actionCapableMessage (actionCapability noCodex DualMode Nothing (RouteProvider (ActionSolve CodexSolver)))
         `shouldSatisfy` maybe False (Text.isInfixOf "codex")
-      actionCapability noCodex DualMode (RouteProvider (ActionSolve ClaudeSolver)) `shouldBe` ActionCapable
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionSolve ClaudeSolver)) `shouldBe` ActionCapable
       -- Autosolve drives the opposite brand's review itself, so it needs both.
-      actionCapability noCodex DualMode (RouteProvider (ActionAutoSolve ClaudeSolver))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionAutoSolve ClaudeSolver))
         `shouldNotBe` ActionCapable
-      actionCapability noCodex DualMode (RouteProvider (ActionPullRequestFlow PullRequestClaude PullRequestReview))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestClaude PullRequestReview))
         `shouldNotBe` ActionCapable
-      actionCapability noCodex DualMode (RouteProvider (ActionPullRequestFlow PullRequestCodex PullRequestReview))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestCodex PullRequestReview))
         `shouldBe` ActionCapable
 
     it "asks nothing of a provider for the queue observation" $
-      actionCapability (withCodexProbe missingProbe) DualMode RouteApprovalQueue `shouldBe` ActionCapable
+      actionCapability (withCodexProbe missingProbe) DualMode Nothing RouteApprovalQueue `shouldBe` ActionCapable
 
   describe "terminal validation" $ do
     let solveTarget = resolveHeldItem (catalogOf [baseIssue 80 []] [] emptyHistory) TargetPlain (IssueItem (baseIssue 80 []))

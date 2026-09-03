@@ -64,7 +64,7 @@ import Kanban.PullRequestFlow
     solveReviewerAssignment,
   )
 import Kanban.Review (EmbeddedReviewBackend (..), claudeToolName, embeddedReviewProvider, githubToolName, questionToolName, reviewDeveloperInstructions)
-import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor)
+import Kanban.Solve (ProviderAdapter (..), SolverBrand (..), adapterFor, providerForBrand)
 import Kanban.UI.Board (drawBase, usageSidebarWidth)
 import Kanban.UI.Refresh (usageRefreshProviders)
 import Kanban.UI.Review (reviewBackendCell)
@@ -74,7 +74,7 @@ import Kanban.UI.Types (withModelRoster)
 import Kanban.Usage (usageProviders)
 import Spec.Support.App (testAppState)
 import Spec.Support.Fixtures (fixtureBoard, testOptions)
-import Spec.Support.Preflight (blockedProblemsIn, readyProviderProbe, withClaudeProbe, withCodexProbe)
+import Spec.Support.Preflight (blockedProblemsIn, blockedProblemsWith, readyPreflightEnvironment, readyProviderProbe, withClaudeProbe, withCodexProbe)
 import Spec.Support.Render (renderWidgetLines)
 import Spec.Support.Roster (cellOf, claudeOnlyRoster, codexOnlyRoster)
 import Test.Hspec
@@ -562,6 +562,61 @@ preflightSpec = describe "the executables it does not require" $ do
         action <- modeSensitiveActions variant
       ]
 
+  -- The other half of D-7, and the one the two arms above create the room for:
+  -- a session that already exists spawns the provider its own specification
+  -- recorded, whatever the mode now routes to, so its readiness has to be
+  -- about that provider and not about the routed one.
+  --
+  -- Without this the two correct rules meeting produce a hole: preflight
+  -- clears the loaded provider while the launch replays the other one, and a
+  -- resumed worker reaches an executable nothing probed. Every route is
+  -- crossed with a record naming the brand this install does /not/ load,
+  -- because that is the only combination in which the two answers differ.
+  it "checks the provider a recorded assignment will really launch, not the routed one" $
+    sequence_
+      [ (variant.variantName, origin, action, blocked)
+          `shouldBe` (variant.variantName, origin, action, [ExecutableUnavailable])
+      | variant <- variants,
+        (origin, action) <- everyRoute,
+        -- The install loads its own provider and has only that executable;
+        -- the resumed worker's record names the other one.
+        let blocked =
+              blockedProblemsWith
+                (without variant)
+                (variantMode variant)
+                (Just (recordedOn variant.variantUnloaded action))
+                (ActionPullRequestFlow origin action)
+      ]
+
+  -- The control that keeps the arm above from passing on any missing probe:
+  -- the same recorded launch, on a machine that does have that executable, is
+  -- ready -- so it is the record's own provider being probed rather than
+  -- readiness having simply become stricter.
+  it "clears that same recorded launch when its own provider is installed" $
+    sequence_
+      [ (variant.variantName, origin, action, blocked)
+          `shouldBe` (variant.variantName, origin, action, [])
+      | variant <- variants,
+        (origin, action) <- everyRoute,
+        let blocked =
+              blockedProblemsWith
+                readyPreflightEnvironment
+                (variantMode variant)
+                (Just (recordedOn variant.variantUnloaded action))
+                (ActionPullRequestFlow origin action)
+      ]
+
+  -- A fresh action has no record, so it still asks the mode -- which is what
+  -- every arm above this one covers, restated here as the boundary between
+  -- the two.
+  it "still asks the mode when nothing was recorded" $
+    sequence_
+      [ (variant.variantName, action, blockedProblemsWith (without variant) (variantMode variant) Nothing action)
+          `shouldBe` (variant.variantName, action, [])
+      | variant <- variants,
+        action <- modeSensitiveActions variant
+      ]
+
   -- The negative control. Dual mode still requires both, so an autosolve run
   -- or a Codex-origin review on a machine with no Claude is still blocked.
   it "still requires both brands in dual mode" $ do
@@ -596,6 +651,13 @@ preflightSpec = describe "the executables it does not require" $ do
         <> [ActionAutoSolve variant.variantBrand]
         <> [ActionPullRequestFlow origin action | (origin, action) <- everyRoute]
     issueOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked]
+    -- What a worker created before the roster moved recorded: that brand's
+    -- own cell for the role the action takes, built the way a launch builds
+    -- it rather than as a bare provider name.
+    recordedOn brand action =
+      recordAssignment
+        (providerForBrand brand)
+        (cellOf (assignmentFor defaultRoster (roleOfAction action) (providerForBrand brand)))
     without variant = probeless variant.variantUnloaded
     withoutLoaded variant = probeless variant.variantBrand
     withoutClaude = probeless ClaudeSolver

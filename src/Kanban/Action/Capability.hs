@@ -32,16 +32,17 @@ import Kanban.Action.Target (pullRequestActionForKind)
 import Kanban.Action.Types
 import Kanban.ApprovalService (approvalUnavailableMessage, discoverApprovalController)
 import Kanban.Domain (Issue (..), PullRequest (..), Repository (..), WorkflowConfig)
-import Kanban.Models (ModelRoster, OperatingMode, RosterLoadError, loadedOperatingMode)
+import Kanban.Models (ModelRoster, OperatingMode, RecordedAssignment (..), RosterLoadError, loadedOperatingMode)
 import Kanban.Preflight
   ( PreflightAction (..),
     PreflightEnvironment,
-    actionReport,
+    actionReportFor,
     blockingRemediation,
     gatherPreflightEnvironment,
     issueOriginFromBody,
     preflightDiagnostic,
   )
+import Kanban.ProviderAdapter (brandForProvider)
 import Kanban.PullRequestFlow (originFromBody)
 import Kanban.Solve (SolverBrand)
 
@@ -107,11 +108,18 @@ actionCapableMessage (ActionIncapable detail) = Just detail
 
 -- | The pure half: readiness for a provider route, derived from one gathered
 -- environment exactly as the board's own preflight derives it.
-actionCapability :: PreflightEnvironment -> OperatingMode -> ActionRoute -> ActionCapability
-actionCapability environment mode route = case routePreflightAction route of
+-- The recorded assignment travels with the route because readiness has to be
+-- about the launch this dispatch will actually make. 'Kanban.UI.Util.launchAssignment'
+-- replays a record rather than resolving a cell, so a resumed session spawns
+-- the provider it recorded whatever the mode now routes to; checking the
+-- routed one would clear it against an executable it will not run.
+actionCapability :: PreflightEnvironment -> OperatingMode -> Maybe RecordedAssignment -> ActionRoute -> ActionCapability
+actionCapability environment mode recorded route = case routePreflightAction route of
   Nothing -> ActionCapable
   Just action ->
-    maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation (actionReport environment mode action))
+    maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation report)
+    where
+      report = actionReportFor environment mode (brandForProvider . (.recordedAssignmentProvider) <$> recorded) action
 
 -- | The gathering half. Read-only on both branches: the provider branch runs
 -- the board's own probes, and the approval branch discovers the controller
@@ -120,11 +128,11 @@ actionCapability environment mode route = case routePreflightAction route of
 -- 'loadedOperatingMode' exactly as the dashboard's own state does: a
 -- @models.toml@ that will not load is no-agent here too, rather than a mode
 -- the caller had to decide on its own.
-actionCapabilityIO :: Repository -> Either RosterLoadError ModelRoster -> ActionRoute -> IO ActionCapability
-actionCapabilityIO repository roster route = case route of
+actionCapabilityIO :: Repository -> Either RosterLoadError ModelRoster -> Maybe RecordedAssignment -> ActionRoute -> IO ActionCapability
+actionCapabilityIO repository roster recorded route = case route of
   RouteProvider _ -> do
     environment <- gatherPreflightEnvironment repository.repositoryRoot
-    pure (actionCapability environment (loadedOperatingMode roster) route)
+    pure (actionCapability environment (loadedOperatingMode roster) recorded route)
   RouteApprovalQueue -> do
     discovered <- discoverApprovalController repository
     pure $ case discovered of

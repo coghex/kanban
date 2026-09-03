@@ -9,7 +9,7 @@ module Kanban.Preflight.Readiness where
 
 import Data.Char (isSpace)
 import Data.List (find, nub)
-import Data.Maybe (isNothing)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Models (OperatingMode (..), soleAgent)
@@ -370,8 +370,31 @@ providerChecks needsBundle probe =
 -- and every place below that used to name the opposite brand asks the mode
 -- for the brand that is really on the other side of the handoff.
 actionReport :: PreflightEnvironment -> OperatingMode -> PreflightAction -> PreflightReport
-actionReport environment mode action = PreflightReport action (checksFor action)
+actionReport environment mode = actionReportFor environment mode Nothing
+
+-- | 'actionReport' for a launch whose brand the caller already knows.
+--
+-- A dispatch replaying a recorded assignment does know it, and it is not
+-- always what the mode would route to: the record is what the worker will
+-- really spawn (D-7), and the two differ exactly when @models.toml@ has moved
+-- under a session that already exists — a Codex pull-request worker created
+-- in dual mode and resumed on a Claude-only roster still launches @codex@.
+-- Checking the routed brand there would clear that resume against an
+-- executable it is not going to run, and leave the one it is going to run
+-- unprobed.
+--
+-- Only the /launch/ is overridden. Each handoff below keeps the live mode,
+-- because the nested spawn it stands for is made fresh by the running agent
+-- and routes under the roster in force when it happens, not under the one
+-- this session was created against.
+actionReportFor :: PreflightEnvironment -> OperatingMode -> Maybe SolverBrand -> PreflightAction -> PreflightReport
+actionReportFor environment mode recordedBrand action = PreflightReport action (checksFor action)
   where
+    -- The brand this action will really spawn: the recorded one where a
+    -- caller supplied it, and otherwise the one this mode routes to, which is
+    -- every fresh action.
+    spawned routed = fromMaybe routed recordedBrand
+
     -- The canonical backend spawns the opposite brand itself (both, for an
     -- unmarked issue under the dual policy Kanban passes), so a review is
     -- only ready if that reviewer's CLI is installed and signed in. No
@@ -403,16 +426,18 @@ actionReport environment mode action = PreflightReport action (checksFor action)
         coordinator = brandForProvider (embeddedReviewProvider mode)
         author = maybe (revisionAuthorBrand origin) brandForProvider (soleAgent mode)
     checksFor (ActionSolve brand) =
-      providerChecks True (environmentProbe environment brand)
+      providerChecks True (environmentProbe environment (spawned brand))
         <> [gitHubCheck environment, reviewBackendCheck environment]
     checksFor (ActionAutoSolve brand) =
-      providerChecks True (environmentProbe environment brand)
+      providerChecks True (environmentProbe environment solver)
         <> [ check
-             | reviewer <- [counterpartBrand mode brand],
-               reviewer /= brand,
+             | reviewer <- [counterpartBrand mode solver],
+               reviewer /= solver,
                check <- providerChecks True (environmentProbe environment reviewer)
            ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
+      where
+        solver = spawned brand
     -- Review and rereview run on the opposite brand from the PR's origin
     -- and are themselves the canonical reviewer, so they need only that
     -- brand. Revision and repair are the exception: each runs on the PR's
@@ -431,7 +456,7 @@ actionReport environment mode action = PreflightReport action (checksFor action)
            ]
         <> [gitHubCheck environment, reviewBackendCheck environment]
       where
-        launched = agentForAction mode origin pullRequestAction
+        launched = spawned (agentForAction mode origin pullRequestAction)
 
 -- | The one-line diagnostic for the first blocking check, or 'Nothing' when
 -- nothing definite stands in the action's way.
