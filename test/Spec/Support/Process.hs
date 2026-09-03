@@ -723,8 +723,8 @@ withFakeReviewClient processShape action =
 -- Production passes the repository review host's own, so every connection is
 -- recorded and censused as it is created; a test client has no supervisor to
 -- record anything with.
-ignoreProcessRegistration :: ManagedProcess -> IO ()
-ignoreProcessRegistration = const (pure ())
+ignoreProcessRegistration :: Maybe Int -> ManagedProcess -> IO ()
+ignoreProcessRegistration _ _ = pure ()
 
 startFakeReviewClient :: EmbeddedReviewBackend -> Repository -> (ReviewEvent -> IO ()) -> IO ReviewClient
 startFakeReviewClient backend repository eventSink = do

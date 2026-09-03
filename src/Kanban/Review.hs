@@ -405,7 +405,7 @@ backendAssignment client =
 -- resolved against two different rosters — and through the same
 -- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
 -- so a roster it allowed cannot be one this refuses.
-startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
 startReviewClient roster workflowConfig repository processRegistered eventSink = case embeddedReviewCell roster of
   -- Resolved before the backend is spawned, not after: a roster that loads
   -- no cell for the routed provider must start no process at all, and the
@@ -423,7 +423,7 @@ startReviewClient roster workflowConfig repository processRegistered eventSink =
 -- 'Kanban.ProviderAdapter.embeddedReviewProvider' resolves. Exported so a
 -- test can drive either process shape without a provider shipping it:
 -- nothing in production calls this except 'startReviewClient' above.
-startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
 startResolvedReviewClient backend roster workflowConfig repository processRegistered eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
@@ -530,7 +530,7 @@ spawnReviewConnection client identifier reviewIssue = case backendAssignment cli
             -- Registered with whoever owns this client before the connection
             -- is even built, so no window exists in which this process is
             -- running and nothing durable names it.
-            client.reviewProcessRegistered processManaged
+            client.reviewProcessRegistered reviewIssue processManaged
             mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
             connection <- newReviewConnection identifier inputHandle processHandle processManaged
             -- What this connection's two readers share. Held beside the
@@ -701,7 +701,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
-            reviewProcessRegistered = const (pure ()),
+            reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -856,7 +856,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
-            reviewProcessRegistered = const (pure ()),
+            reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,

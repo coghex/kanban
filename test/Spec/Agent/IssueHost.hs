@@ -725,6 +725,35 @@ lifecycleSpec = describe "one running host" $ do
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
 
+  -- Round 16's blocker. The connection is spawned inside the begin call and
+  -- was recorded on its child only when that call returned. A host dying in
+  -- between left a child that owned nothing, so terminating it settled the
+  -- action and released its lease with the provider still running — the same
+  -- leak as round 12, one window earlier.
+  it "owns its connection before the call that started it has returned" $
+    withManagedShell "sleep 30" $ \handle -> do
+      connection <- managedProcessFor handle
+      identity <- identityForProcess handle
+      withRunningHost $ \host -> do
+        modifyMVar_ host.hostThreadProcesses (const (pure [connection]))
+        inside <- newEmptyMVar
+        release <- newEmptyMVar
+        entered <- newIORef False
+        -- Parked inside the begin, after the connection was registered and
+        -- before the call returns: the exact window a host's death falls in.
+        modifyMVar_ host.hostBeginGate . const . pure $ do
+          first <- atomicModifyIORef' entered (\seen -> (True, not seen))
+          when first (putMVar inside () >> takeMVar release)
+        child <- publishChild host "action-1" 594 IssueRevision
+        _ <- awaitJust "the begin never reached its gate" (tryReadMVar inside)
+        -- Already the child's, with the call that started it still running.
+        recorded <-
+          awaitState
+            child
+            (\state -> identity.processIdentityPid `elem` map (.processIdentityPid) state.workerStateKnownProcesses)
+        recorded.workerStateReviewThread `shouldBe` Nothing
+        putMVar release ()
+
   -- Round 15's second blocker, and the cost of round 12's fix not being
   -- carried through every path that rebuilds a child's state. A recovering
   -- host built a fresh state for the child it adopted, discarding the
@@ -1881,6 +1910,9 @@ data HostUnderTest = HostUnderTest
     hostSendGate :: MVar (IO ()),
     -- | What the host runs inside a thread attach, for a test to replace.
     hostAttach :: MVar (IO ()),
+    -- | What the fake provider runs inside a begin, after registering the
+    -- connection and before returning, for a test to replace.
+    hostBeginGate :: MVar (IO ()),
     -- | What the fake provider reports as a thread's own processes. Empty is
     -- a shared connection; a test giving it one is the per-thread shape.
     hostThreadProcesses :: MVar [ManagedProcess],
@@ -1914,7 +1946,7 @@ withRunningHostOutcome = withRunningHostUsing workingProvider
     -- assert /when/ it was asked for as well as whether.
     workingProvider = Nothing
 
-withRunningHostUsing :: Maybe (WorkerSpec -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) -> (HostUnderTest -> IO ()) -> IO (Maybe WorkerEvent, Bool)
+withRunningHostUsing :: Maybe (WorkerSpec -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) -> (HostUnderTest -> IO ()) -> IO (Maybe WorkerEvent, Bool)
 withRunningHostUsing overrideProvider body =
   -- A fully provisioned fake machine, because the host runs its /production/
   -- preflight at each child's spawn boundary (requirement 7's first half runs
@@ -1938,6 +1970,7 @@ withRunningHostUsing overrideProvider body =
       handoffBarrier <- newMVar (pure ())
       sendGate <- newMVar (pure ())
       attachBarrier <- newMVar (pure ())
+      beginGate <- newMVar (pure ())
       threadProcesses <- newMVar []
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
@@ -1975,8 +2008,8 @@ withRunningHostUsing overrideProvider body =
               Just refuse -> refuse startingSpec register sink
               Nothing -> do
                 putMVar sinkCell sink
-                register (managedProcessGroup 1)
-                pure (Right (recordingProvider sendGate threadProcesses record))
+                register Nothing (managedProcessGroup 1)
+                pure (Right (recordingProvider sendGate beginGate threadProcesses register record))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -2007,6 +2040,7 @@ withRunningHostUsing overrideProvider body =
             hostHandoff = handoffBarrier,
             hostSendGate = sendGate,
             hostAttach = attachBarrier,
+            hostBeginGate = beginGate,
             hostThreadProcesses = threadProcesses,
             hostRecords = hostDescriptor,
             hostEmitted = emitted
@@ -2039,15 +2073,19 @@ withRunningHostUsing overrideProvider body =
 -- a fake that announced synchronously inside 'providerBeginReview' would make
 -- the settled-before-announced ordering unreachable, which is exactly the
 -- race round 1 found. Every test drives the announcement itself.
-recordingProvider :: MVar (IO ()) -> MVar [ManagedProcess] -> (ProviderCall -> IO ()) -> IssueHostProvider
-recordingProvider gate threadProcesses record =
+recordingProvider :: MVar (IO ()) -> MVar (IO ()) -> MVar [ManagedProcess] -> (Maybe Int -> ManagedProcess -> IO ()) -> (ProviderCall -> IO ()) -> IssueHostProvider
+recordingProvider gate beginGate threadProcesses register record =
   IssueHostProvider
     { providerBeginReview = \issueNumber -> do
         record (BeginReview issueNumber)
-        -- The same cell the thread accessor reads: a per-thread backend
-        -- reports its connection here, before any thread exists, which is
-        -- the window a host's death would otherwise lose.
-        Right <$> readMVar threadProcesses,
+        owned <- readMVar threadProcesses
+        -- What the real client does at the spawn itself: the connection this
+        -- review will run on is registered, named by its issue, before the
+        -- start request is sent. Registering only on the return would leave
+        -- the process running with the child not yet owning it.
+        mapM_ (register (Just issueNumber)) owned
+        join (readMVar beginGate)
+        pure (Right owned),
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
       providerApproveAction = \requested accepted forSession ->
         Right () <$ record (ApproveAction requested accepted forSession),

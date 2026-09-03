@@ -4069,9 +4069,14 @@ The first solve/autosolve-compatible slice is implemented.
   terminal.
   Under a process-per-thread backend the thread /is/ a process, so the action
   owning it records that process on its own durable state and not only on the
-  host's census — from the moment the review is begun, which is when the
-  process exists, rather than when its thread is announced an unbounded time
-  later. That is what a termination or a stale-worker recovery reads
+  host's census — in the same instant the host does, which is the spawn
+  itself. The registration the client makes as it creates a connection names
+  the review that connection was spawned for, and the action with that issue's
+  outstanding start takes ownership there. Any later moment — when the start
+  request returns, when the thread is announced — is a window in which the
+  process runs, the host names it, and the child does not, and a host dying
+  inside that window leaves a termination reading only the child's own state
+  and finding nothing to end. That is what a termination or a stale-worker recovery reads
   when the host is the thing that has died — exactly the case where nobody is
   left to ask for a thread to be finished — and without it the connection went
   on running past the action it served, beside a replacement action for the

@@ -1699,6 +1699,15 @@ unless their typed contract exposes an override.
   only name the process has left. A fix that adds durable state is not done
   until every path that rebuilds that state carries it.
 
+  The sixteenth round closed the last of that window. A per-thread connection
+  is spawned inside the call that begins a review, and the child took
+  ownership only when that call returned; a host dying in between left a child
+  owning nothing, so terminating it settled the action and released its lease
+  with the provider still running. The client's own registration now names the
+  review a connection was spawned for, and the action holding that issue's
+  outstanding start records it there — the same instant the host does, which
+  is the only moment with no window at all.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

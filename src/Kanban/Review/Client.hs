@@ -107,9 +107,14 @@ data ReviewClient = ReviewClient
     -- — and an orphaned provider with nothing naming it is exactly what the
     -- census exists to prevent.
     --
+    -- The issue names the review this connection was spawned to serve, where
+    -- one did — which under 'ProcessPerThread' is what lets that review's own
+    -- action take durable ownership of the process at the same instant, and
+    -- not one step later. 'Nothing' is a connection no single review owns.
+    --
     -- A no-op for every other owner, which is what tests and the
     -- placeholder client pass.
-    reviewProcessRegistered :: ManagedProcess -> IO (),
+    reviewProcessRegistered :: Maybe Int -> ManagedProcess -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
     -- explicit --repo override, e.g. reviewing upstream from a fork

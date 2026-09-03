@@ -356,7 +356,7 @@ data IssueReviewHost = IssueReviewHost
     -- on an install whose embedded backend is unavailable — for a component
     -- its own stage-specific preflight never asks about.
     hostProvider :: MVar (Maybe IssueHostProvider),
-    hostStartProvider :: WorkerSpec -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider),
+    hostStartProvider :: WorkerSpec -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider),
     -- | Runs one canonical stage's @approve_issues.py@ invocation, reporting
     -- the subprocess it spawned through the callback.
     --
@@ -411,7 +411,7 @@ runIssueReviewHost hostSpec = runIssueReviewHostWith defaultIssueHostTuning star
 
 runIssueReviewHostWith ::
   IssueHostTuning ->
-  (WorkerSpec -> (ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
+  (WorkerSpec -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
   (ReviewStage -> Int -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)) ->
   WorkerSpec ->
   (ManagedProcess -> IO ()) ->
@@ -1756,7 +1756,7 @@ persistChild child = readMVar child.hostChildState >>= writeState child.hostChil
 registerProviderProcesses :: IssueReviewHost -> IO ()
 registerProviderProcesses host = do
   provider <- readMVar host.hostProvider
-  forM_ provider $ \connected -> connected.providerProcesses >>= mapM_ (registerHostProcess host)
+  forM_ provider $ \connected -> connected.providerProcesses >>= mapM_ (registerHostProcess host Nothing)
 
 -- | The embedded review client, started the first time something needs one.
 --
@@ -1786,13 +1786,36 @@ ensureHostProvider host = modifyMVar host.hostProvider $ \held -> case held of
 -- Idempotent by pid, because both callers reach the same processes and
 -- registering one twice would replace the recorded provider identity with
 -- itself for no reason.
-registerHostProcess :: IssueReviewHost -> ManagedProcess -> IO ()
-registerHostProcess host process = do
+registerHostProcess :: IssueReviewHost -> Maybe Int -> ManagedProcess -> IO ()
+registerHostProcess host reviewIssue process = do
+  -- The action this connection was spawned for, where there is one, takes
+  -- durable ownership of the process in the same instant the host does. Any
+  -- later moment — when the start request returns, when the thread is
+  -- announced — is a window in which the process is running, the host names
+  -- it, and the child does not; a host that dies inside that window leaves a
+  -- termination reading only the child's own state and finding nothing to
+  -- end. The issue has one start outstanding at a time, so the child it names
+  -- is unambiguous.
+  forM_ reviewIssue $ \issueNumber -> do
+    awaiting <- childAwaitingStart host issueNumber
+    forM_ awaiting (\child -> recordChildProcesses child [process])
   processId <- managedProcessPid process
   forM_ processId $ \pid -> do
     fresh <- atomicModifyIORef' host.hostRegisteredProcesses $ \known ->
       if fromIntegral pid `elem` known then (known, False) else (fromIntegral pid : known, True)
     when fresh (host.hostRememberProvider process)
+
+-- | The child whose start for this issue has not been answered yet.
+--
+-- Read rather than taken: the announcement that resolves the start has not
+-- arrived, and consuming the entry here would leave that announcement with
+-- nothing to attach to.
+childAwaitingStart :: IssueReviewHost -> Int -> IO (Maybe HostChild)
+childAwaitingStart host issueNumber = do
+  pending <- readMVar host.hostPendingStarts
+  case Map.findWithDefault [] issueNumber pending of
+    identifier : _ -> Map.lookup identifier <$> readMVar host.hostChildren
+    [] -> pure Nothing
 
 -- | Closes every child's raw log, live and retired alike.
 closeChildLogs :: IssueReviewHost -> IO ()
