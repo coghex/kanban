@@ -107,9 +107,14 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
 -- Total in 'LaunchMode', so a mode added above cannot run without a decision
 -- about whether a Kanban that spawns nothing may take it.
 --
--- Only the two provider modes do. @--usage@ reads both providers' account
--- status and @--ping@ spends quota on one, so both answer about something a
--- no-agent install does not have. Nothing else is: a worker replays the
+-- Only the two provider modes do. @--usage@ reads the loaded providers'
+-- account status and @--ping@ spends quota on one, so both answer about
+-- something a no-agent install does not have. Which providers those are is
+-- the mode's own question and is asked past this gate:
+-- 'Kanban.Usage.usageProviders' narrows the report and
+-- 'Kanban.Ping.pingBrandRefusal' refuses a brand a single-agent install does
+-- not load, both of which need a provider set this refusal has already
+-- established is non-empty. Nothing else is: a worker replays the
 -- assignment its own specification recorded and consults no roster at all,
 -- the review tool server proxies to a parent that resolved everything
 -- before launching it and likewise consults no roster,
@@ -211,11 +216,11 @@ optionsParser =
       )
     <*> switch
       ( long "usage"
-          <> help "Print Codex and Claude usage windows, then exit without starting the dashboard"
+          <> help "Print the loaded providers' usage windows, then exit without starting the dashboard"
       )
     <*> switch
       ( long "fresh"
-          <> help "With --usage, probe both providers live instead of reading the cache"
+          <> help "With --usage, probe every loaded provider live instead of reading the cache"
       )
     <*> switch
       ( long "json"

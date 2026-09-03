@@ -138,20 +138,20 @@ spec = describe "the settings overlay's model roster" $ do
       board <- testAppState (fixtureBoard [])
       let modeLineOf = filter (Data.Text.isPrefixOf "Operating mode:") . interiorOf
       modeLineOf (withRoster defaults board) `shouldBe` [operatingModeLine DualMode]
-      modeLineOf (withRoster (Right claudeOnly) board) `shouldBe` [operatingModeLine SingleAgentMode]
+      modeLineOf (withRoster (Right claudeOnly) board) `shouldBe` [operatingModeLine (SingleAgentMode ClaudeProvider)]
       modeLineOf (withRoster (Right noAgentRoster) board) `shouldBe` [operatingModeLine NoAgentMode]
       -- A file that will not load derives no-agent too, and still shows its
       -- defect below the line rather than instead of it.
       modeLineOf (withRoster (Left unusableRoster) board) `shouldBe` [operatingModeLine NoAgentMode]
 
     it "names the mode and where it is set, inside the panel's interior" $ do
-      map operatingModeLine [DualMode, SingleAgentMode, NoAgentMode]
+      map operatingModeLine [DualMode, SingleAgentMode CodexProvider, NoAgentMode]
         `shouldBe` [ "Operating mode: dual · set by agents in models.toml",
                      "Operating mode: single-agent · set by agents in models.toml",
                      "Operating mode: no-agent · set by agents in models.toml"
                    ]
       -- Every label fits unwrapped, which is what keeps it one row.
-      map (Data.Text.length . operatingModeLine) [DualMode, SingleAgentMode, NoAgentMode]
+      map (Data.Text.length . operatingModeLine) [DualMode, SingleAgentMode CodexProvider, SingleAgentMode ClaudeProvider, NoAgentMode]
         `shouldSatisfy` all (<= settingsInteriorWidth)
 
     -- The screen shows it and offers no key for it: `agents` is a file edit

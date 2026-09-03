@@ -390,13 +390,16 @@ probeSpec = describe "the usage probes it does not spawn" $ do
   it "probes no provider at all with none loaded" $
     usageRefreshProviders (operatingModeFor noAgentRoster) `shouldBe` []
 
-  -- The negative control, and the out-of-scope boundary: narrowing
-  -- single-agent to the brand it loads is MODEL-10's question, not this
-  -- slice's, so both loaded modes still probe both providers in file order.
-  it "probes both providers in every mode that loads one" $
+  -- The negative control. Dual still probes both, in file order; what
+  -- single-agent narrows it to is "Spec.SingleAgentMode"'s question, and the
+  -- boundary between the two modes is here.
+  it "probes both providers in dual mode, and one in single-agent" $
     sequence_
-      [ (name, usageRefreshProviders (operatingModeFor roster)) `shouldBe` (name, [Codex, Claude])
-        | (name, roster) <- [("dual" :: String, defaultRoster), ("single-agent", claudeOnlyRoster)]
+      [ (name, usageRefreshProviders (operatingModeFor roster)) `shouldBe` (name, expected)
+        | (name, roster, expected) <-
+            [ ("dual" :: String, defaultRoster, [Codex, Claude]),
+              ("single-agent", claudeOnlyRoster, [Claude])
+            ]
       ]
 
 -- ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ module Kanban.Review
     claudeReviewArguments,
     claudeStartedEvent,
     claudeTool,
+    claudeToolName,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
     decodeGitHubIssueToolRequest,
@@ -80,12 +81,14 @@ module Kanban.Review
     decodeStreamRecord,
     drainToolRegistry,
     embeddedReviewProvider,
+    embeddedReviewProviderFor,
     finalOutputSchema,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
     authenticatedClaudeArguments,
     githubIssueViewArguments,
+    githubToolName,
     githubLabelCreateArguments,
     handleWireMessage,
     interruptReview,
@@ -104,6 +107,7 @@ module Kanban.Review
     newToolRegistry,
     outcomeUnknownDiagnostic,
     pendingInterrupt,
+    questionToolName,
     releaseToolSlot,
     renderCanonicalIssueReviewResult,
     reserveToolSlot,
@@ -172,6 +176,8 @@ import Kanban.ProviderAdapter
     ReviewToolServerLaunch (..),
     adapterFor,
     claudeReviewArguments,
+    embeddedReviewProvider,
+    embeddedReviewProviderFor,
   )
 import Kanban.Review.Canonical
   ( IssueReviewerRecord (..),
@@ -250,6 +256,7 @@ import Kanban.Review.Prompts
     githubToolName,
     questionToolName,
     reviewDeveloperInstructions,
+    reviewOpeningMessage,
     reviewPrompt,
   )
 import Kanban.ReviewToolServer
@@ -342,16 +349,6 @@ claudeStartedEvent :: ReviewClient -> ReviewThreadId -> ReviewEvent
 claudeStartedEvent client threadId =
   ReviewClaudeStarted threadId (issueReviseDisplay client.reviewModelRoster)
 
--- | The provider Kanban's embedded issue review runs on, and so the adapter
--- whose backend it starts and whose dynamic tools it registers.
---
--- Codex, unchanged: MODEL-12 makes the backend a field a provider may lack
--- rather than a construction only Codex can be, but it routes nothing new.
--- MODEL-13 is what fills Claude's, and MODEL-10 is what makes this a value
--- the operator's mode can move.
-embeddedReviewProvider :: ProviderName
-embeddedReviewProvider = CodexProvider
-
 -- | The cell an embedded issue review runs on: @issue_review@ for the
 -- provider whose backend is serving it.
 --
@@ -368,8 +365,9 @@ issueReviewAssignment provider roster =
 
 -- | The cell a running client's own backend resolves.
 --
--- Read through the backend rather than through 'embeddedReviewProvider'
--- because everything downstream of it belongs to the provider that started:
+-- Read through the backend rather than through
+-- 'Kanban.ProviderAdapter.embeddedReviewProvider' because everything
+-- downstream of it belongs to the provider that started:
 -- Codex's model and effort travel in @thread\/start@ and @turn\/start@,
 -- Claude's are argv (D-15), and the refusal a roster that cannot supply the
 -- cell produces has to name the provider whose backend is being refused.
@@ -377,24 +375,32 @@ backendAssignment :: ReviewClient -> Either Text Assignment
 backendAssignment client =
   issueReviewAssignment client.reviewBackend.backendProvider client.reviewModelRoster
 
+-- | Start the embedded review on the provider this install routes it to.
+--
+-- The provider comes off the roster the cell is looked up in, the same way
+-- 'Kanban.PullRequestFlow.pullRequestAssignment' takes its mode, so the
+-- backend that starts and the @issue_review@ cell it runs on cannot be
+-- resolved against two different rosters — and through the same
+-- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
+-- so a roster it allowed cannot be one this refuses.
 startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment embeddedReviewProvider roster of
-  -- Resolved before the app-server is spawned, not after: a roster that
-  -- loads no Codex provider must start no process at all, and the backend's
-  -- own failure surface already carries the reason to the UI. The cell is
-  -- consulted first and the backend second, in that order, because that is
-  -- the order the refusals were already reached in: today's Codex-only
-  -- routing always finds a backend, so the second arm answers nothing an
-  -- install can currently ask.
+startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment provider roster of
+  -- Resolved before the backend is spawned, not after: a roster that loads
+  -- no cell for the routed provider must start no process at all, and the
+  -- backend's own failure surface already carries the reason to the UI. The
+  -- cell is consulted first and the backend second, in that order, because
+  -- that is the order the refusals were already reached in.
   Left message -> pure (Left message)
-  Right _ -> case (adapterFor embeddedReviewProvider).adapterEmbeddedReview of
-    Nothing -> pure (Left (missingEmbeddedReviewMessage embeddedReviewProvider))
+  Right _ -> case (adapterFor provider).adapterEmbeddedReview of
+    Nothing -> pure (Left (missingEmbeddedReviewMessage provider))
     Just backend -> startResolvedReviewClient backend roster workflowConfig repository eventSink
+  where
+    provider = embeddedReviewProviderFor roster
 
 -- | Start a client against a chosen backend, rather than the one
--- 'embeddedReviewProvider' resolves. Exported so a test can drive either
--- process shape without a provider shipping it: nothing in production calls
--- this except 'startReviewClient' above.
+-- 'Kanban.ProviderAdapter.embeddedReviewProvider' resolves. Exported so a
+-- test can drive either process shape without a provider shipping it:
+-- nothing in production calls this except 'startReviewClient' above.
 startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
 startResolvedReviewClient backend roster workflowConfig repository eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
@@ -814,8 +820,15 @@ beginIssueReview client issueNumber = case backendAssignment client of
           "approvalPolicy" .= ("on-request" :: Text),
           "sandbox" .= ("read-only" :: Text),
           "ephemeral" .= False,
-          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig client.reviewModelRoster,
-          "dynamicTools" .= (adapterFor embeddedReviewProvider).adapterReviewTools client.reviewModelRoster client.reviewWorkflowConfig
+          -- Named for the backend that is actually serving this thread, for
+          -- the reason 'backendAssignment' gives: a thread must not be told
+          -- it is a coordinator it is not.
+          "developerInstructions" .= reviewDeveloperInstructions client.reviewWorkflowConfig client.reviewModelRoster client.reviewBackend.backendProvider,
+          -- The running backend's own provider, for the reason
+          -- 'backendAssignment' gives: the tools this thread registers belong
+          -- to the process that is serving it, not to whatever the routing
+          -- would select again now.
+          "dynamicTools" .= (adapterFor client.reviewBackend.backendProvider).adapterReviewTools client.reviewModelRoster client.reviewWorkflowConfig
         ]
 
 -- | Open a review on a backend whose process /is/ the thread.
@@ -832,7 +845,20 @@ openStreamedReview :: ReviewClient -> ReviewConnection -> Int -> IO (Either Text
 openStreamedReview client connection issueNumber = do
   pendingId <- nextRequestId connection
   modifyMVar_ connection.connectionPendingRequests (pure . Map.insert pendingId (PendingThreadStart issueNumber))
-  sent <- sendValue client connection (streamUserMessage (reviewPrompt issueNumber))
+  -- The instructions travel with the prompt because this channel has no
+  -- field of its own to carry them; see 'reviewOpeningMessage'.
+  sent <-
+    sendValue
+      client
+      connection
+      ( streamUserMessage
+          ( reviewOpeningMessage
+              client.reviewWorkflowConfig
+              client.reviewModelRoster
+              client.reviewBackend.backendProvider
+              issueNumber
+          )
+      )
   case sent of
     Right () -> pure (Right ())
     Left message -> do

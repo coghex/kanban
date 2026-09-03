@@ -1,5 +1,6 @@
 module Kanban.UI.Solve
-  ( SolveStartDecision (..),
+  ( SolveChooserDecision (..),
+    SolveStartDecision (..),
     applySolveEvent,
     failSolveLaunch,
     freshSolveTranscript,
@@ -11,6 +12,7 @@ module Kanban.UI.Solve
     preflightBlocker,
     pullRequestFromBoard,
     solveActionKind,
+    solveChooserDecision,
     solveChooserFooterHints,
     solveLaunchPlan,
     solveStartDecision,
@@ -51,7 +53,7 @@ import Kanban.Action
   )
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
+import Kanban.Models (ModelRoster, OperatingMode, RecordedAssignment, RosterLoadError, soleAgent)
 import Kanban.Preflight
   ( PreflightAction (..),
     actionReport,
@@ -66,6 +68,7 @@ import Kanban.Solve
     SolveOutcome (..),
     SolveWorkflow (..),
     SolverBrand (..),
+    brandForProvider,
     solveAssignment
   )
 import Kanban.Text (sanitizeText)
@@ -106,6 +109,17 @@ openItemSolveChooser workflow item = do
 
 -- | The refusal precedes reopening a reusable session, so a solve overlay left
 -- behind by work that has since closed cannot be brought back to act on it.
+--
+-- Single-agent mode has nothing to choose between, so a /fresh/ solve starts
+-- on the one loaded provider without a chooser: showing a box whose only
+-- live digit is the brand this install already runs on would be a keystroke
+-- that decides nothing. It is fresh solves only. A reusable session is
+-- reopened above this, on the provider it recorded, exactly as in dual mode,
+-- and the auto-selection never reaches a session that already exists.
+--
+-- Dual mode still opens the chooser with both rows, and no-agent still
+-- reaches the roster refusal 'solveStartDecision' raises -- 'S' and 'A' are
+-- already refused there by 'Kanban.UI.Keys.availableIn' before this runs.
 openIssueSolveChooser :: SolveWorkflow -> Issue -> EventM Name AppState ()
 openIssueSolveChooser workflow issue = do
   state <- get
@@ -113,7 +127,26 @@ openIssueSolveChooser workflow issue = do
     Just notice -> setNotice notice
     Nothing -> case reusableSolveSession workflow issue.issueNumber state.appSolveSessions of
       Just _ -> openExistingSolveOverlay issue.issueNumber
-      Nothing -> modify (\current -> noticeCleared current {appOverlay = Just (SolveChooser workflow issue)})
+      Nothing -> case solveChooserDecision state.appOperatingMode of
+        SolveChooserAuto brand -> startIssueSolve issue workflow brand
+        SolveChooserOpen -> modify (\current -> noticeCleared current {appOverlay = Just (SolveChooser workflow issue)})
+
+-- | What a press with no reusable session to reopen does, as one total
+-- decision on the mode.
+--
+-- A pure function for the reason 'Kanban.UI.Refresh.usageRefreshProviders' is
+-- one: an 'EventM' cannot be run outside brick, and this arm is the whole of
+-- what single-agent mode changes about starting a solve.
+data SolveChooserDecision
+  = -- | Open the chooser and let the operator pick a brand.
+    SolveChooserOpen
+  | -- | Start on this brand without asking; there is only one to ask about.
+    SolveChooserAuto SolverBrand
+  deriving stock (Eq, Show)
+
+solveChooserDecision :: OperatingMode -> SolveChooserDecision
+solveChooserDecision =
+  maybe SolveChooserOpen (SolveChooserAuto . brandForProvider) . soleAgent
 
 openExistingSolveOverlay :: Int -> EventM Name AppState ()
 openExistingSolveOverlay issueNumber = do
@@ -420,10 +453,10 @@ solveActionKind AutoSolve = AutoSolveIssue
 -- definite local observation blocks; an inconclusive probe lets the action
 -- run and fail on its own terms, so a setup Kanban cannot introspect is
 -- never broken by its own diagnostics. Every probe is read-only.
-preflightBlocker :: Repository -> PreflightAction -> IO (Maybe Text)
-preflightBlocker repository action = do
+preflightBlocker :: Repository -> OperatingMode -> PreflightAction -> IO (Maybe Text)
+preflightBlocker repository mode action = do
   environment <- gatherPreflightEnvironment repository.repositoryRoot
-  pure (preflightDiagnostic <$> blockingRemediation (actionReport environment action))
+  pure (preflightDiagnostic <$> blockingRemediation (actionReport environment mode action))
 
 submitSolveInput :: Int -> EventM Name AppState ()
 submitSolveInput issueNumber = do

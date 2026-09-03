@@ -34,6 +34,7 @@ import Kanban.Config
     defaultUsageConfig,
   )
 import Kanban.Domain (UsageProvider (..), UsageSnapshot (..), UsageWindow (..))
+import Kanban.Models (OperatingMode (..))
 import Kanban.Ping
   ( PingBrand (..),
     PingLaunch (..),
@@ -592,7 +593,7 @@ spec = do
     it "launches no ping from a usage acquisition, which is what --usage, startup, and u all run" $
       withPingRoot $ \root -> do
         config <- refreshingConfig root
-        _ <- acquireUsageReport UsageForceFresh False config
+        _ <- acquireUsageReport UsageForceFresh False DualMode config
         refreshesRecorded root `shouldReturn` ["codex", "claude"]
         pingsRecorded root `shouldReturn` []
 
@@ -605,7 +606,7 @@ spec = do
     -- decision D-2 requires to submit no model prompt at all.
     it "launches no ping from the built-in probes release verification exercises" $
       withPingRoot $ \root -> do
-        _ <- acquireUsageReport UsageForceFresh False probeRefreshConfig
+        _ <- acquireUsageReport UsageForceFresh False DualMode probeRefreshConfig
         nonPingLaunches root `shouldNotReturn` []
         pingsRecorded root `shouldReturn` []
 

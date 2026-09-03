@@ -21,7 +21,7 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Kanban.Action
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..), ApprovalUnavailable (..))
 import Kanban.Domain
-import Kanban.Models (RecordedAssignment (..), defaultRoster)
+import Kanban.Models (OperatingMode (..), RecordedAssignment (..), defaultRoster)
 import Kanban.Preflight
   ( IssueOrigin (..),
     PreflightAction (..),
@@ -579,7 +579,7 @@ spec = do
             -- is 'agentForAction''s. Repair included: it runs on the pull
             -- request's own brand, not the reviewer's.
             brandForProvider (cellOf (pullRequestAssignment defaultRoster origin action)).recordedAssignmentProvider
-              `shouldBe` agentForAction origin action
+              `shouldBe` agentForAction DualMode origin action
         )
         [(origin, action) | origin <- [PullRequestCodex, PullRequestClaude], action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]]
 
@@ -620,26 +620,26 @@ spec = do
     it "agrees with actionReport for every applicable preflight action" $
       mapM_
         ( \action ->
-            actionCapability readyPreflightEnvironment (RouteProvider action)
+            actionCapability readyPreflightEnvironment DualMode Nothing (RouteProvider action)
               `shouldBe` capabilityFromReport readyPreflightEnvironment action
         )
         everyPreflightAction
 
     it "blocks only the actions that reach the missing provider" $ do
       let noCodex = withCodexProbe missingProbe
-      actionCapableMessage (actionCapability noCodex (RouteProvider (ActionSolve CodexSolver)))
+      actionCapableMessage (actionCapability noCodex DualMode Nothing (RouteProvider (ActionSolve CodexSolver)))
         `shouldSatisfy` maybe False (Text.isInfixOf "codex")
-      actionCapability noCodex (RouteProvider (ActionSolve ClaudeSolver)) `shouldBe` ActionCapable
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionSolve ClaudeSolver)) `shouldBe` ActionCapable
       -- Autosolve drives the opposite brand's review itself, so it needs both.
-      actionCapability noCodex (RouteProvider (ActionAutoSolve ClaudeSolver))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionAutoSolve ClaudeSolver))
         `shouldNotBe` ActionCapable
-      actionCapability noCodex (RouteProvider (ActionPullRequestFlow PullRequestClaude PullRequestReview))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestClaude PullRequestReview))
         `shouldNotBe` ActionCapable
-      actionCapability noCodex (RouteProvider (ActionPullRequestFlow PullRequestCodex PullRequestReview))
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestCodex PullRequestReview))
         `shouldBe` ActionCapable
 
     it "asks nothing of a provider for the queue observation" $
-      actionCapability (withCodexProbe missingProbe) RouteApprovalQueue `shouldBe` ActionCapable
+      actionCapability (withCodexProbe missingProbe) DualMode Nothing RouteApprovalQueue `shouldBe` ActionCapable
 
   describe "terminal validation" $ do
     let solveTarget = resolveHeldItem (catalogOf [baseIssue 80 []] [] emptyHistory) TargetPlain (IssueItem (baseIssue 80 []))
@@ -1289,7 +1289,7 @@ approvalQueueActivityOf _ = Nothing
 
 capabilityFromReport :: PreflightEnvironment -> PreflightAction -> ActionCapability
 capabilityFromReport environment action =
-  maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation (actionReport environment action))
+  maybe ActionCapable (ActionIncapable . preflightDiagnostic) (blockingRemediation (actionReport environment DualMode action))
 
 everyPreflightAction :: [PreflightAction]
 everyPreflightAction =

@@ -292,6 +292,7 @@ test-suite kanban-test
     Spec.Repository.Identity
     Spec.Repository.Lease
     Spec.Repository.State
+    Spec.SingleAgentMode
     Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe

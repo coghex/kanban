@@ -158,8 +158,19 @@ arithmetic, which §2.3 owns.
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
-  no-agent mode, publishing nothing and changing no label (issue #572). The
-  Haskell side of that collapse is MODEL-10 and is not yet implemented.
+  no-agent mode, publishing nothing and changing no label (issue #572).
+  Kanban's own dashboard collapses it on the same terms: `agentForAction`
+  takes the operating mode, and single-agent routes all four actions to the
+  loaded provider (issue #589). Which provider that is has one declaration
+  site, `Kanban.Models.soleAgent`, as `agentsLoaded` beside it is the one site
+  for whether any is loaded; the mode carries the provider rather than only a
+  count, so a surface holding one can ask. Origin markers are still written in
+  every mode — a solve stamps its brand's marker as before — and it is the
+  routing that stops reading them, not the solve that stops stamping them.
+  A worker that already exists is exempt: its brand comes from the assignment
+  its own specification recorded, so a roster edited between the launch and a
+  later event cannot relabel a running process, and live routing answers only
+  for a specification written before that record existed.
   `authoredOnOwnBrand`
   is the single predicate that decides which side of that split an action is
   on, and brand routing, model selection, and preflight all read it. Which of
@@ -1135,14 +1146,21 @@ reimplement the removal, and `--check` remains read-only.
   canonical gate needs both installed backend files, `gh`, and the reviewer
   the backend itself invokes (the opposite brand from the issue's origin,
   or both when unmarked under the dual policy Kanban passes); a revision
-  needs the Codex coordinator and, for a Claude-origin issue, the Claude
-  CLI its `kanban_run_claude` amendment authoring uses; neither needs a
-  packaged bundle, since both run their providers directly. Auto-solve
-  needs both brands, since it reviews its own pull request with the
-  opposite one, and so do `pr-revise` and `repair`: each runs on the PR's own
-  brand and spawns the opposite one for its single nested canonical rereview
-  (§2.2, §2.7), which is a direct provider call and therefore needs that
-  brand's executable and sign-in but not its bundle.
+  needs the coordinator whose embedded-review backend this install starts
+  and, where its amendment author is a different brand, that brand's CLI —
+  the Claude one `kanban_run_claude` uses for a Claude-origin issue in dual
+  mode; neither needs a packaged bundle, since both run their providers
+  directly. Auto-solve needs both brands, since it reviews its own pull
+  request with the opposite one, and so do `pr-revise` and `repair`: each
+  runs on the PR's own brand and spawns the opposite one for its single
+  nested canonical rereview (§2.2, §2.7), which is a direct provider call
+  and therefore needs that brand's executable and sign-in but not its
+  bundle. Single-agent mode narrows every one of those sets to the provider
+  it loads (issue #589): the routed reviewer, the coordinator, the amendment
+  author, and both sides of each handoff are the same brand, so no action is
+  blocked on a CLI this install never spawns. `--doctor` is the exception and
+  stays on the whole dual matrix: it is answered before any configuration is
+  read, so it has no roster to derive a mode from, and dual is the superset.
 - **Required authority:** setup needs write access to the user's own
   provider configuration and to the Kanban-namespaced install directory.
   Preflight needs none: it is read-only and non-interactive, never starts an

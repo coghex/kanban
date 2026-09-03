@@ -40,6 +40,7 @@ module Kanban.Preflight
     VersionObservation (..),
     actionLabel,
     actionReport,
+    actionReportFor,
     blockingRemediation,
     canonicalReviewBrands,
     issueOriginFromBody,

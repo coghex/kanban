@@ -154,7 +154,7 @@ startPullRequestReviewWithOptions selectAction showOverlay forceFresh pullReques
               presentTranscriptTail
       _ | Just notice <- pullRequestStartRefusal state origin action -> setNotice notice
       _ -> do
-        let brand = agentForAction origin action
+        let brand = agentForAction state.appOperatingMode origin action
             session =
               newAgentSession
                 (priorTickGeneration pullRequest.pullRequestNumber state.appPullRequestReviewSessions)

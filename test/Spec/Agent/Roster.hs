@@ -170,13 +170,21 @@ spec = do
           message `shouldMention` "roles.solve.codex"
 
     -- A valid roster is not automatically a usable one: validation demands a
-    -- cell only for loaded providers, while brand routing stays dual-mode.
+    -- cell only for loaded providers, and a run's routing can still select
+    -- one it has nothing for.
+    --
+    -- Which roster reaches that state differs by surface. A solve's brand is
+    -- the caller's, so a reduced roster asked for the other brand still
+    -- refuses; a pull-request action's provider is the mode's, and
+    -- single-agent routes it to the one loaded (issue #589), so the roster
+    -- that refuses there is a dual one missing the cell its own routing
+    -- selects.
     it "refuses a valid roster that does not load the provider this run's routing selected" $ do
       resolvedRosterCellFor (`solveAssignment` CodexSolver) (Right claudeOnlyRoster)
         `shouldSatisfy` refusalMentioning "codex"
       resolvedRosterCellFor (`solveAssignment` ClaudeSolver) (Right codexOnlyRoster)
         `shouldSatisfy` refusalMentioning "claude"
-      resolvedRosterCellFor (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right codexOnlyRoster)
+      resolvedRosterCellFor (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right (withoutCell PrReviewRole ClaudeProvider))
         `shouldSatisfy` refusalMentioning "claude"
       resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole CodexProvider) (Right claudeOnlyRoster)
         `shouldSatisfy` refusalMentioning "codex"
@@ -231,11 +239,12 @@ spec = do
     -- so nothing is left for the reuse predicate to hand back.
     it "refuses a pull-request press before any session exists" $ do
       state <- testAppState (fixtureBoard [])
-      let rostered = withModelRoster (Right codexOnlyRoster) state
+      let rostered = withModelRoster (Right (withoutCell PrReviewRole ClaudeProvider)) state
       pullRequestStartRefusal rostered PullRequestCodex PullRequestReview
         `shouldSatisfy` maybe False (Data.Text.isInfixOf "claude")
-      -- Revision runs on the pull request's own Codex brand, which this
-      -- roster does load, so the same press is allowed through.
+      -- Revision reads pr_revise rather than pr_review, and this roster's
+      -- hole is only in the reviewer's cell, so the same press is allowed
+      -- through.
       pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
 
     -- Why that pair is the fix rather than a nicety. A session left at
@@ -256,7 +265,7 @@ spec = do
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
           let repository = Repository (temporaryRoot </> "repo") "coghex" "kanban"
               solveDecision = launchAssignment Nothing (`solveAssignment` CodexSolver) (Right claudeOnlyRoster)
-              reviewDecision = launchAssignment Nothing (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right codexOnlyRoster)
+              reviewDecision = launchAssignment Nothing (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview) (Right (withoutCell PrReviewRole ClaudeProvider))
           solveDecision `shouldSatisfy` refusalMentioning "codex"
           reviewDecision `shouldSatisfy` refusalMentioning "claude"
           -- The launch is reached only on the 'Right', which is the shape
@@ -433,7 +442,7 @@ spec = do
               `shouldBe` (either (Left . const "unreachable") Right (cell rerosteredDefaults))
         )
         [ ((`solveAssignment` CodexSolver), claudeOnlyRoster),
-          (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview, codexOnlyRoster)
+          (\roster -> pullRequestAssignment roster PullRequestCodex PullRequestReview, withoutCell PrReviewRole ClaudeProvider)
         ]
 
     -- An autosolve pull-request worker's reattach restores the /solver's/
@@ -639,7 +648,7 @@ spec = do
 
       -- Review prose: the coordinator's own identity is issue_review.codex,
       -- and every Claude clause is issue_revise.claude.
-      let instructions = reviewDeveloperInstructions defaultWorkflowConfig distinctDisplays
+      let instructions = reviewDeveloperInstructions defaultWorkflowConfig distinctDisplays CodexProvider
       -- Each clause separately, so one of them still reading a literal
       -- cannot hide behind another that reads the roster.
       instructions `shouldMention` ("authored by you as " <> displayOf IssueReviewRole CodexProvider)
@@ -772,14 +781,15 @@ spec = do
       let unresolvable =
             [ solveChooserDisplay (Left unusableRoster) CodexSolver,
               solveChooserDisplay (Right claudeOnlyRoster) CodexSolver,
-              -- The reviewer a Claude solve hands to is pr_review.codex, which
-              -- a Claude-only roster does not carry.
-              solveReviewerDisplay (Right claudeOnlyRoster) ClaudeSolver,
+              -- The reviewer a Claude solve hands to in dual mode is
+              -- pr_review.codex, and this roster loads Codex without
+              -- carrying that cell.
+              solveReviewerDisplay (Right (withoutCell PrReviewRole CodexProvider)) ClaudeSolver,
               solveSessionLabel (Left unusableRoster) (solveSessionOn CodexSolver Nothing),
               solveSessionLabel (Right claudeOnlyRoster) (solveSessionOn CodexSolver Nothing),
-              pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver (Right claudeOnlyRoster),
+              pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver (Right (withoutCell PrReviewRole CodexProvider)),
               freshSolveTranscript (Left unusableRoster) AutoSolve CodexSolver,
-              freshPullRequestTranscript (Right claudeOnlyRoster) PullRequestClaude PullRequestReview CodexSolver
+              freshPullRequestTranscript (Right (withoutCell PrReviewRole CodexProvider)) PullRequestClaude PullRequestReview CodexSolver
             ]
       mapM_ (`shouldMention` "model roster unavailable") unresolvable
       mapM_ (\rendered -> mapM_ (rendered `shouldNotMention`) namedModels) unresolvable
@@ -787,15 +797,21 @@ spec = do
     -- The non-visual arm: prose cannot be dimmed, so it says so instead, and
     -- the Codex identity clauses beside it stay resolved because
     -- 'startReviewClient' refuses to build a client without that cell.
+    --
+    -- The roster that reaches it is a dual one whose Claude revision cell is
+    -- missing, not a Codex-only one: an install that does not /load/ Claude
+    -- describes no handoff at all (issue #589), so it is a loaded-but-
+    -- unresolvable cell that leaves prose with a model to name and none to
+    -- put there.
     it "states the Claude assignment is unavailable in review prose without naming a model" $ do
-      let instructions = reviewDeveloperInstructions defaultWorkflowConfig codexOnlyRoster
-          description = encodedValue (claudeTool codexOnlyRoster)
+      let instructions = reviewDeveloperInstructions defaultWorkflowConfig unassignedClaudeRevision CodexProvider
+          description = encodedValue (claudeTool unassignedClaudeRevision)
       instructions `shouldMention` "model roster unavailable"
       description `shouldMention` "model roster unavailable"
       mapM_ (\rendered -> mapM_ (rendered `shouldNotMention`) claudeModels) [instructions, description]
       -- ...and the Codex clauses still name their own cell.
       instructions
-        `shouldMention` ("authored by you as " <> (cellOf (assignmentFor codexOnlyRoster IssueReviewRole CodexProvider)).assignmentDisplay)
+        `shouldMention` ("authored by you as " <> (cellOf (assignmentFor unassignedClaudeRevision IssueReviewRole CodexProvider)).assignmentDisplay)
 
     it "names the spawned cell in every kanban_run_claude diagnostic" $ do
       let display = (cellOf (issueReviseAssignment distinctDisplays)).assignmentDisplay
@@ -854,7 +870,7 @@ spec = do
         `shouldBe` "claude · Sonnet 5 xhigh"
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high".
-      reviewDeveloperInstructions defaultWorkflowConfig defaultRoster
+      reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
         `shouldMention` "authored by you as gpt-5.4 high; Claude-origin amendment content is authored by Claude Sonnet 5 high; unmarked issues default to you as gpt-5.4 high."
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Sonnet 5 high specification-revision agent"
@@ -889,6 +905,24 @@ namedModels =
   [ assignment.assignmentDisplay
   | assignment <- Map.elems defaultRoster.rosterAssignments
   ]
+
+-- | A dual roster that loads both providers and still cannot supply one named
+-- cell -- 'UnassignedCell' rather than 'UnloadedProvider'.
+--
+-- The shape every refusal in this module needs now that single-agent mode
+-- routes each pull-request action to the provider it loads (issue #589): a
+-- reduced roster no longer misses the cell its own routing selects, so the
+-- roster that does is a dual one with a hole in it. A validated file cannot
+-- reach this state; a value edited in process can, and the refusal has to
+-- survive it.
+withoutCell :: RoleName -> ProviderName -> ModelRoster
+withoutCell role provider =
+  defaultRoster {rosterAssignments = Map.delete (role, provider) defaultRoster.rosterAssignments}
+
+-- | The one that leaves review prose describing a handoff whose model it
+-- cannot name, which is what the unavailable wording exists for.
+unassignedClaudeRevision :: ModelRoster
+unassignedClaudeRevision = withoutCell IssueReviseRole ClaudeProvider
 
 -- | The subset of those a Claude-naming review string must not fall back to.
 claudeModels :: [Text]

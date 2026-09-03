@@ -73,7 +73,7 @@ import Kanban.Drainer
     )
 import Kanban.PullRequestFlow
   ( PullRequestAction (..),
-    agentForAction
+    recordedPullRequestBrand
     )
 import Kanban.Review
   ( ReviewStage (..),
@@ -240,7 +240,12 @@ agentSessionEntries state = sortOn sortKey (solveEntries <> pullRequestEntries <
           spec.workerAssignment
           task.pullRequestWorkerOrigin
           task.pullRequestWorkerAction
-          (agentForAction task.pullRequestWorkerOrigin task.pullRequestWorkerAction)
+          ( recordedPullRequestBrand
+              state.appOperatingMode
+              spec.workerAssignment
+              task.pullRequestWorkerOrigin
+              task.pullRequestWorkerAction
+          )
           state.appModelRoster
 
 -- | The chips the base footer shows while the processes overlay is open.

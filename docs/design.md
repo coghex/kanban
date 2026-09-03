@@ -119,7 +119,7 @@ Initial options:
 --border box|open                 border renderer; defaults to box
 --glyph-test                      print vertical-line candidates and exit
 --doctor                          report AI-action readiness read-only and exit
---usage                           print both providers' usage windows and exit
+--usage                           print the loaded providers' usage windows and exit
 --fresh                           with --usage, probe live instead of reading the cache
 --json                            with --usage, write the machine-readable document
 --ping codex|claude               start that provider's window with one deliberate
@@ -198,6 +198,15 @@ saying why an AI action would not start is exactly what it is for. The question
 is asked after the malformed-`--ping` refusal, so an unknown or repeated brand
 is still reported as itself.
 
+In the single-agent mode that list derives, `--usage` reports the one loaded
+provider and `--ping` accepts only that brand. The brand a ping names is
+required and intentionally selected, so a ping asked for the provider this
+install does not load refuses by name — saying which provider the roster loads
+and where that is set — and starts no window rather than redirecting one onto
+the other account. That refusal comes after the no-agent one, so an install
+that loads nothing still says so in the mode's own words rather than naming a
+brand.
+
 ## 6. Layout
 
 The normal wide-screen layout is a 28-column usage sidebar plus a horizontally
@@ -241,11 +250,13 @@ box would have been.
 
 Responsive behavior:
 
-- The sidebar is 28 columns by default and toggles with `c`. In the no-agent
+- The sidebar is 28 columns by default and toggles with `c`. It draws one
+  provider block per loaded provider, so a single-agent install shows the one
+  it loads and no block for the account it never probes. In the no-agent
   operating mode it keeps that width, its box, its ` USAGE ` heading, and both
   the `↻` update and `drain_prs.py` controls with their click behavior
-  unchanged; the Codex and Claude provider blocks and the `approve_issues.py`
-  control are the only things it drops.
+  unchanged; the provider blocks and the `approve_issues.py` control are the
+  only things it drops.
 - Board columns have a readable minimum width rather than being compressed
   until their contents become useless. The initial minimum is 32 cells per
   column.
@@ -778,13 +789,30 @@ no-agent — as is a `models.toml` that will not load at all, which has no list
 to count. Settings names the derived mode on a read-only line, because moving
 it is an edit to that one key in the file rather than a key on the screen.
 Review and rereview read `pr_review`, revision and repair read `pr_revise`,
-solve reads `solve`, the embedded issue-review thread reads
-`issue_review.codex`, and `kanban_run_claude` reads `issue_revise.claude`;
-which brand's column applies is the routing described here and is unchanged by
-the roster. The defaults reproduce today's assignments exactly: Codex-origin
-PRs on Opus 5 xhigh for review and GPT-5.4 high for revision and repair,
-Claude-origin PRs on GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for
-revision and repair, and both solvers on GPT-5.4 high and Sonnet 5 high.
+solve reads `solve`, the embedded issue-review thread reads that thread's own
+provider's `issue_review`, and `kanban_run_claude` reads `issue_revise.claude`;
+which brand's column applies is the routing described here. The defaults
+reproduce today's assignments exactly: Codex-origin PRs on Opus 5 xhigh for
+review and GPT-5.4 high for revision and repair, Claude-origin PRs on
+GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for revision and repair, and
+both solvers on GPT-5.4 high and Sonnet 5 high.
+
+Single-agent mode moves that column rather than the roles. Every pull-request
+action — review, rereview, revision, repair — runs on the one loaded provider
+whatever the pull request's origin marker says, including a pull request whose
+origin is unknown or external; the embedded issue review starts that
+provider's own backend, the Codex app-server in a Codex-only install and the
+`claude` stream-json session in a Claude-only one; a fresh solve starts on it
+without opening the chooser, because there is nothing to choose between; and
+the usage surfaces read only its account. Which provider that is has one
+declaration site, beside the one that answers whether any is loaded at all, and
+no surface derives it from the `agents` list on its own. Origin markers are
+still written in every mode: a solve stamps its brand's marker as it always
+did, and it is the routing that stops reading them. What single-agent does not
+move is the roles themselves — authored work still reads `pr_revise` and the
+canonical gate still reads `pr_review` — nor which keys the board offers, which
+is decided at the spawn boundary rather than on the footer. Dual mode is
+unchanged in all of it.
 
 A roster that cannot supply the cell a launch needs starts no process and
 reports why. A press that has not created a session yet — a chooser digit, an
@@ -819,10 +847,11 @@ one before its first launch and one recovered from a worker specification
 written before the record existed, resolves the live cell instead. A surface
 that belongs to no session resolves live because there is nothing to replay:
 the chooser's two rows are `solve.codex` and `solve.claude`, and the reviewer
-line an autosolve session carries is the opposite brand's `pr_review`, which
-is the cell that review will run on when it starts. A surface whose cell
-cannot be resolved names no model at all — it says the model roster is
-unavailable, dimmed where the name was its own dimmed text — and never falls
+line an autosolve session carries is the `pr_review` cell that review will run
+on when it starts — the opposite brand's in dual mode, the one loaded
+provider's in single-agent. A surface whose cell cannot be resolved names no
+model at all — it says the model roster is unavailable, dimmed where the name
+was its own dimmed text — and never falls
 back to the compiled defaults; review prose, which cannot be dimmed, states
 the same thing in words.
 
@@ -887,11 +916,15 @@ only their owning turn. Kanban renders the request, returns the selected answer
 as the tool result, and lets other sessions and the board remain usable.
 Command and file-change approval requests use the same waiting-state UI.
 
-Kanban also registers `kanban_run_claude`. Sonnet-authored revision stages use
-this tool instead of launching `claude` through a Codex command: the latter runs
-inside Codex's sandbox and cannot reliably reach the macOS keychain-backed
-Claude login. The client tool starts the official CLI directly from Kanban on
-the roster's `issue_revise.claude` cell — `claude-sonnet-5` at `high` by
+Kanban also registers `kanban_run_claude`, on the threads that have a separate
+Claude revision agent to reach through it — which is a Codex coordinator on an
+install that loads Claude as well. A Claude coordinator revises inline and is
+served no such tool, and a Codex-only install loads no agent for it to reach,
+so both are told about neither. Sonnet-authored revision stages use it instead
+of launching `claude` through a Codex command: the latter runs inside Codex's
+sandbox and cannot reliably reach the macOS keychain-backed Claude login. The
+client tool starts the official CLI directly from Kanban on the roster's
+`issue_revise.claude` cell — `claude-sonnet-5` at `high` by
 compiled default — under `--permission-mode plan --safe-mode`, refusing to
 spawn at all when the roster loads no Claude provider. It streams a standalone
 prompt over stdin, and returns its output to the coordinator. It has a
@@ -2060,12 +2093,20 @@ is probed to fill one; section 6 describes what the sidebar keeps in its place.
 ### The `--usage` command-line surface
 
 `kanban --usage` answers the same question from a shell without starting the
-dashboard. It reports both providers and exits zero when at least one produced
-windows, non-zero when none did. A provider that fails prints its own line and
-never suppresses or replaces the other's. In the no-agent operating mode it
-reports no provider at all: there is none loaded to report on, so it prints the
-mode-naming message to stderr and exits non-zero without probing, exactly as
-`--ping` does (section 5).
+dashboard. It reports the providers the operating mode loads — both in dual
+mode, the one loaded in single-agent — and exits zero when at least one
+produced windows, non-zero when none did. A provider that fails prints its own
+line and never suppresses or replaces the other's. In the no-agent operating
+mode it reports no provider at all: there is none loaded to report on, so it
+prints the mode-naming message to stderr and exits non-zero without probing,
+exactly as `--ping` does (section 5).
+
+One derivation decides that set for every usage surface, so the sidebar's
+provider blocks, the update the `u` key and the sidebar's `↻` share, and both
+the cached and the forced-live `--usage` read the same accounts. An entry the
+snapshot cache still holds for a provider this install has stopped loading
+stays on disk untouched; it is neither probed nor displayed, because it is not
+this install's own reading.
 
 ```text
 Codex
@@ -2103,7 +2144,7 @@ Freshness policy:
   print for is probed live. A cached snapshot carrying no windows is not
   usable — there is nothing to print — so it is probed live too and never
   counts toward the exit status.
-- `--fresh` probes both providers live regardless of the cache.
+- `--fresh` probes every loaded provider live regardless of the cache.
 - `--no-cache` and a global `cache = false` probe live and neither read nor
   write the `usage.json` snapshot (section 16). Combining either with
   `--fresh` is accepted and behaves the same. Neither affects the scratch

@@ -40,17 +40,20 @@ module Kanban.ProviderAdapter
     adapterForBrand,
     brandForProvider,
     claudeReviewArguments,
+    embeddedReviewProvider,
+    embeddedReviewProviderFor,
     providerForBrand,
   )
 where
 
 import Data.Aeson (Value, encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (WorkflowConfig)
-import Kanban.Models (Assignment (..), ModelRoster, ProviderName (..))
-import Kanban.Review.Prompts (claudeTool, finalOutputSchema, githubTool, githubToolName, questionTool, questionToolName)
+import Kanban.Models (Assignment (..), ModelRoster, OperatingMode, ProviderName (..), operatingModeFor, soleAgent)
+import Kanban.Review.Prompts (claudeRevisionAvailable, claudeTool, finalOutputSchema, githubTool, githubToolName, questionTool, questionToolName)
 import Kanban.ReviewToolServer (mcpToolAllowance, reviewToolServerConfig)
 import Kanban.Solve.Event (SolverBrand (..))
 import System.Process
@@ -219,6 +222,38 @@ brandForProvider :: ProviderName -> SolverBrand
 brandForProvider CodexProvider = CodexSolver
 brandForProvider ClaudeProvider = ClaudeSolver
 
+-- | The provider Kanban's embedded issue review runs on, and so the adapter
+-- whose backend it starts and whose dynamic tools it registers.
+--
+-- Single-agent mode moves it to the one loaded provider, in both variants:
+-- the Codex app-server in a Codex-only install and the stream-json backend in
+-- a Claude-only one, each declared by that provider's own
+-- 'adapterEmbeddedReview'. Dual mode is Codex, unchanged — the embedded
+-- review is one thread serving every issue whatever its origin marker, so
+-- there is no per-issue routing for a mode with two providers to collapse,
+-- and the operator's way to move it is to load the other provider alone.
+--
+-- Declared here rather than in "Kanban.Review" because what it selects is an
+-- adapter: the process shape, protocol, and tool registry a review thread
+-- runs under are that record's fields, and 'adapterEmbeddedReview' is where a
+-- provider says whether it has one at all.
+embeddedReviewProvider :: OperatingMode -> ProviderName
+embeddedReviewProvider = fromMaybe CodexProvider . soleAgent
+
+-- | 'embeddedReviewProvider' reached through the roster a caller already
+-- holds, which is how both sites that need it actually have the mode.
+--
+-- One spelling because two of them ask, at two different moments: the
+-- dashboard boundary that resolves the @issue_review@ cell and refuses before
+-- starting any process, and 'Kanban.Review.startReviewClient', which resolves
+-- it again for the backend it is about to spawn. Deriving the provider from
+-- the roster each is given, rather than from a mode threaded in beside it, is
+-- what stops the refusal being made about one provider and the spawn about
+-- another -- which is exactly how a Claude-only install came to be refused
+-- for want of a Codex cell it would never have run on.
+embeddedReviewProviderFor :: ModelRoster -> ProviderName
+embeddedReviewProviderFor = embeddedReviewProvider . operatingModeFor
+
 codexAdapter :: ProviderAdapter
 codexAdapter =
   ProviderAdapter
@@ -228,7 +263,15 @@ codexAdapter =
       adapterPullRequestProcess = agentSessionProcess,
       adapterRevisionProcess = oneShotProcess,
       adapterEmbeddedReview = Just codexEmbeddedReview,
-      adapterReviewTools = \roster config -> [questionTool, claudeTool roster, githubTool config]
+      -- The nested revision tool only where there is a separate Claude
+      -- revision agent to reach through it: a Codex-only install loads none,
+      -- so the tool could only ever be refused, and
+      -- 'Kanban.Review.Prompts.reviewDeveloperInstructions' drops the clauses
+      -- describing it on exactly the same condition.
+      adapterReviewTools = \roster config ->
+        [questionTool]
+          <> [claudeTool roster | claudeRevisionAvailable roster CodexProvider]
+          <> [githubTool config]
     }
 
 claudeAdapter :: ProviderAdapter

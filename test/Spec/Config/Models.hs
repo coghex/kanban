@@ -28,6 +28,7 @@ import Kanban.Models
     loadedOperatingMode,
     operatingModeFor,
     operatingModeLabel,
+    soleAgent,
     roleApplicability,
     rosterErrorMessage,
     rosterPath,
@@ -115,11 +116,19 @@ spec = do
 
     -- Both singletons, because Codex and Claude are the whole compiled
     -- registry and one arm would leave half of single-agent unasserted.
-    it "derives single-agent from either loaded provider on its own" $ do
-      operatingModeFor codexOnlyRoster `shouldBe` SingleAgentMode
-      operatingModeFor claudeOnlyRoster `shouldBe` SingleAgentMode
-      fmap operatingModeFor (decodeRoster (encodeRoster codexOnlyRoster)) `shouldBe` Right SingleAgentMode
-      fmap operatingModeFor (decodeRoster (encodeRoster claudeOnlyRoster)) `shouldBe` Right SingleAgentMode
+    it "derives single-agent from either loaded provider on its own, naming it" $ do
+      operatingModeFor codexOnlyRoster `shouldBe` SingleAgentMode CodexProvider
+      operatingModeFor claudeOnlyRoster `shouldBe` SingleAgentMode ClaudeProvider
+      fmap operatingModeFor (decodeRoster (encodeRoster codexOnlyRoster)) `shouldBe` Right (SingleAgentMode CodexProvider)
+      fmap operatingModeFor (decodeRoster (encodeRoster claudeOnlyRoster)) `shouldBe` Right (SingleAgentMode ClaudeProvider)
+
+    -- Issue #589 requirement 1: the one place a surface asks which provider a
+    -- single-agent install runs on. Every mode answers, so a mode added to
+    -- the type cannot reach a routing site without a decision about it.
+    it "answers the sole loaded provider, and only for single-agent" $ do
+      map soleAgent [operatingModeFor codexOnlyRoster, operatingModeFor claudeOnlyRoster]
+        `shouldBe` [Just CodexProvider, Just ClaudeProvider]
+      map soleAgent [DualMode, NoAgentMode] `shouldBe` [Nothing, Nothing]
 
     it "derives no-agent from an empty agents list" $ do
       operatingModeFor noAgentRoster `shouldBe` NoAgentMode
@@ -127,7 +136,7 @@ spec = do
 
     it "carries a loaded roster's own mode through the startup projection" $ do
       loadedOperatingMode (Right defaultRoster) `shouldBe` DualMode
-      loadedOperatingMode (Right claudeOnlyRoster) `shouldBe` SingleAgentMode
+      loadedOperatingMode (Right claudeOnlyRoster) `shouldBe` SingleAgentMode ClaudeProvider
       loadedOperatingMode (Right noAgentRoster) `shouldBe` NoAgentMode
 
     -- A file that will not load has no agents list to count. It derives
@@ -143,7 +152,10 @@ spec = do
 
     it "names each mode the way the file's own comment does" $ do
       operatingModeLabel DualMode `shouldBe` "dual"
-      operatingModeLabel SingleAgentMode `shouldBe` "single-agent"
+      -- Both singletons are one mode by name: the provider the constructor
+      -- carries routes work, it does not rename the mode.
+      map operatingModeLabel [SingleAgentMode CodexProvider, SingleAgentMode ClaudeProvider]
+        `shouldBe` ["single-agent", "single-agent"]
       operatingModeLabel NoAgentMode `shouldBe` "no-agent"
 
   describe "the round trip" $ do

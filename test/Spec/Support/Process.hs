@@ -39,6 +39,7 @@ module Spec.Support.Process
     ClaudeReviewFixture (..),
     withClaudeReviewClient,
     withClaudeReviewClientUsing,
+    withRoutedReviewClientUsing,
     withClaudeMcpReviewClient,
     claudeReviewTurn,
     claudeMcpToolCall,
@@ -132,6 +133,7 @@ import Kanban.Review
     reviewConnectionsForTesting,
     runAuthenticatedClaude,
     startResolvedReviewClient,
+    startReviewClient,
     runCanonicalCommand,
     runGitHubIssueTool,
     stopReviewClient,
@@ -776,6 +778,31 @@ withClaudeReviewClient = withClaudeReviewClientUsing defaultRoster
 withClaudeReviewClientUsing :: ModelRoster -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
 withClaudeReviewClientUsing roster = withClaudeReviewSession roster defaultWorkflowConfig Nothing []
 
+-- | As 'withClaudeReviewClientUsing', but started through
+-- 'Kanban.Review.startReviewClient' rather than against a backend the fixture
+-- picked.
+--
+-- The difference is the whole point: every other fixture here hands
+-- 'startResolvedReviewClient' the Claude backend and so proves nothing about
+-- which backend an install would route to. This one lets the routing choose,
+-- so a Claude-only roster that failed to reach the Claude backend -- or
+-- reached it and then refused on a cell it does not carry -- fails here
+-- rather than passing on a backend no install would have selected.
+withRoutedReviewClientUsing :: ModelRoster -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withRoutedReviewClientUsing roster =
+  withReviewSessionStartedBy StartThroughRouting roster defaultWorkflowConfig Nothing []
+
+-- | How a review-client fixture starts its client.
+data ReviewClientStart
+  = -- | Against Claude's backend directly, which is what a test about that
+    -- backend's own behavior wants and what every fixture here did before
+    -- routing became a thing an install could move.
+    StartOnClaudeBackend
+  | -- | Through 'Kanban.Review.startReviewClient', so the install's own
+    -- routing picks the backend.
+    StartThroughRouting
+  deriving stock (Eq, Show)
+
 -- | A fake @claude@ that spawns and drives the MCP server its launch names
 -- — exactly as the real CLI does — plus a fake @gh@ on the same PATH for
 -- the calls the parent answers by running one.
@@ -800,7 +827,10 @@ withClaudeMcpReviewClient workflowConfig ghScript =
 -- @turnScript@ (run per user message), optionally a fake @gh@ beside it,
 -- and a live client on Kanban's real Claude backend.
 withClaudeReviewSession :: ModelRoster -> WorkflowConfig -> Maybe [ByteString.ByteString] -> [ByteString.ByteString] -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
-withClaudeReviewSession roster workflowConfig ghScript prelude turnScript action =
+withClaudeReviewSession = withReviewSessionStartedBy StartOnClaudeBackend
+
+withReviewSessionStartedBy :: ReviewClientStart -> ModelRoster -> WorkflowConfig -> Maybe [ByteString.ByteString] -> [ByteString.ByteString] -> [ByteString.ByteString] -> (ClaudeReviewFixture -> IO result) -> IO result
+withReviewSessionStartedBy clientStart roster workflowConfig ghScript prelude turnScript action =
   withTemporaryCacheRoot $ \temporaryRoot -> do
     let repositoryRoot = temporaryRoot </> "repo"
         binaryRoot = temporaryRoot </> "bin"
@@ -827,7 +857,11 @@ withClaudeReviewSession roster workflowConfig ghScript prelude turnScript action
       withEnvironmentValue "PATH" (binaryRoot <> ":" <> originalPath) $
         bracket
           ( do
-              started <- startResolvedReviewClient backend roster workflowConfig (Repository repositoryRoot "coghex" "kanban") (\event -> modifyIORef events (<> [event]))
+              let repository = Repository repositoryRoot "coghex" "kanban"
+                  sink event = modifyIORef events (<> [event])
+              started <- case clientStart of
+                StartOnClaudeBackend -> startResolvedReviewClient backend roster workflowConfig repository sink
+                StartThroughRouting -> startReviewClient roster workflowConfig repository sink
               case started of
                 Right client -> pure client
                 Left message -> throwIO (userError ("the Claude review backend did not start: " <> Data.Text.unpack message))

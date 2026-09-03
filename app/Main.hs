@@ -1,14 +1,14 @@
 module Main (main) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, optionsParserInfo)
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
-import Kanban.Models (loadModelRoster)
-import Kanban.Ping (PingMode (..), pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
+import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
+import Kanban.Ping (PingMode (..), pingBrandRefusal, pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
 import Kanban.Repository (resolveRepository, resolveRepositoryRoster)
 import Kanban.ReviewToolServer (serveReviewTools)
@@ -46,13 +46,26 @@ main = do
   -- the worker do not read models.toml twice. The decision is
   -- 'launchModeRefusal' in the library, which the suite covers; this reports
   -- what it answered and nothing more.
-  when (launchModeNeedsProvider selectedMode) $ do
-    loadedRoster <- loadModelRoster
-    case launchModeRefusal selectedMode loadedRoster of
-      Nothing -> pure ()
-      Just message -> do
-        hPutStrLn stderr ("kanban: " <> Text.unpack message)
-        exitFailure
+  loadedRoster <-
+    if launchModeNeedsProvider selectedMode
+      then Just <$> loadModelRoster
+      else pure Nothing
+  case launchModeRefusal selectedMode <$> loadedRoster of
+    Just (Just message) -> do
+      hPutStrLn stderr ("kanban: " <> Text.unpack message)
+      exitFailure
+    _ -> pure ()
+  -- The provider set the two run-and-exit modes below report on, retained
+  -- from the read the gate above already made rather than loading the file a
+  -- second time. Single-agent narrows both to the one loaded brand (§14):
+  -- --usage probes and prints that provider alone, and --ping refuses the
+  -- other one outright instead of spending its quota.
+  --
+  -- 'NoAgentMode' stands for "this invocation loaded no roster", which
+  -- neither arm below can observe: 'launchModeNeedsProvider' is exactly the
+  -- set of modes that load one, and the gate above has already exited for a
+  -- roster that loads no provider.
+  let operatingMode = maybe NoAgentMode loadedOperatingMode loadedRoster
   case selectedMode of
     WorkerMode workerSpec -> do
       result <- runWorker workerSpec
@@ -97,11 +110,20 @@ main = do
                     usageModeCache = cacheOn,
                     usageModeJson = parsedOptions.optionJson
                   }
-          produced <- runUsageMode mode resolvedConfig
+          produced <- runUsageMode mode operatingMode resolvedConfig
           unless produced exitFailure
     -- Last of the run-and-exit modes, and deliberately so: it is the only one
     -- that spends the user's quota (§14), so every observational mode above
     -- wins over it and an invocation naming one of them pings nothing.
+    -- The brand gate, after the mode gate above and before any configuration
+    -- is read: an install that does not load the named provider spends
+    -- nothing and refreshes nothing, rather than redirecting the window to
+    -- the brand it does load (§5, §14).
+    PingQueryMode
+      | Just brand <- pingBrand,
+        Just message <- pingBrandRefusal operatingMode brand -> do
+          hPutStrLn stderr ("kanban: " <> Text.unpack message)
+          exitFailure
     PingQueryMode | Just brand <- pingBrand -> do
       absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
       configResult <- loadRawConfig absoluteConfigPath

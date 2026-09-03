@@ -17,9 +17,11 @@
 -- +----------------------------+-----------------------------------------------+
 --
 -- The registry adds no authority of its own. Provider, model, role and
--- opposite-brand routing are read from 'Kanban.PullRequestFlow.agentForAction'
--- and 'Kanban.PullRequestFlow.pullRequestAssignment'; readiness is
--- 'Kanban.Preflight.actionReport' over the matching 'PreflightAction'; the
+-- mode-aware brand routing are read from
+-- 'Kanban.PullRequestFlow.agentForAction' and
+-- 'Kanban.PullRequestFlow.pullRequestAssignment'; readiness is
+-- 'Kanban.Preflight.actionReport' over the matching 'PreflightAction' and the
+-- operating mode this environment's roster derives; the
 -- spawn boundary is 'Kanban.Worker.launchSolveWorker' and
 -- 'Kanban.Worker.launchPullRequestWorker'; the loop's progression is
 -- 'Kanban.UI.AutoSolve.decideAutoSolve'. What is new is the shape: explicit

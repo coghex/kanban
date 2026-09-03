@@ -22,6 +22,7 @@ module Kanban.Ping
     pingArguments,
     pingBrandName,
     pingBrandProvider,
+    pingBrandRefusal,
     pingExecutableName,
     pingPrompt,
     pingRepositoryIdentity,
@@ -62,6 +63,7 @@ import Kanban.Config
     usageSolveRoundEstimates,
   )
 import Kanban.Domain (Repository (..), UsageProvider (..))
+import Kanban.Models (OperatingMode, providerKey, soleAgent)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot, killVerifiedGroupWith)
 import Kanban.Provider (ProviderError (..))
@@ -71,6 +73,7 @@ import Kanban.Usage
     UsageReport (..),
     fetchProviderUsage,
     renderUsageReport,
+    usageProviderFor,
     usageReportProduced,
   )
 import System.Directory (XdgDirectory (XdgCache), findExecutable, getXdgDirectory)
@@ -105,6 +108,35 @@ pingBrandProvider PingClaude = Claude
 pingBrandName :: PingBrand -> Text
 pingBrandName PingCodex = "codex"
 pingBrandName PingClaude = "claude"
+
+-- | Why an explicit @--ping BRAND@ cannot run under this operating mode, or
+-- 'Nothing' when it may.
+--
+-- The brand is required and intentionally selected (§5, §14), so a single-agent
+-- install that is asked for the provider it does not load refuses rather than
+-- redirecting: a ping is the one action that deliberately spends quota, and
+-- silently starting a window on the other account would spend it on a request
+-- the user did not make and report it under a brand they did not name.
+--
+-- Both other modes answer 'Nothing'. Dual loads whichever brand was named, and
+-- no-agent is already refused ahead of this by
+-- 'Kanban.CLI.launchModeRefusal' with the message that names the mode — this
+-- says nothing about it rather than restating that refusal in a second
+-- vocabulary.
+pingBrandRefusal :: OperatingMode -> PingBrand -> Maybe Text
+pingBrandRefusal mode brand = do
+  provider <- soleAgent mode
+  if usageProviderFor provider == pingBrandProvider brand
+    then Nothing
+    else
+      Just
+        ( "--ping "
+            <> pingBrandName brand
+            <> ": model roster loads only "
+            <> providerKey provider
+            <> ", and a ping starts a window on the brand it is asked for"
+            <> " · set by agents in models.toml"
+        )
 
 -- | Turns every @--ping@ occurrence into the one brand to ping, or into the
 -- reason there is no such brand.

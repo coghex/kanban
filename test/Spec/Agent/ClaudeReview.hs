@@ -30,6 +30,7 @@ import Kanban.Models
     ModelRoster (..),
     ProviderName (..),
     RoleName (..),
+    assignmentFor,
     defaultRoster,
   )
 import Kanban.Domain (defaultWorkflowConfig)
@@ -77,6 +78,7 @@ import Kanban.UI.Types (AgentSession (..), ChatTranscript (..), ReviewDetail (..
 import Spec.Support.Env (withEnvironmentValue)
 import Spec.Support.Expect (shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, fixtureReviewThread)
+import Spec.Support.Roster (cellOf)
 import System.Environment (getExecutablePath, lookupEnv)
 import System.FilePath ((</>))
 import Spec.Support.Process
@@ -87,6 +89,7 @@ import Spec.Support.Process
     recordedClaudeInput,
     recordedClaudeLaunches,
     reviewOutputs,
+    withRoutedReviewClientUsing,
     startFailures,
     threadCreations,
     plainChatTranscript,
@@ -176,6 +179,25 @@ spec = do
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
         map (dropWhile (/= "--model")) launches `shouldBe` [["--model", "haiku-9", "--effort", "low"]]
+
+    -- Issue #589: the routing itself, rather than a backend this fixture
+    -- picked. Every other arm here hands 'startResolvedReviewClient' the
+    -- Claude backend, so none of them would notice an install that never
+    -- selected it -- which is exactly what a Claude-only install did while
+    -- the launch boundary still resolved @issue_review.codex@ and refused
+    -- before any backend was reached.
+    --
+    -- Asserted through to a completed turn, not just a started client,
+    -- because "the backend started" and "a review ran on it" are different
+    -- claims and only the second one is what the mode promises.
+    it "starts a Claude-only install's review through the routing, on that roster's own cell" $
+      withRoutedReviewClientUsing claudeOnlyRoster (reviewTurn <> [approvedResult 844]) $ \fixture -> do
+        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        _ <- awaitOneCompletedTurn fixture
+        launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
+        let cell = cellOf (assignmentFor claudeOnlyRoster IssueReviewRole ClaudeProvider)
+        map (dropWhile (/= "--model")) launches
+          `shouldBe` [["--model", cell.assignmentModel, "--effort", cell.assignmentEffort]]
 
     -- Requirement 7. The refusal is reached before a connection is acquired,
     -- and acquiring one is this backend's spawn, so nothing reaches PATH: a
@@ -1487,3 +1509,8 @@ rerostered model effort =
 -- resolved at all.
 codexOnlyRoster :: ModelRoster
 codexOnlyRoster = defaultRoster {rosterAgents = [CodexProvider]}
+
+-- | The mirror image: a valid roster loading only Claude, which is the
+-- install issue #589 routes its embedded review to this backend.
+claudeOnlyRoster :: ModelRoster
+claudeOnlyRoster = defaultRoster {rosterAgents = [ClaudeProvider]}

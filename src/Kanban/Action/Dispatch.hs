@@ -78,7 +78,7 @@ import Kanban.ApprovalService
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Label (..), PullRequest (..), Repository, WorkflowConfig)
-import Kanban.Models (RecordedAssignment)
+import Kanban.Models (RecordedAssignment, loadedOperatingMode)
 import Kanban.Preflight (PreflightAction (..))
 import Kanban.PullRequestFlow
   ( PullRequestAction,
@@ -208,13 +208,18 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
   ActionTargetItem resolved
     | Left refusal <- checkedAgainst environment plan -> pure (Left refusal)
     | otherwise -> do
-        capability <- actionCapabilityIO environment.actionRepository plan.planRoute
+        capability <- actionCapabilityIO environment.actionRepository environment.actionRoster request.requestRecordedAssignment plan.planRoute
         case capability of
           ActionIncapable detail -> pure (Left (ActionCapabilityBlocked plan.planKind detail))
           ActionCapable -> case assignmentFor plan of
             Left message -> pure (Left (ActionRoutingUnavailable plan.planKind message))
             Right cell -> launchFor resolved cell
   where
+    -- One mode for the whole dispatch, off the roster this environment was
+    -- built with, so the brand the handle reports and the cell
+    -- 'pullRequestAssignment' resolves cannot come from two different reads.
+    mode = loadedOperatingMode environment.actionRoster
+
     -- The baseline is taken here, at dispatch, and carried on the handle:
     -- "exactly one /new/ pull request" is only answerable against what already
     -- existed when the run started.
@@ -249,7 +254,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
           >>= settled brand (solveTurn resolved AutoSolve brand) recordedAttribution (autoSolveHandle resolved)
       RouteProvider (ActionPullRequestFlow origin action) ->
         launchPullRequest resolved origin action cell
-          >>= settled (agentForAction origin action) (pullRequestTurn resolved origin action) (const . Just) (workerHandle resolved)
+          >>= settled (agentForAction mode origin action) (pullRequestTurn resolved origin action) (const . Just) (workerHandle resolved)
       _ -> pure (Left (ActionRoutingUnavailable plan.planKind "this action starts no provider"))
 
     -- The turn this request wanted, as a fact about a worker's task. A lease
