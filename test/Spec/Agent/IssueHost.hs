@@ -1065,6 +1065,13 @@ lifecycleSpec = describe "one running host" $ do
         journaled <- readMVar emitted
         let offered = WorkerReviewInput standing.reviewCommandId "look again" (Just "the review host stopped before this command's result was observed")
         journaled `shouldContain` [offered]
+        -- Round 19's first blocker. The terminal record went only to the sink
+        -- attached now, so a dashboard reattaching later replayed an action
+        -- that never ended — and the journal stayed open to the appends the
+        -- envelope exists to stop.
+        durable <- journalEvents descriptor
+        [event | event@(WorkerFinished _) <- durable]
+          `shouldBe` [WorkerFinished (SolveFailed "persistent worker stopped unexpectedly; its provider process group was terminated")]
         -- Before the terminal envelope, so a monitor that stops on the
         -- terminal record has still seen it.
         let beforeTheOffer = takeWhile (/= offered) journaled

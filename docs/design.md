@@ -1003,7 +1003,11 @@ the write are still two steps, so the overlay also holds what it wrote until
 the child's journal accounts for it: a command that reached its action
 journals its line before that action's terminal envelope, so anything still
 held when the terminal event arrives is a message the action never read, and
-it is offered back to the input line rather than lost. Ending an action and
+it is offered back to the input line rather than lost. That release is not
+conditional on the envelope being what settled the session: a result event can
+publish the terminal phase first, and that phase stands, but the envelope is
+still the last thing the journal can say and what is held at that point was
+still never read. Ending an action and
 interrupting a turn are held by nothing, carrying no text of their own. The
 host and the reconciliation each refuse anything that slips past, on the
 ledger rather than the journal, because the terminal envelope is still the
@@ -3986,7 +3990,8 @@ The first solve/autosolve-compatible slice is implemented.
   successful snapshot completes the pending "killed by user" outcome. An
   issue action settled this way closes its journal with the same terminal
   envelope a host would have written, after answering any claim its dead host
-  left standing: a dashboard reattaching to it replays that journal and
+  left standing — and so does the stale-worker recovery a reattached dashboard
+  runs, which reaches the same actions by a different route: a dashboard reattaching to it replays that journal and
   nothing else, so a terminal state with no envelope in it leaves an action
   that never appears to end — and leaves the journal open to the appends the
   envelope exists to stop.

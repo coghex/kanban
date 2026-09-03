@@ -30,7 +30,8 @@ import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), QuitReques
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
-  ( appliedIssueActionTermination,
+  ( appliedIssueActionFinished,
+    appliedIssueActionTermination,
     appliedReviewInput,
     awaitedCommandText,
     dropAwaiting,
@@ -741,6 +742,32 @@ spec = do
                      Nothing,
                      Nothing
                    ]
+
+    -- Round 19's second blocker. A result event can publish the terminal
+    -- phase before the envelope arrives, and the release used to be skipped
+    -- along with the rest of that handler — so the held text was dropped by
+    -- the very event that proves it was never read.
+    it "offers its text back even when a result already settled the phase" $ do
+      let alreadySettled = running {sessionPhase = ReviewNeedsChanges, sessionActivity = "changes requested"}
+          released = appliedIssueActionFinished "the issue action was terminated" alreadySettled
+      released.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      -- Recoverable, on the line or queued behind it — which of the two is
+      -- 'applyUndeliveredSteer'\'s own rule and not this release's.
+      (released.sessionInput : released.sessionDetail.reviewSessionUndelivered)
+        `shouldContain` ["look again"]
+      -- And the phase a result already published is what stands: this
+      -- envelope adds the release and nothing else.
+      released.sessionPhase `shouldBe` ReviewNeedsChanges
+      released.sessionActivity `shouldBe` "changes requested"
+
+    -- The other arm, so the rule above is a rule rather than the function
+    -- doing nothing: an envelope that /is/ what settles the session says so.
+    it "settles a running session and releases what it was holding" $ do
+      let released = appliedIssueActionFinished "the issue action was terminated" running
+      released.sessionPhase `shouldBe` ReviewFailed
+      released.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      Text.unpack released.sessionTranscript.standardTranscript
+        `shouldContain` "the issue action was terminated"
 
     it "forgets a command the journal accounted for" $ do
       let seen = appliedReviewInput "look again" Nothing (dropAwaiting fixtureCommandId running)

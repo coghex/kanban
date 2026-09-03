@@ -12,6 +12,7 @@ module Kanban.UI.Review
     appliedIssueActionTermination,
     releaseAwaiting,
     dropAwaiting,
+    appliedIssueActionFinished,
     awaitedCommandText,
     applyReviewInput,
     reviewOutputPrefix,
@@ -52,7 +53,7 @@ where
 import Brick
 import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO)
-import Control.Monad (unless, void )
+import Control.Monad (unless, void , when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -1328,20 +1329,38 @@ applyIssueActionFinished :: Int -> SolveOutcome -> EventM Name AppState ()
 applyIssueActionFinished issueNumber outcome = do
   state <- get
   case Map.lookup issueNumber state.appReviewSessions of
-    Just session | not (reviewPhaseActive session.sessionPhase) -> pure ()
-    _ -> do
-      appendToReviewSession issueNumber
-        ( \session ->
-            releaseAwaiting
-              session
-                { sessionPhase = ReviewFailed,
-                  sessionActivity = canonicalReviewActivity detail,
-                  sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText detail <> "\n")
-                }
-        )
-      setNotice (agentFailureNotice "Issue review" detail)
+    Nothing -> pure ()
+    Just session -> do
+      appendToReviewSession issueNumber (appliedIssueActionFinished detail)
+      -- Only where this envelope is what settled the session. A result event
+      -- that got there first has already said why, and saying it again would
+      -- overwrite the reason the user is looking at with a generic one.
+      when (reviewPhaseActive session.sessionPhase) (setNotice (agentFailureNotice "Issue review" detail))
   where
     detail = case outcome of
       SolveCompleted -> "the issue action ended without publishing a result"
       SolveNeedsInput message -> message
       SolveFailed message -> message
+
+-- | What a child's terminal envelope does to its session.
+--
+-- Pure and named for the same reason 'appliedReviewInput' is: the ordering it
+-- guards is a property of replay, and both a live overlay and a reattached
+-- one reach it by applying this to the same record.
+--
+-- A result event can publish the terminal phase before this envelope arrives,
+-- and that phase is the authoritative one — so the transcript and phase are
+-- left exactly as they stand. What is /not/ conditional on that is the
+-- release: this envelope is the last thing a child's journal can say, so a
+-- command still held when it arrives was never read, whichever event settled
+-- the session first.
+appliedIssueActionFinished :: Text -> ReviewSession -> ReviewSession
+appliedIssueActionFinished detail session
+  | not (reviewPhaseActive session.sessionPhase) = releaseAwaiting session
+  | otherwise =
+      releaseAwaiting
+        session
+          { sessionPhase = ReviewFailed,
+            sessionActivity = canonicalReviewActivity detail,
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText detail <> "\n")
+          }

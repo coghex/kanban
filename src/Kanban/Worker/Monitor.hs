@@ -27,7 +27,8 @@ import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPres
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Worker.Command (reconcileIssueActionClaims)
 import Kanban.Worker.Journal
-  ( decodeJournalLine,
+  ( appendWorkerEvent,
+    newEventJournalLock, decodeJournalLine,
     drainJournalBeforeExit,
     emitEnvelope,
     isTerminalEnvelope,
@@ -160,6 +161,13 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                                     workerStateHeartbeatAt = now,
                                     workerStateLastActivity = "worker failed closed"
                                   }
+                          -- On the journal, not only to whoever is attached
+                          -- now. A dashboard reattaching later replays that
+                          -- journal and nothing else, so an action whose
+                          -- terminal record went only to a live sink reads as
+                          -- one that never ended — and its journal stays open
+                          -- to the appends the envelope exists to stop.
+                          closeJournalWith outcome sawFinished
                           writeState descriptor terminalState
                           ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
                           releaseWorkerLease descriptor
@@ -177,6 +185,13 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
     drainAfterReconciling = do
       reconcileIssueActionClaims descriptor
       drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+    -- The terminal envelope this recovery owes the journal, unless the
+    -- journal already carried one — in which case the worker closed its own
+    -- and a second would be a record after the last record.
+    closeJournalWith outcome sawFinished =
+      unless sawFinished $ do
+        journal <- newEventJournalLock
+        appendWorkerEvent descriptor journal (WorkerFinished outcome)
     -- Reached only once the supervisor is confirmed absent by its durably
     -- recorded launch identity — its single call site above has no other
     -- entry condition, and deliberately no elapsed-time one. No state file

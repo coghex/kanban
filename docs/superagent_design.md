@@ -1729,6 +1729,14 @@ unless their typed contract exposes an override.
   recording a terminal state and releasing the lease while leaving the journal
   open, so a reattaching dashboard replayed an action that never ended.
 
+  The nineteenth round found both of the previous round's fixes applied to one
+  path and not its twin. Stale-worker recovery terminalizes the same actions a
+  direct termination does, by a different route, and it was still recording a
+  terminal state while leaving the journal open. And the release of a held
+  command was skipped whenever a result event had already published the
+  terminal phase — dropped by the very envelope that proves the command was
+  never read. Both now hold wherever the action ends.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
