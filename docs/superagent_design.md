@@ -1656,6 +1656,16 @@ unless their typed contract exposes an override.
   but no action id, so the evidence the child had actually produced was left
   addressable by nothing.
 
+  The twelfth round closed one. A process-per-thread connection was named
+  only on the host's own census, and that record is exactly as useful as the
+  host: a host that has died is precisely when a termination has nobody to ask
+  to finish a thread and settles the child from its durable state alone, so
+  the connection outlived the action it served — beside a replacement action
+  for the same issue. The action now records that process on its own state as
+  well. A shared connection is recorded nowhere on a child, and must not be:
+  one process serves every thread there, so a single child's termination would
+  end all of them.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard

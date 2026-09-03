@@ -14,7 +14,7 @@ import qualified Data.Text
 import qualified Data.Text.Encoding as TextEncoding
 import Kanban.Domain
 import Kanban.Models (ProviderName (..))
-import Kanban.Process (killManagedProcess)
+import Kanban.Process (killManagedProcess, managedProcessPid)
 import Kanban.PullRequestFlow (flowOutcome)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -36,6 +36,8 @@ import Kanban.Review
     approveReviewAction,
     beginIssueReview,
     reviewConnectionsForTesting,
+    reviewThreadOwnProcesses,
+    reviewThreadOwnProcesses,
     stopReviewClient,
     decodeCanonicalIssueReviewResult,
     decodeClaudeToolPrompt,
@@ -666,6 +668,32 @@ spec = do
         -- rather than merely emptying soon, and left no provider process.
         map (.connectionId) <$> reviewConnectionsForTesting client `shouldReturn` []
         mapM_ (\pid -> shouldHaveBeenSwept pid "a per-thread review connection") pids
+
+    -- Round 12's blocker, at the point the rule lives. A per-thread
+    -- connection is that thread's own process, so the action owning the
+    -- thread records it on its own durable state and can end it with no host
+    -- left to ask. A shared one is every thread's, and recording it against
+    -- one action would let that action's termination kill all of them.
+    it "names the process serving a thread only where the thread owns it" $ do
+      withFakeReviewClient ProcessPerThread $ \_ client _ -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        connections <- reviewConnectionsForTesting client
+        case connections of
+          [connection] -> do
+            owned <- reviewThreadOwnProcesses client (threadOn connection "thread-1")
+            expected <- managedProcessPid connection.connectionManaged
+            mapM managedProcessPid owned `shouldReturn` [expected]
+          _ -> expectationFailure "expected exactly one per-thread connection"
+        stopReviewClient client
+      withFakeReviewClient SharedProcess $ \_ client _ -> do
+        beginIssueReview client 844 `shouldReturn` Right ()
+        connections <- reviewConnectionsForTesting client
+        case connections of
+          [connection] -> do
+            owned <- reviewThreadOwnProcesses client (threadOn connection "thread-1")
+            mapM managedProcessPid owned `shouldReturn` []
+          _ -> expectationFailure "expected exactly one shared connection"
+        stopReviewClient client
 
     it "resolves a response only against the connection it arrived on" $
       withFakeReviewClient ProcessPerThread $ \_ client events -> do

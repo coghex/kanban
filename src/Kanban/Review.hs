@@ -107,6 +107,7 @@ module Kanban.Review
     newReviewClientForTesting,
     reviewClientLogPath,
     reviewConnectionProcesses,
+    reviewThreadOwnProcesses,
     reviewConnectionsForTesting,
     reviewDeveloperInstructions,
     newToolRegistry,
@@ -811,6 +812,26 @@ reviewConnectionsForTesting client = attachedConnections client.reviewConnection
 -- orphaned with nothing durable naming them.
 reviewConnectionProcesses :: ReviewClient -> IO [ManagedProcess]
 reviewConnectionProcesses client = map (.connectionManaged) <$> attachedConnections client.reviewConnections
+
+-- | The process serving one thread, when that process is the thread's alone.
+--
+-- Under 'ProcessPerThread' a thread /is/ a process, so the action that owns
+-- the thread owns the process too, and it is recorded on that action's own
+-- durable state. That is what lets a termination or a stale-worker recovery
+-- reach it with no host left to ask: a host registers these with its own
+-- supervisor, and a supervisor that has died takes that record's usefulness
+-- with it.
+--
+-- Under 'SharedProcess' this is deliberately empty. The one process serves
+-- every thread, so recording it against a child would let that child's
+-- termination kill every sibling — the opposite of requirement 11 — and
+-- ending a thread there is 'finishReviewThread'\'s interrupt instead.
+reviewThreadOwnProcesses :: ReviewClient -> ReviewThreadId -> IO [ManagedProcess]
+reviewThreadOwnProcesses client threadId = case client.reviewBackend.backendProcessShape of
+  SharedProcess -> pure []
+  ProcessPerThread -> do
+    connection <- lookupConnection client.reviewConnections threadId.reviewThreadConnection
+    pure (maybe [] ((: []) . (.connectionManaged)) connection)
 
 -- | Where this client writes the raw traffic that belongs to no one review
 -- thread — the handshake, the diagnostics, a line it could not parse.

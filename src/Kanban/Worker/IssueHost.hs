@@ -99,6 +99,7 @@ import Kanban.Review
     interruptReview,
     reviewClientLogPath,
     reviewConnectionProcesses,
+    reviewThreadOwnProcesses,
     reviewTurnResumable,
     runCanonicalIssueReview,
     sendReviewMessage,
@@ -187,6 +188,13 @@ data IssueHostProvider = IssueHostProvider
     -- otherwise leaves them orphaned with nothing durable naming them, and
     -- nothing for a recovery pass to verify.
     providerProcesses :: IO [ManagedProcess],
+    -- | The process serving one thread, when it is that thread's alone.
+    --
+    -- Empty under a shared connection, and it must be: the child records what
+    -- this returns on its own durable state so a termination with no host
+    -- left can reach it, and a shared process recorded there would let one
+    -- child's termination kill every sibling.
+    providerThreadProcesses :: ReviewThreadId -> IO [ManagedProcess],
     -- | Where the client writes the traffic that belongs to no one thread.
     -- The host records it as its own log; each child keeps its own.
     providerLogPath :: Maybe FilePath,
@@ -208,6 +216,7 @@ embeddedIssueHostProvider client =
       providerInterruptTurn = interruptReview client,
       providerFinishThread = finishReviewThread client,
       providerProcesses = reviewConnectionProcesses client,
+      providerThreadProcesses = reviewThreadOwnProcesses client,
       providerLogPath = reviewClientLogPath client,
       providerStop = stopReviewClient client
     }
@@ -971,6 +980,30 @@ recordLiveCanonicalProcess child process = do
           workerStateLastActivity = "running canonical gate"
         }
 
+-- | Records the process serving this child's thread on the child itself,
+-- where a process-per-thread backend gives it one of its own.
+--
+-- The host registers every connection with its own supervisor, and that
+-- record is exactly as useful as the host: a host that has died is the case
+-- where a termination or a stale-worker recovery has nobody to ask for
+-- 'providerFinishThread', and those paths settle a child from its own durable
+-- state alone. A connection named only on the host's census therefore went on
+-- running past the child it served — beside a replacement action for the same
+-- issue, in the case that matters.
+--
+-- Empty under a shared connection, and that is the point: recording the one
+-- process every thread shares would make a single child's termination end all
+-- of them.
+recordThreadProcess :: IssueReviewHost -> HostChild -> ReviewThreadId -> IO ()
+recordThreadProcess host child threadId = do
+  provider <- readMVar host.hostProvider
+  processes <- maybe (pure []) (\connected -> connected.providerThreadProcesses threadId) provider
+  pids <- catMaybes <$> mapM managedProcessPid processes
+  forM_ pids $ \pid -> do
+    recordProviderIdentity child.hostChildDescriptor child.hostChildState (fromIntegral pid)
+    refreshProcessCensus child.hostChildDescriptor child.hostChildState
+    updateChildState child $ \state -> state {workerStateProviderPid = Just (fromIntegral pid)}
+
 -- | An interactive revision.
 --
 -- Nothing is journaled from here: the turn's whole account arrives as
@@ -1057,6 +1090,7 @@ routeReviewEvent host event = case event of
             -- that process with no recorded identity for any recovery pass to
             -- verify or terminate.
             registerProviderProcesses host
+            recordThreadProcess host child threadId
   ReviewStartFailed issueNumber message -> do
     -- A start that failed is a start that will never be announced, so it is
     -- the one this issue is waiting on.

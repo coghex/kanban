@@ -102,7 +102,8 @@ import Kanban.Worker
     workerDirectory,
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, withPreflightMachine)
+import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, realProcessSnapshotTool, withPreflightMachine)
+import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -602,6 +603,38 @@ lifecycleSpec = describe "one running host" $ do
                 Just task <- [issueActionTask candidate.workerDescriptorSpec.workerTask]
             ]
       owners `shouldBe` [hostIdUnderTest]
+
+  -- Round 12's blocker, at the point the record is made. A per-thread
+  -- connection is registered with the host's supervisor, and that record is
+  -- exactly as useful as the host: a host that has died is precisely when a
+  -- termination has nobody to ask for @providerFinishThread@ and settles the
+  -- child from its own durable state alone.
+  it "records a per-thread connection on the child, where a host's death cannot reach" $
+    withManagedShell "sleep 30" $ \handle -> do
+      connection <- managedProcessFor handle
+      identity <- identityForProcess handle
+      withRunningHost $ \host -> do
+        modifyMVar_ host.hostThreadProcesses (const (pure [connection]))
+        child <- publishChild host "action-1" 594 IssueRevision
+        _ <- awaitThreadFor host 594
+        -- On the child's own census, which is what a termination with no host
+        -- left to ask reads and ends.
+        recorded <-
+          awaitState
+            child
+            (\state -> identity.processIdentityPid `elem` map (.processIdentityPid) state.workerStateKnownProcesses)
+        recorded.workerStateProviderPid `shouldBe` Just identity.processIdentityPid
+
+  -- And the other shape, which must not record: one process serves every
+  -- thread, so a child holding it would end all of them when it was
+  -- terminated.
+  it "records no connection on a child whose backend shares one" $
+    withRunningHost $ \host -> do
+      child <- publishChild host "action-1" 594 IssueRevision
+      _ <- awaitThreadFor host 594
+      recorded <- awaitState child (\state -> state.workerStateReviewThread /= Nothing)
+      recorded.workerStateKnownProcesses `shouldBe` []
+      recorded.workerStateProviderPid `shouldBe` Nothing
 
   -- Round 11's first blocker. Applying a command and recording that it was
   -- applied are two steps, and a settle between them closes the journal: the
@@ -1155,6 +1188,28 @@ terminationSpec = describe "ending one child" $ do
       commands <- readReviewCommands descriptor
       length commands `shouldBe` 1
 
+  -- Round 12's blocker, end to end. The child is settled from its own
+  -- durable state because there is no host to ask, so what that state names
+  -- is the whole of what gets ended.
+  it "ends the connection its dead host's child was still holding" $
+    withManagedShell "sleep 30" $ \handle ->
+      withIssueAction $ \descriptor -> do
+        now <- getCurrentTime
+        identity <- identityForProcess handle
+        writeChildState
+          descriptor
+          (runningChildState descriptor now)
+            { -- Provably gone, which is the only thing that settles a child
+              -- here rather than queueing a command its host would read.
+              workerStateWorkerIdentity = Just departedIdentity,
+              workerStateKnownProcesses = [identity]
+            }
+        terminateWorker descriptor
+        readReviewCommands descriptor `shouldReturn` []
+        state <- decodeChildState descriptor
+        fmap (.workerStateStatus) state `shouldBe` Just (WorkerTerminal (SolveFailed "killed by user"))
+        shouldHaveBeenSwept identity.processIdentityPid "a per-thread review connection"
+
 -- ---------------------------------------------------------------------------
 -- Durable evidence (requirements 4 and 5)
 -- ---------------------------------------------------------------------------
@@ -1657,6 +1712,9 @@ data HostUnderTest = HostUnderTest
     hostHandoff :: MVar (IO ()),
     -- | What the fake provider runs inside a send, for a test to replace.
     hostSendGate :: MVar (IO ()),
+    -- | What the fake provider reports as a thread's own processes. Empty is
+    -- a shared connection; a test giving it one is the per-thread shape.
+    hostThreadProcesses :: MVar [ManagedProcess],
     -- | The host's own durable records, for a test that reads its marker.
     hostRecords :: WorkerDescriptor,
     -- | The host's own journal, where anything that outlived a child's
@@ -1693,7 +1751,10 @@ withRunningHostUsing overrideProvider body =
   -- preflight at each child's spawn boundary (requirement 7's first half runs
   -- at the press, this is the second). Stubbing that out would leave the one
   -- boundary a child can be refused at untested.
-  withPreflightMachine fullyProvisionedFakes BackendInstalled $ \workingDirectory _ ->
+  -- With a real @ps@ on it, because 'withPreflightMachine' replaces @PATH@
+  -- and a host on a machine that cannot snapshot processes records nothing —
+  -- which would make every census assertion below quietly vacuous.
+  withPreflightMachine (fullyProvisionedFakes <> [realProcessSnapshotTool]) BackendInstalled $ \workingDirectory _ ->
     withEnvironmentValue "XDG_CACHE_HOME" (takeDirectory workingDirectory) $ do
       let repository = Repository workingDirectory "coghex" "kanban"
       directory <- workerDirectory repository
@@ -1707,6 +1768,7 @@ withRunningHostUsing overrideProvider body =
       -- inside a send; a run that does neither is unaffected.
       handoffBarrier <- newMVar (pure ())
       sendGate <- newMVar (pure ())
+      threadProcesses <- newMVar []
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
       let hostSpecification =
@@ -1744,7 +1806,7 @@ withRunningHostUsing overrideProvider body =
               Nothing -> do
                 putMVar sinkCell sink
                 register (managedProcessGroup 1)
-                pure (Right (recordingProvider sendGate record))
+                pure (Right (recordingProvider sendGate threadProcesses record))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
       -- Forked rather than spawned: what is under test is the host's own
@@ -1774,6 +1836,7 @@ withRunningHostUsing overrideProvider body =
             hostCanonicalFinished = canonicalFinished,
             hostHandoff = handoffBarrier,
             hostSendGate = sendGate,
+            hostThreadProcesses = threadProcesses,
             hostRecords = hostDescriptor,
             hostEmitted = emitted
           }
@@ -1805,8 +1868,8 @@ withRunningHostUsing overrideProvider body =
 -- a fake that announced synchronously inside 'providerBeginReview' would make
 -- the settled-before-announced ordering unreachable, which is exactly the
 -- race round 1 found. Every test drives the announcement itself.
-recordingProvider :: MVar (IO ()) -> (ProviderCall -> IO ()) -> IssueHostProvider
-recordingProvider gate record =
+recordingProvider :: MVar (IO ()) -> MVar [ManagedProcess] -> (ProviderCall -> IO ()) -> IssueHostProvider
+recordingProvider gate threadProcesses record =
   IssueHostProvider
     { providerBeginReview = \issueNumber -> Right () <$ record (BeginReview issueNumber),
       providerAnswerQuestion = \requested _ -> Right () <$ record (AnswerQuestion requested),
@@ -1823,6 +1886,9 @@ recordingProvider gate record =
       -- init, which is always present, so registering it exercises the real
       -- path without spawning anything.
       providerProcesses = pure [managedProcessGroup 1],
+      -- Empty by default, which is a shared connection's answer. A test that
+      -- wants the process-per-thread shape fills this.
+      providerThreadProcesses = const (readMVar threadProcesses),
       -- The client's own transcript, which the host records as its log and
       -- which is deliberately not any child's.
       providerLogPath = Nothing,

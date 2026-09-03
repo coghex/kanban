@@ -31,7 +31,8 @@ module Spec.Support.Preflight
     readyGitHubFake,
     signedOutGitHubFake,
     hangingGitHubFake,
-    python3Fake
+    python3Fake,
+    realProcessSnapshotTool
   )
 where
 
@@ -383,3 +384,15 @@ hangingGitHubFake = ("gh", ["while :; do sleep 1; done"])
 -- interpreter has to exist for the backend check to be about the backend.
 python3Fake :: (String, [ByteString.ByteString])
 python3Fake = ("python3", ["exit 0"])
+
+-- | @ps@, passed straight through to the real one.
+--
+-- Not a fake at all, and deliberately: 'withPreflightMachine' replaces @PATH@
+-- with its own directory, so a machine without this cannot take a process
+-- snapshot — and a test asserting that a process was recorded, censused, or
+-- swept against such a machine asserts nothing, because every one of those
+-- paths treats an unavailable snapshot as "nothing to say". A real machine
+-- has @ps@; a scenario that wants one without it should drop this rather than
+-- inherit the absence by accident.
+realProcessSnapshotTool :: (String, [ByteString.ByteString])
+realProcessSnapshotTool = ("ps", ["exec /bin/ps \"$@\""])

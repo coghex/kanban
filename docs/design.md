@@ -4038,6 +4038,15 @@ The first solve/autosolve-compatible slice is implemented.
   shared connection the turn is interrupted, since dropping the bookkeeping
   alone would leave the provider working for an action already marked
   terminal.
+  Under a process-per-thread backend the thread /is/ a process, so the action
+  owning it records that process on its own durable state and not only on the
+  host's census. That is what a termination or a stale-worker recovery reads
+  when the host is the thing that has died — exactly the case where nobody is
+  left to ask for a thread to be finished — and without it the connection went
+  on running past the action it served, beside a replacement action for the
+  same issue. Under a shared connection nothing is recorded there, and must
+  not be: one process serves every thread, so a child holding it would end
+  every sibling when it was ended.
   The provider's process shape is the adapter's, unchanged: a shared-process
   backend multiplexes concurrent children through the host's one connection,
   and a process-per-thread backend gives each child its own. Ending or
