@@ -54,6 +54,12 @@ module Kanban.Action.Types
     resolvedTargetPullRequest,
     ActionTarget (..),
 
+    -- * Preconditions
+    TargetPrecondition (..),
+    targetPreconditionFor,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+
     -- * Refusals
     checkTargetRepository,
     StructuralRefusal (..),
@@ -108,11 +114,15 @@ import Kanban.ApprovalService
     approvalUnavailableMessage,
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
+import Data.List (sort)
 import Kanban.Domain
   ( BoardItem (..),
     CompletedHistory (..),
     Issue (..),
+    IssueState (..),
+    Label (..),
     PullRequest (..),
+    PullRequestState (..),
     RepoSnapshot (..),
     Repository,
     WorkflowConfig,
@@ -353,6 +363,87 @@ resolvedTargetPullRequest target = case target.resolvedTargetItem of
   PullRequestItem pullRequest -> Just pullRequest
   IssueItem _ -> Nothing
 
+-- | The exact live facts an effect was authorized against.
+--
+-- Carried on a request so the /owning action/ can enforce it, rather than only
+-- the caller that planned the effect (issue #595, requirement 8). A caller
+-- that reads a target, decides to act on it, and hands the decision to a
+-- worker has left a window in which the target can move, and a worker that
+-- mutates GitHub after it moved is the blind overwrite the requirement exists
+-- to prevent. What closes it is this record travelling with the request and
+-- being compared against the environment's own fresh read at the last point
+-- before the spawn.
+--
+-- Every field, and the labels as a sorted set because GitHub's ordering is not
+-- a fact about the item. Anything weaker would let an effect proceed against a
+-- target that changed in a way the plan was never checked against.
+data TargetPrecondition = TargetPrecondition
+  { preconditionKind :: ActionTargetKind,
+    preconditionNumber :: Int,
+    preconditionUpdatedAt :: UTCTime,
+    -- | A pull request's head commit; 'Nothing' for an issue.
+    preconditionHead :: Maybe Text,
+    preconditionLabels :: [Text],
+    -- | @open@, @closed@, or @merged@.
+    preconditionState :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | The precondition a resolved target currently satisfies.
+--
+-- Derived from the record the resolution already holds, so the caller that
+-- plans an effect and the dispatch that enforces it read the same item the
+-- same way rather than each extracting its own fields.
+targetPreconditionFor :: ResolvedTarget -> TargetPrecondition
+targetPreconditionFor resolved = case resolved.resolvedTargetItem of
+  IssueItem issue ->
+    TargetPrecondition
+      { preconditionKind = ActionTargetIssue,
+        preconditionNumber = issue.issueNumber,
+        preconditionUpdatedAt = issue.issueUpdatedAt,
+        preconditionHead = Nothing,
+        preconditionLabels = sort (map (.labelName) issue.issueLabels),
+        preconditionState = case issue.issueState of
+          IssueOpen -> "open"
+          IssueClosed -> "closed"
+      }
+  PullRequestItem pullRequest ->
+    TargetPrecondition
+      { preconditionKind = ActionTargetPullRequest,
+        preconditionNumber = pullRequest.pullRequestNumber,
+        preconditionUpdatedAt = pullRequest.pullRequestUpdatedAt,
+        preconditionHead = Just pullRequest.pullRequestHead,
+        preconditionLabels = sort (map (.labelName) pullRequest.pullRequestLabels),
+        preconditionState = case pullRequest.pullRequestState of
+          PullRequestOpen -> "open"
+          PullRequestClosed -> "closed"
+          PullRequestMerged -> "merged"
+      }
+
+-- | Whether the recorded precondition still describes the live observation.
+targetPreconditionHolds :: TargetPrecondition -> TargetPrecondition -> Bool
+targetPreconditionHolds recorded observed = normalize recorded == normalize observed
+  where
+    normalize precondition = precondition {preconditionLabels = sort precondition.preconditionLabels}
+
+-- | Which facts moved, for a refusal a person can act on.
+targetPreconditionMessage :: TargetPrecondition -> TargetPrecondition -> Text
+targetPreconditionMessage recorded observed =
+  "#"
+    <> showNumber recorded.preconditionNumber
+    <> " changed after this action was planned ("
+    <> Text.intercalate ", " differences
+    <> "); nothing was dispatched"
+  where
+    differences =
+      concat
+        [ ["state " <> recorded.preconditionState <> " → " <> observed.preconditionState | recorded.preconditionState /= observed.preconditionState],
+          ["it was updated" | recorded.preconditionUpdatedAt /= observed.preconditionUpdatedAt],
+          ["its head moved" | recorded.preconditionHead /= observed.preconditionHead],
+          ["its labels changed" | sort recorded.preconditionLabels /= sort observed.preconditionLabels],
+          ["it is a different item" | recorded.preconditionNumber /= observed.preconditionNumber || recorded.preconditionKind /= observed.preconditionKind]
+        ]
+
 -- | What a request resolved to: one item, or the repository itself for the
 -- action that observes a queue rather than a card.
 data ActionTarget
@@ -418,6 +509,12 @@ data ActionRefusal
     ActionTurnAlreadyRunning WorkflowActionKind Text
   | -- | The owning authority refused or could not be started.
     ActionDispatchFailed WorkflowActionKind Text
+  | -- | The request carried an expected target version and the live target no
+    -- longer matches it. Recorded first, observed second. Nothing was
+    -- dispatched, which is the whole point: a caller that planned against the
+    -- first reading gets to replan rather than have its plan carried out
+    -- against the second (issue #595, requirement 8).
+    ActionTargetStale WorkflowActionKind TargetPrecondition TargetPrecondition
   deriving stock (Eq, Show)
 
 actionRefusalMessage :: ActionRefusal -> Text
@@ -450,6 +547,7 @@ actionRefusalMessage refusal = case refusal of
   ActionRoutingUnavailable _ detail -> detail
   ActionTurnAlreadyRunning _ detail -> detail
   ActionDispatchFailed _ detail -> detail
+  ActionTargetStale _ recorded observed -> targetPreconditionMessage recorded observed
   where
     article ActionTargetIssue = "an issue"
     article ActionTargetPullRequest = "a pull request"
@@ -785,7 +883,13 @@ data ActionRequest = ActionRequest
     requestExistingLogPath :: Maybe FilePath,
     requestResumeProvenance :: ResumeProvenance,
     requestUserMessage :: Text,
-    requestParent :: Maybe WorkerParent
+    requestParent :: Maybe WorkerParent,
+    -- | The exact target state this request was planned against, when the
+    -- caller recorded one. Verified against the environment's own read
+    -- immediately before the launch, and 'Nothing' for a caller with no such
+    -- record — a dashboard press acts on the item the operator is looking at
+    -- and has nothing older to be stale against.
+    requestExpectedTarget :: Maybe TargetPrecondition
   }
 
 actionRequest :: WorkflowActionKind -> Text -> ActionTargetRef -> ActionRequest
@@ -800,7 +904,8 @@ actionRequest kind repository target =
       requestExistingLogPath = Nothing,
       requestResumeProvenance = ResumeAnswer,
       requestUserMessage = "",
-      requestParent = Nothing
+      requestParent = Nothing,
+      requestExpectedTarget = Nothing
     }
 
 -- | Refuse a target that belongs to a repository other than the one the

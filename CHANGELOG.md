@@ -30,10 +30,17 @@ created above it.
   Every external effect is journaled and flushed before it is attempted and
   the target is reread immediately before it, so a crash leaves an outcome
   nobody observed rather than an effect nobody recorded, and a target that
-  moved in between is a typed stale-version result with nothing mutated. The
-  run ends when the mission is terminal, paused, or blocked, and reports the
-  transitions it made. It never merges a pull request, applies a verdict
-  label, or reports an indeterminate result as a success.
+  moved in between is a typed stale-version result with nothing mutated — a
+  result the owning action enforces too, since the recorded version travels
+  with the request and is compared against the registry's own read at the last
+  instruction before it starts anything. The run's own terminal is its
+  authenticated console: a line typed there can pause or resume the mission,
+  resolve an unknown outcome, end a registered subtree, or register a child,
+  while a redirected standard input is never read. The run ends when the
+  mission is terminal, paused, or blocked, and reports the transitions it
+  made. It never merges a pull request, applies a verdict label, or reports an
+  indeterminate result as a success — and never reads a target's absence from
+  the open board as one.
 - A new `[timeouts]` key, `worker_deadline_seconds`, sets the deadline every
   action worker records at launch — solve, pull-request, issue-host,
   issue-action, and every registry-dispatched worker alike. Omitting it keeps

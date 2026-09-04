@@ -279,10 +279,17 @@ data MissionStepEvidence = MissionStepEvidence
     missionEvidenceLifecycle :: MissionStepLifecycle,
     missionEvidenceInvocation :: Maybe MissionInvocationState,
     missionEvidenceWorker :: Maybe MissionWorkerReading,
-    -- | The live target already satisfies what this step was for. Read from
-    -- the current canonical state, never restored from the mission's older
-    -- snapshot.
+    -- | Positive evidence that the live target already satisfies what this
+    -- step was for. Read from the current canonical state, never restored
+    -- from the mission's older snapshot, and never inferred from an absence:
+    -- \"the item is no longer in the open read\" is 'missionEvidenceDeparted',
+    -- because a closed issue with no pull request and a closed-unmerged pull
+    -- request both look exactly like a satisfied one to a read that only
+    -- covers open work.
     missionEvidenceSatisfied :: Maybe Text,
+    -- | The target has left the read this evidence was taken from, and this
+    -- read cannot say why. Never success.
+    missionEvidenceDeparted :: Maybe Text,
     -- | Live work on this target that this mission did not register, and
     -- cannot prove the intent of.
     missionEvidenceForeign :: Maybe Text
@@ -349,6 +356,12 @@ classifyMissionWork evidence
   | Just reading <- evidence.missionEvidenceWorker,
     Just (MissionWorkerSucceeded detail) <- reading.missionWorkerTerminal =
       MissionWorkLanded detail
+  -- Deliberately after both kinds of positive evidence and before the
+  -- invocation record. A target that has left the open read is not a target
+  -- that succeeded: requirement 9 admits a terminal external item only when it
+  -- can be classified confidently, and this read cannot tell a landed result
+  -- from a closed issue nobody solved.
+  | Just detail <- evidence.missionEvidenceDeparted = MissionWorkUnresolved detail
   | Just state <- evidence.missionEvidenceInvocation,
     not (missionInvocationResolved state) =
       MissionWorkUnresolved (unresolvedDetail state)
@@ -545,16 +558,25 @@ missionSessionSubtree snapshot root = go [root] []
     children identity =
       [node.missionSessionId | node <- nodes, node.missionSessionParent == Just identity]
 
--- | Whether any session this step registered is still live or unverifiable.
+-- | Whether any session this step registered /below its own root/ is still
+-- live or unverifiable.
 --
 -- Requirement 11's rule that an owning action stays nonterminal while a
 -- registered child survives. Unverifiable counts as surviving: a session
 -- nothing proves is gone is one a settled parent would strand.
+--
+-- Strict descendants, and that is the whole of the rule rather than a
+-- simplification of it. The step's own root session /is/ the owning action;
+-- counting it would make a step unable to settle until something else had
+-- settled the very session whose settling the step is the record of, which is
+-- a deadlock rather than a safeguard. What must outlive the parent's
+-- conclusion is a child, and a child is exactly what this counts.
 stepHasUnsettledDescendants :: MissionSnapshot -> MissionStepId -> Bool
 stepHasUnsettledDescendants snapshot step =
-  any unsettled (concatMap (missionSessionSubtree snapshot) roots)
+  any unsettled (concatMap descendants roots)
   where
     roots = [node.missionSessionId | node <- snapshot.missionSnapshotSessions, node.missionSessionStep == Just step]
+    descendants root = drop 1 (missionSessionSubtree snapshot root)
     unsettled node = missionSessionDisposition node /= MissionSessionSettled
 
 -- ---------------------------------------------------------------------------

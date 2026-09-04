@@ -111,7 +111,7 @@ data MissionTargetVersion = MissionTargetVersion
     missionVersionNumber :: Int,
     -- | The item's own last-update instant, which is what moves for a body
     -- edit, a label change, or a comment.
-    missionVersionUpdatedAt :: Maybe UTCTime,
+    missionVersionUpdatedAt :: UTCTime,
     -- | A pull request's head commit. 'Nothing' for an issue.
     missionVersionHead :: Maybe Text,
     missionVersionLabels :: [Text],
@@ -155,12 +155,11 @@ missionStaleVersionMessage stale =
     differences =
       concat
         [ ["state " <> recorded.missionVersionState <> " → " <> observed.missionVersionState | recorded.missionVersionState /= observed.missionVersionState],
-          ["updated " <> renderInstant recorded.missionVersionUpdatedAt <> " → " <> renderInstant observed.missionVersionUpdatedAt | recorded.missionVersionUpdatedAt /= observed.missionVersionUpdatedAt],
+          ["it was updated" | recorded.missionVersionUpdatedAt /= observed.missionVersionUpdatedAt],
           ["head " <> renderText recorded.missionVersionHead <> " → " <> renderText observed.missionVersionHead | recorded.missionVersionHead /= observed.missionVersionHead],
           ["labels changed" | sort recorded.missionVersionLabels /= sort observed.missionVersionLabels],
           ["a different item" | recorded.missionVersionNumber /= observed.missionVersionNumber || recorded.missionVersionKind /= observed.missionVersionKind]
         ]
-    renderInstant = maybe "unknown" (Text.pack . show)
     renderText = maybe "none" id
 
 -- | What the effect was going to be.

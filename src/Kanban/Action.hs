@@ -93,6 +93,12 @@ module Kanban.Action
     resolvedTargetPullRequest,
     ActionTarget (..),
 
+    -- * Preconditions
+    TargetPrecondition (..),
+    targetPreconditionFor,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+
     -- * Refusals
     StructuralRefusal (..),
     structuralRefusalMessage,

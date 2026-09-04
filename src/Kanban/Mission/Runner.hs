@@ -40,12 +40,17 @@ module Kanban.Mission.Runner
     runMissionMode,
     runMissionWith,
     liveMissionDriver,
+    drainMissionConsole,
+    drainMissionConsoleWith,
+    missionVersionOf,
+    preconditionOf,
     missionRunnerPollMicros,
     missionRunnerIterationBudget,
   )
 where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (IOException, try)
 import Data.List (find)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
@@ -54,34 +59,38 @@ import Data.Time (getCurrentTime)
 import Kanban.Action
   ( ActionEnvironment (..),
     ActionHandle,
-    ActionRefusal,
     ActionRequest (..),
+    ActionTarget (..),
     ActionTargetKind (..),
     ActionTargetRef (..),
     CatalogHistory (..),
     TargetCatalog (..),
+    TargetPrecondition (..),
     actionHandleWorker,
     actionKindDecodeErrorMessage,
+    actionRefusalMessage,
     actionRequest,
     decodeWorkflowActionKind,
     dispatchAction,
+    resolveActionTarget,
     settledWorkerFailure,
+    targetPreconditionFor,
   )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
 import Kanban.Domain
   ( Issue (..),
-    IssueState (..),
     Label (..),
     PullRequest (..),
-    PullRequestState (..),
     RepoSnapshot (..),
     Repository (..),
     WorkflowConfig (..),
   )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, newGhFetchGuard, newGhRecordLock)
+import Kanban.Mission.Control (parseMissionConsoleCommand, submitMissionCommand)
 import Kanban.Mission.Controller
-  ( MissionDispatchAccepted (..),
+  ( MissionController (..),
+    MissionDispatchAccepted (..),
     MissionDispatchRequest (..),
     MissionDriver (..),
     MissionInventory (..),
@@ -95,7 +104,7 @@ import Kanban.Mission.Controller
     stopMissionController,
   )
 import Kanban.Mission.Invocation (MissionTargetVersion (..))
-import Kanban.Mission.Paths (MissionStore, openMissionStore)
+import Kanban.Mission.Paths (openMissionStore)
 import Kanban.Mission.Reconcile
   ( MissionContinuation (..),
     MissionHalt,
@@ -108,16 +117,20 @@ import Kanban.Mission.Reconcile
     missionFailureFromRefusal,
     missionHaltMessage,
   )
-import Kanban.Mission.Store (listMissions)
+import Kanban.Mission.Store (listMissions, recordMissionEvent)
 import Kanban.Mission.Types
-  ( MissionId (..),
+  ( MissionEvent (..),
+    MissionId (..),
+    MissionObservedOutcome (..),
     MissionPlanStep (..),
     MissionSessionId (..),
     MissionStepRecord (..),
     MissionTarget (..),
     MissionTargetKind (..),
+    MissionTerminalObservation (..),
   )
 import Kanban.Models (loadModelRoster)
+import Kanban.Mission.Paths (MissionStore (..))
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..))
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
@@ -134,6 +147,7 @@ import Kanban.Worker
     readWorkerState,
     terminateWorker,
   )
+import System.IO (Handle, hGetLine, hIsTerminalDevice, hReady, stdin)
 
 -- | What one foreground run did, in the order it did it.
 data MissionRunReport = MissionRunReport
@@ -209,6 +223,11 @@ runMissionMode options config repository identifier
         Left detail -> pure (Left detail)
         Right store ->
           runMissionWith
+            -- This process's own terminal is the authenticated console
+            -- requirement 14 names. 'drainMissionConsole' is what decides
+            -- whether this handle qualifies; a redirected stdin is
+            -- unauthenticated process input and is never read.
+            (Just stdin)
             store
             repository
             (MissionId (Text.strip identifier))
@@ -218,8 +237,8 @@ runMissionMode options config repository identifier
 --
 -- The seam a fixture uses: everything below this point is the controller's own
 -- progression, and everything the driver does is the outside world.
-runMissionWith :: MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either Text MissionRunReport)
-runMissionWith store repository mission buildDriver = do
+runMissionWith :: Maybe Handle -> MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either Text MissionRunReport)
+runMissionWith console store repository mission buildDriver = do
   started <- startMissionController store repository mission buildDriver
   case started of
     Left refusal -> pure (Left (missionStartRefusalMessage (refusal :: MissionStartRefusal)))
@@ -231,6 +250,7 @@ runMissionWith store repository mission buildDriver = do
     loop controller remaining transitions
       | remaining <= 0 = pure (concluded transitions (Left budgetExhausted))
       | otherwise = do
+          mapM_ (\handle -> drainMissionConsole handle controller) console
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced transition -> loop controller (remaining - 1) (transition : transitions)
@@ -260,12 +280,15 @@ liveMissionDriver options config repository store _ =
       { missionDriverInventory = inventory,
         missionDriverObserveTarget = observeTarget,
         missionDriverStepEvidence = stepEvidence,
+        missionDriverObserveSession = observeSession,
         missionDriverDispatch = dispatch,
         missionDriverTerminate = terminate
       }
   where
     workflowConfig :: WorkflowConfig
     workflowConfig = config.resolvedWorkflow
+
+    identity = repository.repositoryOwner <> "/" <> repository.repositoryName
 
     -- Requirement 17: everything on this machine, for validation and conflict
     -- detection, and nothing that selects.
@@ -294,58 +317,30 @@ liveMissionDriver options config repository store _ =
           repository
       pure (either (Left . missionFailureFromProviderError) (Right . (.githubSnapshot)) fetched)
 
+    catalogOf snapshot =
+      TargetCatalog
+        { catalogRepository = repository,
+          catalogIssues = snapshot.snapshotIssues,
+          catalogPullRequests = snapshot.snapshotPullRequests,
+          catalogHistory = CatalogHistoryAbsent
+        }
+
+    -- The live reading of one target, taken through the registry's own
+    -- resolution and its own precondition derivation.
+    --
+    -- Shared rather than re-extracted, so the record the controller journals
+    -- and the record `dispatchProviderTurn` compares against at the launch
+    -- boundary are the same reading of the same item. Two derivations here
+    -- would be two chances to disagree about what "unchanged" means.
     observeTarget target = do
       board <- readBoard
       pure $ case board of
         Left failure -> Left (missionStepFailureText failure)
-        Right snapshot -> versionOf target snapshot
-
-    missionStepFailureText failure = case failure of
-      MissionFailureAuthentication detail -> detail
-      MissionFailureExecutable detail -> detail
-      MissionFailureCapacity detail -> detail
-      MissionFailureConfiguration detail -> detail
-      MissionFailureDeadline detail -> detail
-      MissionFailureOutcomeUnknown detail -> detail
-      MissionFailureGeneric detail -> detail
-      MissionFailureStaleVersion _ -> "the target's live state could not be established"
-
-    versionOf target snapshot = case target.missionTargetKind of
-      MissionTargetIssue -> case find ((== target.missionTargetNumber) . (.issueNumber)) snapshot.snapshotIssues of
-        Nothing -> Left (missing target)
-        Just issue ->
-          Right
-            MissionTargetVersion
-              { missionVersionKind = MissionTargetIssue,
-                missionVersionNumber = issue.issueNumber,
-                missionVersionUpdatedAt = Just issue.issueUpdatedAt,
-                missionVersionHead = Nothing,
-                missionVersionLabels = map (.labelName) issue.issueLabels,
-                missionVersionState = case issue.issueState of
-                  IssueOpen -> "open"
-                  IssueClosed -> "closed"
-              }
-      MissionTargetPullRequest ->
-        case find ((== target.missionTargetNumber) . (.pullRequestNumber)) snapshot.snapshotPullRequests of
-          Nothing -> Left (missing target)
-          Just pullRequest ->
-            Right
-              MissionTargetVersion
-                { missionVersionKind = MissionTargetPullRequest,
-                  missionVersionNumber = pullRequest.pullRequestNumber,
-                  missionVersionUpdatedAt = Just pullRequest.pullRequestUpdatedAt,
-                  missionVersionHead = Just pullRequest.pullRequestHead,
-                  missionVersionLabels = map (.labelName) pullRequest.pullRequestLabels,
-                  missionVersionState = case pullRequest.pullRequestState of
-                    PullRequestOpen -> "open"
-                    PullRequestClosed -> "closed"
-                    PullRequestMerged -> "merged"
-                }
-
-    missing target =
-      "#"
-        <> Text.pack (show target.missionTargetNumber)
-        <> " is not in this repository's open read; its live state cannot be established"
+        Right snapshot -> case resolveActionTarget workflowConfig (catalogOf snapshot) identity (targetRefFor target) of
+          Left refusal -> Left (actionRefusalMessage refusal)
+          Right (ActionTargetRepositoryWide _) ->
+            Left ("#" <> Text.pack (show target.missionTargetNumber) <> " resolved to the repository rather than an item")
+          Right (ActionTargetItem resolved) -> Right (missionVersionOf (targetPreconditionFor resolved))
 
     -- One step's evidence.
     --
@@ -360,7 +355,7 @@ liveMissionDriver options config repository store _ =
       case reading of
         Just ours
           | ours.missionWorkerLive ->
-              pure (Right (evidenceOf record (Just ours) Nothing foreignWork))
+              pure (Right (evidenceOf record (Just ours) Nothing Nothing foreignWork))
         _ -> do
           board <- readBoard
           pure $ case board of
@@ -370,9 +365,10 @@ liveMissionDriver options config repository store _ =
             -- mission for the duration of somebody's network outage.
             Left failure -> Left (missionStepFailureText failure)
             Right snapshot ->
-              Right (evidenceOf record reading (externallySatisfied step snapshot) foreignWork)
+              let (satisfied, departed) = externalState step snapshot
+               in Right (evidenceOf record reading satisfied departed foreignWork)
 
-    evidenceOf record reading satisfied foreignWork =
+    evidenceOf record reading satisfied departed foreignWork =
       MissionStepEvidence
         { missionEvidenceStep = record.missionStepRecordId,
           missionEvidenceLifecycle = record.missionStepRecordLifecycle,
@@ -380,6 +376,7 @@ liveMissionDriver options config repository store _ =
           missionEvidenceInvocation = Nothing,
           missionEvidenceWorker = reading,
           missionEvidenceSatisfied = satisfied,
+          missionEvidenceDeparted = departed,
           missionEvidenceForeign = foreignWork
         }
 
@@ -409,12 +406,61 @@ liveMissionDriver options config repository store _ =
                     missionWorkerProviderSession = recorded.workerStateSessionId
                   }
 
+    -- Whether one registered session has ended, for the accounting
+    -- requirement 11 asks of a subtree.
+    --
+    -- A session identifier is a worker identifier, so this is that worker's
+    -- own durable state and nothing else. A worker whose record has been
+    -- collected is gone; a worker still running is not; and a worker whose
+    -- state will not decode is neither, which keeps the node unsettled and the
+    -- parent nonterminal.
+    observeSession session = do
+      workers <- discoverWorkerHistory repository
+      case find ((== session.unMissionSessionId) . workerIdentity) workers of
+        Nothing -> do
+          now <- getCurrentTime
+          pure
+            ( Right
+                ( Just
+                    MissionTerminalObservation
+                      { missionObservationAt = now,
+                        missionObservationOutcome = MissionObservedExit 0,
+                        missionObservationDetail = Just "its worker record has been collected"
+                      }
+                )
+            )
+        Just descriptor -> do
+          state <- readWorkerState descriptor
+          now <- getCurrentTime
+          pure $ case state of
+            Left _ -> Right Nothing
+            Right recorded -> case recorded.workerStateStatus of
+              WorkerStarting -> Right Nothing
+              WorkerRunning -> Right Nothing
+              WorkerOrphaned _ -> Right Nothing
+              WorkerTerminal outcome ->
+                Right
+                  ( Just
+                      MissionTerminalObservation
+                        { missionObservationAt = now,
+                          missionObservationOutcome = case outcome of
+                            SolveCompleted -> MissionObservedExit 0
+                            _ -> MissionObservedExit 1,
+                          missionObservationDetail = Just (terminalDetail outcome)
+                        }
+                  )
+
+    terminalDetail outcome = case outcome of
+      SolveCompleted -> "it completed"
+      SolveNeedsInput detail -> "it stopped to ask: " <> detail
+      SolveFailed detail -> detail
+
     -- Live work on this step's target that this mission never registered.
     --
     -- Read from this machine's own worker records rather than from GitHub, so
     -- it costs nothing and stays true while the board is not being refreshed.
-    -- Its whole job is to make requirement 9's \"incompatible or conflicting
-    -- live work\" a state the controller can observe rather than one it takes
+    -- Its whole job is to make requirement 9's "incompatible or conflicting
+    -- live work" a state the controller can observe rather than one it takes
     -- on trust.
     --
     -- Two narrowings matter, and both were the difference between a real
@@ -437,10 +483,10 @@ liveMissionDriver options config repository store _ =
             ]
         pure $ case mapMaybe id candidates of
           [] -> Nothing
-          (identity : _) ->
+          (found : _) ->
             Just
               ( "worker "
-                  <> identity
+                  <> found
                   <> " is live against #"
                   <> Text.pack (show target.missionTargetNumber)
                   <> " and this mission did not start it"
@@ -482,30 +528,39 @@ liveMissionDriver options config repository store _ =
       WorkerStarting -> Nothing
       WorkerRunning -> Nothing
 
-    -- Whether the live board already shows what this step was for.
+    -- What the live board says about this step's target: positive evidence
+    -- that it landed, and separately whether it has left the read at all.
     --
-    -- Deliberately narrow, and never inferred from a label the mission's own
-    -- older snapshot held: a solve is satisfied when an open pull request
-    -- links its issue, a review is satisfied when the pull request carries a
-    -- configured verdict label, and any target that has left the open read
-    -- entirely is satisfied because it is no longer work this mission can do.
-    externallySatisfied step snapshot = case step.missionPlanStepTarget of
-      Nothing -> Nothing
+    -- The separation is the point. An open read covers open work, so a closed
+    -- issue nobody solved, a closed-unmerged pull request, and a genuinely
+    -- finished item are all equally absent from it — and reading that absence
+    -- as success is how a mission would report work nobody did. Only positive
+    -- evidence satisfies a step: an open pull request that links the issue a
+    -- solve was for, or a configured verdict label on the pull request a
+    -- review was for. Absence is handed on as a departure, which the
+    -- classification treats as an outcome nobody can settle from here.
+    externalState step snapshot = case step.missionPlanStepTarget of
+      Nothing -> (Nothing, Nothing)
       Just target -> case target.missionTargetKind of
         MissionTargetIssue
           | not (any ((== target.missionTargetNumber) . (.issueNumber)) snapshot.snapshotIssues) ->
-              Just ("#" <> Text.pack (show target.missionTargetNumber) <> " has left the open read")
+              (Nothing, Just (departedMessage target))
           | solving step,
             (number : _) <- linkedPullRequests target snapshot ->
-              Just ("PR #" <> Text.pack (show number) <> " already links #" <> Text.pack (show target.missionTargetNumber))
-          | otherwise -> Nothing
+              (Just ("PR #" <> Text.pack (show number) <> " already links #" <> Text.pack (show target.missionTargetNumber)), Nothing)
+          | otherwise -> (Nothing, Nothing)
         MissionTargetPullRequest ->
           case find ((== target.missionTargetNumber) . (.pullRequestNumber)) snapshot.snapshotPullRequests of
-            Nothing -> Just ("PR #" <> Text.pack (show target.missionTargetNumber) <> " has left the open read")
+            Nothing -> (Nothing, Just (departedMessage target))
             Just pullRequest
               | reviewing step, any verdictLabel pullRequest.pullRequestLabels ->
-                  Just ("PR #" <> Text.pack (show target.missionTargetNumber) <> " already carries a verdict")
-              | otherwise -> Nothing
+                  (Just ("PR #" <> Text.pack (show target.missionTargetNumber) <> " already carries a verdict"), Nothing)
+              | otherwise -> (Nothing, Nothing)
+
+    departedMessage target =
+      "#"
+        <> Text.pack (show target.missionTargetNumber)
+        <> " has left this repository's open read, which cannot say whether the work landed"
 
     solving step = step.missionPlanStepAction `elem` ["solve_issue", "autosolve_issue"]
     reviewing step = step.missionPlanStepAction == "review_pull_request"
@@ -517,8 +572,13 @@ liveMissionDriver options config repository store _ =
         target.missionTargetNumber `elem` pullRequest.pullRequestLinkedIssues
       ]
 
-    -- The effect itself. Requirement 8's recheck happens in the controller,
-    -- immediately before this is called and against this same live read.
+    -- The effect itself.
+    --
+    -- The recorded precondition travels with the request, so the registry
+    -- verifies it against this very read immediately before the spawn
+    -- (requirement 8). The controller's own recheck happens a moment earlier
+    -- and against a read of its own; both are cheap, and the one that matters
+    -- is the one nearest the effect.
     dispatch request = case decodeWorkflowActionKind request.missionDispatchStep.missionPlanStepAction of
       Left decodeError -> pure (Left (MissionFailureConfiguration (actionKindDecodeErrorMessage decodeError)))
       Right kind -> do
@@ -534,32 +594,23 @@ liveMissionDriver options config repository store _ =
                       actionWorkflowConfig = workflowConfig,
                       actionConfigPath = options.optionConfig,
                       actionRoster = roster,
-                      actionCatalog =
-                        TargetCatalog
-                          { catalogRepository = repository,
-                            catalogIssues = snapshot.snapshotIssues,
-                            catalogPullRequests = snapshot.snapshotPullRequests,
-                            catalogHistory = CatalogHistoryAbsent
-                          },
+                      actionCatalog = catalogOf snapshot,
                       actionNow = now,
                       actionWorkerDeadline =
                         WorkerDeadline config.resolvedTimeouts.timeoutsWorkerDeadlineSeconds
                     }
-                identity = repository.repositoryOwner <> "/" <> repository.repositoryName
-                base = actionRequest kind identity (targetRefFor request)
+                base = actionRequest kind identity (maybe TargetRepositoryWide targetRefFor request.missionDispatchTarget)
                 -- Requirement 13: the recorded session is resumed when there
                 -- is one, and a fresh session is briefed rather than handed
                 -- the old session's identity.
-                requested = case request.missionDispatchContinuation of
+                continued = case request.missionDispatchContinuation of
                   MissionResumeSession session ->
                     base {requestExistingSession = Just session, requestResumeProvenance = ResumeAnswer}
                   MissionFreshSession brief ->
                     base {requestUserMessage = brief, requestResumeProvenance = ResumeAnswer}
+                requested = continued {requestExpectedTarget = preconditionOf <$> request.missionDispatchVersion}
             dispatched <- dispatchAction environment requested
-            pure (either (Left . refusalFailure) (Right . acceptance) dispatched)
-
-    refusalFailure :: ActionRefusal -> MissionStepFailure
-    refusalFailure = missionFailureFromRefusal
+            pure (either (Left . missionFailureFromRefusal) (Right . acceptance) dispatched)
 
     acceptance :: ActionHandle -> MissionDispatchAccepted
     acceptance handle = case actionHandleWorker handle of
@@ -578,16 +629,6 @@ liveMissionDriver options config repository store _ =
             missionAcceptedDetail = "this action owns no worker"
           }
 
-    targetRefFor request = case request.missionDispatchTarget of
-      Nothing -> TargetRepositoryWide
-      Just target ->
-        TargetByKind
-          ( case target.missionTargetKind of
-              MissionTargetIssue -> ActionTargetIssue
-              MissionTargetPullRequest -> ActionTargetPullRequest
-          )
-          target.missionTargetNumber
-
     -- Requirement 11: the controller has already journaled which sessions
     -- these are, and they are already the complete registered subtree; this
     -- ends exactly those and nothing else.
@@ -599,3 +640,142 @@ liveMissionDriver options config repository store _ =
     endOne workers session = case find ((== session.unMissionSessionId) . workerIdentity) workers of
       Nothing -> pure ()
       Just descriptor -> terminateWorker descriptor
+
+-- | Submits every complete line waiting at the runner's own console.
+--
+-- Requirement 14's boundary, and it is a property of the handle rather than of
+-- the words on it. A terminal attached to this process is the console the
+-- operator is sitting at; a pipe, a file, or @\/dev\/null@ is some other
+-- process's output, and reading a command off one of those would be exactly
+-- the unauthenticated process input the requirement excludes. So a handle that
+-- is not a terminal is not read at all, and this returns without consuming a
+-- byte of it.
+--
+-- What is read goes out through the endpoint the controller /owns/, which is
+-- the only endpoint holding this run's secret, so a console line is
+-- authenticated by construction rather than by a check further down.
+--
+-- Non-blocking: only lines already buffered are taken, so a mission with a
+-- live worker and a silent operator advances at its own pace. A line that does
+-- not parse is journaled as a rejected command and consumes nothing else.
+drainMissionConsole :: Handle -> MissionController -> IO ()
+drainMissionConsole handle = drainMissionConsoleWith (hIsTerminalDevice handle) handle
+
+-- | 'drainMissionConsole' with the console test injected.
+--
+-- The seam a fixture uses, and the reason it is a seam: the property worth
+-- testing is what the runner does with a line once it decides the handle is a
+-- console, and arranging a real terminal to say so costs a pseudo-terminal.
+-- Production supplies 'hIsTerminalDevice' and nothing else does.
+drainMissionConsoleWith :: IO Bool -> Handle -> MissionController -> IO ()
+drainMissionConsoleWith isConsole handle controller = do
+  usable <- try @IOException isConsole
+  case usable of
+    Right True -> drain (0 :: Int)
+    _ -> pure ()
+  where
+    -- Bounded, so a console producing lines faster than the controller applies
+    -- them cannot keep an iteration from ever happening.
+    drain taken
+      | taken >= missionConsoleBatch = pure ()
+      | otherwise = do
+          available <- try @IOException (hReady handle)
+          case available of
+            Right True -> do
+              line <- try @IOException (Text.pack <$> hGetLine handle)
+              case line of
+                Left _ -> pure ()
+                Right typed -> do
+                  submit typed
+                  drain (taken + 1)
+            _ -> pure ()
+    submit typed = do
+      commandId <- newConsoleCommandId
+      case parseMissionConsoleCommand controller.missionControllerMission typed of
+        Left detail -> reportUnparsed commandId typed detail
+        Right payload -> do
+          submitted <- submitMissionCommand controller.missionControllerControl commandId payload
+          either (reportUnparsed commandId typed) pure submitted
+    -- A line the console could not turn into a command still has to leave a
+    -- trace: the operator typed it, and a silently dropped instruction is
+    -- indistinguishable from one that was carried out.
+    reportUnparsed commandId typed detail = do
+      now <- getCurrentTime
+      _ <-
+        recordMissionEvent
+          controller.missionControllerStore
+          MissionEvent
+            { missionEventMission = controller.missionControllerMission,
+              missionEventRepository = controller.missionControllerStore.missionStoreRepository,
+              missionEventAt = now,
+              missionEventStep = Nothing,
+              missionEventSession = Nothing,
+              missionEventKind = "console_rejected",
+              missionEventDetail = Just (commandId <> ": " <> Text.strip typed <> " — " <> detail)
+            }
+      pure ()
+
+-- | How many console lines one iteration will take.
+missionConsoleBatch :: Int
+missionConsoleBatch = 16
+
+newConsoleCommandId :: IO Text
+newConsoleCommandId = do
+  now <- getCurrentTime
+  pure ("console-" <> Text.pack (filter (`notElem` (" :-." :: String)) (show now)))
+
+-- | The action-layer target reference one mission target names.
+targetRefFor :: MissionTarget -> ActionTargetRef
+targetRefFor target =
+  TargetByKind
+    ( case target.missionTargetKind of
+        MissionTargetIssue -> ActionTargetIssue
+        MissionTargetPullRequest -> ActionTargetPullRequest
+    )
+    target.missionTargetNumber
+
+-- | The durable record of a precondition, and the precondition it records.
+--
+-- Two shapes rather than one because they answer to different owners: the
+-- durable one is the mission store's schema and outlives every release that
+-- reads it, and the other is the registry's vocabulary for a value that never
+-- reaches a file. The conversions are total in both directions, which is what
+-- makes the pair a spelling difference rather than a second opinion.
+missionVersionOf :: TargetPrecondition -> MissionTargetVersion
+missionVersionOf precondition =
+  MissionTargetVersion
+    { missionVersionKind = case precondition.preconditionKind of
+        ActionTargetIssue -> MissionTargetIssue
+        ActionTargetPullRequest -> MissionTargetPullRequest,
+      missionVersionNumber = precondition.preconditionNumber,
+      missionVersionUpdatedAt = precondition.preconditionUpdatedAt,
+      missionVersionHead = precondition.preconditionHead,
+      missionVersionLabels = precondition.preconditionLabels,
+      missionVersionState = precondition.preconditionState
+    }
+
+preconditionOf :: MissionTargetVersion -> TargetPrecondition
+preconditionOf version =
+  TargetPrecondition
+    { preconditionKind = case version.missionVersionKind of
+        MissionTargetIssue -> ActionTargetIssue
+        MissionTargetPullRequest -> ActionTargetPullRequest,
+      preconditionNumber = version.missionVersionNumber,
+      preconditionUpdatedAt = version.missionVersionUpdatedAt,
+      preconditionHead = version.missionVersionHead,
+      preconditionLabels = version.missionVersionLabels,
+      preconditionState = version.missionVersionState
+    }
+
+-- | The one place a step failure becomes the sentence a caller who wanted a
+-- reading gets instead.
+missionStepFailureText :: MissionStepFailure -> Text
+missionStepFailureText failure = case failure of
+  MissionFailureAuthentication detail -> detail
+  MissionFailureExecutable detail -> detail
+  MissionFailureCapacity detail -> detail
+  MissionFailureConfiguration detail -> detail
+  MissionFailureDeadline detail -> detail
+  MissionFailureOutcomeUnknown detail -> detail
+  MissionFailureGeneric detail -> detail
+  MissionFailureStaleVersion _ -> "the target's live state could not be established"

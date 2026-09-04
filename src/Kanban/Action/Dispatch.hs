@@ -216,6 +216,16 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
   -- crosses, and the repository it crosses into is this environment's.
   ActionTargetItem resolved
     | Left refusal <- checkedAgainst environment plan -> pure (Left refusal)
+    -- Requirement 8's boundary, and it is here rather than at the caller
+    -- because here is the last instruction before the spawn. The resolution
+    -- this dispatch is about to act on comes from /this/ environment's read,
+    -- so comparing the caller's recorded expectation against it is a fresh
+    -- reread of the live target — and a mismatch dispatches nothing at all
+    -- rather than handing a worker a plan the target has already outgrown.
+    | Just recorded <- request.requestExpectedTarget,
+      let observed = targetPreconditionFor resolved,
+      not (targetPreconditionHolds recorded observed) ->
+        pure (Left (ActionTargetStale plan.planKind recorded observed))
     | otherwise -> do
         capability <- actionCapabilityIO environment.actionRepository environment.actionRoster request.requestRecordedAssignment plan.planRoute
         case capability of

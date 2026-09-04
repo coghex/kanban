@@ -37,6 +37,8 @@ import Kanban.Action
     ActionRefusal (..),
     WorkflowActionKind (SolveIssue),
     settledWorkerFailure,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
   )
 import Kanban.CLI (LaunchMode (..), Options (..), launchMode)
 import Data.Aeson (eitherDecode, encode)
@@ -61,6 +63,7 @@ import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Process (deadlineFixtureSpec)
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
+import System.IO (Handle, IOMode (ReadMode), withFile)
 import Test.Hspec
 
 spec :: Spec
@@ -75,6 +78,8 @@ spec = describe "the foreground mission runner" $ do
   continuationSpec
   commandSpec
   childRequestSpec
+  consoleSpec
+  preconditionBoundarySpec
   deadlineSpec
   failureVocabularySpec
 
@@ -208,7 +213,7 @@ issueVersion labels =
   MissionTargetVersion
     { missionVersionKind = MissionTargetIssue,
       missionVersionNumber = 844,
-      missionVersionUpdatedAt = Just fixedTime,
+      missionVersionUpdatedAt = fixedTime,
       missionVersionHead = Nothing,
       missionVersionLabels = labels,
       missionVersionState = "open"
@@ -218,9 +223,13 @@ issueVersion labels =
 data Stage = Stage
   { stageTargets :: IORef [Either Text MissionTargetVersion],
     stageEvidence :: IORef (MissionStepEvidence -> MissionStepEvidence),
-    stageDispatchResult :: IORef (Either MissionStepFailure MissionDispatchAccepted),
+    -- | A function of the request, so a child request produces a session of
+    -- its own rather than the one its parent already registered.
+    stageDispatchResult :: IORef (MissionDispatchRequest -> Either MissionStepFailure MissionDispatchAccepted),
     stageDispatches :: IORef [MissionDispatchRequest],
-    stageTerminated :: IORef [[MissionSessionId]]
+    stageTerminated :: IORef [[MissionSessionId]],
+    -- | The sessions the driver will report as ended.
+    stageSessions :: IORef [MissionSessionId]
   }
 
 newStage :: IO Stage
@@ -228,18 +237,29 @@ newStage =
   Stage
     <$> newIORef (repeat (Right (issueVersion ["reviewed:approve"])))
     <*> newIORef id
-    <*> newIORef (Right acceptedDispatch)
+    <*> newIORef (Right . acceptedDispatch)
+    <*> newIORef []
     <*> newIORef []
     <*> newIORef []
 
-acceptedDispatch :: MissionDispatchAccepted
-acceptedDispatch =
+endedObservation :: MissionTerminalObservation
+endedObservation =
+  MissionTerminalObservation
+    { missionObservationAt = fixedTime,
+      missionObservationOutcome = MissionObservedExit 0,
+      missionObservationDetail = Just "it completed"
+    }
+
+acceptedDispatch :: MissionDispatchRequest -> MissionDispatchAccepted
+acceptedDispatch request =
   MissionDispatchAccepted
-    { missionAcceptedSession = MissionSessionId "solve-844-0001",
+    { missionAcceptedSession = MissionSessionId session,
       missionAcceptedProviderSession = Just "provider-1",
-      missionAcceptedWorker = "solve-844-0001",
+      missionAcceptedWorker = session,
       missionAcceptedDetail = "dispatched"
     }
+  where
+    session = request.missionDispatchStep.missionPlanStepId.unMissionStepId <> "-0001"
 
 stagedDriver :: Stage -> MissionStore -> MissionId -> IO MissionDriver
 stagedDriver stage _ _ =
@@ -261,13 +281,17 @@ stagedDriver stage _ _ =
                         missionEvidenceInvocation = Nothing,
                         missionEvidenceWorker = Nothing,
                         missionEvidenceSatisfied = Nothing,
+                        missionEvidenceDeparted = Nothing,
                         missionEvidenceForeign = Nothing
                       }
                 )
             ),
+        missionDriverObserveSession = \session -> do
+          settled <- readIORef stage.stageSessions
+          pure (Right (if session `elem` settled then Just endedObservation else Nothing)),
         missionDriverDispatch = \request -> do
           atomicModifyIORef' stage.stageDispatches (\seen -> (seen <> [request], ()))
-          readIORef stage.stageDispatchResult,
+          ($ request) <$> readIORef stage.stageDispatchResult,
         missionDriverTerminate = \sessions -> do
           atomicModifyIORef' stage.stageTerminated (\seen -> (seen <> [sessions], ()))
           pure (Right ())
@@ -540,6 +564,7 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
               missionEvidenceInvocation = Nothing,
               missionEvidenceWorker = Nothing,
               missionEvidenceSatisfied = Nothing,
+              missionEvidenceDeparted = Nothing,
               missionEvidenceForeign = Nothing
             }
         reading live compatible conclusion =
@@ -596,6 +621,80 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
       readIORef stage.stageDispatches `shouldReturn` []
       snapshot <- currentSnapshot store
       stepLifecycle snapshot `shouldBe` Just MissionStepRunning
+
+  -- Requirement 11's accounting reads the session tree and nothing else, so a
+  -- worker recorded only as an identifier on a step record is a worker no
+  -- child can name as its parent, no termination can reach, and no parent has
+  -- to wait for.
+  it "registers the session a dispatch produced in the mission's own tree" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      _ <- oneIteration store stage
+      snapshot <- currentSnapshot store
+      map (.missionSessionId) snapshot.missionSnapshotSessions
+        `shouldBe` [MissionSessionId "solve-844-0001"]
+      map (.missionSessionParent) snapshot.missionSnapshotSessions `shouldBe` [Nothing]
+      map (.missionSessionStep) snapshot.missionSnapshotSessions `shouldBe` [Just theStep]
+      map (.missionSessionProviderSessionId) snapshot.missionSnapshotSessions `shouldBe` [Just "provider-1"]
+      -- Freshly registered and never observed, so nothing proves it is gone.
+      map missionSessionDisposition snapshot.missionSnapshotSessions
+        `shouldBe` [MissionSessionUnverifiable]
+
+  -- The other half of the same rule: the tree has to be able to reach a
+  -- settled state, and only an observation can put it there.
+  it "records the end of a registered session when its worker settles" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] sessions) $ \store stage -> do
+      writeIORef stage.stageSessions [MissionSessionId "solve-844-0001"]
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionSessionEnded session detail) -> do
+          session `shouldBe` MissionSessionId "solve-844-0001"
+          detail `shouldBe` "it completed"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      snapshot <- currentSnapshot store
+      map missionSessionDisposition snapshot.missionSnapshotSessions `shouldBe` [MissionSessionSettled]
+
+  -- Requirement 4's blocker, stated as a loop that does not happen: a running
+  -- step whose worker cannot be found anywhere and whose result did not land
+  -- is an outcome nobody observed, not a step to wait on for ever.
+  it "stops waiting on a running step nothing can be found for" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+          step `shouldBe` theStep
+          Text.unpack detail `shouldSatisfy` isInfixOf "no live worker"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  -- An open read covers open work, so a closed issue nobody solved and a
+  -- finished one are equally absent from it. Reading that absence as success
+  -- is how a mission would report work nobody did.
+  it "reads a target that left the open read as unresolved, never as landed" $ do
+    let base =
+          MissionStepEvidence
+            { missionEvidenceStep = theStep,
+              missionEvidenceLifecycle = MissionStepRunning,
+              missionEvidenceInvocation = Nothing,
+              missionEvidenceWorker = Nothing,
+              missionEvidenceSatisfied = Nothing,
+              missionEvidenceDeparted = Just "#844 has left this repository's open read",
+              missionEvidenceForeign = Nothing
+            }
+    missionExternalWorkTag (classifyMissionWork base) `shouldBe` "outcome_unknown"
+    -- Positive evidence still wins, and is the only thing that does.
+    missionExternalWorkTag (classifyMissionWork base {missionEvidenceSatisfied = Just "PR #900 links it"})
+      `shouldBe` "satisfied_externally"
+
+  it "carries a departed target through to a mission waiting for input" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store stage -> do
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence {missionEvidenceDeparted = Just "#844 has left this repository's open read"}
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled _ MissionStepOutcomeUnknown _) -> pure ()
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
 
   it "pauses on live work it did not register" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store stage -> do
@@ -676,7 +775,7 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
 
   it "ends the foreground run when the mission is waiting for input" $
     withMission (snapshotWith MissionWaitingInput [stepRecord MissionStepNeedsInput []] []) $ \store stage -> do
-      report <- runMissionWith store boardRepository theMission (stagedDriver stage)
+      report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
         Left detail -> expectationFailure (Text.unpack detail)
         Right run -> do
@@ -807,7 +906,7 @@ preconditionSpec = describe "the exact-version precondition" $ do
     missionVersionHolds (issueVersion ["a"]) ((issueVersion ["a"]) {missionVersionState = "closed"}) `shouldBe` False
     missionVersionHolds
       (issueVersion ["a"])
-      ((issueVersion ["a"]) {missionVersionUpdatedAt = Just (addUTCTime 60 fixedTime)})
+      ((issueVersion ["a"]) {missionVersionUpdatedAt = addUTCTime 60 fixedTime})
       `shouldBe` False
 
   -- Requirement 8's whole point: the target moves between the plan and the
@@ -855,7 +954,7 @@ preconditionSpec = describe "the exact-version precondition" $ do
   it "reports an unreadable precondition as a stopped run" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
       writeIORef stage.stageTargets [Right (issueVersion ["reviewed:approve"]), Left "GitHub is unreachable"]
-      report <- runMissionWith store boardRepository theMission (stagedDriver stage)
+      report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
         Left detail -> expectationFailure (Text.unpack detail)
         Right run -> do
@@ -1113,6 +1212,57 @@ childRequestSpec = describe "registered child requests" $ do
       _ <- currentSnapshot store
       pure ()
 
+  -- Requirement 12's child is an external effect like any other, so it takes
+  -- the same discipline: its target is observed, journaled, and rechecked.
+  it "journals a target-bearing child's observed version before launching it" $
+    withLiveParent $ \store stage controller -> do
+      _ <-
+        submitMissionCommand
+          controller.missionControllerControl
+          "c-target"
+          (targetedChildRequest "r-9" theMission (MissionSessionId "solve-844-0001"))
+      iteration <- missionControllerIteration controller
+      case iteration of
+        MissionAdvanced (MissionCommandApplied "c-target" _) -> pure ()
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      recorded <- currentInvocations store
+      map ((.missionInvocationVersion) . (.missionInvocationRecord)) recorded
+        `shouldBe` [Just (issueVersion ["reviewed:approve"])]
+      dispatched <- readIORef stage.stageDispatches
+      map (.missionDispatchVersion) dispatched `shouldBe` [Just (issueVersion ["reviewed:approve"])]
+
+  it "refuses a child whose target moved between the plan and the launch" $
+    withLiveParent $ \_ stage controller -> do
+      writeIORef
+        stage.stageTargets
+        [Right (issueVersion ["reviewed:approve"]), Right (issueVersion ["reviewed:approve", "blocked"])]
+      _ <-
+        submitMissionCommand
+          controller.missionControllerControl
+          "c-stale"
+          (targetedChildRequest "r-10" theMission (MissionSessionId "solve-844-0001"))
+      iteration <- missionControllerIteration controller
+      case iteration of
+        MissionAdvanced (MissionCommandRefused "c-stale" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "stale version"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "puts a registered child in the tree under the parent that asked for it" $
+    withLiveParent $ \store _ controller -> do
+      _ <-
+        submitMissionCommand
+          controller.missionControllerControl
+          "c-lineage"
+          (childRequest "r-11" theMission (MissionSessionId "solve-844-0001"))
+      _ <- missionControllerIteration controller
+      snapshot <- currentSnapshot store
+      [ (node.missionSessionId, node.missionSessionParent)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [(MissionSessionId "child-r-11-0001", Just (MissionSessionId "solve-844-0001"))]
+
   it "rejects a request naming another mission" $
     withLiveParent $ \_ stage controller -> do
       _ <-
@@ -1186,6 +1336,14 @@ childRequest requestId mission parent =
         missionChildRequestTarget = Nothing
       }
 
+-- | The same request with a target, which is what brings the precondition
+-- discipline into play.
+targetedChildRequest :: Text -> MissionId -> MissionSessionId -> MissionCommandPayload
+targetedChildRequest requestId mission parent = case childRequest requestId mission parent of
+  MissionChildRequestCommand request ->
+    MissionChildRequestCommand request {missionChildRequestTarget = Just theTarget}
+  other -> other
+
 withLiveParent :: (MissionStore -> Stage -> MissionController -> IO ()) -> IO ()
 withLiveParent action = do
   let sessions = [sessionNode "solve-844-0001" Nothing Nothing]
@@ -1196,6 +1354,120 @@ withLiveParent action = do
       Right controller -> do
         action store stage controller
         stopMissionController controller
+
+-- ---------------------------------------------------------------------------
+-- The runner's own console
+-- ---------------------------------------------------------------------------
+
+consoleSpec :: Spec
+consoleSpec = describe "the runner's own console" $ do
+  it "parses every verb the grammar admits" $ do
+    parse "pause the operator asked" `shouldBe` Right (MissionPauseCommand "the operator asked")
+    parse "pause" `shouldBe` Right (MissionPauseCommand "the operator paused it")
+    parse "resume" `shouldBe` Right MissionResumeCommand
+    parse "override solve-844 it never ran"
+      `shouldBe` Right (MissionUserOverrideCommand theStep "it never ran")
+    parse "terminate solve-844-0001 enough"
+      `shouldBe` Right (MissionTerminateSubtreeCommand (MissionSessionId "solve-844-0001") "enough")
+    parse "child r-1 solve-844-0001 review_pull_request"
+      `shouldBe` Right (childRequest "r-1" theMission (MissionSessionId "solve-844-0001"))
+
+  it "reports a line it cannot turn into a command" $ do
+    parse "" `shouldSatisfy` either (isInfixOf "empty" . Text.unpack) (const False)
+    parse "merge 613" `shouldSatisfy` either (isInfixOf "unknown command merge" . Text.unpack) (const False)
+
+  -- The production path requirement 3's blocker was about: a line typed at the
+  -- runner's own console reaches the controller as an authenticated command.
+  it "submits a console line through the endpoint the runner owns" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          withConsole "override solve-844 it never ran\n" $ \handle ->
+            drainMissionConsoleWith (pure True) handle controller
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandApplied _ detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "user override on solve-844"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepPending
+
+  -- And the boundary that makes it authority rather than a formality: a handle
+  -- that is not this process's terminal is some other process's output, which
+  -- requirement 14 excludes by name.
+  it "reads nothing from a handle that is not this process's terminal" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          withConsole "override solve-844 let me in\n" $ \handle ->
+            drainMissionConsole handle controller
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> pure ()
+            other -> expectationFailure ("a redirected handle was read as a console: " <> show other)
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepOutcomeUnknown
+
+  it "journals a console line it could not parse rather than dropping it" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          withConsole "merge 613\n" $ \handle -> drainMissionConsoleWith (pure True) handle controller
+          stopMissionController controller
+      journal <- readMissionJournal store theMission 0
+      case journal of
+        Left message -> expectationFailure (Text.unpack message)
+        Right (lines', _) ->
+          [detail | MissionJournalEvent event <- lines', event.missionEventKind == "console_rejected", Just detail <- [event.missionEventDetail]]
+            `shouldSatisfy` any (isInfixOf "merge 613" . Text.unpack)
+  where
+    parse = parseMissionConsoleCommand theMission
+
+-- | A readable handle carrying exactly this text, which is not a terminal.
+withConsole :: String -> (Handle -> IO result) -> IO result
+withConsole typed action = withTemporaryCacheRoot $ \root -> do
+  let path = root </> "console"
+  writeFile path typed
+  withFile path ReadMode action
+
+-- ---------------------------------------------------------------------------
+-- The precondition boundary
+-- ---------------------------------------------------------------------------
+
+preconditionBoundarySpec :: Spec
+preconditionBoundarySpec = describe "the precondition the owning action enforces" $ do
+  -- Requirement 8's boundary is the registry's, not only the controller's: the
+  -- recorded expectation travels on the request so the owning action can
+  -- compare it against its own read at the last instruction before the spawn.
+  -- A dispatch that carried no version would leave that comparison with
+  -- nothing to make.
+  it "carries the recorded version onto every dispatched request" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      _ <- oneIteration store stage
+      dispatched <- readIORef stage.stageDispatches
+      map (.missionDispatchVersion) dispatched
+        `shouldBe` [Just (issueVersion ["reviewed:approve"])]
+
+  it "round-trips between the durable record and the registry's vocabulary" $ do
+    let version = issueVersion ["reviewed:approve", "enhancement"]
+    missionVersionOf (preconditionOf version) `shouldBe` version
+
+  it "holds only when every fact still agrees" $ do
+    let recorded = preconditionOf (issueVersion ["a", "b"])
+    targetPreconditionHolds recorded (preconditionOf (issueVersion ["b", "a"])) `shouldBe` True
+    targetPreconditionHolds recorded (preconditionOf (issueVersion ["a"])) `shouldBe` False
+    targetPreconditionHolds recorded (preconditionOf ((issueVersion ["a", "b"]) {missionVersionState = "closed"}))
+      `shouldBe` False
+    Text.unpack (targetPreconditionMessage recorded (preconditionOf (issueVersion ["a"])))
+      `shouldSatisfy` isInfixOf "nothing was dispatched"
 
 -- ---------------------------------------------------------------------------
 -- The configured deadline
@@ -1303,7 +1575,7 @@ failureVocabularySpec = describe "the typed results a step can reach" $ do
 
   it "refuses a dispatch the owning authority declined, without concluding the mission" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
-      writeIORef stage.stageDispatchResult (Left (MissionFailureExecutable "gh is not installed"))
+      writeIORef stage.stageDispatchResult (const (Left (MissionFailureExecutable "gh is not installed")))
       iteration <- oneIteration store stage
       case iteration of
         MissionAdvanced (MissionStepBlocked step failure) -> do

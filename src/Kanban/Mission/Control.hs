@@ -64,6 +64,7 @@ module Kanban.Mission.Control
     readMissionCommands,
     consumeMissionCommand,
     overrideAuthorized,
+    parseMissionConsoleCommand,
   )
 where
 
@@ -172,6 +173,57 @@ missionCommandPayloadTag payload = case payload of
 overrideAuthorized :: MissionCommandAuthority -> Bool
 overrideAuthorized MissionRunnerAuthenticated = True
 overrideAuthorized MissionAttachedClient = False
+
+-- | One line typed at the runner's own console.
+--
+-- A grammar rather than free text, and a small one: every verb here is an
+-- authority the channel grants, so a line that does not parse is reported back
+-- rather than guessed at. Pure, so the whole vocabulary is exercisable without
+-- a terminal.
+--
+--   [@pause \<reason\>@] stop dispatching; terminate nothing.
+--   [@resume@] start dispatching again.
+--   [@override \<step\> \<detail\>@] resolve an unknown outcome and replan
+--     the step (requirement 14).
+--   [@terminate \<session\> \<reason\>@] end that registered subtree
+--     (requirement 11).
+--   [@child \<request\> \<parent\> \<action\>@] register and launch a child
+--     of a live registered session (requirement 12).
+parseMissionConsoleCommand :: MissionId -> Text -> Either Text MissionCommandPayload
+parseMissionConsoleCommand mission line = case Text.words (Text.strip line) of
+  [] -> Left "an empty line is not a command"
+  ("pause" : rest) -> Right (MissionPauseCommand (joined rest "the operator paused it"))
+  ["resume"] -> Right MissionResumeCommand
+  ("override" : step : rest)
+    | not (Text.null step) ->
+        Right (MissionUserOverrideCommand (MissionStepId step) (joined rest "the operator resolved it"))
+  ("terminate" : session : rest)
+    | not (Text.null session) ->
+        Right
+          ( MissionTerminateSubtreeCommand
+              (MissionSessionId session)
+              (joined rest "the operator ended it")
+          )
+  ["child", requestId, parent, action] ->
+    Right
+      ( MissionChildRequestCommand
+          MissionChildRequest
+            { missionChildRequestId = requestId,
+              missionChildRequestMission = mission,
+              missionChildRequestParent = MissionSessionId parent,
+              missionChildRequestAction = action,
+              missionChildRequestTarget = Nothing
+            }
+      )
+  (verb : _) ->
+    Left
+      ( "unknown command "
+          <> verb
+          <> "; expected pause, resume, override, terminate, or child"
+      )
+  where
+    joined [] fallback = fallback
+    joined parts _ = Text.unwords parts
 
 -- | The wire record a client writes.
 data MissionCommandFile = MissionCommandFile

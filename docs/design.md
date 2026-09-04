@@ -242,7 +242,18 @@ durable state and on this mission's records, never on a timed GitHub refresh
 (section 3); GitHub is read when a step is planned, immediately before an
 effect, and when a settled worker's result has to be validated. The runner
 never merges a pull request, never applies a verdict label, and never reports
-an indeterminate result as a success.
+an indeterminate result as a success — and absence is not a result: a target
+that has left the open read is an outcome nobody can settle from that read, not
+a step that succeeded.
+
+Its own terminal is the authenticated console. A line typed there is submitted
+through the endpoint the run owns and may pause or resume the mission, record a
+`user_override` that resolves an unknown outcome, end a registered subtree, or
+register a child of a live registered session. A redirected standard input is
+some other process's output, so it is not read at all: that distinction is what
+makes the console an authority rather than a convention, and it is the same
+rule that leaves an attached dashboard able to submit ordinary operator
+commands and nothing more.
 
 ## 6. Layout
 
@@ -3403,13 +3414,21 @@ Defaults:
   observed — something may have happened — and it is resolved by fresh
   evidence or by authenticated direction, never by repeating the effect. Its
   identity is also how a replayed request returns the child it already
-  produced instead of launching a second one. `control/requests/` is the
+  produced instead of launching a second one, and the version it records is
+  carried to the owning action, which compares it against its own fresh read at
+  the last instruction before it starts anything. `control/requests/` is the
   channel a controller takes direction on; a command file naming the secret
   the running controller minted in memory is that controller's own console and
   may record a `user_override` or resolve an unknown outcome, and every other
   command is recorded as an ordinary durable operator command with no such
   authority. The secret is never written to the store, so an attached client
   cannot obtain one.
+- The snapshot's session tree is what an advancing controller registers every
+  session it starts in, with the parent that asked for it. That tree is what a
+  subtree termination walks and what an owning action's "is a registered child
+  still live?" question reads, so a session recorded only as an identifier
+  elsewhere would be one no child could name as its parent, no termination
+  could reach, and no parent had to wait for.
 - Every mission record also carries the repository and the mission it belongs
   to, and a record whose identity disagrees with the directory it sits in is
   refused rather than adopted — the specification, the snapshot, each journal

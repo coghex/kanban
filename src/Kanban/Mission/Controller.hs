@@ -132,11 +132,13 @@ import Kanban.Mission.Types
     MissionLifecycle (..),
     MissionPause (..),
     MissionPlanStep (..),
+    MissionProcessOwnership (..),
     MissionReconciliation (..),
     MissionRepository (..),
     MissionSessionDisposition (..),
     MissionSessionId (..),
     MissionSessionNode (..),
+    MissionTerminalObservation (..),
     MissionSnapshot (..),
     MissionSpecification (..),
     MissionStepId (..),
@@ -202,6 +204,14 @@ data MissionDriver = MissionDriver
     -- | What live evidence says about one step, assembled by the caller so the
     -- classification stays pure.
     missionDriverStepEvidence :: MissionPlanStep -> MissionStepRecord -> IO (Either Text MissionStepEvidence),
+    -- | Whether one registered session has ended, and with what.
+    --
+    -- Separate from the step evidence because a mission's session tree is not
+    -- a projection of its plan: a registered child has a node and a parent and
+    -- no plan step of its own, and requirement 11's accounting is over that
+    -- tree. 'Nothing' means it has not ended, which keeps its parent
+    -- nonterminal — as does a reading that could not be taken at all.
+    missionDriverObserveSession :: MissionSessionId -> IO (Either Text (Maybe MissionTerminalObservation)),
     missionDriverDispatch :: MissionDispatchRequest -> IO (Either MissionStepFailure MissionDispatchAccepted),
     -- | Ends exactly the registered sessions named, which the controller has
     -- already journaled and which is already the complete subtree.
@@ -454,6 +464,7 @@ data MissionTransition
   | MissionStepAttached MissionStepId MissionSessionId
   | MissionStepDispatched MissionStepId MissionInvocationId MissionSessionId
   | MissionStepBlocked MissionStepId MissionStepFailure
+  | MissionSessionEnded MissionSessionId Text
   | MissionSubtreeTerminated MissionSessionId Int
   | MissionLifecycleSet MissionLifecycle Text
   deriving stock (Eq, Show)
@@ -474,6 +485,8 @@ missionTransitionMessage transition = case transition of
       <> session.unMissionSessionId
   MissionStepBlocked step failure ->
     step.unMissionStepId <> " blocked: " <> missionStepFailureMessage failure
+  MissionSessionEnded session detail ->
+    "session " <> session.unMissionSessionId <> " settled: " <> detail
   MissionSubtreeTerminated session count ->
     "terminated " <> Text.pack (show count) <> " registered session(s) under " <> session.unMissionSessionId
   MissionLifecycleSet lifecycle detail -> "mission " <> missionLifecycleTag lifecycle <> ": " <> detail
@@ -516,6 +529,14 @@ missionControllerIteration controller = do
 -- something to do.
 advance :: MissionController -> MissionSnapshot -> IO MissionIteration
 advance controller snapshot = do
+  observed <- observeOneSession controller snapshot
+  case observed of
+    Just iteration -> pure iteration
+    Nothing -> advanceSteps controller snapshot
+
+-- | Reconcile, then dispatch, then settle.
+advanceSteps :: MissionController -> MissionSnapshot -> IO MissionIteration
+advanceSteps controller snapshot = do
   reconciled <- reconcileOneStep controller snapshot
   case reconciled of
     Just iteration -> pure iteration
@@ -532,6 +553,68 @@ advance controller snapshot = do
         Nothing
           | anyLive snapshot -> pure (MissionAwaiting "registered work is live")
           | otherwise -> settle controller snapshot
+
+-- | Records the end of the first registered session that has one.
+--
+-- The mission's session tree is what requirement 11's accounting reads, and
+-- nothing else updates it: a step record says which sessions a step started,
+-- but only this pass can say that one of them has stopped. Without it a
+-- registered child would stay unsettled for ever and its parent could never
+-- terminalize — which is the same deadlock, wearing the safeguard's clothes.
+--
+-- One session per iteration, like every other transition here.
+observeOneSession :: MissionController -> MissionSnapshot -> IO (Maybe MissionIteration)
+observeOneSession controller snapshot = go unsettled
+  where
+    unsettled =
+      [ node
+      | node <- snapshot.missionSnapshotSessions,
+        missionSessionDisposition node /= MissionSessionSettled
+      ]
+    go [] = pure Nothing
+    go (node : rest) = do
+      reading <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId
+      case reading of
+        Left detail -> pure (Just (MissionControllerFailed detail))
+        Right Nothing -> go rest
+        Right (Just observation) ->
+          Just <$> recordSessionObservation controller snapshot node observation
+
+-- | Writes one session's terminal observation into the snapshot.
+recordSessionObservation :: MissionController -> MissionSnapshot -> MissionSessionNode -> MissionTerminalObservation -> IO MissionIteration
+recordSessionObservation controller snapshot node observation = do
+  now <- getCurrentTime
+  let updated =
+        snapshot
+          { missionSnapshotSessions = map recordOn snapshot.missionSnapshotSessions,
+            missionSnapshotUpdatedAt = now
+          }
+      recordOn candidate
+        | candidate.missionSessionId /= node.missionSessionId = candidate
+        | otherwise = candidate {missionSessionObservation = Just observation}
+  written <- writeMissionSnapshot controller.missionControllerStore updated
+  case written of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right () -> do
+      _ <-
+        recordMissionEvent
+          controller.missionControllerStore
+          ( ( missionEvent
+                controller.missionControllerMission
+                controller.missionControllerStore.missionStoreRepository
+                now
+                "session_settled"
+                observation.missionObservationDetail
+            )
+              {missionEventSession = Just node.missionSessionId}
+          )
+      pure
+        ( MissionAdvanced
+            ( MissionSessionEnded
+                node.missionSessionId
+                (maybe "it ended" id observation.missionObservationDetail)
+            )
+        )
 
 -- | Whether any step is still under way.
 anyLive :: MissionSnapshot -> Bool
@@ -622,16 +705,23 @@ reconcileOneStep controller snapshot = go candidates
               | otherwise ->
                   Just
                     <$> applyStepLifecycle controller snapshot step.missionPlanStepId MissionStepOutcomeUnknown detail
+            -- Nothing outside this mission has anything to say about a step
+            -- that is already under way. That is not a step to wait on: its
+            -- worker is not live (a live one classifies as attachable), no
+            -- result landed, and no invocation explains it — the record it was
+            -- dispatched against is simply gone. Leaving it running is what
+            -- made the foreground runner wait for ever on a worker nobody
+            -- could find.
             MissionWorkUnobserved
-              | record.missionStepRecordLifecycle == MissionStepDispatching ->
+              | record.missionStepRecordLifecycle == MissionStepOutcomeUnknown -> go rest
+              | otherwise ->
                   Just
                     <$> applyStepLifecycle
                       controller
                       snapshot
                       step.missionPlanStepId
                       MissionStepOutcomeUnknown
-                      "nothing was recorded for a step that had already been dispatched"
-              | otherwise -> go rest
+                      "no live worker, no recorded result, and no evidence of what became of it"
 
 -- ---------------------------------------------------------------------------
 -- Dispatch
@@ -755,7 +845,12 @@ performDispatch controller snapshot step invocation plannedVersion = do
                 step.missionPlanStepId
                 MissionStepRunning
                 acceptance.missionAcceptedDetail
-                (Just acceptance.missionAcceptedSession)
+                ( Just
+                    ( acceptance.missionAcceptedSession,
+                      Nothing,
+                      acceptance.missionAcceptedProviderSession
+                    )
+                )
             pure $ case written of
               Left detail -> MissionControllerFailed detail
               Right () ->
@@ -1020,9 +1115,14 @@ registerChild controller snapshot command request
 
 -- | The launch itself, with the same journal-then-act ordering every other
 -- effect uses.
+-- A child is an external effect like any other, so it takes the same
+-- discipline: its target is observed, the observation is journaled with the
+-- invocation, and the reading is rechecked and carried to the owning action's
+-- own boundary. Exempting it because the request came from inside the mission
+-- would put the one dispatch a provider can ask for outside the precondition
+-- every other dispatch obeys.
 launchChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
 launchChild controller snapshot command request invocation = do
-  now <- getCurrentTime
   let step =
         MissionPlanStep
           { missionPlanStepId = MissionStepId ("child-" <> request.missionChildRequestId),
@@ -1031,6 +1131,17 @@ launchChild controller snapshot command request invocation = do
             missionPlanStepTarget = request.missionChildRequestTarget,
             missionPlanStepDependsOn = []
           }
+  planned <- observePlannedVersion controller step
+  case planned of
+    Left detail -> do
+      journalCommand controller command ("the child's target could not be read: " <> detail)
+      consumeMissionCommand command
+      pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+    Right plannedVersion -> launchPlannedChild controller snapshot command request invocation step plannedVersion
+
+launchPlannedChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> MissionPlanStep -> Maybe MissionTargetVersion -> IO MissionIteration
+launchPlannedChild controller snapshot command request invocation step plannedVersion = do
+  now <- getCurrentTime
   journaled <-
     recordMissionInvocation
       controller.missionControllerInvocations
@@ -1041,23 +1152,29 @@ launchChild controller snapshot command request invocation = do
           missionInvocationStep = step.missionPlanStepId,
           missionInvocationAction = request.missionChildRequestAction,
           missionInvocationTarget = request.missionChildRequestTarget,
-          missionInvocationVersion = Nothing,
+          missionInvocationVersion = plannedVersion,
           missionInvocationEffect = MissionEffectDispatch request.missionChildRequestAction,
           missionInvocationAt = now
         }
   case journaled of
     Left detail -> pure (MissionControllerFailed detail)
     Right () -> do
-      accepted <-
-        controller.missionControllerDriver.missionDriverDispatch
-          MissionDispatchRequest
-            { missionDispatchStep = step,
-              missionDispatchTarget = request.missionChildRequestTarget,
-              missionDispatchVersion = Nothing,
-              missionDispatchContinuation =
-                missionContinuation controller.missionControllerSpecification snapshot step Nothing,
-              missionDispatchInvocation = invocation
-            }
+      rechecked <- observePlannedVersion controller step
+      accepted <- case (plannedVersion, rechecked) of
+        (_, Left detail) -> pure (Left (MissionFailureOutcomeUnknown detail))
+        (Just recorded, Right (Just observed))
+          | not (missionVersionHolds recorded observed) ->
+              pure (Left (MissionFailureStaleVersion (MissionStaleVersion recorded observed)))
+        (_, Right currentVersion) ->
+          controller.missionControllerDriver.missionDriverDispatch
+            MissionDispatchRequest
+              { missionDispatchStep = step,
+                missionDispatchTarget = request.missionChildRequestTarget,
+                missionDispatchVersion = currentVersion,
+                missionDispatchContinuation =
+                  missionContinuation controller.missionControllerSpecification snapshot step Nothing,
+                missionDispatchInvocation = invocation
+              }
       concluded <- getCurrentTime
       case accepted of
         Left failure -> do
@@ -1077,15 +1194,32 @@ launchChild controller snapshot command request invocation = do
               invocation
               (MissionInvocationDispatched acceptance.missionAcceptedWorker)
               concluded
+          -- The child joins the session tree under the parent that asked for
+          -- it. Without the lineage it would be a session nothing accounts
+          -- for: no termination would reach it and no parent would wait.
+          written <-
+            writeStep
+              controller
+              snapshot
+              step.missionPlanStepId
+              MissionStepRunning
+              acceptance.missionAcceptedDetail
+              ( Just
+                  ( acceptance.missionAcceptedSession,
+                    Just request.missionChildRequestParent,
+                    acceptance.missionAcceptedProviderSession
+                  )
+              )
           journalCommand controller command ("registered child " <> acceptance.missionAcceptedWorker)
           consumeMissionCommand command
-          pure
-            ( MissionAdvanced
+          pure $ case written of
+            Left detail -> MissionControllerFailed detail
+            Right () ->
+              MissionAdvanced
                 ( MissionCommandApplied
                     command.missionCommandId
                     ("registered child " <> acceptance.missionAcceptedWorker)
                 )
-            )
 
 -- ---------------------------------------------------------------------------
 -- Writing the record
@@ -1107,7 +1241,7 @@ applyAttachment controller snapshot step reading = do
       step
       MissionStepRunning
       ("reattached to session " <> reading.missionWorkerSession.unMissionSessionId)
-      (Just reading.missionWorkerSession)
+      (Just (reading.missionWorkerSession, Nothing, reading.missionWorkerProviderSession))
   pure $ case written of
     Left detail -> MissionControllerFailed detail
     Right () -> MissionAdvanced (MissionStepAttached step reading.missionWorkerSession)
@@ -1158,17 +1292,54 @@ applyMissionLifecycle controller snapshot lifecycle detail = do
           (missionEvent controller.missionControllerMission controller.missionControllerStore.missionStoreRepository now (missionLifecycleTag lifecycle) (Just detail))
       pure (MissionAdvanced (MissionLifecycleSet lifecycle detail))
 
+-- | Adds the session a dispatch produced to the mission's own session tree.
+--
+-- Registering it is what makes it a mission session at all. Parent validation,
+-- subtree termination, and unsettled-descendant accounting every one of them
+-- read this tree and nothing else, so a worker recorded only as an identifier
+-- on a step record is a worker no child can name as its parent, no termination
+-- can reach, and no parent has to wait for. The lineage travels with the
+-- registration for the same reason: a child's parent link is the only thing
+-- that puts it inside a subtree.
+--
+-- Idempotent by identity, because a step that is reattached to a session it
+-- already registered must not gain a second node for it.
+registerSession :: MissionController -> MissionStepId -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text) -> [MissionSessionNode] -> [MissionSessionNode]
+registerSession _ _ Nothing nodes = nodes
+registerSession controller step (Just (identity, parent, providerSession)) nodes
+  | any ((== identity) . (.missionSessionId)) nodes = nodes
+  | otherwise = nodes <> [node]
+  where
+    node =
+      MissionSessionNode
+        { missionSessionId = identity,
+          missionSessionMission = controller.missionControllerMission,
+          missionSessionParent = parent,
+          missionSessionStep = Just step,
+          missionSessionProvider = "registry",
+          missionSessionProviderSessionId = providerSession,
+          -- Nothing recorded proves it is gone, which is exactly right for a
+          -- session that has just been started: 'missionSessionDisposition'
+          -- reads it as unverifiable, so a parent waits for it until the
+          -- session pass observes it end.
+          missionSessionOwnership = MissionProcessOwnership {missionProcessIdentity = Nothing, missionProcessGroup = Nothing},
+          missionSessionLog = Nothing,
+          missionSessionObservation = Nothing
+        }
+
 -- | Replaces one step record and journals the change.
 --
 -- The snapshot is written before the journal line, because the snapshot is
 -- what the next iteration decides from and the journal is what a reader
 -- replays: a crash between them loses a line of narration rather than a state.
-writeStep :: MissionController -> MissionSnapshot -> MissionStepId -> MissionStepLifecycle -> Text -> Maybe MissionSessionId -> IO (Either Text ())
-writeStep controller snapshot step lifecycle detail session = do
+writeStep :: MissionController -> MissionSnapshot -> MissionStepId -> MissionStepLifecycle -> Text -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text) -> IO (Either Text ())
+writeStep controller snapshot step lifecycle detail registration = do
   now <- getCurrentTime
-  let updated =
+  let session = (\(identity, _, _) -> identity) <$> registration
+      updated =
         snapshot
-          { missionSnapshotSteps = map replace snapshot.missionSnapshotSteps,
+          { missionSnapshotSessions = registerSession controller step registration snapshot.missionSnapshotSessions,
+            missionSnapshotSteps = map replace snapshot.missionSnapshotSteps,
             missionSnapshotCurrentStep = Just step,
             missionSnapshotLastReconciliation =
               Just

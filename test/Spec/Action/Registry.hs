@@ -14,7 +14,7 @@ import Control.Exception (bracket)
 import Control.Monad (forever, void, when)
 import Data.Aeson (eitherDecodeFileStrict, encode)
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.List (isSuffixOf, sortOn)
+import Data.List (isInfixOf, isSuffixOf, sortOn)
 import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -100,7 +100,7 @@ import Kanban.UI.Types
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import Test.Hspec (Spec, describe, it, shouldBe, shouldNotBe, shouldReturn, shouldSatisfy)
+import Test.Hspec (Spec, describe, expectationFailure, it, shouldBe, shouldNotBe, shouldReturn, shouldSatisfy)
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -564,6 +564,42 @@ spec = do
       either (Text.isInfixOf "completed history is read-only" . actionRefusalMessage) (const False)
         (solveLaunchPlan settled (solveCell CodexSolver) 844 SolveOnly CodexSolver Nothing ResumeAnswer "")
         `shouldBe` True
+
+    -- Issue #595 requirement 8. A caller that read a target, decided to act on
+    -- it, and handed the decision on has left a window; a request carrying the
+    -- reading it decided from lets this boundary close it. The comparison is
+    -- against the environment's own catalog, which is the freshest read the
+    -- dispatch has, and it happens before the capability probe and the spawn —
+    -- so a stale expectation dispatches nothing at all.
+    it "refuses a dispatch whose expected target has since moved" $ do
+      let approved = (baseIssue 844 []) {issueLabels = [label "reviewed:approve"]}
+          blocked = approved {issueLabels = [label "reviewed:approve", label "blocked"]}
+          environmentFor issue = environmentOf (catalogOf [issue] [] emptyHistory)
+          recorded = targetPreconditionFor <$> itemTarget (resolveIn (catalogOf [approved] [] emptyHistory) (TargetByNumber 844))
+          request expected =
+            (actionRequest SolveIssue identityUnderTest (TargetByNumber 844))
+              { requestSolverBrand = Just CodexSolver,
+                requestRecordedAssignment = Just (solveCell CodexSolver),
+                requestExpectedTarget = expected
+              }
+      -- The recording itself, so the rest of the example is not comparing two
+      -- values it never established.
+      recorded `shouldSatisfy` (/= Nothing)
+      stale <- dispatchAction (environmentFor blocked) (request recorded)
+      case stale of
+        Left (ActionTargetStale kind was now) -> do
+          kind `shouldBe` SolveIssue
+          was.preconditionLabels `shouldBe` ["reviewed:approve"]
+          now.preconditionLabels `shouldBe` ["blocked", "reviewed:approve"]
+          Text.unpack (actionRefusalMessage (ActionTargetStale kind was now))
+            `shouldSatisfy` isInfixOf "nothing was dispatched"
+        other -> expectationFailure ("a moved target was dispatched against: " <> show (() <$ other))
+      -- The negative control is every other dispatch example in this group:
+      -- each builds its request with 'actionRequest', which records no
+      -- expectation, and each reaches its launch. A request that records
+      -- nothing is therefore stale against nothing — asserted by those, and
+      -- deliberately not re-asserted here, because the only way to observe it
+      -- is to let a dispatch run to its spawn.
 
     -- The dashboard classifies structure from what it is drawing; a headless
     -- caller from the hierarchy. Both feed the one rule, and only the first
