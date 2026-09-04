@@ -31,7 +31,6 @@ module Kanban.UI.Types
     ProcessSelection (..),
     PullRequestDetail (..),
     PullRequestReviewSession,
-    ReviewBackend (..),
     ReviewDetail (..),
     ReviewPhase (..),
     ReviewSession,
@@ -89,10 +88,7 @@ import Kanban.PullRequestFlow
     PullRequestOrigin (..)
     )
 import Kanban.Review
-  ( CanonicalIssueReviewResult (..),
-    ReviewApproval (..),
-    ReviewClient,
-    ReviewEvent (..),
+  ( ReviewApproval (..),
     ReviewQuestion (..),
     ReviewRequestId,
     ReviewStage (..),
@@ -110,7 +106,8 @@ import Kanban.Settings
   ( Settings (..)
     )
 import Kanban.Worker
-  ( WorkerDescriptor (..),
+  ( ReviewCommandId,
+    WorkerDescriptor (..),
     WorkerEvent (..),
     WorkerId
     )
@@ -411,15 +408,32 @@ data ReviewDetail = ReviewDetail
     -- draft typed after the original send — and a second independently
     -- rejected steer — survives, and 'takeNextUndelivered' hands the queue
     -- back one message at a time as the line frees up (issue #17).
-    reviewSessionUndelivered :: [Text]
+    reviewSessionUndelivered :: [Text],
+    -- | Commands this dashboard has written and not yet seen the child
+    -- journal, newest last, as the identifier each was written under and the
+    -- text it carried.
+    --
+    -- A command that reached its action journals its line before that
+    -- action's terminal envelope, so anything still here when the terminal
+    -- event arrives is a message the action never read — written into the
+    -- window between the child being settled and this dashboard being told,
+    -- which no poll and no reconciliation will ever hand back. Those are
+    -- offered to the line as undelivered rather than lost, and the draft that
+    -- produced them was cleared on the strength of this list holding them.
+    reviewSessionAwaiting :: [(ReviewCommandId, Text)],
+    -- | The handed-back message currently sitting on the input line, if the
+    -- line is holding one rather than a draft the user typed.
+    --
+    -- Needed because the queue above drains /onto/ the line as soon as the
+    -- line is free, so by the time Enter is pressed a recovered steer is no
+    -- longer in the queue and is indistinguishable from fresh text. Which of
+    -- the two it is decides which durable command the submission becomes — a
+    -- deliberate resend of a refused steer, or new feedback (issue #17,
+    -- SAG-10 requirement 9) — and the evidence a review leaves should say
+    -- which of those happened.
+    reviewSessionRestored :: Maybe Text
   }
   deriving stock (Eq, Show)
-
-data ReviewBackend
-  = ReviewBackendStopped
-  | ReviewBackendStarting
-  | ReviewBackendReady ReviewClient
-  | ReviewBackendFailed Text
 
 data AgentSessionRef
   = SolveAgent Int
@@ -667,8 +681,6 @@ data AppEvent
     -- optimistic state over the stop that replaced it.
     ApprovalToggleFinished Int (Either Text ApprovalObservation)
   | DirectMergeFinished Int (Either Text DirectMergeOutcome)
-  | ReviewBackendStarted (Either Text ReviewClient)
-  | ReviewProtocolEvent ReviewEvent
   | -- | Session key, then the tick chain's generation. Every kind carries a
     -- generation so a superseded chain's queued tick is dropped rather than
     -- rearming alongside its replacement (issue #30, extended to solve and
@@ -680,6 +692,11 @@ data AppEvent
   | PullRequestProtocolEvent PullRequestFlowEvent
   | PullRequestAnimationTick Int Int
   | WorkerRegistered WorkerDescriptor
+  | -- | The registry refused an issue review or revision this dashboard
+    -- asked for. The session the press created is already open, so the
+    -- refusal is carried back to settle it rather than left to a launch that
+    -- will never happen.
+    IssueActionRefused Int Text
   | WorkerProtocolEvent WorkerDescriptor WorkerEvent
   | WorkerDiscoveryFinished [WorkerDescriptor]
   | -- | A displayed notice instance's ten seconds elapsed. It carries the
@@ -689,8 +706,6 @@ data AppEvent
     -- notice repeats — finds a different identity displayed and is dropped
     -- rather than allowed to clear it (issue #590 requirement 5).
     NoticeExpired Int
-  | CanonicalIssueReviewProcessStarted Int ManagedProcess
-  | CanonicalIssueReviewFinished Int ReviewStage (Either Text CanonicalIssueReviewResult)
 
 data AppState = AppState
   { appRepository :: Repository,
@@ -899,7 +914,6 @@ data AppState = AppState
     -- its work. A further quit while this is set reports the wait rather than
     -- commanding a second cancellation.
     appQuitPending :: Bool,
-    appReviewBackend :: ReviewBackend,
     appReviewSessions :: Map Int ReviewSession,
     -- | Text an issue's review still owes a send, held apart from any one
     -- session: a message a failed interrupt handed back (D-16), or a draft
@@ -917,7 +931,6 @@ data AppState = AppState
     appReviewUndelivered :: Map Int [Text],
     appSolveSessions :: Map Int SolveSession,
     appSolveProcesses :: Map Int ManagedProcess,
-    appCanonicalReviewProcesses :: Map Int ManagedProcess,
     appPullRequestReviewSessions :: Map Int PullRequestReviewSession,
     appPullRequestProcesses :: Map Int ManagedProcess,
     appWorkers :: Map WorkerId WorkerDescriptor,

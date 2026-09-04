@@ -206,9 +206,11 @@ library kanban-internal
     Kanban.Solve.Parse
     Kanban.Solve.Unknown
     Kanban.Worker.Census
+    Kanban.Worker.Command
     Kanban.Worker.Discovery
     Kanban.Worker.Journal
     Kanban.Worker.Lease
+    Kanban.Worker.IssueHost
     Kanban.Worker.Monitor
     Kanban.Worker.Paths
     Kanban.Worker.Termination
@@ -254,6 +256,7 @@ test-suite kanban-test
     Spec.Agent.Adapter
     Spec.Agent.Capture
     Spec.Agent.Compatibility
+    Spec.Agent.IssueHost
     Spec.Agent.IssueReviewer
     Spec.Agent.ManagedProcess
     Spec.Agent.ManagedProcess.Deadline

@@ -804,7 +804,10 @@ examples = do
                     workerStateLogPath = Nothing,
                     workerStateHeartbeatAt = now,
                     workerStateLastActivity = "",
-                    workerStateKnownProcesses = []
+                    workerStateKnownProcesses = [],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                   }
           withManagedShell (detachedEscapedDescendantCommand pidFile) $ \providerProcess -> do
             managed <- managedProcessFor providerProcess
@@ -1125,7 +1128,10 @@ examples = do
                   workerDescriptorAckPath = temporaryRoot </> "unused.ack",
                   workerDescriptorLeasePath = temporaryRoot </> "unused.lease",
                   workerDescriptorLeaseOwnerPath = temporaryRoot </> "unused.lease" </> "owner.json",
-                  workerDescriptorPendingTerminationPath = temporaryRoot </> "unused.pending-termination"
+                  workerDescriptorPendingTerminationPath = temporaryRoot </> "unused.pending-termination",
+                  workerDescriptorHandoffPath = temporaryRoot </> "unused.handing-off",
+                  workerDescriptorCommandPath = temporaryRoot </> "unused.commands.jsonl",
+                  workerDescriptorCommandAckPath = temporaryRoot </> "unused.command-acks.jsonl"
                 }
             fixtureState =
               WorkerState
@@ -1139,7 +1145,10 @@ examples = do
                   workerStateLogPath = Nothing,
                   workerStateHeartbeatAt = now,
                   workerStateLastActivity = "",
-                  workerStateKnownProcesses = []
+                  workerStateKnownProcesses = [],
+workerStateReviewThread = Nothing,
+workerStateReviewTurn = Nothing,
+workerStateReviewRequest = Nothing
                 }
         -- Fresh cells, so this poll's 'claimLeaseRelease' necessarily wins
         -- on its very first attempt (nothing else has ever contended for

@@ -1,3 +1,6 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+
 -- | Pure action-readiness derivation and doctor rendering, built from the
 -- raw observations 'Kanban.Preflight.Environment' gathers: which checks one
 -- board action depends on, whether any of them blocks it, and the
@@ -7,16 +10,19 @@
 -- that module's public contract promises.
 module Kanban.Preflight.Readiness where
 
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isSpace)
 import Data.List (find, nub)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Domain (Repository (..))
 import Kanban.Models (OperatingMode (..), soleAgent)
 import Kanban.Preflight.Environment
 import Kanban.ProviderAdapter (brandForProvider, embeddedReviewProvider)
 import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..), agentForAction, authoredOnOwnBrand)
 import Kanban.Solve (SolverBrand (..))
+import GHC.Generics (Generic)
 
 -- | The six causes a preflight must tell apart, so the board can name the
 -- remediation instead of reporting a generic agent failure.
@@ -55,12 +61,16 @@ data PreflightCheck = PreflightCheck
 -- | Which agent authored an issue, since both issue-side actions route
 -- their provider work by it. 'IssueOriginConflicting' mirrors the backend's
 -- own error case: a body declaring both origins.
+-- Durable because an issue action's specification records the origin its
+-- launch boundary read, rather than re-reading an issue body the detached
+-- host does not hold (SAG-10).
 data IssueOrigin
   = IssueOriginCodex
   | IssueOriginClaude
   | IssueOriginUnmarked
   | IssueOriginConflicting
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | The in-app AI actions launched from the board, each reported
 -- separately: an action is only as ready as the dependencies it actually
@@ -551,3 +561,20 @@ statusText (PreflightBlocked problem detail remediation) =
 
 pad :: Int -> Text -> Text
 pad width value = value <> Text.replicate (max 1 (width - Text.length value)) " "
+
+-- | Preflight one AI action just before spawning it, so a missing
+-- Kanban-owned component is reported with the command that installs it
+-- instead of surfacing minutes later as an opaque agent failure. Only a
+-- definite local observation blocks; an inconclusive probe lets the action
+-- run and fail on its own terms, so a setup Kanban cannot introspect is
+-- never broken by its own diagnostics. Every probe is read-only.
+--
+-- Here rather than beside the dashboard's launch boundaries because it is no
+-- longer only theirs: a detached issue-review host preflights each child
+-- action at the instant it spawns that action's provider (SAG-10), and the
+-- two must ask the same question of the same environment rather than one
+-- reimplementing it below the other.
+preflightBlocker :: Repository -> OperatingMode -> PreflightAction -> IO (Maybe Text)
+preflightBlocker repository mode action = do
+  environment <- gatherPreflightEnvironment repository.repositoryRoot
+  pure (preflightDiagnostic <$> blockingRemediation (actionReport environment mode action))

@@ -66,7 +66,7 @@ import Kanban.ReviewToolServer (reviewToolServerConfig)
 import Kanban.UI.Review
   ( applyFailedInterrupt,
     carryUndelivered,
-    markReviewSessionsDisconnected,
+    markReviewSessionDisconnected,
     newReviewSession,
     reviewOutcomePhase,
     reviewSessionHoldsUnsentText,
@@ -124,7 +124,7 @@ spec = do
     -- below goes on ignoring the hook records.
     it "runs the CLI's stream-json channel with the machine's settings, MCP servers, and built-in tools excluded, on the roster's issue_review.claude cell" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
         launch <- case launches of
@@ -167,7 +167,7 @@ spec = do
     -- launch can show, because a record only says what it asked for.
     it "runs it at the repository root" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         recorded <- canonicalizePath =<< recordedClaudeDirectory fixture.claudeReviewRecordings 0
         expected <- canonicalizePath fixture.claudeReviewRepositoryRoot
@@ -175,7 +175,7 @@ spec = do
 
     it "carries a rerostered issue_review.claude cell rather than a compiled pair" $
       withClaudeReviewClientUsing (rerostered "haiku-9" "low") (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
         map (dropWhile (/= "--model")) launches `shouldBe` [["--model", "haiku-9", "--effort", "low"]]
@@ -192,7 +192,7 @@ spec = do
     -- claims and only the second one is what the mode promises.
     it "starts a Claude-only install's review through the routing, on that roster's own cell" $
       withRoutedReviewClientUsing claudeOnlyRoster (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
         let cell = cellOf (assignmentFor claudeOnlyRoster IssueReviewRole ClaudeProvider)
@@ -234,7 +234,7 @@ spec = do
     -- is read back and judged.
     it "opens the review with one CLI user message naming the issue, and no app-server request at all" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         written <- recordedClaudeInput fixture.claudeReviewRecordings 0
         case written of
@@ -252,7 +252,7 @@ spec = do
     -- would answer it with none of it.
     it "answers a second between-turn message on the same process, without respawning" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         first <- awaitOneCompletedTurn fixture
         threadId <- soleThread first
         sendReviewMessage fixture.claudeReviewClient threadId Nothing "look again" `shouldReturn` Right ()
@@ -277,7 +277,7 @@ spec = do
     -- between, and exactly one completion closes it.
     it "produces the app-server path's lifecycle in the app-server path's order" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
         threadId.reviewThreadProvider `shouldNotBe` ""
@@ -296,7 +296,7 @@ spec = do
     -- review twice, and a fake that omitted that record could not tell.
     it "splits text from thinking and reports each exactly once" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
         reviewOutputs recorded
@@ -308,7 +308,7 @@ spec = do
     -- out of the CLI's own structured output.
     it "decodes the structured verdict into the review result the app-server path produces" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
         turnCompletions recorded
@@ -344,7 +344,7 @@ spec = do
     -- throw a whole review away over one unreadable line.
     it "warns about a record it cannot read and goes on reading the stream" $
       withClaudeReviewClient (malformedLine : reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
         case [(provider, message) | ReviewProtocolWarning provider message <- recorded] of
@@ -370,7 +370,7 @@ spec = do
     -- two the scheduler happens to pick.
     it "reports a per-thread process's stderr against its own review, tagged with its own brand" $
       withClaudeReviewClient (["printf '%s\\n' 'warming up' >&2", "sleep 0.4"] <> reviewTurn <> ["sleep 0.4", "printf '%s\\n' 'still going' >&2", approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <-
           waitForReviewEvents
             "both diagnostics and a completed turn"
@@ -401,7 +401,7 @@ spec = do
     -- held at all.
     it "still reports early stderr from a process that never names a session" $
       withClaudeReviewClient ["printf '%s\\n' 'cannot start' >&2", "exit 4"] $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <-
           waitForReviewEvents
             "the released diagnostic and the start failure"
@@ -418,7 +418,7 @@ spec = do
     -- nothing would announce that thread to anybody.
     it "disregards a later record naming a different session, keeping the review's own thread" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844, driftingSecondTurn]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <-
           waitForReviewEvents
             "both turns"
@@ -437,7 +437,7 @@ spec = do
     -- running, and none of them names the other provider's.
     it "names its own program in every diagnostic, and never the other provider's" $
       withClaudeReviewClient (malformedLine : reviewTurn <> [rawResult "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}"]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         stopReviewClient fixture.claudeReviewClient
         recorded <- waitForReviewEvents "the connection's end" fixture.claudeReviewEvents (not . null . connectionStopReports)
@@ -458,7 +458,7 @@ spec = do
     -- asserted by the program it names rather than by the cause it gives.
     it "fails the review by issue number when its process dies before naming a session" $
       withClaudeReviewClient ["exit 7"] $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- waitForReviewEvents "the start failure" fixture.claudeReviewEvents (not . null . startFailures)
         map fst (startFailures recorded) `shouldBe` [844]
         mapM_ (`shouldMention` "Claude stream-json session") (map snd (startFailures recorded))
@@ -471,9 +471,9 @@ spec = do
     -- raising it here would take down a healthy review on another process.
     it "fails only the dead process's own turn, leaving the client and the other review running" $
       withClaudeReviewClient stallingTurn $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- waitForReviewEvents "the stalled review's turn" fixture.claudeReviewEvents (not . null . turnStarts)
-        beginIssueReview fixture.claudeReviewClient 845 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 845) `shouldReturn` Right ()
         settled <- waitForReviewEvents "the healthy review's verdict" fixture.claudeReviewEvents (not . null . turnCompletions)
         (stalled, healthy) <- stalledAndHealthy settled
         length <$> recordedClaudeLaunches fixture.claudeReviewRecordings `shouldReturn` 2
@@ -490,7 +490,7 @@ spec = do
         surviving <- waitForHeldConnections fixture.claudeReviewClient 1
         surviving `shouldBe` [healthy.reviewThreadConnection]
         -- The client is not the connection: a further review still starts.
-        beginIssueReview fixture.claudeReviewClient 846 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 846) `shouldReturn` Right ()
 
   -- MODEL-16. The channel has no operation that redirects a turn in flight
   -- (D-16), so a message typed into one ends that turn and becomes the next.
@@ -720,7 +720,7 @@ spec = do
     -- lost.
     it "refuses to interrupt a turn the thread has already finished" $
       withClaudeReviewClient (reviewTurn <> [approvedResult 844]) $ \fixture -> do
-        beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+        fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         recorded <- awaitOneCompletedTurn fixture
         threadId <- soleThread recorded
         stale <- sendReviewMessage fixture.claudeReviewClient threadId (Just "turn-1") "focus on the parser"
@@ -785,7 +785,9 @@ spec = do
                   reviewSessionThreadId = Just (fixtureReviewThread "claude-session-1"),
                   reviewSessionTurnId = Just "turn-1",
                   reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = []
+                  reviewSessionUndelivered = [],
+                  reviewSessionAwaiting = [],
+                  reviewSessionRestored = Nothing
                 }
           )
             {sessionInput = input}
@@ -844,19 +846,11 @@ spec = do
     -- from. Any one of those four links missing loses the message.
     it "carries the message through the connection's end to a fresh review that can send it" $ do
       let opened = interruptedSession ""
-          -- The connection the session is actually running on, read off the
-          -- session rather than restated, so this cannot drift into
-          -- disconnecting a connection it was never served by and passing
-          -- because nothing happened.
-          serving = fmap (.reviewThreadConnection) opened.sessionDetail.reviewSessionThreadId
-          settled =
-            markReviewSessionsDisconnected
-              serving
-              "Claude stream-json session exited"
-              (Map.singleton 588 opened)
-      stranded <- case Map.lookup 588 settled of
-        Just session -> pure (applyFailedInterrupt cause (Just guidance) session)
-        Nothing -> fail "the connection's end dropped the session it served"
+          -- The host routes a connection's end only into the children that
+          -- connection was serving (SAG-10), so what reaches this session is
+          -- already known to be its own.
+          settled = markReviewSessionDisconnected "Claude stream-json session exited" opened
+      stranded <- pure (applyFailedInterrupt cause (Just guidance) settled)
       stranded.sessionPhase `shouldBe` ReviewFailed
       stranded.sessionDetail.reviewSessionUndelivered `shouldBe` [guidance]
       reviewSessionReusable
@@ -936,13 +930,12 @@ spec = do
     it "carries a message left on an interrupted session whose connection then stopped" $ do
       let interrupted = (interruptedSession "") {sessionPhase = ReviewInterrupted}
           held = applyFailedInterrupt cause (Just guidance) interrupted
-          serving = fmap (.reviewThreadConnection) held.sessionDetail.reviewSessionThreadId
-          settled = markReviewSessionsDisconnected serving "Claude stream-json session exited" (Map.singleton 588 held)
+          settled = markReviewSessionDisconnected "Claude stream-json session exited" held
       -- Live while the thread was merely interrupted, so the message is on
       -- the line ready to resend.
       reviewSessionInputLive IssueRevision ReviewInterrupted `shouldBe` True
       held.sessionInput `shouldBe` guidance
-      stopped <- maybe (fail "the connection's end dropped the session it served") pure (Map.lookup 588 settled)
+      let stopped = settled
       -- The connection's end is what makes it unresumable, and says so.
       stopped.sessionPhase `shouldBe` ReviewFailed
       reviewSessionReusable
@@ -1262,7 +1255,7 @@ malformedLine = rawResult "notjsonatall"
 failedTurnSays :: Text -> ByteString.ByteString -> Expectation
 failedTurnSays detail script =
   withClaudeReviewClient (reviewTurn <> [script]) $ \fixture -> do
-    beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+    fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
     recorded <- awaitOneCompletedTurn fixture
     threadId <- soleThread recorded
     case turnCompletions recorded of
@@ -1306,7 +1299,7 @@ awaitOneCompletedTurn fixture =
 -- state every mid-turn test begins from.
 awaitRunningTurn :: ClaudeReviewFixture -> IO ReviewThreadId
 awaitRunningTurn fixture = do
-  beginIssueReview fixture.claudeReviewClient 844 `shouldReturn` Right ()
+  fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
   recorded <- waitForReviewEvents "a running turn" fixture.claudeReviewEvents (not . null . turnStarts)
   soleThread recorded
 
@@ -1437,7 +1430,7 @@ diagnostics recorded =
 mentionsAProvider :: Text -> Bool
 mentionsAProvider message = any (`Data.Text.isInfixOf` Data.Text.toLower message) ["claude", "codex"]
 
-refusalText :: Either Text () -> Text
+refusalText :: Either Text value -> Text
 refusalText = either id (const "")
 
 -- | The text of every content block in one recorded CLI user message.

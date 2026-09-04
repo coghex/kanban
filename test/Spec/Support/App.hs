@@ -47,7 +47,6 @@ import Kanban.UI.Types
     ProcessSelection (..),
     PullRequestDetail (..),
     PullRequestReviewSession,
-    ReviewBackend (..),
     ReviewDetail (..),
     ReviewPhase (..),
     ReviewSession,
@@ -125,12 +124,10 @@ testAppState board = do
         appBoardRefreshQueued = False,
         appRefreshCoordinator = refreshCoordinator,
         appQuitPending = False,
-        appReviewBackend = ReviewBackendStopped,
         appReviewSessions = Map.empty,
         appReviewUndelivered = Map.empty,
         appSolveSessions = Map.empty,
         appSolveProcesses = Map.empty,
-        appCanonicalReviewProcesses = Map.empty,
         appPullRequestReviewSessions = Map.empty,
         appPullRequestProcesses = Map.empty,
         appWorkers = Map.empty,
@@ -208,7 +205,9 @@ testReviewSession issue phase =
           reviewSessionThreadId = Nothing,
           reviewSessionTurnId = Nothing,
           reviewSessionPending = Nothing,
-          reviewSessionUndelivered = []
+          reviewSessionUndelivered = [],
+          reviewSessionAwaiting = [],
+          reviewSessionRestored = Nothing
         }
 
 emptyTranscript :: ChatTranscript

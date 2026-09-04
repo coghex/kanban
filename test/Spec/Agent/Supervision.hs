@@ -46,7 +46,7 @@ import Kanban.UI.Types
     SolveSession,
   )
 import Kanban.UI.Util (failureActivity)
-import Kanban.UI.Worker (orphanMessage)
+import Kanban.UI.Session (orphanMessage)
 import Kanban.Worker (workerDeadlineReason)
 import Spec.Support.Env (waitForFileToExist, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust, requireLeft, requireRight, shouldMention, shouldNotMention)

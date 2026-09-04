@@ -35,7 +35,8 @@ import Kanban.UI.Approval
     approvalTogglePress,
   )
 import Kanban.UI.PullRequest (drainerTogglePress)
-import Kanban.UI.Review (approvalServiceRefusal, canonicalLaunchOutcome)
+import Kanban.Review (canonicalLaunchOutcome)
+import Kanban.UI.Review (approvalServiceRefusal)
 import Kanban.UI.Types (AppState (..))
 import Kanban.UI.Util (shownNotice)
 import Spec.Support.App (testAppState)

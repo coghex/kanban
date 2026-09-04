@@ -6,7 +6,6 @@ import Brick (BrickEvent (..), Location (..))
 import Data.Aeson (Value (..))
 import qualified Data.Map.Strict as Map
 import Data.Foldable (for_)
-import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import qualified Data.Text
 import qualified Graphics.Vty as Vty
@@ -14,6 +13,7 @@ import Kanban.Domain
 import Kanban.Models (ProviderName (..))
 import Kanban.Review
   ( ConnectionId (..),
+    ReviewAnswer (..),
     ReviewApproval (..),
     ReviewOutputKind (..),
     ReviewThreadId (..),
@@ -24,13 +24,25 @@ import Kanban.Review
     ReviewStage (..)
   )
 import Kanban.UI.Board (reviewPhaseGlyphFor)
-import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), overlayMouseAction)
+import qualified Data.Text as Text
+import Kanban.Worker (ReviewCommandId (..), ReviewCommandPayload (..), reviewCommandDisplay)
+import Kanban.UI.Events (OverlayExtent (..), OverlayMouseAction (..), QuitRequest (..), dashboardQuitRequest, overlayMouseAction)
 import Kanban.UI.Overlay (reviewPhaseLabel)
 import Kanban.UI.Reconcile (reconcileReviewSessions)
 import Kanban.UI.Review
-  (
+  ( appliedIssueActionFinished,
+    appliedIssueActionTermination,
+    appliedReviewInput,
+    awaitedCommandText,
+    dropAwaiting,
+    releaseAwaiting,
+    applyUndeliveredSteer,
+    carryUndelivered,
+    newReviewSession,
+    undeliveredForIssue,
     forcedToNormalBy,
-    markReviewSessionsDisconnected,
+    markReviewSessionDisconnected,
+    reviewSubmission,
     numberedChoicePrompt,
     reviewDigitActionFor, ReviewCancelAction (..),
     ReviewDigitAction (..),
@@ -46,7 +58,6 @@ import Kanban.UI.Session
   ( EpicReviewRefusal (..),
     ReviewTarget (..),
     itemReviewRefusal,
-    liveReviewSessions,
     resolveProcessClick,
     resolveProcessSelection,
     reviewAgentSessionEntry,
@@ -100,7 +111,7 @@ import Kanban.UI.Types
 import Kanban.Worker (WorkerId (..))
 import Spec.Support.App (testAppState, testReviewSession)
 import Kanban.UI.Session (reviewSessionMode)
-import Spec.Support.Expect (shouldMention, shouldNotMention)
+import Spec.Support.Expect (shouldMention)
 import Spec.Support.Fixtures
   ( baseIssue,
     basePullRequest,
@@ -344,7 +355,9 @@ spec = do
                 reviewSessionThreadId = threadId,
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
-                reviewSessionUndelivered = []
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
               }
         onFirst = Just (ReviewThreadId (ConnectionId 0) "thread-1")
         onSecond = Just (ReviewThreadId (ConnectionId 1) "thread-1")
@@ -355,8 +368,9 @@ spec = do
               (3, sessionOn Nothing ReviewStarting),
               (4, sessionOn onFirst ReviewFinished)
             ]
-        phasesAfter ended = Map.map (.sessionPhase) (markReviewSessionsDisconnected ended "backend gone" sessions)
-        interruptedSessions = Map.singleton 5 (sessionOn onFirst ReviewInterrupted)
+        disconnectedPhase :: Int -> Maybe ReviewPhase
+        disconnectedPhase key = (.sessionPhase) . markReviewSessionDisconnected "backend gone" <$> Map.lookup key sessions
+        interruptedSession = sessionOn onFirst ReviewInterrupted
 
     -- An interrupted revision keeps its input line because it is resumable,
     -- which is true only while there is something to resume it on. Its
@@ -364,42 +378,25 @@ spec = do
     -- leaving it resumable leaves that line offering a send into a dead
     -- process.
     it "terminalizes an interrupted revision whose connection has gone" $
-      Map.lookup 5 (Map.map (.sessionPhase) (markReviewSessionsDisconnected (Just (ConnectionId 0)) "backend gone" interruptedSessions))
-        `shouldBe` Just ReviewFailed
+      (markReviewSessionDisconnected "backend gone" interruptedSession).sessionPhase
+        `shouldBe` ReviewFailed
 
-    it "terminalizes every live session when the whole client stopped" $
-      phasesAfter Nothing
-        `shouldBe` Map.fromList
-          [ (1, ReviewFailed),
-            (2, ReviewFailed),
-            (3, ReviewFailed),
-            -- Already settled, so untouched: a finished revision is not
-            -- retroactively a disconnection.
-            (4, ReviewFinished)
-          ]
+    -- Which sessions an ended connection reaches is the host's decision now,
+    -- not this function's: it journals a client-stopped or connection-stopped
+    -- event only into the children that connection was serving (SAG-10), so
+    -- what arrives here is already known to belong to this session. What is
+    -- left to decide is the phase, and the one session it must /not/ move is
+    -- one that already settled.
+    it "terminalizes a live session the ended connection was serving" $
+      map disconnectedPhase [1, 2, 3]
+        `shouldBe` [Just ReviewFailed, Just ReviewFailed, Just ReviewFailed]
 
-    it "terminalizes only the sessions the ended connection was serving" $
-      phasesAfter (Just (ConnectionId 0))
-        `shouldBe` Map.fromList
-          [ (1, ReviewFailed),
-            -- Still running on a connection that is still up. Reporting this
-            -- one is the client-wide failure requirement 5 forbids.
-            (2, ReviewRunning),
-            -- No thread yet, so a connection-scoped stop cannot reach it at
-            -- all. That is not the same as its review surviving: a review
-            -- whose thread never arrived is terminalized by the
-            -- 'ReviewStartFailed' the client raises for it by issue number
-            -- (Spec.Agent.Protocol), because it has no identity this
-            -- function could match it by.
-            (3, ReviewStarting),
-            (4, ReviewFinished)
-          ]
+    it "leaves an already-settled session alone" $
+      disconnectedPhase 4 `shouldBe` Just ReviewFinished
 
-    it "names the ended connection in the transcript of the sessions it claimed" $ do
-      let disconnected = markReviewSessionsDisconnected (Just (ConnectionId 1)) "backend gone" sessions
-          transcriptOf key = maybe "" (\session -> session.sessionTranscript.compactTranscript) (Map.lookup key disconnected)
-      transcriptOf 2 `shouldMention` "backend gone"
-      transcriptOf 1 `shouldNotMention` "backend gone"
+    it "names the ended connection in the transcript of the session it claimed" $ do
+      let disconnected = markReviewSessionDisconnected "backend gone" (sessionOn onSecond ReviewRunning)
+      disconnected.sessionTranscript.compactTranscript `shouldMention` "backend gone"
 
   -- The one review event whose display names a program rather than a
   -- session. Every other diagnostic reaches the operator inside a session
@@ -434,17 +431,20 @@ spec = do
     it "tags a Claude session's stderr as Claude's" $
       reviewOutputPrefix (DiagnosticOutput ClaudeProvider) `shouldBe` "[claude] "
 
-  describe "review session liveness, quit protection, and the x gate" $ do
-    -- issue #151: the processes overlay, the `x` gate that dispatches on
-    -- its rows, and the dashboard quit guard each re-implemented "live"
-    -- differently, so a revision waiting on a question or approval blocked
-    -- `q` while the overlay called the same session dead and refused `x`.
-    -- 'reviewSessionLive' is now the one decision all three consume, and it
-    -- means *currently killable*: the session has a target 'killReviewAgent'
-    -- can act on. These are the pure decisions behind those call sites, so
-    -- the whole input matrix is covered without an 'EventM' harness.
+  describe "review session liveness and the x gate" $ do
+    -- issue #151 made the processes overlay, the @x@ gate that dispatches on
+    -- its rows, and the dashboard quit guard consume one decision, because
+    -- three implementations of "live" disagreed. SAG-10 keeps that single
+    -- decision and simplifies what it is made of: the durable child action a
+    -- review runs as either exists or it does not, and ending it is a command
+    -- its host applies, so there is no window in which a row reads live while
+    -- the kill would refuse.
+    --
+    -- The quit guard is no longer one of the three. A live issue action
+    -- outlives the dashboard now (requirement 3), so it is asserted here
+    -- against the quit decision itself rather than against this predicate.
     let reviewedIssue = 151
-        sessionFor (_, _, stage, phase, threadId, turnId) =
+        sessionFor (stage, phase, threadId, turnId) =
           newAgentSession
             0
             phase
@@ -457,9 +457,10 @@ spec = do
                 reviewSessionThreadId = threadId,
                 reviewSessionTurnId = turnId,
                 reviewSessionPending = Nothing,
-                reviewSessionUndelivered = []
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
               }
-        canonicalProcesses hasProcess = if hasProcess then Set.singleton reviewedIssue else Set.empty
         allPhases =
           [ ReviewStarting,
             ReviewRunning,
@@ -471,103 +472,344 @@ spec = do
             ReviewInterrupted
           ]
         allStages = [InitialReview, IssueRevision, IssueRereview]
-        -- Every input the kill target depends on: phase, stage,
-        -- canonical-process presence, backend readiness, and both IDs.
-        killTargetInputs =
-          [ (backendReady, hasProcess, stage, phase, threadId, turnId)
-            | backendReady <- [False, True],
-              hasProcess <- [False, True],
-              stage <- allStages,
+        sessionInputs =
+          [ (stage, phase, threadId, turnId)
+            | stage <- allStages,
               phase <- allPhases,
               threadId <- [Nothing, Just (fixtureReviewThread "thread-1")],
               turnId <- [Nothing, Just "turn-1"]
           ]
-        -- The issue's rule restated independently of the code under test.
-        expectedLive (backendReady, hasProcess, stage, phase, threadId, turnId) =
-          hasProcess
-            || ( stage == IssueRevision
-                   && phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting]
-                   && backendReady
-                   && isJust threadId
-                   && isJust turnId
-               )
-        sharedLive inputs@(backendReady, hasProcess, _, _, _, _) =
-          reviewSessionLive backendReady hasProcess (sessionFor inputs)
-        overlayLive inputs@(backendReady, hasProcess, _, _, _, _) =
-          (reviewAgentSessionEntry backendReady hasProcess reviewedIssue (sessionFor inputs)).agentSessionLive
-        quitBlocked inputs@(backendReady, hasProcess, _, _, _, _) =
-          liveReviewSessions backendReady (canonicalProcesses hasProcess) (Map.singleton reviewedIssue (sessionFor inputs))
-            == [reviewedIssue]
-        -- Every combination whose answer disagrees with the rule above,
-        -- tagged with its inputs, so a failure names the exact
-        -- combinations rather than reporting "True /= False" or dumping
-        -- the whole matrix.
-        wrongAnswers decide = [(inputs, decide inputs) | inputs <- killTargetInputs, decide inputs /= expectedLive inputs]
 
-    it "covers every combination of phase, stage, canonical process, backend readiness, and both IDs" $ do
-      length killTargetInputs `shouldBe` 384
-      (any expectedLive killTargetInputs, all expectedLive killTargetInputs) `shouldBe` (True, False)
-
-    it "reports a review session live exactly when it currently has a kill target" $
-      wrongAnswers sharedLive `shouldBe` []
-
-    it "keeps the processes overlay and the quit guard agreeing over the whole matrix" $ do
-      wrongAnswers overlayLive `shouldBe` []
-      wrongAnswers quitBlocked `shouldBe` []
-
-    it "keeps a waiting revision live and routes x to its interruptible turn" $ do
-      let waiting = (True, False, IssueRevision, ReviewWaiting, Just (fixtureReviewThread "thread-1"), Just "turn-1")
-          session = sessionFor waiting
-      sharedLive waiting `shouldBe` True
-      overlayLive waiting `shouldBe` True
-      liveReviewSessions True Set.empty (Map.singleton reviewedIssue session) `shouldBe` [reviewedIssue]
-      -- The gate hands a live review row to 'killReviewAgent', whose turn
-      -- branch takes the recorded thread and turn under exactly this
-      -- condition, so `x` interrupts the turn instead of reporting no live
-      -- process to kill.
-      reviewTurnInterruptible IssueRevision ReviewWaiting `shouldBe` True
-
-    it "leaves a canonical stage quittable until its process is registered" $ do
-      let starting = (True, False, InitialReview, ReviewStarting, Nothing, Nothing)
-      sharedLive starting `shouldBe` False
-      overlayLive starting `shouldBe` False
-      liveReviewSessions True Set.empty (Map.singleton reviewedIssue (sessionFor starting)) `shouldBe` []
-
-    it "leaves a starting revision quittable until its backend is ready and it has both IDs" $
-      mapM_
-        (\inputs -> (inputs, sharedLive inputs, overlayLive inputs, quitBlocked inputs) `shouldBe` (inputs, False, False, False))
-        [ (False, False, IssueRevision, ReviewStarting, Nothing, Nothing),
-          (False, False, IssueRevision, ReviewStarting, Just (fixtureReviewThread "thread-1"), Just "turn-1"),
-          (True, False, IssueRevision, ReviewStarting, Nothing, Nothing),
-          (True, False, IssueRevision, ReviewStarting, Just (fixtureReviewThread "thread-1"), Nothing),
-          (True, False, IssueRevision, ReviewStarting, Nothing, Just "turn-1")
+    -- The whole point of the simplification: the answer depends on the child
+    -- and on nothing the session happens to be showing. A row that reported
+    -- live off a phase would go on offering @x@ after the action ended, and
+    -- one that reported dead off a phase would refuse @x@ for an action still
+    -- running — both of which #151 was filed for.
+    it "reports a review session live exactly when its durable action is" $
+      sequence_
+        [ (actionLive, stage, phase, reviewSessionLive actionLive) `shouldBe` (actionLive, stage, phase, actionLive)
+          | actionLive <- [False, True],
+            (stage, phase, _, _) <- sessionInputs
         ]
 
-    it "keeps a registered canonical process live and killable whatever the session phase" $
-      mapM_
-        ( \phase -> do
-            let withProcess = (False, True, InitialReview, phase, Nothing, Nothing)
-            sharedLive withProcess `shouldBe` True
-            overlayLive withProcess `shouldBe` True
-            quitBlocked withProcess `shouldBe` True
-            -- No interruptible turn, so 'killReviewAgent' reaches the
-            -- unchanged canonical process-kill branch for this row.
-            reviewTurnInterruptible InitialReview phase `shouldBe` False
-            (reviewAgentSessionEntry False True reviewedIssue (sessionFor withProcess)).agentSessionRef
-              `shouldBe` ReviewAgent reviewedIssue
-        )
-        allPhases
+    it "covers every combination of phase, stage, and both identifiers" $ do
+      length sessionInputs `shouldBe` 96
+      length (filter (\(stage, _, _, _) -> stage == IssueRevision) sessionInputs) `shouldBe` 32
 
-    it "stops counting a just-killed revision as live while it still carries its turn ID" $ do
-      -- 'killReviewAgent' leaves the session ReviewFailed without clearing
-      -- the thread and turn IDs, so without the phase condition `q` would
-      -- stay refused after the kill and a second `x` would pass the gate
-      -- only to hit the no-live-process notice.
-      let killed = (True, False, IssueRevision, ReviewFailed, Just (fixtureReviewThread "thread-1"), Just "turn-1")
-      sharedLive killed `shouldBe` False
-      overlayLive killed `shouldBe` False
-      quitBlocked killed `shouldBe` False
-      reviewTurnInterruptible IssueRevision ReviewFailed `shouldBe` False
+    it "keeps the processes overlay agreeing with that decision" $
+      sequence_
+        [ (actionLive, (reviewAgentSessionEntry actionLive reviewedIssue (sessionFor inputs)).agentSessionLive)
+            `shouldBe` (actionLive, actionLive)
+          | actionLive <- [False, True],
+            inputs <- sessionInputs
+        ]
+
+    -- Which of the two things @x@ then does. Only an interactive revision
+    -- with a running turn gets a turn interrupt; every canonical stage ends
+    -- the whole child, which is the escalation requirement 13 preserves
+    -- along with its wording.
+    it "routes x to a turn interrupt only for a revision that has one" $
+      sequence_
+        [ (stage, phase, reviewTurnInterruptible stage phase)
+            `shouldBe` (stage, phase, stage == IssueRevision && phase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting])
+          | stage <- allStages,
+            phase <- allPhases
+        ]
+
+  -- Round 8's first blocker. A command must name the thread and turn the
+  -- overlay is showing, not the newest the child has recorded: the two differ
+  -- for as long as a journal event takes to reach Brick, and a durable read
+  -- in that window addresses a turn the user never saw. Naming what was on
+  -- screen turns the race into a refusal they are told about.
+  describe "which turn a submitted command names" $ do
+    let showing turnId =
+          newAgentSession
+            0
+            ReviewWaiting
+            ""
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                reviewSessionTurnId = turnId,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
+              }
+
+    it "takes the thread and turn from the session on screen" $ do
+      let displayed = showing (Just "turn-1")
+      ( displayed.sessionDetail.reviewSessionThreadId,
+        displayed.sessionDetail.reviewSessionTurnId
+        )
+        `shouldBe` (Just (fixtureReviewThread "thread-1"), Just "turn-1")
+
+    -- A session that has not been told a turn yet names none, which the host
+    -- accepts only while the child holds none either. The refusal half of
+    -- that rule is exercised against a real host in
+    -- "Spec.Agent.IssueHost" — "rejects feedback written for a turn that has
+    -- since been replaced" — because it is the host that decides it.
+    it "names no turn when the overlay has not been told one" $
+      (showing Nothing).sessionDetail.reviewSessionTurnId `shouldBe` Nothing
+
+  -- Which durable command a submission becomes (requirement 9). The two are
+  -- not interchangeable: one is new guidance, the other is the recovery of a
+  -- specific message the provider refused, and a review's evidence should say
+  -- which happened.
+  describe "what the input line submits" $ do
+    let revising phase =
+          newAgentSession
+            0
+            phase
+            ""
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                reviewSessionTurnId = Just "turn-1",
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
+              }
+
+    it "sends text the user typed as feedback" $
+      reviewSubmission (revising ReviewRunning) {sessionInput = "look again"}
+        `shouldBe` SendReviewFeedback "look again"
+
+    -- The message a refused steer hands back lands on the line, and pressing
+    -- Enter on it is the deliberate resend the queue exists for. The queue
+    -- itself cannot answer this: it drains onto the line the moment the line
+    -- is free, so by Enter the message is no longer in it.
+    it "sends a handed-back message as a deliberate resend" $ do
+      let handed = applyUndeliveredSteer "look again" (revising ReviewRunning)
+      handed.sessionInput `shouldBe` "look again"
+      handed.sessionDetail.reviewSessionUndelivered `shouldBe` []
+      reviewSubmission handed `shouldBe` ResendReviewSteer "look again"
+
+    -- Offered back /editable/ is the point, so editing it makes it new text.
+    it "treats an edited handed-back message as new feedback" $ do
+      let edited = (applyUndeliveredSteer "look again" (revising ReviewRunning)) {sessionInput = "look again, but at the lease"}
+      reviewSubmission edited `shouldBe` SendReviewFeedback "look again, but at the lease"
+
+    -- A message that could not reach the line stays queued, and nothing on
+    -- the line claims to be it.
+    it "leaves a message queued when the line is already holding a draft" $ do
+      let queued = applyUndeliveredSteer "look again" (revising ReviewRunning) {sessionInput = "my own draft"}
+      queued.sessionInput `shouldBe` "my own draft"
+      queued.sessionDetail.reviewSessionUndelivered `shouldBe` ["look again"]
+      reviewSubmission queued `shouldBe` SendReviewFeedback "my own draft"
+
+    -- And the message carried into a fresh session by the press that
+    -- replaces a dead one is a resend there too: it is the same refused
+    -- message, on the first line that can actually send it.
+    it "carries a handed-back message into a fresh session as a resend" $ do
+      let stranded = applyUndeliveredSteer "look again" (revising ReviewFailed)
+          (restarted, held) =
+            carryUndelivered (undeliveredForIssue (Just stranded) []) (newReviewSession (baseIssue 151 []) IssueRevision 0)
+      held `shouldBe` []
+      restarted.sessionInput `shouldBe` "look again"
+      reviewSubmission restarted `shouldBe` ResendReviewSteer "look again"
+
+  -- The other half of the terminal-envelope ordering (round 7). A command
+  -- that ends an action journals its line before the child's terminal event
+  -- so a replay meets them in that order — and this holds whatever order a
+  -- replay actually meets them in: a delivered line is always recorded, and
+  -- never moves a session that has already settled back to running.
+  describe "a delivered input arriving after a session settled" $ do
+    let settledAs phase =
+          newAgentSession
+            0
+            phase
+            "approved"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
+              }
+
+    it "records the line without reviving the session" $
+      sequence_
+        [ (phase, applied.sessionPhase, applied.sessionTranscript.standardTranscript)
+            `shouldBe` (phase, phase, "\nYou: carry on\n")
+          | phase <- [ReviewFinished, ReviewNeedsChanges, ReviewFailed, ReviewRevised],
+            let applied = appliedReviewInput "carry on" Nothing (settledAs phase)
+        ]
+
+    -- A running session still takes the line and the phase, which is what
+    -- makes the rule above a rule rather than the function doing nothing.
+    it "still moves a running session to thinking" $ do
+      let applied = appliedReviewInput "carry on" Nothing (settledAs ReviewWaiting)
+      applied.sessionPhase `shouldBe` ReviewRunning
+      applied.sessionActivity `shouldBe` "thinking"
+      applied.sessionTranscript.standardTranscript `shouldMention` "carry on"
+
+  -- Round 13's blocker. Both gestures that end an action used to mark the
+  -- transcript and move the phase at the press, before the command was even
+  -- written. A reattached overlay cannot reconstruct that mark — it is no
+  -- journal event — so one action read one way live and another on replay,
+  -- and a ledger write that failed still announced a kill.
+  describe "ending an action from the overlay" $ do
+    let running =
+          newAgentSession
+            0
+            ReviewRunning
+            "thinking"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = InitialReview,
+                reviewSessionThreadId = Nothing,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
+              }
+
+    -- The property both gestures rest on. Anything moved here is moved for a
+    -- live overlay and for nobody else.
+    it "moves nothing at the press, for a kill or a canonical interrupt alike" $
+      appliedIssueActionTermination running `shouldBe` running
+
+    -- And what the two journaled records do, which is the whole of what
+    -- either gesture produces. The line reads as the thing the user did, and
+    -- no bracketed marker appears in it, because no such marker is written
+    -- anywhere any more.
+    it "renders a termination from its journal alone" $ do
+      let afterInput = appliedReviewInput (reviewCommandDisplay TerminateIssueAction) Nothing running
+      afterInput.sessionTranscript.standardTranscript `shouldBe` "\nYou: end this action\n"
+      Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[killed by user]"
+      Text.unpack afterInput.sessionTranscript.standardTranscript `shouldNotContain` "[interrupted by user]"
+
+  -- Round 18's first blocker. Checking the action's durable state and writing
+  -- the command are two steps, so a settle between them leaves a command
+  -- nothing will hand back — and the draft it came from was cleared on the
+  -- assumption that something would. The dashboard holds what it wrote until
+  -- the child's journal accounts for it, and the terminal event is the last
+  -- thing that journal can say.
+  describe "a command the child's journal never accounts for" $ do
+    let running =
+          newAgentSession
+            0
+            ReviewRunning
+            "thinking"
+            Nothing
+            (ChatTranscript "" "" "")
+            ReviewDetail
+              { reviewSessionIssue = baseIssue 151 [],
+                reviewSessionStage = IssueRevision,
+                reviewSessionThreadId = Nothing,
+                reviewSessionTurnId = Nothing,
+                reviewSessionPending = Nothing,
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [(fixtureCommandId, "look again")],
+                reviewSessionRestored = Nothing
+              }
+
+    it "offers its text back when the action ends without it" $ do
+      let ended = releaseAwaiting running
+      ended.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      -- Onto the line, since nothing else is holding it: the message is
+      -- recoverable rather than lost.
+      ended.sessionInput `shouldBe` "look again"
+
+    -- And a command the journal did account for is not offered twice: it was
+    -- shown as sent, or handed back with its own reason, when its line
+    -- arrived.
+    -- Which commands are held at all. A payload dropped from this list is a
+    -- message that goes silently missing in the window above, and a payload
+    -- added to it offers a category word back to the input line.
+    it "holds exactly the commands that carry a person's own words" $
+      map awaitedCommandText everyCommandPayload
+        `shouldBe` [ Just "a",
+                     Just "Allowed similar actions for this review session",
+                     Just "feedback",
+                     Just "steer",
+                     Nothing,
+                     Nothing
+                   ]
+
+    -- Round 19's second blocker. A result event can publish the terminal
+    -- phase before the envelope arrives, and the release used to be skipped
+    -- along with the rest of that handler — so the held text was dropped by
+    -- the very event that proves it was never read.
+    it "offers its text back even when a result already settled the phase" $ do
+      let alreadySettled = running {sessionPhase = ReviewNeedsChanges, sessionActivity = "changes requested"}
+          released = appliedIssueActionFinished "the issue action was terminated" alreadySettled
+      released.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      -- Recoverable, on the line or queued behind it — which of the two is
+      -- 'applyUndeliveredSteer'\'s own rule and not this release's.
+      (released.sessionInput : released.sessionDetail.reviewSessionUndelivered)
+        `shouldContain` ["look again"]
+      -- And the phase a result already published is what stands: this
+      -- envelope adds the release and nothing else.
+      released.sessionPhase `shouldBe` ReviewNeedsChanges
+      released.sessionActivity `shouldBe` "changes requested"
+
+    -- The other arm, so the rule above is a rule rather than the function
+    -- doing nothing: an envelope that /is/ what settles the session says so.
+    it "settles a running session and releases what it was holding" $ do
+      let released = appliedIssueActionFinished "the issue action was terminated" running
+      released.sessionPhase `shouldBe` ReviewFailed
+      released.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      Text.unpack released.sessionTranscript.standardTranscript
+        `shouldContain` "the issue action was terminated"
+
+    it "forgets a command the journal accounted for" $ do
+      let seen = appliedReviewInput "look again" Nothing (dropAwaiting fixtureCommandId running)
+      seen.sessionDetail.reviewSessionAwaiting `shouldBe` []
+      releaseAwaiting seen `shouldBe` seen
+
+  -- Requirement 3. The quoted refusal is gone, and with it the only reason
+  -- the dashboard ever declined to quit for an agent.
+  describe "quitting with a live issue action" $ do
+    it "halts immediately even while an issue action is running" $ do
+      state <- testAppState (fixtureBoard [])
+      let running =
+            state
+              { appReviewSessions =
+                  Map.singleton
+                    151
+                    ( newAgentSession
+                        0
+                        ReviewRunning
+                        "thinking"
+                        Nothing
+                        (ChatTranscript "" "" "")
+                        ReviewDetail
+                          { reviewSessionIssue = baseIssue 151 [],
+                            reviewSessionStage = IssueRevision,
+                            reviewSessionThreadId = Just (fixtureReviewThread "thread-1"),
+                            reviewSessionTurnId = Just "turn-1",
+                            reviewSessionPending = Nothing,
+                            reviewSessionUndelivered = [],
+                            reviewSessionAwaiting = [],
+                            reviewSessionRestored = Nothing
+                          }
+                    )
+              }
+      dashboardQuitRequest running False `shouldBe` QuitImmediate
+
+    -- The two answers that remain, so this is not passing merely because the
+    -- function always says halt.
+    it "still settles GitHub work first, and still reports an in-flight settle" $ do
+      state <- testAppState (fixtureBoard [])
+      dashboardQuitRequest state True `shouldBe` QuitMustSettle
+      dashboardQuitRequest state {appQuitPending = True} False `shouldBe` QuitAlreadySettling
 
   describe "canonical review completion vs. cancellation" $ do
     -- issue #31 spec addition: a canonical process's completion event can
@@ -745,7 +987,9 @@ spec = do
                   reviewSessionThreadId = Nothing,
                   reviewSessionTurnId = Nothing,
                   reviewSessionPending = Nothing,
-                  reviewSessionUndelivered = []
+                  reviewSessionUndelivered = [],
+                  reviewSessionAwaiting = [],
+                  reviewSessionRestored = Nothing
                 }
           )
             {sessionTickArmed = armed}
@@ -817,7 +1061,9 @@ spec = do
                 reviewSessionThreadId = Nothing,
                 reviewSessionTurnId = Nothing,
                 reviewSessionPending = Nothing,
-                reviewSessionUndelivered = []
+                reviewSessionUndelivered = [],
+                reviewSessionAwaiting = [],
+                reviewSessionRestored = Nothing
               }
         reconciledPhaseFor issue session =
           (reconcileReviewSessions defaultWorkflowConfig [issue] (Map.singleton issue.issueNumber session) Map.! issue.issueNumber).sessionPhase
@@ -1220,3 +1466,19 @@ spec = do
       selectedReviewTarget ordinary `shouldBe` ReviewTargetItem (IssueItem (baseIssue 10 []))
       selectedReviewTarget child `shouldBe` ReviewTargetItem (IssueItem (baseIssue 811 []))
       selectedReviewTarget selectedPullRequest `shouldBe` ReviewTargetItem (PullRequestItem pullRequest)
+
+-- | One command identifier, for a session fixture that has written a command
+-- and not yet seen its journal.
+fixtureCommandId :: ReviewCommandId
+fixtureCommandId = ReviewCommandId "command-under-test"
+
+-- | Every command a dashboard can write, in the vocabulary's own order.
+everyCommandPayload :: [ReviewCommandPayload]
+everyCommandPayload =
+  [ AnswerReviewQuestion (ReviewRequestId (ConnectionId 1) (String "request-1")) (ReviewAnswer ["a"] Nothing) "a",
+    AnswerReviewApproval (ReviewRequestId (ConnectionId 1) (String "request-2")) True True "Allowed similar actions for this review session",
+    SendReviewFeedback "feedback",
+    ResendReviewSteer "steer",
+    InterruptReviewTurn,
+    TerminateIssueAction
+  ]

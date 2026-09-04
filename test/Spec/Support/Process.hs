@@ -370,7 +370,10 @@ runningWorkerState identifier pid identity =
       workerStateLogPath = Nothing,
       workerStateHeartbeatAt = epoch,
       workerStateLastActivity = "running",
-      workerStateKnownProcesses = []
+      workerStateKnownProcesses = [],
+      workerStateReviewThread = Nothing,
+      workerStateReviewTurn = Nothing,
+      workerStateReviewRequest = Nothing
     }
 
 isDiagnosticEvent :: WorkerEvent -> Bool
@@ -715,9 +718,17 @@ withFakeReviewClient processShape action =
       stopReviewClient
       (\client -> action spawnLog client events)
 
+-- | The process registration a client with no supervisor owning it makes.
+--
+-- Production passes the repository review host's own, so every connection is
+-- recorded and censused as it is created; a test client has no supervisor to
+-- record anything with.
+ignoreProcessRegistration :: Maybe Int -> ManagedProcess -> IO ()
+ignoreProcessRegistration _ _ = pure ()
+
 startFakeReviewClient :: EmbeddedReviewBackend -> Repository -> (ReviewEvent -> IO ()) -> IO ReviewClient
 startFakeReviewClient backend repository eventSink = do
-  started <- startResolvedReviewClient backend defaultRoster defaultWorkflowConfig repository eventSink
+  started <- startResolvedReviewClient backend defaultRoster defaultWorkflowConfig repository ignoreProcessRegistration eventSink
   case started of
     Right client -> pure client
     Left message -> fail ("the fake review backend did not start: " <> Data.Text.unpack message)
@@ -860,8 +871,8 @@ withReviewSessionStartedBy clientStart roster workflowConfig ghScript prelude tu
               let repository = Repository repositoryRoot "coghex" "kanban"
                   sink event = modifyIORef events (<> [event])
               started <- case clientStart of
-                StartOnClaudeBackend -> startResolvedReviewClient backend roster workflowConfig repository sink
-                StartThroughRouting -> startReviewClient roster workflowConfig repository sink
+                StartOnClaudeBackend -> startResolvedReviewClient backend roster workflowConfig repository ignoreProcessRegistration sink
+                StartThroughRouting -> startReviewClient roster workflowConfig repository ignoreProcessRegistration sink
               case started of
                 Right client -> pure client
                 Left message -> throwIO (userError ("the Claude review backend did not start: " <> Data.Text.unpack message))

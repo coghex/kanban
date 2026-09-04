@@ -118,6 +118,7 @@ import Kanban.Domain
   )
 import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
+import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (ResumeProvenance (..), SolverBrand)
 import Kanban.Worker (WorkerDescriptor, WorkerParent)
 import Kanban.Workflow (readOnlyHistoryNotice)
@@ -134,11 +135,11 @@ import Kanban.Workflow (readOnlyHistoryNotice)
 -- ('Kanban.PullRequestFlow.directPullRequestAction' selects repair only for an
 -- approved Done pull request reporting a problem).
 --
--- 'ReviewIssue' and 'ReviseIssue' are declared here — target type, capability
--- query, dispatch vocabulary and owning authority alike — but no runner owns
--- them yet. Dispatching either returns 'ActionNotRunnerOwned' rather than
--- reaching a lifecycle that only exists inside the dashboard; SAG-10 supplies
--- those two runners.
+-- All eight are runner-owned. 'ReviewIssue' and 'ReviseIssue' were the last
+-- two that were not: they reached a lifecycle held in dashboard memory, and
+-- dispatching either returned a typed refusal saying so. SAG-10 replaced that
+-- refusal with the repository review host, so both now dispatch to a durable
+-- child action exactly as the other six dispatch to a persistent worker.
 data WorkflowActionKind
   = ReviewIssue
   | ReviseIssue
@@ -403,8 +404,6 @@ data ActionRefusal
   | -- | The target exists and is the right kind, but its current state is not
     -- one this verb acts on.
     ActionLifecycleIncompatible WorkflowActionKind Text
-  | -- | Declared, but no runner owns it in this slice.
-    ActionNotRunnerOwned WorkflowActionKind
   | -- | This verb needs a target and the request named none, or named one for
     -- the verb that takes none.
     ActionTargetMismatchedArity WorkflowActionKind
@@ -438,8 +437,6 @@ actionRefusalMessage refusal = case refusal of
       <> article expected
   ActionLifecycleIncompatible kind detail ->
     workflowActionKindTitle kind <> " does not apply here: " <> detail
-  ActionNotRunnerOwned kind ->
-    workflowActionKindTitle kind <> " is declared but has no runner yet"
   ActionTargetMismatchedArity kind ->
     workflowActionKindTitle kind <> " was given the wrong kind of target"
   ActionCapabilityBlocked _ detail -> detail
@@ -507,6 +504,14 @@ newtype AutoSolveCursor = AutoSolveCursor
 data ActionHandle
   = -- | One provider turn owned by a persistent worker.
     WorkerActionHandle WorkflowActionKind ResolvedTarget WorkerDescriptor ActionAttribution
+  | -- | One durable issue action owned by the repository's review host.
+    --
+    -- No attribution: an issue review opens no pull request, so there is no
+    -- baseline to measure a new one against. The stage travels instead,
+    -- because it is what decides the owning authority — and therefore what
+    -- the terminal evidence looks like and what a published result may
+    -- claim.
+    IssueActionHandle WorkflowActionKind ResolvedTarget ReviewStage WorkerDescriptor
   | -- | The complete autosolve loop over one issue. The worker is the provider
     -- turn it started with; observing the handle advances the loop past it.
     AutoSolveActionHandle ResolvedTarget WorkerDescriptor ActionAttribution AutoSolveCursor
@@ -515,12 +520,14 @@ data ActionHandle
 
 actionHandleKind :: ActionHandle -> WorkflowActionKind
 actionHandleKind (WorkerActionHandle kind _ _ _) = kind
+actionHandleKind (IssueActionHandle kind _ _ _) = kind
 actionHandleKind (AutoSolveActionHandle _ _ _ _) = AutoSolveIssue
 actionHandleKind (ApprovalQueueHandle _) = ObserveApprovalQueue
 
 actionHandleWorker :: ActionHandle -> Maybe WorkerDescriptor
 actionHandleWorker (WorkerActionHandle _ _ descriptor _) = Just descriptor
 actionHandleWorker (AutoSolveActionHandle _ descriptor _ _) = Just descriptor
+actionHandleWorker (IssueActionHandle _ _ _ descriptor) = Just descriptor
 actionHandleWorker (ApprovalQueueHandle _) = Nothing
 
 -- | The repository an approval-queue handle observes, and nothing for the two
@@ -551,6 +558,18 @@ data ActionOutcome
   | ActionNeedsInput Text
   | ActionStopped Text
   | ActionFailed Text
+  | -- | An issue action ran to completion and its owning authority
+    -- published what that authority publishes: for a canonical initial
+    -- review or rereview, the verdict @approve_issues.py@ recorded; for an
+    -- interactive revision, the specification amendment its
+    -- @kanban_github_issue@ tool posted.
+    --
+    -- The flag is read back off the child's own durable evidence, never
+    -- inferred from the worker having exited cleanly. A child that completed
+    -- but recorded no published result is 'ActionStopped', because
+    -- requirement 6 forbids reporting an indeterminate canonical result as an
+    -- approval and a worker's exit code is exactly that.
+    ActionIssueReviewed Int ReviewStage Bool
   | ActionApprovalQueueReport ApprovalQueueObservation
   deriving stock (Eq, Show)
 
@@ -573,6 +592,11 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionNeedsInput _ -> False
   ActionStopped _ -> False
   ActionFailed _ -> False
+  -- A published verdict is a completed review whichever way it went, exactly
+  -- as a changes-requested pull-request verdict is. What is /not/ success is
+  -- an action that published nothing, and that never reaches this
+  -- constructor.
+  ActionIssueReviewed _ _ _ -> True
   ActionApprovalQueueReport observation -> approvalQueueWasReported observation
 
 -- | Whether the controller actually answered.
@@ -589,8 +613,20 @@ actionOutcomeMessage outcome = case outcome of
   ActionNeedsInput detail -> "needs input: " <> detail
   ActionStopped detail -> "stopped: " <> detail
   ActionFailed detail -> "failed: " <> detail
+  ActionIssueReviewed number stage approved ->
+    "issue #" <> showNumber number <> " " <> issueStageWord stage <> " " <> issueVerdictWord stage approved
   ActionApprovalQueueReport observation -> approvalQueueObservationMessage observation
   where
+    issueStageWord InitialReview = "review"
+    issueStageWord IssueRereview = "rereview"
+    issueStageWord IssueRevision = "revision"
+    -- A revision never approves (requirement 6): what it publishes is the
+    -- specification amendment and the move to @reviewed:revised@, so it is
+    -- reported as published rather than as a verdict it has no authority to
+    -- reach.
+    issueVerdictWord IssueRevision _ = "published its specification amendment"
+    issueVerdictWord _ True = "was approved"
+    issueVerdictWord _ False = "requested changes"
     verdictWord PullRequestVerdictApproved = "is approved"
     verdictWord PullRequestVerdictChangesRequested = "has requested changes"
     verdictWord PullRequestVerdictPending = "has no verdict yet"

@@ -138,7 +138,10 @@ workerRecord status session =
       workerStateLogPath = Nothing,
       workerStateHeartbeatAt = epoch,
       workerStateLastActivity = "working",
-      workerStateKnownProcesses = []
+      workerStateKnownProcesses = [],
+      workerStateReviewThread = Nothing,
+      workerStateReviewTurn = Nothing,
+      workerStateReviewRequest = Nothing
     }
 
 running :: WorkerState

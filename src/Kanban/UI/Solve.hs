@@ -9,7 +9,6 @@ module Kanban.UI.Solve
     launchSolveInvocation,
     openItemSolveChooser,
     openSelectedSolveChooser,
-    preflightBlocker,
     pullRequestFromBoard,
     solveActionKind,
     solveChooserDecision,
@@ -54,13 +53,6 @@ import Kanban.Action
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Models (ModelRoster, OperatingMode, RecordedAssignment, RosterLoadError, soleAgent)
-import Kanban.Preflight
-  ( PreflightAction (..),
-    actionReport,
-    blockingRemediation,
-    gatherPreflightEnvironment,
-    preflightDiagnostic
-    )
 import Kanban.Process (interruptManagedProcess )
 import Kanban.Solve
   ( ResumeProvenance (..),
@@ -446,17 +438,6 @@ solveLaunchPlan state assignment issueNumber workflow brand existingSession prov
 solveActionKind :: SolveWorkflow -> WorkflowActionKind
 solveActionKind SolveOnly = SolveIssue
 solveActionKind AutoSolve = AutoSolveIssue
-
--- | Preflight one AI action just before spawning it, so a missing
--- Kanban-owned component is reported with the command that installs it
--- instead of surfacing minutes later as an opaque agent failure. Only a
--- definite local observation blocks; an inconclusive probe lets the action
--- run and fail on its own terms, so a setup Kanban cannot introspect is
--- never broken by its own diagnostics. Every probe is read-only.
-preflightBlocker :: Repository -> OperatingMode -> PreflightAction -> IO (Maybe Text)
-preflightBlocker repository mode action = do
-  environment <- gatherPreflightEnvironment repository.repositoryRoot
-  pure (preflightDiagnostic <$> blockingRemediation (actionReport environment mode action))
 
 submitSolveInput :: Int -> EventM Name AppState ()
 submitSolveInput issueNumber = do

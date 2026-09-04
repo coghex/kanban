@@ -70,8 +70,10 @@ ACTIVE_SITES = {
     "src/Kanban/UI/Reconcile.hs": 3,
     # A discovered worker's absent-item refusals, composed over an
     # outstanding startup line for the same reason: discovery is forked at
-    # startup and routinely answers before the first publication.
-    "src/Kanban/UI/Worker.hs": 2,
+    # startup and routinely answers before the first publication. Three since
+    # SAG-10: a discovered issue action is a third kind whose issue can be
+    # absent from the cached board.
+    "src/Kanban/UI/Worker.hs": 3,
 }
 
 
@@ -135,6 +137,91 @@ class NoticeActiveInventoryTests(unittest.TestCase):
         # A lookalike identifier is not the family.
         self.assertEqual(active_token_count("x = noticeSetForever y\n"), 0)
         self.assertEqual(active_token_count("x = reActiveWhile y\n"), 0)
+
+
+# Every notice that tells the user a durable request is under way, and the
+# source file it is announced from. Each of these follows a
+# `submitReviewCommand`, and the command is only under way if that submission
+# actually wrote it: a ledger that could not take the command means nothing
+# was asked for, and the submission has already set the failure notice these
+# would overwrite.
+REQUEST_ANNOUNCEMENTS = {
+    "src/Kanban/UI/Review.hs": (
+        "Interrupting review #",
+        "Interrupting issue review #",
+    ),
+    "src/Kanban/UI/Events.hs": ("Killing issue review #",),
+}
+
+# How far above an announcement its guard may sit. The guard binds the
+# submission's result and the notice follows within the same short block; a
+# window this size spans that and the comment between them without reaching
+# into an unrelated preceding statement.
+GUARD_WINDOW = 8
+
+GUARD = re.compile(r"\bwhen\s+requested\b")
+
+
+def guarded_announcements(source):
+    """Each announcement in `source`, paired with whether a guard precedes it."""
+    lines = source.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        for announcement in REQUEST_ANNOUNCEMENTS_ANY:
+            if announcement in line and not line.lstrip().startswith("--"):
+                window = "\n".join(lines[max(0, index - GUARD_WINDOW) : index + 1])
+                found.append((announcement, bool(GUARD.search(window))))
+    return found
+
+
+REQUEST_ANNOUNCEMENTS_ANY = tuple(
+    announcement
+    for announcements in REQUEST_ANNOUNCEMENTS.values()
+    for announcement in announcements
+)
+
+
+class RequestAnnouncementTests(unittest.TestCase):
+    """A notice may claim a request is under way only if it was recorded."""
+
+    def test_every_request_announcement_is_guarded(self):
+        for path, announcements in REQUEST_ANNOUNCEMENTS.items():
+            source = (REPO_ROOT / path).read_text(encoding="utf-8")
+            found = dict(guarded_announcements(source))
+            for announcement in announcements:
+                with self.subTest(path=path, announcement=announcement):
+                    self.assertIn(
+                        announcement,
+                        found,
+                        f"{path} no longer announces {announcement!r}; if the "
+                        "wording moved, move it here, and if the gesture is "
+                        "gone drop the row",
+                    )
+                    self.assertTrue(
+                        found[announcement],
+                        f"{path} announces {announcement!r} without checking "
+                        "that its command was written. An unwritable ledger "
+                        "means nothing was requested, and this overwrites the "
+                        "failure notice that says so",
+                    )
+
+    def test_detector_finds_an_unguarded_announcement(self):
+        # The scanner's own teeth: the guarded shape passes and the bare one
+        # does not, so a rule that matched everything could not pass while
+        # asserting nothing.
+        guarded = (
+            "      requested <- submitReviewCommand issueNumber TerminateIssueAction\n"
+            "      when requested $\n"
+            '        setNotice ("Killing issue review #" <> showText n)\n'
+        )
+        bare = (
+            "      _ <- submitReviewCommand issueNumber TerminateIssueAction\n"
+            '      setNotice ("Killing issue review #" <> showText n)\n'
+        )
+        self.assertEqual(guarded_announcements(guarded), [("Killing issue review #", True)])
+        self.assertEqual(guarded_announcements(bare), [("Killing issue review #", False)])
+        # A mention in prose is not an announcement.
+        self.assertEqual(guarded_announcements('      -- "Killing issue review #" is set below\n'), [])
 
 
 if __name__ == "__main__":

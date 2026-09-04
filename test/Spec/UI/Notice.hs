@@ -549,5 +549,8 @@ discoveredWorker =
       workerDescriptorAckPath = "/tmp/worker-1.ack",
       workerDescriptorLeasePath = "/tmp/worker-1.lease",
       workerDescriptorLeaseOwnerPath = "/tmp/worker-1.lease.owner",
-      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating"
+      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating",
+      workerDescriptorHandoffPath = "/tmp/worker-1.handing-off",
+      workerDescriptorCommandPath = "/tmp/worker-1.commands.jsonl",
+      workerDescriptorCommandAckPath = "/tmp/worker-1.command-acks.jsonl"
     }

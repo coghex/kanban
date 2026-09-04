@@ -2,10 +2,19 @@ module Kanban.UI.Review
   ( ReviewCancelAction (..),
     ReviewDigitAction (..),
     applyCanonicalIssueReview,
+    applyIssueActionFinished,
+    applyIssueActionOrphans,
+    applyIssueActionRefused,
     applyReviewAnimationTick,
-    applyReviewBackendStarted,
+    applyReviewDiagnostic,
     applyReviewEvent,
-    reviewBackendCell,
+    appliedReviewInput,
+    appliedIssueActionTermination,
+    releaseAwaiting,
+    dropAwaiting,
+    appliedIssueActionFinished,
+    awaitedCommandText,
+    applyReviewInput,
     reviewOutputPrefix,
     reviewProtocolWarningNotice,
     applyFailedInterrupt,
@@ -16,19 +25,18 @@ module Kanban.UI.Review
     armReviewTick,
     armVisibleReviewTicks,
     cancelReviewSession,
-    canonicalLaunchOutcome,
     canonicalReviewActivity,
     claudeTranscriptStart,
     canonicalReviewCompletionSuperseded,
     canonicalReviewNotice,
-    deferredRevisionLaunches,
     chooseReviewOption,
     epicReviewRefusalNotice,
     forcedToNormalBy,
-    markReviewSessionsDisconnected,
+    markReviewSessionDisconnected,
     newReviewSession,
     reviewOutcomePhase,
     reviewSessionHoldsUnsentText,
+    reviewSubmission,
     numberedChoicePrompt,
     resolveReviewCancelAction,
     reviewDigitActionFor,
@@ -37,6 +45,7 @@ module Kanban.UI.Review
     startItemReview,
     startSelectedReview,
     submitReviewInput,
+    terminateIssueAction,
   )
 where
 
@@ -44,67 +53,70 @@ where
 import Brick
 import Brick.BChan (writeBChan)
 import Control.Concurrent (forkIO)
-import Control.Monad (unless, void )
+import Control.Monad (unless, void , when)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (partition)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
+import Data.Time (getCurrentTime)
 import qualified Data.Text as Text
-import Kanban.ApprovalService
-  ( ApprovalController,
-    ApprovalUnavailable,
-    approvalContentionNotice,
-    approvalOwnsCanonicalReview,
-    liveApprovalContention,
-  )
-import Kanban.CLI (Options (..))
+import Kanban.ApprovalService (approvalContentionNotice, approvalOwnsCanonicalReview)
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
-import Kanban.Drainer (normalizedRepositoryIdentity)
-import Kanban.Models (Assignment, ModelRoster, ProviderName (..), RoleName (..), RosterLoadError, assignmentFor, providerDisplayName, providerKey)
-import Kanban.Preflight
-  ( PreflightAction (..),
-    issueOriginFromBody,
-    preflightDiagnosticDetail,
-    reviewBackendAction
-  )
-import Kanban.Process (ManagedProcess, interruptThenKillManagedProcess )
+import Kanban.Models (ProviderName, providerDisplayName, providerKey)
+import Kanban.Preflight (preflightDiagnosticDetail)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     ReviewAnswer (..),
     ReviewChoice (..),
-    ReviewClient,
     ReviewEvent (..),
     ReviewOutputKind (..),
     ReviewQuestion (..),
     ReviewQuestionKind (..),
     ReviewRequestId,
-    ConnectionId,
     ReviewResult (..),
     ReviewStage (..),
     ReviewThreadId (..),
     ReviewTurnOutcome (..),
-    answerReviewQuestion,
-    approveReviewAction,
-    beginIssueReview,
-    embeddedReviewProviderFor,
-    interruptReview,
-    killReviewTools,
     outcomeUnknownDiagnostic,
-    reviewStageForLabels,
     renderCanonicalIssueReviewResult,
-    runCanonicalIssueReview,
     renderReviewResult,
-    sendReviewMessage,
-    startReviewClient
+    reviewStageForLabels
     )
 import Kanban.Settings
   ( ChatVerbosity (..)
     )
+import Kanban.Action
+  ( ActionTarget (..),
+    ActionEnvironment (..),
+    ActionTargetKind (..),
+    ActionTargetRef (..),
+    TargetStructure (..),
+    WorkflowActionKind (..),
+    actionHandleWorker,
+    actionRefusalMessage,
+    actionRequest,
+    catalogIdentity,
+    dispatchProviderTurn,
+    planResolvedAction,
+    resolveHeldItem,
+  )
+import Kanban.Solve (SolveOutcome (..))
 import Kanban.Text (sanitizeText)
-import Kanban.UI.Filter (readOnlyHistoryRefusal)
+import Kanban.Worker
+  ( readWorkerState,
+    ReviewCommandId,
+    terminalStatus,
+    WorkerState (..), ReviewCommand (..),
+    ReviewCommandPayload (..),
+    appendReviewCommand,
+    newReviewCommandId,
+    WorkerSpec (..),
+    WorkerDescriptor (..),
+    ProcessIdentity,
+  )
+import Kanban.UI.Filter (dashboardActionEnvironment, readOnlyHistoryRefusal)
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -114,7 +126,6 @@ import Kanban.UI.Transcript
 import Kanban.UI.Session
 import Kanban.UI.SessionEvents
 import Kanban.UI.Refresh
-import Kanban.UI.Solve
 import Kanban.UI.PullRequest
 
 -- | What a digit key '1'..'9' should do given the pending review
@@ -220,68 +231,170 @@ submitReviewInput issueNumber = do
           Just (PendingReviewApproval _ _) -> setNotice "Use 1, 2, or 3 to answer the approval request"
           Nothing -> sendReviewFeedback issueNumber session
 
-submitQuestionAnswer :: Int -> ReviewRequestId -> ReviewAnswer -> Text -> EventM Name AppState ()
-submitQuestionAnswer issueNumber requestId answer displayAnswer = do
+-- | Every dashboard input reaches its action the same way: as one durable,
+-- correlated, deduplicated command written to that action's own command
+-- journal (requirement 9).
+--
+-- Not a direct call into a client, because there is no longer one to call:
+-- the review runs inside the repository host, and the dashboard that submits
+-- a command may be closed before the provider reads it and replaced by
+-- another before the answer comes back. The command carries the thread and
+-- turn the overlay was looking at, so the host can refuse one aimed at a turn
+-- that has since ended rather than silently retargeting it at the next.
+--
+-- What the user sees happen is /not/ written here. The transcript entry
+-- arrives back through the child's journal as a 'WorkerReviewInput', which is
+-- what makes the line identical for the dashboard that typed it and for one
+-- that reattaches later (requirement 4). Only the input line is cleared here,
+-- because that is this dashboard's own draft rather than the action's
+-- evidence.
+-- Reports whether the command was actually written. A caller that goes on
+-- to announce what it asked for must not announce it when the ledger could not
+-- take it: nothing was requested, and the failure notice this already set is
+-- the one the user needs to see.
+submitReviewCommand :: Int -> ReviewCommandPayload -> EventM Name AppState Bool
+submitReviewCommand issueNumber payload = do
   state <- get
-  case state.appReviewBackend of
-    ReviewBackendReady client -> do
-      result <- liftIO (answerReviewQuestion client requestId answer)
-      case result of
-        Left message -> setNotice message
-        Right () ->
-          appendToReviewSession issueNumber
-            ( \session ->
-                (clearPendingInteraction session)
-                  { sessionPhase = ReviewRunning,
-                    sessionActivity = "thinking",
-                    sessionInput = "",
-                    sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> displayAnswer <> "\n")
-                  }
-            )
-          >> armReviewTick issueNumber
-    _ -> setNotice "Codex app-server is not connected"
+  case (issueActionWorkerFor state issueNumber, Map.lookup issueNumber state.appReviewSessions) of
+    (Nothing, _) -> False <$ setNotice issueActionGoneNotice
+    (_, Nothing) -> False <$ setNotice issueActionGoneNotice
+    (Just descriptor, Just session) -> do
+      -- The child's own durable state, not the dashboard's picture of it.
+      -- Settling writes that state before the monitor delivers the terminal
+      -- event, so between the two this session still looks live and takes
+      -- input — and a command written then is owed to a child no poll will
+      -- ever look at again. Refusing here keeps the draft on the line, which
+      -- is the whole point: a rejection the user can see beats a message that
+      -- silently went nowhere.
+      recorded <- liftIO (readWorkerState descriptor)
+      case recorded of
+        Right held | terminalStatus held.workerStateStatus -> False <$ setNotice issueActionGoneNotice
+        _ -> submitToLiveChild issueNumber descriptor session payload
+
+-- | Writes one command to a child this dashboard has just confirmed is live.
+submitToLiveChild :: Int -> WorkerDescriptor -> ReviewSession -> ReviewCommandPayload -> EventM Name AppState Bool
+submitToLiveChild issueNumber descriptor session payload = do
+    identifier <- liftIO newReviewCommandId
+    now <- liftIO getCurrentTime
+    let command =
+          ReviewCommand
+            { reviewCommandId = identifier,
+              reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
+              reviewCommandIssue = issueNumber,
+              -- The thread and turn the /overlay is showing/, not the
+              -- newest the child has recorded. The two differ for as long
+              -- as it takes a journal event to reach Brick, and in that
+              -- window a durable read would address the turn that started
+              -- while the user was typing rather than the one they were
+              -- answering. The host refuses a command whose turn has moved
+              -- on, so naming what was on screen is what turns this race
+              -- into a refusal the user is told about instead of a message
+              -- steering a turn they never saw.
+              reviewCommandThread = session.sessionDetail.reviewSessionThreadId,
+              reviewCommandTurn = session.sessionDetail.reviewSessionTurnId,
+              reviewCommandIssuedAt = now,
+              reviewCommandPayload = payload
+            }
+    written <- liftIO (appendReviewCommand descriptor command)
+    case written of
+      Left message -> False <$ setNotice (agentFailureNotice "Issue review" message)
+      Right () -> True <$ modifyReviewSession issueNumber (clearedInput identifier)
+  where
+    -- Cleared even for a command the host may reject: a rejection comes back
+    -- as an undelivered message that is offered to the line again, and
+    -- leaving the text there in the meantime would show it twice. What the
+    -- line was holding goes with it, so a later draft that happens to read
+    -- the same is not mistaken for a resend.
+    --
+    -- Clearing it is only safe because the message is held below until the
+    -- child's journal accounts for it. A command written into the window
+    -- between the action being settled and this dashboard being told is one
+    -- nothing will ever hand back, and the draft would go with it.
+    clearedInput identifier held = (withAwaiting identifier held) {sessionInput = ""}
+    withAwaiting identifier held = case awaitedText of
+      Nothing -> withRestored Nothing held
+      Just text -> holdAwaiting identifier text (withRestored Nothing held)
+    awaitedText = awaitedCommandText payload
+
+-- | The text a command carries back to the input line if its action never
+-- reads it.
+--
+-- Only what a person typed or chose. Ending an action and interrupting a turn
+-- carry no text of their own, and offering their category word back to the
+-- line would be nonsense.
+awaitedCommandText :: ReviewCommandPayload -> Maybe Text
+awaitedCommandText payload = case payload of
+  AnswerReviewQuestion _ _ display -> Just display
+  AnswerReviewApproval _ _ _ display -> Just display
+  SendReviewFeedback message -> Just message
+  ResendReviewSteer message -> Just message
+  InterruptReviewTurn -> Nothing
+  TerminateIssueAction -> Nothing
+
+-- | Remembers one written command until its action's journal accounts for it.
+holdAwaiting :: ReviewCommandId -> Text -> ReviewSession -> ReviewSession
+holdAwaiting identifier text =
+  withSessionDetail (\detail -> detail {reviewSessionAwaiting = detail.reviewSessionAwaiting <> [(identifier, text)]})
+
+-- | Forgets a command the journal has now accounted for, however it went.
+--
+-- A rejection is accounted for too: it arrives as a journaled input carrying
+-- its reason, and the restoration that follows is 'applyUndeliveredSteer'\'s,
+-- not this list's.
+dropAwaiting :: ReviewCommandId -> ReviewSession -> ReviewSession
+dropAwaiting identifier =
+  withSessionDetail
+    (\detail -> detail {reviewSessionAwaiting = filter ((/= identifier) . fst) detail.reviewSessionAwaiting})
+
+-- | Offers back every command the journal never accounted for.
+--
+-- Reached at the terminal event, which is the last thing a child's journal
+-- can say: a command that reached the action journaled its line before that
+-- envelope, so whatever is still held here was written into the window
+-- between the action being settled and this dashboard being told, and no poll
+-- or reconciliation will hand it back.
+releaseAwaiting :: ReviewSession -> ReviewSession
+releaseAwaiting session =
+  foldl'
+    (\held (_, text) -> applyUndeliveredSteer text held)
+    (withSessionDetail (\detail -> detail {reviewSessionAwaiting = []}) session)
+    session.sessionDetail.reviewSessionAwaiting
+
+issueActionGoneNotice :: Text
+issueActionGoneNotice = "This review is no longer running; press " <> actionKeyText ReviewSelection <> " to start a fresh one"
+
+submitQuestionAnswer :: Int -> ReviewRequestId -> ReviewAnswer -> Text -> EventM Name AppState ()
+submitQuestionAnswer issueNumber requestId answer displayAnswer =
+  void (submitReviewCommand issueNumber (AnswerReviewQuestion requestId answer displayAnswer))
 
 submitApprovalAnswer :: Int -> ReviewRequestId -> Bool -> Bool -> Text -> EventM Name AppState ()
-submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer = do
-  state <- get
-  case state.appReviewBackend of
-    ReviewBackendReady client -> do
-      result <- liftIO (approveReviewAction client requestId accepted forSession)
-      case result of
-        Left message -> setNotice message
-        Right () ->
-          appendToReviewSession issueNumber
-            ( \session ->
-                (clearPendingInteraction session)
-                  { sessionPhase = ReviewRunning,
-                    sessionActivity = "thinking",
-                    sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> displayAnswer <> "\n")
-                  }
-            )
-          >> armReviewTick issueNumber
-    _ -> setNotice "Codex app-server is not connected"
+submitApprovalAnswer issueNumber requestId accepted forSession displayAnswer =
+  void (submitReviewCommand issueNumber (AnswerReviewApproval requestId accepted forSession displayAnswer))
 
+-- | Ordinary feedback, or the deliberate resend of a steer the provider
+-- refused.
+--
+-- The two are distinct commands rather than one, because a resend is the
+-- recovery of a specific earlier message (issue #17) and reporting it as a
+-- fresh one would lose that. Which of them a submission is depends on whether
+-- the line is carrying a message handed back — 'takeNextUndelivered' is what
+-- puts one there — so the queue is consulted here rather than at the send.
 sendReviewFeedback :: Int -> ReviewSession -> EventM Name AppState ()
-sendReviewFeedback issueNumber session = do
-  state <- get
-  case (state.appReviewBackend, session.sessionDetail.reviewSessionThreadId) of
-    (ReviewBackendReady client, Just threadId) -> do
-      let message = Text.strip session.sessionInput
-      result <- liftIO (sendReviewMessage client threadId session.sessionDetail.reviewSessionTurnId message)
-      case result of
-        Left errorMessage -> setNotice errorMessage
-        Right () ->
-          appendToReviewSession issueNumber
-            ( \current ->
-                let (restored, stillUndelivered) = takeNextUndelivered current.sessionDetail.reviewSessionUndelivered
-                 in (withUndelivered stillUndelivered current)
-                      { sessionInput = restored,
-                        sessionPhase = ReviewRunning,
-                        sessionActivity = "thinking",
-                        sessionTranscript = appendTranscript current.sessionTranscript ("\nYou: " <> message <> "\n")
-                      }
-            )
-    _ -> setNotice "The review session has not connected yet"
+sendReviewFeedback issueNumber session =
+  void (submitReviewCommand issueNumber (reviewSubmission session))
+
+-- | Which command the message on a session's input line is.
+--
+-- A resend exactly when the line is holding a message that was handed back
+-- rather than one the user typed, and only while that message is still the
+-- one on the line: editing it makes it new text, which is the whole point of
+-- offering it back editable.
+reviewSubmission :: ReviewSession -> ReviewCommandPayload
+reviewSubmission session
+  | session.sessionDetail.reviewSessionRestored == Just message = ResendReviewSteer message
+  | otherwise = SendReviewFeedback message
+  where
+    message = Text.strip session.sessionInput
 
 -- | What the input line becomes once the message on it has been sent: empty
 -- as before, unless a previously rejected steer is still waiting, in which
@@ -315,7 +428,7 @@ applyUndeliveredSteer = holdUndelivered True
 -- message was delivered.
 holdUndelivered :: Bool -> Text -> ReviewSession -> ReviewSession
 holdUndelivered inputLive message session =
-  (withUndelivered stillUndelivered session)
+  (withRestored restored (withUndelivered stillUndelivered session))
     { sessionInput = nextInput,
       sessionTranscript =
         appendTranscript session.sessionTranscript ("\n" <> undeliveredTranscriptNote message <> "\n")
@@ -325,6 +438,11 @@ holdUndelivered inputLive message session =
     (nextInput, stillUndelivered)
       | inputLive, Text.null (Text.strip session.sessionInput) = takeNextUndelivered queued
       | otherwise = (session.sessionInput, queued)
+    -- Only when this call is what put the message there. A line already
+    -- carrying the user's own draft keeps whatever it was holding.
+    restored
+      | nextInput == session.sessionInput = session.sessionDetail.reviewSessionRestored
+      | otherwise = Just nextInput
 
 -- | Record what an issue's review still owes a send, dropping the entry
 -- entirely once nothing is owed so the map holds only live obligations.
@@ -374,10 +492,11 @@ reviewSessionHoldsUnsentText session =
 carryUndelivered :: [Text] -> ReviewSession -> (ReviewSession, [Text])
 carryUndelivered carried session
   | not (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase) = (session, offered)
-  | otherwise = ((withUndelivered stillUndelivered session) {sessionInput = nextInput}, [])
+  | otherwise = ((withRestored (restoredFrom nextInput) (withUndelivered stillUndelivered session)) {sessionInput = nextInput}, [])
   where
     (nextInput, stillUndelivered) = takeNextUndelivered offered
     offered = filter (not . Text.null . Text.strip) carried
+    restoredFrom line = if Text.null line then Nothing else Just line
 
 -- | Everything an issue's review still owes a send, oldest first: what the
 -- session being replaced was holding, and whatever earlier stages could not
@@ -400,6 +519,9 @@ withPendingInteraction pending = withSessionDetail (\detail -> detail {reviewSes
 
 withUndelivered :: [Text] -> ReviewSession -> ReviewSession
 withUndelivered undelivered = withSessionDetail (\detail -> detail {reviewSessionUndelivered = undelivered})
+
+withRestored :: Maybe Text -> ReviewSession -> ReviewSession
+withRestored restored = withSessionDetail (\detail -> detail {reviewSessionRestored = restored})
 
 -- | The phase a completed turn leaves its session in.
 --
@@ -472,10 +594,15 @@ interruptFailureNotice cause message = "Interrupt failed: " <> sanitizeText caus
       Just _ -> " — your message was not delivered and is kept in the review session"
 
 -- | What Ctrl-C/Ctrl-X in a review overlay should do, decided from the
--- session's connection/process state rather than inline in
--- 'cancelReviewSession' so the routing between the app-server interrupt
--- path (the only resumable turn) and a canonical stage's process
--- interrupt/kill escalation is unit-testable without an 'EventM' harness.
+-- action's own live state rather than inline in 'cancelReviewSession' so the
+-- routing between the interrupt path (the only resumable turn) and a
+-- canonical stage's process interrupt/kill escalation is unit-testable
+-- without an 'EventM' harness.
+--
+-- The split is stage-specific and stays that way (requirement 13). Only an
+-- interactive revision holding a thread and a turn gets a turn interrupt;
+-- every canonical stage escalates to ending the whole child, because a
+-- canonical stage has no turn to redirect and never resumes.
 data ReviewCancelAction
   = ReviewCancelInterruptTurn ReviewThreadId Text
   | ReviewCancelInterruptProcess
@@ -485,9 +612,9 @@ data ReviewCancelAction
   deriving stock (Eq, Show)
 
 resolveReviewCancelAction :: Bool -> Maybe ReviewThreadId -> Maybe Text -> ReviewStage -> ReviewPhase -> Bool -> ReviewCancelAction
-resolveReviewCancelAction backendReady threadId turnId stage phase hasCanonicalProcess
-  | backendReady, Just thread <- threadId, Just turn <- turnId = ReviewCancelInterruptTurn thread turn
-  | hasCanonicalProcess = ReviewCancelInterruptProcess
+resolveReviewCancelAction actionLive threadId turnId stage phase hasCanonicalAction
+  | actionLive, Just thread <- threadId, Just turn <- turnId = ReviewCancelInterruptTurn thread turn
+  | hasCanonicalAction, stage /= IssueRevision = ReviewCancelInterruptProcess
   | stage /= IssueRevision, phase == ReviewStarting = ReviewCancelStillStarting
   | stage /= IssueRevision = ReviewCancelNotRunning
   | otherwise = ReviewCancelNoActiveTurn
@@ -498,46 +625,69 @@ cancelReviewSession issueNumber = do
   case Map.lookup issueNumber state.appReviewSessions of
     Nothing -> setNotice "Review session is no longer available"
     Just session -> do
-      let backendReady = case state.appReviewBackend of
-            ReviewBackendReady _ -> True
-            _ -> False
-          hasCanonicalProcess = Map.member issueNumber state.appCanonicalReviewProcesses
-      case resolveReviewCancelAction backendReady session.sessionDetail.reviewSessionThreadId session.sessionDetail.reviewSessionTurnId session.sessionDetail.reviewSessionStage session.sessionPhase hasCanonicalProcess of
-        ReviewCancelInterruptTurn threadId turnId -> case state.appReviewBackend of
-          ReviewBackendReady client -> do
-            void . liftIO . forkIO $ killReviewTools client threadId
-            result <- liftIO (interruptReview client threadId turnId)
-            case result of
-              Left message -> setNotice message
-              Right () -> setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
-          _ -> setNotice "This review has no active turn to cancel"
-        ReviewCancelInterruptProcess -> cancelCanonicalReviewProcess issueNumber (Map.lookup issueNumber state.appCanonicalReviewProcesses)
+      let actionLive = isJust (issueActionWorkerFor state issueNumber)
+          stage = session.sessionDetail.reviewSessionStage
+      case resolveReviewCancelAction actionLive session.sessionDetail.reviewSessionThreadId session.sessionDetail.reviewSessionTurnId stage session.sessionPhase actionLive of
+        ReviewCancelInterruptTurn _ _ -> do
+          requested <- submitReviewCommand issueNumber InterruptReviewTurn
+          -- Same rule as the two gestures that end an action: a ledger that
+          -- would not take the command means nothing was asked for, and the
+          -- failure notice is what the user needs rather than a promise.
+          when requested $
+            setNotice ("Interrupting review #" <> showText issueNumber <> "; type guidance when the turn stops")
+        ReviewCancelInterruptProcess -> cancelCanonicalIssueAction issueNumber
         ReviewCancelStillStarting -> setNotice ("Issue review #" <> showText issueNumber <> " is still starting; try Ctrl-C again once it is running")
         ReviewCancelNotRunning -> setNotice ("Issue review #" <> showText issueNumber <> " is not running")
         ReviewCancelNoActiveTurn -> setNotice "This review has no active turn to cancel"
 
--- | Interrupts a canonical review stage's live subprocess. Canonical stages
--- are not resumable turns, so unlike the app-server path this lands the
--- session in the 'ReviewInterrupted' terminal phase immediately (preserving
--- the transcript) rather than waiting on a protocol event, and the notice
--- says a fresh stage restarts rather than promising "type guidance".
--- 'appCanonicalReviewProcesses' keeps its entry until
--- 'applyCanonicalIssueReview' observes the process's actual completion, so
--- quit protection and same-stage retry both stay accurate while the kill is
--- still in flight.
-cancelCanonicalReviewProcess :: Int -> Maybe ManagedProcess -> EventM Name AppState ()
-cancelCanonicalReviewProcess issueNumber Nothing = setNotice ("Issue review #" <> showText issueNumber <> " is not running")
-cancelCanonicalReviewProcess issueNumber (Just process) = do
-  appendToReviewSession issueNumber
-    ( \session ->
-        session
-          { sessionPhase = ReviewInterrupted,
-            sessionActivity = "interrupted",
-            sessionTranscript = appendTranscript session.sessionTranscript "\n[interrupted by user]\n"
-          }
-    )
-  void . liftIO . forkIO $ interruptThenKillManagedProcess process
-  setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
+-- | Ends a canonical stage's whole child action.
+--
+-- Canonical stages are not resumable turns, so unlike the interrupt path this
+-- ends the action outright — which under runner ownership is a termination
+-- command the host applies to that child alone, settling its subprocess and
+-- descendants without touching the host or a sibling (requirement 11). The
+-- session moves to the 'ReviewInterrupted' terminal phase immediately,
+-- preserving the transcript, and the notice says a fresh stage restarts
+-- rather than promising "type guidance" — the same meaning and the same
+-- words as before (requirement 13).
+-- | Ends one issue action outright, from a kill gesture rather than a
+-- cancellation.
+--
+-- The same durable termination command 'cancelCanonicalIssueAction' submits,
+-- with the wording a kill has always used. Child-scoped: its host settles
+-- this action's thread or process and its descendants and leaves every
+-- sibling — and itself — running (requirement 11).
+terminateIssueAction :: Int -> EventM Name AppState Bool
+terminateIssueAction issueNumber = do
+  appendToReviewSession issueNumber appliedIssueActionTermination
+  submitReviewCommand issueNumber TerminateIssueAction
+
+cancelCanonicalIssueAction :: Int -> EventM Name AppState ()
+cancelCanonicalIssueAction issueNumber = do
+  appendToReviewSession issueNumber appliedIssueActionTermination
+  requested <- submitReviewCommand issueNumber TerminateIssueAction
+  -- Only for a termination that was actually written. A ledger that could not
+  -- take it means nothing was asked for, and saying an interruption is under
+  -- way would overwrite the one notice that says otherwise.
+  when requested $
+    setNotice ("Interrupting issue review #" <> showText issueNumber <> "; canonical stages don't resume — Esc, then r starts a fresh one")
+
+-- | What ending an action does to its session at the moment of the gesture:
+-- nothing.
+--
+-- Both gestures used to mark the transcript and move the phase here, before
+-- the command had even been written. A reattached overlay cannot reconstruct
+-- that mark — it is not a journal event — so the same action read one way
+-- live and another way on replay, which is exactly what requirement 4 forbids.
+-- It also announced a kill that a failed ledger write meant had not happened.
+--
+-- So the transition belongs to the evidence: the host journals the command's
+-- own line before it applies it, and the child's terminal envelope after, and
+-- a live overlay and a reattached one apply those same two records in that
+-- same order. This is the seam that says so, and it stays a call rather than
+-- a deletion because "the gesture moves nothing" is the property under test.
+appliedIssueActionTermination :: ReviewSession -> ReviewSession
+appliedIssueActionTermination = id
 
 appendReviewOutput :: ReviewOutputKind -> Text -> ChatTranscript -> ChatTranscript
 appendReviewOutput outputKind addition transcript =
@@ -576,13 +726,6 @@ showReviewOutput CompactChat _ = False
 showReviewOutput StandardChat DiagnosticOutput {} = False
 showReviewOutput StandardChat _ = True
 showReviewOutput FullChat _ = True
-
-whenReviewOverlayOpen :: (Int -> EventM Name AppState ()) -> EventM Name AppState ()
-whenReviewOverlayOpen action = do
-  state <- get
-  case state.appOverlay of
-    Just (ReviewOverlay issueNumber) -> action issueNumber
-    _ -> pure ()
 
 startSelectedReview :: EventM Name AppState ()
 startSelectedReview = do
@@ -635,6 +778,21 @@ epicReviewRefusalNotice CollapsedEpicGroup =
 epicReviewRefusalNotice StructuralEpicHeader =
   "An epic header is not reviewable; it is board structure, not work"
 
+-- | The board's review key, as an adapter over the workflow action registry.
+--
+-- Three things happen here and nothing else: the stage is read off the
+-- labels, a live child action for this issue is reattached to, and anything
+-- else is dispatched. There is no second launch path — no canonical
+-- subprocess started from Brick, no app-server turn opened from Brick
+-- (requirement 14) — so what the board starts and what a headless mission
+-- runner starts are one thing.
+--
+-- Reattachment comes first and is not a refusal (requirement 13, and the
+-- rereview's third correction). Pressing the key on an issue whose action is
+-- already live reopens its overlay and presents the transcript tail, exactly
+-- as reopening a reusable in-memory session did; the registry's own lease
+-- refusal is reserved for the fail-closed case where a turn is running and
+-- its owner cannot be identified.
 startIssueReview :: Issue -> EventM Name AppState ()
 startIssueReview issue = do
   state <- get
@@ -645,16 +803,17 @@ startIssueReview issue = do
           session.sessionPhase
           session.sessionDetail.reviewSessionStage
           requestedStage
-          (Map.member issue.issueNumber state.appCanonicalReviewProcesses)
+          (liveCanonicalIssueAction state issue.issueNumber)
           (reviewSessionHoldsUnsentText session) -> do
           modify (\current -> noticeCleared current {appOverlay = Just (ReviewOverlay issue.issueNumber)})
           presentTranscriptTail
           armVisibleReviewTicks
-    -- The service interlock is asked before a session is created, so a press
-    -- made while the approval service owns a canonical review reports the wait
-    -- rather than opening a session that could only fail. It is asked again at
-    -- the spawn boundary below, because the service can take the backend's
-    -- approval lock between the press and the launch.
+    -- The service interlock is asked before an action is dispatched, so a
+    -- press made while the approval service owns a canonical review reports
+    -- the wait rather than creating a child that could only fail. The host
+    -- asks it again at its own spawn boundary, because the service can take
+    -- the backend's approval lock between this press and that spawn
+    -- (requirement 7).
     _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
@@ -675,15 +834,67 @@ startIssueReview issue = do
                 }
         )
       presentTranscriptTail
-      if requestedStage == IssueRevision
-        then do
-          updated <- get
-          case updated.appReviewBackend of
-            ReviewBackendReady client -> launchIssueReview client issue
-            ReviewBackendStarting -> pure ()
-            ReviewBackendStopped -> startReviewBackend
-            ReviewBackendFailed _ -> startReviewBackend
-        else launchCanonicalIssueReview issue requestedStage
+      dispatchIssueReview issue requestedStage
+
+-- | Dispatch one issue action through the registry.
+--
+-- Asynchronous, like every other launch boundary: the dispatch acquires the
+-- child's lease, writes its specification, and ensures the repository host,
+-- none of which the event loop may block on. The descriptor comes back as a
+-- 'WorkerRegistered' event, which is what starts the journal monitor that
+-- feeds this session every event the action produces.
+dispatchIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
+dispatchIssueReview issue stage = do
+  state <- get
+  let eventChannel = state.appEventChannel
+      environment = dashboardActionEnvironment state
+      kind = issueReviewActionKind stage
+      -- Planned against the issue the press was made on rather than against
+      -- its number, exactly as the solve boundary plans: that record is what
+      -- every refusal above has already been asked about, and re-resolving
+      -- the number would additionally refuse an issue that has since left the
+      -- open read.
+      planned =
+        planResolvedAction
+          state.appConfig.resolvedWorkflow
+          (catalogIdentity environment.actionCatalog)
+          kind
+          Nothing
+          (ActionTargetItem (resolveHeldItem environment.actionCatalog TargetPlain (IssueItem issue)))
+      request = actionRequest kind (catalogIdentity environment.actionCatalog) (TargetByKind ActionTargetIssue issue.issueNumber)
+  void . liftIO . forkIO $ case planned of
+    Left refusal -> writeBChan eventChannel (IssueActionRefused issue.issueNumber (actionRefusalMessage refusal))
+    Right plan -> do
+      dispatched <- dispatchProviderTurn environment request plan
+      case dispatched of
+        Left refusal -> writeBChan eventChannel (IssueActionRefused issue.issueNumber (actionRefusalMessage refusal))
+        Right handle -> mapM_ (writeBChan eventChannel . WorkerRegistered) (actionHandleWorker handle)
+
+-- | Which registry verb a review stage is.
+--
+-- The stage is the authority and the verb follows it, never the other way
+-- round: @review_issue@ runs the canonical @approve_issues.py@ gate for the
+-- initial review and the rereview, and @revise_issue@ runs the interactive
+-- coordinator for the revision (requirement 6).
+issueReviewActionKind :: ReviewStage -> WorkflowActionKind
+issueReviewActionKind IssueRevision = ReviseIssue
+issueReviewActionKind _ = ReviewIssue
+
+-- | A dispatch the registry refused. The session was created by the press
+-- that reached it, so it settles here with the reason on it rather than
+-- waiting for a turn that will never start — the same shape
+-- this shape has always had.
+applyIssueActionRefused :: Int -> Text -> EventM Name AppState ()
+applyIssueActionRefused issueNumber notice = do
+  appendToReviewSession issueNumber
+    ( \session ->
+        session
+          { sessionPhase = ReviewFailed,
+            sessionActivity = "not started",
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> notice <> "\n")
+          }
+    )
+  setNotice notice
 
 issueReviewStage :: WorkflowConfig -> Issue -> ReviewStage
 issueReviewStage config issue = reviewStageForLabels config (map (.labelName) issue.issueLabels)
@@ -709,21 +920,10 @@ newReviewSession issue stage priorGeneration =
         reviewSessionThreadId = Nothing,
         reviewSessionTurnId = Nothing,
         reviewSessionPending = Nothing,
-        reviewSessionUndelivered = []
+        reviewSessionUndelivered = [],
+        reviewSessionAwaiting = [],
+        reviewSessionRestored = Nothing
       }
-
--- | The canonical review's spawn boundary. The refusal is re-asked here as
--- well as at the press that reached it, for the reason every other launch
--- re-asks: what a session was created for can settle before the process it
--- needs is started.
-launchCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
-launchCanonicalIssueReview issue stage = do
-  state <- get
-  case readOnlyHistoryRefusal state (IssueItem issue) of
-    Just notice -> refuseStartedReview issue.issueNumber notice
-    Nothing -> case approvalServiceRefusal state stage of
-      Just notice -> refuseStartedReview issue.issueNumber notice
-      Nothing -> launchLiveCanonicalIssueReview issue stage
 
 -- | Why a canonical stage started from a card has to wait for the persistent
 -- issue approval service, if it does (requirement 8).
@@ -755,66 +955,6 @@ approvalServiceRefusal state stage
   | approvalOwnsCanonicalReview state.appApprovalResult = Just approvalContentionNotice
   | otherwise = Nothing
 
--- | One canonical launch's sequence: the preflight, then the approval-service
--- interlock, then the spawn.
---
--- The interlock sits /between/ the two rather than ahead of both. The preflight
--- runs several probes — executables, authentication, installed bundles — and
--- the service can take the backend's approval lock while they do, so a check
--- taken before it can be stale by the time the spawn happens. This position is
--- the last instant before a competing canonical child would be started, which
--- is the only place a reading of live state cannot go stale before the thing it
--- guards.
---
--- It is asked of the controller rather than of the board's newest observation,
--- because that observation is up to a whole poll interval old.
---
--- Both dependencies are parameters so that window is exercisable: a test
--- supplies a preflight that changes what the controller reports and establishes
--- that the spawn never ran.
-canonicalLaunchOutcome ::
-  ReviewStage ->
-  Text ->
-  Either ApprovalUnavailable ApprovalController ->
-  IO (Maybe Text) ->
-  IO (Either Text result) ->
-  IO (Either Text result)
-canonicalLaunchOutcome stage identity controller preflight spawn = do
-  blocked <- preflight
-  case blocked of
-    Just message -> pure (Left message)
-    Nothing -> do
-      -- A revision performs no canonical backend review, so it contends for
-      -- nothing and is never asked about.
-      contended <-
-        if stage == IssueRevision
-          then pure Nothing
-          else liveApprovalContention identity controller
-      case contended of
-        Just notice -> pure (Left notice)
-        Nothing -> spawn
-
--- | The asynchronous launch itself.
---
--- A service refusal is reported the way a preflight blocker is — as this
--- invocation's own failed result — so the session settles with the reason on it
--- rather than waiting on a process that was never started.
-launchLiveCanonicalIssueReview :: Issue -> ReviewStage -> EventM Name AppState ()
-launchLiveCanonicalIssueReview issue stage = do
-  state <- get
-  let channel = state.appEventChannel
-      issueNumber = issue.issueNumber
-      identity = normalizedRepositoryIdentity state.appRepository
-  void . liftIO . forkIO $ do
-    result <-
-      canonicalLaunchOutcome
-        stage
-        identity
-        state.appApprovalController
-        (preflightBlocker state.appRepository state.appOperatingMode (ActionIssueReview (issueOriginFromBody issue.issueBody)))
-        (runCanonicalIssueReview state.appOptions.optionConfig state.appRepository issueNumber stage (writeBChan channel . CanonicalIssueReviewProcessStarted issueNumber))
-    writeBChan channel (CanonicalIssueReviewFinished issueNumber stage result)
-
 -- | Whether a just-arrived 'CanonicalIssueReviewFinished' must be discarded
 -- rather than applied: the session was already moved to 'ReviewInterrupted'
 -- by a user Ctrl-C, so a late completion from that now-dead invocation must
@@ -825,7 +965,6 @@ canonicalReviewCompletionSuperseded phase = phase == ReviewInterrupted
 
 applyCanonicalIssueReview :: Int -> ReviewStage -> Either Text CanonicalIssueReviewResult -> EventM Name AppState ()
 applyCanonicalIssueReview issueNumber stage result = do
-  modify (\current -> current {appCanonicalReviewProcesses = Map.delete issueNumber current.appCanonicalReviewProcesses})
   state <- get
   let superseded = maybe False (canonicalReviewCompletionSuperseded . (.sessionPhase)) (Map.lookup issueNumber state.appReviewSessions)
   unless superseded $ do
@@ -862,174 +1001,13 @@ canonicalReviewNotice message
   | outcomeUnknownDiagnostic message = "Canonical issue review outcome could not be observed; check the issue before running it again"
   | otherwise = agentFailureNotice "Canonical issue review" message
 
--- | One coordinator serves every revision session, so it preflights only
--- its own origin-independent dependencies. A per-issue dependency checked
--- here would be reported against sessions queued behind the one that
--- started it: 'applyReviewBackendStarted' fails every 'ReviewStarting'
--- revision on a backend failure, which is right for a shared cause and
--- wrong for an issue-specific one. Each queued session gets its own
--- preflight from 'launchIssueReview' once the coordinator is up.
---
--- The roster is unwrapped here, before any process is started, exactly as it
--- is at the solve and pull-request boundaries. Which provider's
--- @issue_review@ cell is consulted is 'reviewBackendCell' below, and it is
--- the one this install will actually start a backend on, not a fixed brand:
--- a boundary that refused for want of a Codex cell would keep a Claude-only
--- install's own backend from ever starting. @kanban_run_claude@ still
--- refuses on its own cell at its own boundary. A refusal travels the
--- backend's existing failure surface, which already fails every session
--- waiting on it.
-startReviewBackend :: EventM Name AppState ()
-startReviewBackend = do
-  state <- get
-  modify (\current -> current {appReviewBackend = ReviewBackendStarting})
-  let eventChannel = state.appEventChannel
-      eventSink = writeBChan eventChannel . ReviewProtocolEvent
-  case reviewBackendCell state.appModelRoster of
-    Left message -> liftIO (writeBChan eventChannel (ReviewBackendStarted (Left message)))
-    Right (roster, _) ->
-      void
-        . liftIO
-        . forkIO
-        $ do
-          blocked <- preflightBlocker state.appRepository state.appOperatingMode reviewBackendAction
-          case blocked of
-            Just message -> writeBChan eventChannel (ReviewBackendStarted (Left message))
-            Nothing -> startReviewClient roster state.appConfig.resolvedWorkflow state.appRepository eventSink >>= writeBChan eventChannel . ReviewBackendStarted
-
--- | The cell starting the embedded review backend needs, and the roster it
--- was resolved from.
---
--- A pure function for the reason 'Kanban.UI.Refresh.usageRefreshProviders' is
--- one: an 'EventM' cannot be run outside brick, and this is the whole of what
--- the arm above decides before it forks. It resolves through
--- 'embeddedReviewProviderFor', which is the same function
--- 'Kanban.Review.startReviewClient' routes its backend by, so this boundary
--- cannot refuse a roster that spawn would have accepted or accept one it
--- would refuse.
-reviewBackendCell :: Either RosterLoadError ModelRoster -> Either Text (ModelRoster, Assignment)
-reviewBackendCell =
-  resolvedRosterCellFor (\roster -> assignmentFor roster IssueReviewRole (embeddedReviewProviderFor roster))
-
--- | Preflighted here too, not only in 'startReviewBackend': a backend
--- already running for an earlier issue is reused as-is, so this is the only
--- door a Claude-origin revision passes through when the coordinator was
--- started for a Codex-origin one.
--- | The deferred spawn boundary. A revision session is created while the
--- backend is still starting, so this runs an arbitrary time after the press
--- that asked for it — long enough for a refresh to have settled the issue
--- underneath it, which is exactly why the refusal is asked again here.
-launchIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
-launchIssueReview client issue = do
-  state <- get
-  case readOnlyHistoryRefusal state (IssueItem issue) of
-    Just notice -> refuseStartedReview issue.issueNumber notice
-    Nothing -> launchLiveIssueReview client issue
-
-launchLiveIssueReview :: ReviewClient -> Issue -> EventM Name AppState ()
-launchLiveIssueReview client issue = do
-  state <- get
-  let eventChannel = state.appEventChannel
-      issueNumber = issue.issueNumber
-  void
-    . liftIO
-    . forkIO
-    $ do
-      blocked <- preflightBlocker state.appRepository state.appOperatingMode (issueRevisionPreflightAction issue)
-      result <- case blocked of
-        Just message -> pure (Left message)
-        Nothing -> beginIssueReview client issueNumber
-      case result of
-        Left message -> writeBChan eventChannel (ReviewProtocolEvent (ReviewStartFailed issueNumber message))
-        Right () -> pure ()
-
-issueRevisionPreflightAction :: Issue -> PreflightAction
-issueRevisionPreflightAction issue = ActionIssueRevision (issueOriginFromBody issue.issueBody)
-
--- | What a just-ready review backend owes the revision sessions waiting on
--- it: the ones whose turn it must start, and the ones it must refuse instead.
---
--- Both halves have to be acted on. A session created while the backend was
--- starting has been sitting in 'ReviewStarting' ever since, so one whose issue
--- settled in the meantime cannot simply be skipped — it would wait for a turn
--- that must never be started. Total, and a pure function of the state, so the
--- deferred boundary is decided in one place rather than inside the arm that
--- reaches it.
-deferredRevisionLaunches :: AppState -> ([Issue], [(Int, Text)])
-deferredRevisionLaunches state = (map fst live, map refusal settled)
-  where
-    waiting =
-      [ (session.sessionDetail.reviewSessionIssue, readOnlyHistoryRefusal state (IssueItem session.sessionDetail.reviewSessionIssue))
-        | session <- Map.elems state.appReviewSessions,
-          session.sessionDetail.reviewSessionStage == IssueRevision,
-          session.sessionPhase == ReviewStarting,
-          session.sessionDetail.reviewSessionThreadId == Nothing
-      ]
-    (settled, live) = partition (isJust . snd) waiting
-    refusal (issue, notice) = (issue.issueNumber, fromMaybe "" notice)
-
--- | A review session a launch boundary turned away. It never started, so it
--- leaves 'ReviewStarting' rather than waiting for a turn that will not come,
--- and the refusal is what its activity, transcript and the notice all say.
-refuseStartedReview :: Int -> Text -> EventM Name AppState ()
-refuseStartedReview issueNumber notice = do
-  appendToReviewSession issueNumber
-    ( \session ->
-        session
-          { sessionPhase = ReviewFailed,
-            sessionActivity = "read-only history",
-            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> notice <> "\n")
-          }
-    )
-  setNotice notice
-
-applyReviewBackendStarted :: Either Text ReviewClient -> EventM Name AppState ()
-applyReviewBackendStarted result = case result of
-  Left message -> do
-    modify
-      ( \state ->
-          noticeSet
-            (agentFailureNotice "Issue revision" message)
-            state
-              { appReviewBackend = ReviewBackendFailed message,
-                appReviewSessions = Map.map (failStartingSession message) state.appReviewSessions
-              }
-      )
-    tailDisplayedTranscript
-  Right client -> do
-    modify (\state -> state {appReviewBackend = ReviewBackendReady client})
-    started <- get
-    let (live, settled) = deferredRevisionLaunches started
-    mapM_ (uncurry refuseStartedReview) settled
-    mapM_ (launchIssueReview client) live
-  where
-    failStartingSession message session
-      | session.sessionDetail.reviewSessionStage == IssueRevision && session.sessionPhase == ReviewStarting =
-          session
-            { sessionPhase = ReviewFailed,
-              sessionActivity = canonicalReviewActivity message,
-              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
-            }
-      | otherwise = session
-
--- | How a protocol warning is announced: the provider whose backend raised
--- it, then what it said.
---
--- Named by the provider the event carries rather than by a brand compiled in
--- here. The warning is raised by client code shared by every backend --
--- the reader loops, the response dispatch, the tool runners -- and the only
--- thing that knows whose protocol misbehaved is the backend that raised it.
---
--- Pure and separate because 'applyReviewEvent' runs in brick's 'EventM',
--- which no unit test can drive, and because the wording is a contract on
--- both sides: Codex's has to stay exactly the sentence it always was.
 reviewProtocolWarningNotice :: ProviderName -> Text -> Text
 reviewProtocolWarningNotice provider message =
   providerDisplayName provider <> " protocol warning: " <> message
 
-applyReviewEvent :: ReviewEvent -> EventM Name AppState ()
-applyReviewEvent reviewEvent = case reviewEvent of
-  ReviewThreadCreated issueNumber threadId ->
+applyReviewEvent :: Int -> ReviewEvent -> EventM Name AppState ()
+applyReviewEvent issueNumber reviewEvent = case reviewEvent of
+  ReviewThreadCreated _ threadId ->
     appendToReviewSession issueNumber
       ( \session ->
           (withSessionDetail (\detail -> detail {reviewSessionThreadId = Just threadId}) session)
@@ -1037,8 +1015,8 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionTranscript = appendTranscript session.sessionTranscript "Codex session created.\n"
             }
       )
-  ReviewTurnStarted threadId turnId -> do
-    modifyReviewSessionByThread threadId
+  ReviewTurnStarted _ turnId -> do
+    modifyReviewSession issueNumber
       ( \session ->
           ( clearPendingInteraction
               (withSessionDetail (\detail -> detail {reviewSessionTurnId = Just turnId}) session)
@@ -1048,18 +1026,13 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionFollowing = followAfterTurnStarted session.sessionFollowing session.sessionDetail.reviewSessionTurnId turnId
             }
       )
-    state <- get
-    case findReviewSessionByThread threadId state of
-      Just (issueNumber, _) -> armReviewTick issueNumber
-      Nothing -> pure ()
-  ReviewOutput threadId outputKind delta
-    -- A connection's stderr belongs to no thread: the provider writes it for
-    -- the whole process, so it is shown as a notice rather than appended to
-    -- one session's transcript.
-    | Text.null threadId.reviewThreadProvider ->
-        whenReviewOverlayOpen (\_ -> setNotice (reviewOutputPrefix outputKind <> sanitizeText delta))
-    | otherwise -> do
-        modifyReviewSessionByThread threadId
+    armReviewTick issueNumber
+  -- A connection's stderr belongs to no thread and so to no child: the
+  -- provider writes it for the whole process, and the host journals it
+  -- against itself rather than routing it into whichever action happens to be
+  -- running. So everything that reaches here is this child's own output.
+  ReviewOutput _ outputKind delta -> do
+        modifyReviewSession issueNumber
           ( \session ->
               session
                 { sessionTranscript =
@@ -1067,9 +1040,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
                   sessionActivity = reviewOutputActivity outputKind
                 }
           )
-        tailReviewThread threadId
-  ReviewQuestionRequested threadId requestId question ->
-    modifyReviewSessionByThread threadId
+        tailReviewSession issueNumber
+  ReviewQuestionRequested _ requestId question ->
+    modifyReviewSession issueNumber
       ( \session ->
           forcedToNormalBy (numberedChoicePrompt question)
             (withPendingInteraction (Just (PendingReviewQuestion requestId question)) session)
@@ -1077,8 +1050,8 @@ applyReviewEvent reviewEvent = case reviewEvent of
                 sessionActivity = "waiting for answer"
               }
       )
-  ReviewApprovalRequested threadId requestId approval ->
-    modifyReviewSessionByThread threadId
+  ReviewApprovalRequested _ requestId approval ->
+    modifyReviewSession issueNumber
       ( \session ->
           forcedToNormalBy True
             (withPendingInteraction (Just (PendingReviewApproval requestId approval)) session)
@@ -1086,18 +1059,18 @@ applyReviewEvent reviewEvent = case reviewEvent of
                 sessionActivity = "waiting for approval"
               }
       )
-  ReviewClaudeStarted threadId display -> do
+  ReviewClaudeStarted _ display -> do
     let started = claudeTranscriptStart display
-    modifyReviewSessionByThread threadId
+    modifyReviewSession issueNumber
       ( \session ->
           session
             { sessionTranscript = appendTranscript session.sessionTranscript started,
               sessionActivity = "running Claude reviewer"
             }
       )
-    tailReviewThread threadId
-  ReviewClaudeFinished threadId result -> do
-    modifyReviewSessionByThread threadId
+    tailReviewSession issueNumber
+  ReviewClaudeFinished _ result -> do
+    modifyReviewSession issueNumber
       ( \session ->
           session
             { sessionTranscript =
@@ -1105,9 +1078,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionActivity = "processing reviewer result"
             }
       )
-    tailReviewThread threadId
-  ReviewGitHubStarted threadId summary -> do
-    modifyReviewSessionByThread threadId
+    tailReviewSession issueNumber
+  ReviewGitHubStarted _ summary -> do
+    modifyReviewSession issueNumber
       ( \session ->
           session
             { sessionTranscript =
@@ -1115,9 +1088,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionActivity = "updating GitHub"
             }
       )
-    tailReviewThread threadId
-  ReviewGitHubFinished threadId result -> do
-    modifyReviewSessionByThread threadId
+    tailReviewSession issueNumber
+  ReviewGitHubFinished _ result -> do
+    modifyReviewSession issueNumber
       ( \session ->
           session
             { sessionTranscript =
@@ -1125,9 +1098,9 @@ applyReviewEvent reviewEvent = case reviewEvent of
               sessionActivity = "processing GitHub result"
             }
       )
-    tailReviewThread threadId
-  ReviewTurnCompleted threadId outcome message result -> do
-    modifyReviewSessionByThread threadId
+    tailReviewSession issueNumber
+  ReviewTurnCompleted _ outcome message result -> do
+    modifyReviewSession issueNumber
       ( \session ->
           let completedStage = maybe session.sessionDetail.reviewSessionStage (reviewResultStage . snd) result
               completed =
@@ -1149,7 +1122,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
                       message
                 }
       )
-    tailReviewThread threadId
+    tailReviewSession issueNumber
     case outcome of
       TurnSucceeded -> startBoardRefresh
       _ -> pure ()
@@ -1157,7 +1130,7 @@ applyReviewEvent reviewEvent = case reviewEvent of
   -- 'launchIssueReview' preflights a revision against an already-running
   -- backend, so it classifies the message the same way every other terminal
   -- path does rather than calling a missing component a failed agent.
-  ReviewStartFailed issueNumber message -> do
+  ReviewStartFailed _ message -> do
     appendToReviewSession issueNumber
       ( \session ->
           session
@@ -1170,34 +1143,23 @@ applyReviewEvent reviewEvent = case reviewEvent of
   -- Every thread was multiplexed onto the connection that ended, so the
   -- backend itself is finished and every live revision session with it.
   ReviewClientStopped message -> do
-    modify
-      ( \state ->
-          noticeSet
-            message
-            state
-              { appReviewBackend = ReviewBackendFailed message,
-                appReviewSessions = markReviewSessionsDisconnected Nothing message state.appReviewSessions
-              }
-      )
+    modifyReviewSession issueNumber (markReviewSessionDisconnected message)
+    setNotice message
     tailDisplayedTranscript
   -- One connection of several ended. Only the sessions it was serving are
   -- finished; the backend stays ready, because the threads on its other
   -- connections are still running and a new review can still be started.
-  ReviewConnectionStopped endedConnection message -> do
-    modify
-      ( \state ->
-          noticeSet
-            message
-            state {appReviewSessions = markReviewSessionsDisconnected (Just endedConnection) message state.appReviewSessions}
-      )
+  ReviewConnectionStopped _ message -> do
+    modifyReviewSession issueNumber (markReviewSessionDisconnected message)
+    setNotice message
     tailDisplayedTranscript
-  ReviewSteerUndelivered threadId _targetTurnId message -> do
-    modifyReviewSessionByThread threadId (applyUndeliveredSteer message)
-    tailReviewThread threadId
+  ReviewSteerUndelivered _ _targetTurnId message -> do
+    modifyReviewSession issueNumber (applyUndeliveredSteer message)
+    tailReviewSession issueNumber
     setNotice undeliveredNotice
-  ReviewInterruptFailed threadId cause message -> do
-    modifyReviewSessionByThread threadId (applyFailedInterrupt cause message)
-    tailReviewThread threadId
+  ReviewInterruptFailed _ cause message -> do
+    modifyReviewSession issueNumber (applyFailedInterrupt cause message)
+    tailReviewSession issueNumber
     setNotice (interruptFailureNotice cause message)
   ReviewProtocolWarning provider message -> setNotice (reviewProtocolWarningNotice provider message)
   where
@@ -1266,38 +1228,151 @@ claudeTranscriptStart :: Text -> Text
 claudeTranscriptStart display =
   "\n[sonnet] Starting authenticated " <> display <> "…\n"
 
--- | The sessions one ended provider connection terminalizes.
+-- | What an ended provider connection does to the one session it was serving.
 --
--- 'Nothing' is the whole client stopping: a backend that multiplexes every
--- review thread onto one connection has nothing left running, so every live
--- revision session is disconnected. @Just connection@ is one of several
--- per-thread connections ending, and then only the sessions that connection
--- was serving are: a session on a connection that is still up must keep
--- running, and one that never reached a thread at all belongs to no
--- connection yet, so nothing here claims it.
+-- Applied per child now rather than swept across the whole map: the host
+-- delivers a client-stopped or connection-stopped event only into the
+-- children that connection was actually serving, so deciding here which
+-- sessions it reaches would be answering a question that has already been
+-- answered correctly with less information.
 --
--- A session that already settled is left alone either way, which is why the
--- stage and phase test applies to both.
-markReviewSessionsDisconnected :: Maybe ConnectionId -> Text -> Map Int ReviewSession -> Map Int ReviewSession
-markReviewSessionsDisconnected endedConnection message = Map.map disconnect
+-- A session that already settled is left alone. 'ReviewInterrupted' is not
+-- one of those, unlike every other settled phase: an interrupted revision is
+-- resumable only while there is something to resume it on, and once the
+-- connection carrying its thread is gone it is exactly as finished as a
+-- failed one — leaving it resumable would leave its input line offering a
+-- send that can only reach a dead process, and 'reviewSessionReusable'
+-- reopening it forever.
+markReviewSessionDisconnected :: Text -> ReviewSession -> ReviewSession
+markReviewSessionDisconnected message session
+  | session.sessionDetail.reviewSessionStage == IssueRevision,
+    session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting, ReviewInterrupted] =
+      session
+        { sessionPhase = ReviewFailed,
+          sessionActivity = "disconnected",
+          sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
+        }
+  | otherwise = session
+
+-- | The transcript entry one applied command leaves, and where a refused one
+-- puts the message back.
+--
+-- Journaled by the host rather than appended optimistically at the press, so
+-- a dashboard that reattaches an hour later writes exactly the same line in
+-- exactly the same place as the one that typed it (requirement 4). A refusal
+-- carries its reason and hands the text back through the same
+-- undelivered-steer path a rejected steer takes, so nothing the user typed is
+-- lost and nothing they never sent is shown as sent (issue #17).
+applyReviewInput :: Int -> ReviewCommandId -> Text -> Maybe Text -> EventM Name AppState ()
+applyReviewInput issueNumber identifier display rejected = do
+  appendToReviewSession issueNumber (appliedReviewInput display rejected . dropAwaiting identifier)
+  tailReviewSession issueNumber
+  case rejected of
+    Nothing -> armReviewTick issueNumber
+    Just reason -> setNotice ("Not delivered: " <> sanitizeText reason)
+
+-- | What one journaled input does to its session.
+--
+-- Pure and named so the terminal-safety rule below is assertable without an
+-- 'EventM' harness: the ordering it guards is a property of replay, and a
+-- replay is exactly a sequence of these applied in journal order.
+appliedReviewInput :: Text -> Maybe Text -> ReviewSession -> ReviewSession
+appliedReviewInput display rejected = apply
   where
-    disconnect session
-      | not (servedByEndedConnection session) = session
-      -- 'ReviewInterrupted' among them, unlike every other settled phase.
-      -- An interrupted revision is resumable only while there is something
-      -- to resume it on: its thread outlives the interrupt but not the
-      -- connection carrying it, so once that connection is gone it is
-      -- exactly as finished as a failed one -- and leaving it resumable
-      -- leaves its input line offering a send that can only reach a dead
-      -- process, and 'reviewSessionReusable' reopening it forever.
-      | session.sessionDetail.reviewSessionStage == IssueRevision,
-        session.sessionPhase `elem` [ReviewStarting, ReviewRunning, ReviewWaiting, ReviewInterrupted] =
+    apply session = case rejected of
+      -- The line is always recorded; the phase moves only for a session that
+      -- is still running. A command that ends the action journals its line
+      -- before the terminal envelope precisely so the two arrive in that
+      -- order, and this is the other half of that guarantee: a delivered
+      -- input arriving after a session has settled — by any ordering, on any
+      -- replay — records what was typed without resurrecting it.
+      Nothing
+        | not (reviewPhaseActive session.sessionPhase) ->
+            session {sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> display <> "\n")}
+        | otherwise ->
+            (clearPendingInteraction session)
+              { sessionPhase = ReviewRunning,
+                sessionActivity = "thinking",
+                sessionTranscript = appendTranscript session.sessionTranscript ("\nYou: " <> display <> "\n")
+              }
+      Just reason ->
+        holdUndelivered
+          (reviewSessionInputLive session.sessionDetail.reviewSessionStage session.sessionPhase)
+          display
           session
-            { sessionPhase = ReviewFailed,
-              sessionActivity = "disconnected",
-              sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> message)
+            { sessionTranscript =
+                appendTranscript session.sessionTranscript ("\n[not delivered] " <> sanitizeText reason <> "\n")
             }
-      | otherwise = session
-    servedByEndedConnection session = case endedConnection of
-      Nothing -> True
-      Just connection -> fmap (.reviewThreadConnection) session.sessionDetail.reviewSessionThreadId == Just connection
+
+-- | A diagnostic the host recorded against this action.
+applyReviewDiagnostic :: Int -> Text -> EventM Name AppState ()
+applyReviewDiagnostic issueNumber message = do
+  appendToReviewSession issueNumber
+    ( \session ->
+        session {sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText message <> "\n")}
+    )
+  tailReviewSession issueNumber
+
+-- | Subprocesses that outlived a settled issue action, reported the way a
+-- solve worker's are: the session says what survived and which key ends it.
+applyIssueActionOrphans :: Int -> SolveOutcome -> [ProcessIdentity] -> EventM Name AppState ()
+applyIssueActionOrphans issueNumber outcome processes = do
+  let notice = orphanMessage outcome (showText (length processes)) "the issue review"
+  appendToReviewSession issueNumber
+    ( \session ->
+        session
+          { sessionPhase = ReviewFailed,
+            sessionActivity = notice,
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> notice <> "\n")
+          }
+    )
+  setNotice notice
+
+-- | The child's terminal envelope.
+--
+-- Confirming rather than deciding: the event that /produced/ the outcome —
+-- the canonical result, the completed turn, the start failure — has already
+-- moved the session to the phase it belongs in, and that phase carries the
+-- verdict this one does not have. So a session that has already settled is
+-- left exactly as it is, and only one still showing an active phase is
+-- brought to a terminal one, which is the case where the action ended for a
+-- reason its own events never reported: a deadline, a kill, a host that died.
+applyIssueActionFinished :: Int -> SolveOutcome -> EventM Name AppState ()
+applyIssueActionFinished issueNumber outcome = do
+  state <- get
+  case Map.lookup issueNumber state.appReviewSessions of
+    Nothing -> pure ()
+    Just session -> do
+      appendToReviewSession issueNumber (appliedIssueActionFinished detail)
+      -- Only where this envelope is what settled the session. A result event
+      -- that got there first has already said why, and saying it again would
+      -- overwrite the reason the user is looking at with a generic one.
+      when (reviewPhaseActive session.sessionPhase) (setNotice (agentFailureNotice "Issue review" detail))
+  where
+    detail = case outcome of
+      SolveCompleted -> "the issue action ended without publishing a result"
+      SolveNeedsInput message -> message
+      SolveFailed message -> message
+
+-- | What a child's terminal envelope does to its session.
+--
+-- Pure and named for the same reason 'appliedReviewInput' is: the ordering it
+-- guards is a property of replay, and both a live overlay and a reattached
+-- one reach it by applying this to the same record.
+--
+-- A result event can publish the terminal phase before this envelope arrives,
+-- and that phase is the authoritative one — so the transcript and phase are
+-- left exactly as they stand. What is /not/ conditional on that is the
+-- release: this envelope is the last thing a child's journal can say, so a
+-- command still held when it arrives was never read, whichever event settled
+-- the session first.
+appliedIssueActionFinished :: Text -> ReviewSession -> ReviewSession
+appliedIssueActionFinished detail session
+  | not (reviewPhaseActive session.sessionPhase) = releaseAwaiting session
+  | otherwise =
+      releaseAwaiting
+        session
+          { sessionPhase = ReviewFailed,
+            sessionActivity = canonicalReviewActivity detail,
+            sessionTranscript = appendTranscript session.sessionTranscript ("\n" <> sanitizeText detail <> "\n")
+          }

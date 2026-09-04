@@ -15,9 +15,14 @@
 -- module's public contract promises.
 module Kanban.Worker.Types
   ( WorkerId (..),
+    ReviewCommandId (..),
     SolveWorkerTask (..),
     PullRequestWorkerTask (..),
+    IssueHostWorkerTask (..),
+    IssueActionWorkerTask (..),
     WorkerTask (..),
+    issueActionTask,
+    issueHostTask,
     WorkerParent (..),
     WorkerSpec (..),
     WorkerEvent (..),
@@ -38,10 +43,29 @@ import GHC.Generics (Generic)
 import Kanban.Domain (Repository, WorkflowConfig, defaultWorkflowConfig)
 import Kanban.Models (RecordedAssignment)
 import Kanban.Process (ManagedProcess, ProcessIdentity)
+import Kanban.Preflight (IssueOrigin)
 import Kanban.PullRequestFlow (PullRequestAction, PullRequestOrigin)
+import Kanban.Review
+  ( CanonicalIssueReviewResult,
+    ReviewEvent,
+    ReviewRequestId,
+    ReviewStage,
+    ReviewThreadId,
+  )
 import Kanban.Solve (AgentEvent, ResumeProvenance (..), SolveOutcome, SolveWorkflow, SolverBrand)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | One dashboard-to-child command's identity.
+--
+-- Declared here rather than beside the command protocol in
+-- "Kanban.Worker.Command" because the /journal/ names it too: a delivery
+-- writes what it delivered, and that record has to be matchable against the
+-- ledger entry for the same command. The protocol built on it stays there;
+-- this is just the identity, next to every other durable identity.
+newtype ReviewCommandId = ReviewCommandId {unReviewCommandId :: Text}
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -61,9 +85,71 @@ data PullRequestWorkerTask = PullRequestWorkerTask
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
-data WorkerTask = SolveWorkerTaskKind SolveWorkerTask | PullRequestWorkerTaskKind PullRequestWorkerTask
+-- | The repository-scoped review host (SAG-10).
+--
+-- One per canonical repository, and the only worker that owns a
+-- 'Kanban.Review.ReviewClient' and its connection pool. It runs no review of
+-- its own: every initial review, rereview, and revision is a separately
+-- durable child action addressed to it, which is what lets a shared-process
+-- provider multiplex two concurrent issue threads through one connection
+-- while each of them still has its own lease, journal, commands, and
+-- terminal result.
+--
+-- The identity is recorded rather than derived from 'workerRepository' at
+-- read time for the reason every other durable field is: a child proves it
+-- belongs to this host by naming its id, and the host proves it belongs to
+-- this repository by naming the identity its launch resolved.
+newtype IssueHostWorkerTask = IssueHostWorkerTask
+  { issueHostRepositoryIdentity :: Text
+  }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | One issue action owned by a repository's review host.
+--
+-- The stage is what decides the owning authority, and the two are never
+-- interchangeable: 'Kanban.Review.InitialReview' and
+-- 'Kanban.Review.IssueRereview' run the canonical @approve_issues.py@
+-- backend, which is the only authority that publishes a canonical review
+-- comment or moves a verdict label, while 'Kanban.Review.IssueRevision' runs
+-- the embedded interactive client, whose @kanban_github_issue@ tool may
+-- publish one specification amendment and move @reviewed:changes@ to
+-- @reviewed:revised@ and may never approve.
+--
+-- The origin is recorded rather than re-read: the detached host holds no
+-- issue body, and preflighting against a body refetched later would check a
+-- different marker than the launch boundary allowed the action on.
+data IssueActionWorkerTask = IssueActionWorkerTask
+  { issueActionIssueNumber :: Int,
+    issueActionStage :: ReviewStage,
+    -- | The host this child belongs to. Startup discovery reattaches a child
+    -- only to its owning host, so the claim has to be on the child's own
+    -- durable record rather than inferred from whichever host happens to be
+    -- live in the directory now.
+    issueActionHost :: WorkerId,
+    issueActionOrigin :: IssueOrigin
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+data WorkerTask
+  = SolveWorkerTaskKind SolveWorkerTask
+  | PullRequestWorkerTaskKind PullRequestWorkerTask
+  | IssueHostWorkerTaskKind IssueHostWorkerTask
+  | IssueActionWorkerTaskKind IssueActionWorkerTask
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | The issue action a task is, if it is one. Written once here rather than
+-- pattern-matched at each of the dozen places that ask, so a third worker
+-- kind carrying an issue number cannot quietly start answering yes.
+issueActionTask :: WorkerTask -> Maybe IssueActionWorkerTask
+issueActionTask (IssueActionWorkerTaskKind task) = Just task
+issueActionTask _ = Nothing
+
+issueHostTask :: WorkerTask -> Maybe IssueHostWorkerTask
+issueHostTask (IssueHostWorkerTaskKind task) = Just task
+issueHostTask _ = Nothing
 
 -- | What an autosolve pull-request worker records about the /solver/ that
 -- launched it, so a dashboard restart can restore that solver's own session
@@ -181,6 +267,47 @@ data WorkerEvent
   | WorkerAgentOutput AgentEvent
   | WorkerDiagnostic Text
   | WorkerOrphansDetected SolveOutcome [ProcessIdentity]
+  | -- | One review event, journaled verbatim by the repository host into the
+    -- child action it belongs to.
+    --
+    -- Verbatim, and not a rendering of it, because a reattaching dashboard
+    -- replays these through the very handler a live event reaches
+    -- ('Kanban.UI.Review.applyReviewEvent'). That is what makes the
+    -- reconstructed overlay the same bounded transcript suffix, pending
+    -- interaction, activity, and follow state a dashboard that never closed
+    -- would be showing — without the bound ever reaching back into the
+    -- journal, which retains every event either way (requirement 4).
+    WorkerReviewEvent ReviewEvent
+  | -- | What a person typed or chose, and whether it reached the provider.
+    --
+    -- The overlay's own half of the transcript, journaled rather than
+    -- appended optimistically in the dashboard that submitted it. A runner
+    -- owns the action, so the dashboard is a viewer: it can be closed between
+    -- the answer and the reply, replaced by another, or never have existed
+    -- when the command was written. Recording the line here is what makes the
+    -- transcript a later dashboard reconstructs identical to the one a
+    -- dashboard that stayed open is showing (requirement 4) rather than one
+    -- missing every word the user contributed.
+    --
+    -- 'Nothing' is delivered; 'Just' carries why it was not, which is the
+    -- account a rejected steer needs so it can be offered back rather than
+    -- left looking sent.
+    --
+    -- It names its command, and that is load-bearing rather than decorative.
+    -- This record is written before the command's final acknowledgement, so
+    -- when that write fails the ledger keeps only the claim while the journal
+    -- already holds the answer. A later host reconciles the two by this id,
+    -- rather than reporting a command it can see was delivered as one whose
+    -- outcome nobody observed.
+    WorkerReviewInput ReviewCommandId Text (Maybe Text)
+  | -- | What the canonical @approve_issues.py@ backend reported for an
+    -- initial review or rereview, including the reviewer route and models it
+    -- selected.
+    --
+    -- Recorded rather than re-derived: the route and models are the
+    -- backend's own choice, and a canonical child has no embedded provider
+    -- session to read them off (requirement 5).
+    WorkerCanonicalReviewFinished ReviewStage (Either Text CanonicalIssueReviewResult)
   | WorkerFinished SolveOutcome
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -200,11 +327,34 @@ data WorkerState = WorkerState
     workerStateLogPath :: Maybe FilePath,
     workerStateHeartbeatAt :: UTCTime,
     workerStateLastActivity :: Text,
-    workerStateKnownProcesses :: [ProcessIdentity]
+    workerStateKnownProcesses :: [ProcessIdentity],
+    -- | The provider thread an interactive revision is running on, recorded
+    -- as soon as the provider names it.
+    --
+    -- The three review identifiers below are stage-specific and optional by
+    -- construction (requirement 5). A canonical initial review or rereview
+    -- has no embedded provider session at all, so it records none of them
+    -- and fabricates none: its subprocess is 'workerStateProviderPid' and
+    -- 'workerStateProviderIdentity' like any other managed child, and its
+    -- route and models arrive on 'WorkerCanonicalReviewFinished'.
+    workerStateReviewThread :: Maybe ReviewThreadId,
+    -- | The turn currently running on that thread, so a command submitted
+    -- after a dashboard restart can name the turn it means to interrupt or
+    -- steer rather than whichever one is running when it is read.
+    workerStateReviewTurn :: Maybe Text,
+    -- | The interaction the provider is waiting on an answer to, if any.
+    -- Durable because a question raised while no dashboard was running has to
+    -- still be answerable by the one that arrives next (requirement 10).
+    workerStateReviewRequest :: Maybe ReviewRequestId
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
+-- | Hand-written for the reason 'WorkerSpec's is, and now carrying the three
+-- optional review identifiers as well: a solve or pull-request state written
+-- before any of them existed still decodes, which matters more here than
+-- anywhere else because a state file that will not decode drops a live worker
+-- out of startup discovery rather than reporting it.
 instance FromJSON WorkerState where
   parseJSON = withObject "WorkerState" $ \object ->
     WorkerState
@@ -219,6 +369,9 @@ instance FromJSON WorkerState where
       <*> object .: "workerStateHeartbeatAt"
       <*> object .: "workerStateLastActivity"
       <*> object .:? "workerStateKnownProcesses" .!= []
+      <*> object .:? "workerStateReviewThread" .!= Nothing
+      <*> object .:? "workerStateReviewTurn" .!= Nothing
+      <*> object .:? "workerStateReviewRequest" .!= Nothing
 
 data WorkerLease = WorkerLease
   { workerLeaseId :: WorkerId,
@@ -270,7 +423,23 @@ data WorkerDescriptor = WorkerDescriptor
     -- 'recoverIfWorkerStoppedWith' (both outside the live supervisor
     -- process), so unlike the state file it is never clobbered by the
     -- supervisor's own heartbeat or census writes.
-    workerDescriptorPendingTerminationPath :: FilePath
+    workerDescriptorPendingTerminationPath :: FilePath,
+    -- | The dashboard-to-child command journal, and the acknowledgements the
+    -- owning live session writes back.
+    --
+    -- Two files rather than one because they have different writers: a
+    -- dashboard appends commands and never acknowledges them, and the host
+    -- appends acknowledgements and never issues a command. Only an issue
+    -- action ever has either; the paths are derived for every worker so the
+    -- collection pass names them unconditionally and cannot leave one behind
+    -- (see 'companionArtifactPaths').
+    -- | Written by a review host that has decided to exit, before the
+    -- final scan that decision rests on. Everything asking whether that host
+    -- is live reads it as no, which is what orders a child's admission
+    -- against the host's exit rather than leaving the two to race.
+    workerDescriptorHandoffPath :: FilePath,
+    workerDescriptorCommandPath :: FilePath,
+    workerDescriptorCommandAckPath :: FilePath
   }
   deriving stock (Eq, Show)
 

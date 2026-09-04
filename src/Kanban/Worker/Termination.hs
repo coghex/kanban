@@ -35,13 +35,15 @@ import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
     checkGroupMembershipWith,
+    checkIdentityPresenceWith,
     defaultProcessSnapshot,
     descendantProcesses,
     identityForPid,
@@ -51,15 +53,25 @@ import Kanban.Process
   )
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Worker.Census (processKey)
-import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock)
+import Kanban.Worker.Command
+  ( reconcileIssueActionClaims, ReviewCommand (..),
+    ReviewCommandPayload (..),
+    appendReviewCommand,
+    newReviewCommandId,
+  )
+import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock, readWorkerJournal)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (ignoreFileOperation, readWorkerState, writeState)
 import Kanban.Worker.Types
-  ( ProviderSlot (..),
+  ( IssueActionWorkerTask (..),
+    WorkerEnvelope (..),
+    ProviderSlot (..),
     WorkerDescriptor (..),
     WorkerEvent (..),
+    WorkerSpec (..),
     WorkerState (..),
     WorkerStatus (..),
+    issueActionTask,
   )
 import System.Directory (doesFileExist, removeFile)
 import System.Posix.Files (setFileMode)
@@ -75,11 +87,116 @@ terminateWorkerWith takeSnapshot descriptor = do
     Left _ -> pure ()
     Right state -> case state.workerStateStatus of
       WorkerTerminal _ -> pure ()
-      _ -> do
-        completed <- finalizeUserTermination takeSnapshot descriptor state
-        if completed
-          then releaseWorkerLease descriptor
-          else recordPendingTermination descriptor
+      _
+        | isJust (issueActionTask descriptor.workerDescriptorSpec.workerTask) ->
+            terminateIssueActionWith takeSnapshot descriptor state
+        | otherwise -> do
+            completed <- finalizeUserTermination takeSnapshot descriptor state
+            if completed
+              then releaseWorkerLease descriptor
+              else recordPendingTermination descriptor
+
+-- | Ending one issue action, which is never a signal to a process group.
+--
+-- A child action has no process of its own: its @workerStateWorkerPid@ is its
+-- /host's/, because the host is its supervisor. Signalling that group — which
+-- is what every other worker's termination does — would kill the host and
+-- every sibling action multiplexed onto it, the exact opposite of what
+-- requirement 11 asks for. So the ordinary path is a durable termination
+-- command, and the host settles this child alone.
+--
+-- The fallback is the case where there is nobody left to read it. A child
+-- whose host is provably gone is orphaned: nothing will ever apply the
+-- command, so leaving one behind would leave the action live in every
+-- discovery pass forever. Its own recorded descendants are settled — those
+-- are its canonical subprocess and that subprocess's children, never the
+-- host's — and its records are committed terminal here.
+--
+-- Fails closed on an unreadable snapshot, like every other judgement in this
+-- layer: a host that cannot be proven gone is treated as live, and the
+-- command waits for it.
+-- | The terminal outcome this action's journal has already published, if any.
+--
+-- Its presence is the whole of the "half-settled" test: a settle writes the
+-- envelope before the state, so a journal that ends over a state that does
+-- not is a settle that was interrupted between the two.
+journalTerminalOutcome :: WorkerDescriptor -> IO (Maybe SolveOutcome)
+journalTerminalOutcome descriptor = do
+  journaled <- readWorkerJournal descriptor
+  pure (listToMaybe [outcome | envelope <- journaled, WorkerFinished outcome <- [envelope.workerEnvelopeEvent]])
+
+-- | What the state records this action was doing last. A kill says so; a
+-- settle this only completed says what that settle said.
+terminalActivityFor :: Maybe SolveOutcome -> Text
+terminalActivityFor published = case published of
+  Nothing -> "killed by user"
+  Just _ -> "ended before its state was recorded"
+
+terminateIssueActionWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> WorkerState -> IO ()
+terminateIssueActionWith takeSnapshot descriptor state = do
+  hostPresence <- hostIdentityPresence
+  case hostPresence of
+    IdentityPresent -> submitTermination
+    IdentitySnapshotFailed _ -> submitTermination
+    IdentityAbsent -> do
+      recordedOk <- terminateRecordedStateProcessesWith takeSnapshot state
+      if recordedOk
+        then do
+          now <- getCurrentTime
+          -- An action whose journal already ends can only be one thing: a
+          -- settle that wrote its envelope and died before recording the
+          -- state. Its outcome is the one it published, and appending a
+          -- second envelope over it would put a record after the journal's
+          -- last record — the thing the envelope exists to prevent — and
+          -- leave two dashboards disagreeing about which one ended it.
+          published <- journalTerminalOutcome descriptor
+          let outcome = fromMaybe (SolveFailed "killed by user") published
+          -- Before the envelope, because nothing may follow one: a claim this
+          -- action's dead host left standing is answered while the journal
+          -- can still say so, rather than by a later pass appending input
+          -- evidence after the action had already ended.
+          reconcileIssueActionClaims descriptor
+          -- The journal's own terminal record, not only the state file's.
+          -- A dashboard reattaching to this action replays the journal and
+          -- nothing else, so a terminal state with no envelope leaves it
+          -- reading an action that never ends — and leaves the journal open
+          -- to exactly the appends the envelope exists to stop.
+          when (isNothing published) $ do
+            journal <- newEventJournalLock
+            appendWorkerEvent descriptor journal (WorkerFinished outcome)
+          writeState
+            descriptor
+            state
+              { workerStateStatus = WorkerTerminal outcome,
+                workerStateProviderPid = Nothing,
+                workerStateProviderIdentity = Nothing,
+                workerStateHeartbeatAt = now,
+                workerStateLastActivity = terminalActivityFor published
+              }
+          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
+          releaseWorkerLease descriptor
+        else recordPendingTermination descriptor
+  where
+    hostIdentityPresence = case state.workerStateWorkerIdentity of
+      -- No recorded host identity is the pre-state window a child is created
+      -- in. Its host is the one that has not written its own state yet, not
+      -- one that is gone, so the command is what reaches it.
+      Nothing -> pure (IdentitySnapshotFailed "the owning host has not recorded an identity yet")
+      Just hostIdentity -> checkIdentityPresenceWith takeSnapshot [hostIdentity]
+    submitTermination = do
+      identifier <- newReviewCommandId
+      now <- getCurrentTime
+      let command =
+            ReviewCommand
+              { reviewCommandId = identifier,
+                reviewCommandTarget = descriptor.workerDescriptorSpec.workerId,
+                reviewCommandIssue = maybe 0 (.issueActionIssueNumber) (issueActionTask descriptor.workerDescriptorSpec.workerTask),
+                reviewCommandThread = state.workerStateReviewThread,
+                reviewCommandTurn = state.workerStateReviewTurn,
+                reviewCommandIssuedAt = now,
+                reviewCommandPayload = TerminateIssueAction
+              }
+      void (appendReviewCommand descriptor command)
 
 -- | Attempts to complete a requested termination: verifies the provider and
 -- recorded-descendant groups are gone, and only then signals the

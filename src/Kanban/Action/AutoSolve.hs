@@ -612,11 +612,16 @@ autoSolveStateFromWorkers target boardPullRequests descriptors =
           autoSolveActionReviewer = reviewerDescriptor
         }
 
+-- The four predicates below answer questions about the /solve loop's own/
+-- workers, and an issue review host or child action is never one: it holds a
+-- different lease, runs a different authority, and an autosolve run that
+-- adopted one would rebuild its state from a review it does not own. So they
+-- name the kinds they mean and say no to everything else.
 isAutoSolveFor :: Int -> WorkerDescriptor -> Bool
 isAutoSolveFor issueNumber descriptor = case descriptor.workerDescriptorSpec.workerTask of
   SolveWorkerTaskKind task ->
     task.solveWorkerIssueNumber == issueNumber && task.solveWorkerWorkflow == AutoSolve
-  PullRequestWorkerTaskKind _ -> False
+  _ -> False
 
 -- | Whether a pull-request worker is one of /this loop's own/ rounds.
 --
@@ -632,17 +637,17 @@ isAutoSolveRoundFor issueNumber descriptor = case descriptor.workerDescriptorSpe
   PullRequestWorkerTaskKind task ->
     ((.workerParentIssueNumber) <$> descriptor.workerDescriptorSpec.workerParent) == Just issueNumber
       && task.pullRequestWorkerAction /= PullRequestRepair
-  SolveWorkerTaskKind _ -> False
+  _ -> False
 
 reviewNumberOf :: WorkerDescriptor -> Maybe Int
 reviewNumberOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
   PullRequestWorkerTaskKind task -> Just task.pullRequestWorkerNumber
-  SolveWorkerTaskKind _ -> Nothing
+  _ -> Nothing
 
 solverBrandOf :: WorkerDescriptor -> Maybe SolverBrand
 solverBrandOf descriptor = case descriptor.workerDescriptorSpec.workerTask of
   SolveWorkerTaskKind task -> Just task.solveWorkerBrand
-  PullRequestWorkerTaskKind _ -> Nothing
+  _ -> Nothing
 
 -- | 'autoSolveStateFromWorkers' over this repository's discoverable workers.
 recoverAutoSolveState :: Repository -> ResolvedTarget -> Set Int -> IO (Maybe AutoSolveState)

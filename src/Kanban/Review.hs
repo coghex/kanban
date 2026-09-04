@@ -67,6 +67,7 @@ module Kanban.Review
     canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    canonicalLaunchOutcome,
     claudeCommandBounds,
     claudeReviewArguments,
     claudeStartedEvent,
@@ -81,8 +82,10 @@ module Kanban.Review
     decodeStreamRecord,
     drainToolRegistry,
     embeddedReviewProvider,
+    embeddedReviewCell,
     embeddedReviewProviderFor,
     finalOutputSchema,
+    finishReviewThread,
     githubCommandBounds,
     githubIssueCommentArguments,
     githubIssueEditArguments,
@@ -102,6 +105,9 @@ module Kanban.Review
     missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
     newReviewClientForTesting,
+    reviewClientLogPath,
+    reviewConnectionProcesses,
+    reviewThreadOwnProcesses,
     reviewConnectionsForTesting,
     reviewDeveloperInstructions,
     newToolRegistry,
@@ -114,6 +120,7 @@ module Kanban.Review
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
     reviewStageForLabels,
+    reviewTurnResumable,
     settleInterrupt,
     streamInterruptRequest,
     streamUserMessage,
@@ -137,7 +144,7 @@ where
 import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, putMVar, takeMVar, threadDelay, withMVar)
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception (IOException, try)
-import Control.Monad (forever, void, when)
+import Control.Monad (forM_, forever, void, when)
 import Data.Aeson
   ( Result (..),
     Value (..),
@@ -166,7 +173,7 @@ import Kanban.Models
     assignmentFor,
     assignmentUnavailableMessage,
   )
-import Kanban.Process (killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
 import Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProviderAdapter (..),
@@ -185,6 +192,7 @@ import Kanban.Review.Canonical
     canonicalCommandBounds,
     canonicalIssueReviewArguments,
     canonicalIssueReviewerPath,
+    canonicalLaunchOutcome,
     issueReviewerNotFoundMessage,
     issueReviewerRecordFromBytes,
     issueReviewerRecordPath,
@@ -293,7 +301,7 @@ import Kanban.Review.Tools
     runGitHubIssueTool,
   )
 import Kanban.Review.Types
-  ( CanonicalIssueReviewResult (..),
+  ( reviewTurnResumable, CanonicalIssueReviewResult (..),
     ClaudeToolRequest (..),
     GitHubIssueOperation (..),
     GitHubIssueToolRequest (..),
@@ -320,7 +328,7 @@ import Kanban.Review.Types
     renderReviewResult,
     reviewStageForLabels,
   )
-import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog)
+import Kanban.Transcript (SessionLog, closeSessionLog, logMessage, logRawLine, openSessionLog, sessionLogPath)
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hClose, hFlush, hIsEOF, hSetBuffering)
@@ -359,6 +367,20 @@ claudeStartedEvent client threadId =
 -- backend actually started. Those are the same cell for the backend an
 -- install routes to, and a second backend is exactly what would make two
 -- separate lookups drift apart.
+-- | The cell the embedded review backend will actually start on.
+--
+-- One expression, named, because three places have to agree about it and two
+-- of them are not the spawn: 'startReviewClient' refuses on it before any
+-- process exists, the processes overlay labels the repository review host and
+-- its children with it, and a test pins it. Resolving it separately anywhere
+-- is how a boundary comes to refuse a roster the spawn would have accepted,
+-- or to name a provider the host would never have started.
+--
+-- The provider half is 'embeddedReviewProviderFor', which is the adapter's
+-- routing and not a brand chosen here (requirement 8).
+embeddedReviewCell :: ModelRoster -> Either Text Assignment
+embeddedReviewCell roster = issueReviewAssignment (embeddedReviewProviderFor roster) roster
+
 issueReviewAssignment :: ProviderName -> ModelRoster -> Either Text Assignment
 issueReviewAssignment provider roster =
   either (Left . assignmentUnavailableMessage) Right (assignmentFor roster IssueReviewRole provider)
@@ -383,8 +405,8 @@ backendAssignment client =
 -- resolved against two different rosters — and through the same
 -- 'embeddedReviewProviderFor' the dashboard's own launch boundary refuses on,
 -- so a roster it allowed cannot be one this refuses.
-startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startReviewClient roster workflowConfig repository eventSink = case issueReviewAssignment provider roster of
+startReviewClient :: ModelRoster -> WorkflowConfig -> Repository -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startReviewClient roster workflowConfig repository processRegistered eventSink = case embeddedReviewCell roster of
   -- Resolved before the backend is spawned, not after: a roster that loads
   -- no cell for the routed provider must start no process at all, and the
   -- backend's own failure surface already carries the reason to the UI. The
@@ -393,7 +415,7 @@ startReviewClient roster workflowConfig repository eventSink = case issueReviewA
   Left message -> pure (Left message)
   Right _ -> case (adapterFor provider).adapterEmbeddedReview of
     Nothing -> pure (Left (missingEmbeddedReviewMessage provider))
-    Just backend -> startResolvedReviewClient backend roster workflowConfig repository eventSink
+    Just backend -> startResolvedReviewClient backend roster workflowConfig repository processRegistered eventSink
   where
     provider = embeddedReviewProviderFor roster
 
@@ -401,8 +423,8 @@ startReviewClient roster workflowConfig repository eventSink = case issueReviewA
 -- 'Kanban.ProviderAdapter.embeddedReviewProvider' resolves. Exported so a
 -- test can drive either process shape without a provider shipping it:
 -- nothing in production calls this except 'startReviewClient' above.
-startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
-startResolvedReviewClient backend roster workflowConfig repository eventSink = do
+startResolvedReviewClient :: EmbeddedReviewBackend -> ModelRoster -> WorkflowConfig -> Repository -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text ReviewClient)
+startResolvedReviewClient backend roster workflowConfig repository processRegistered eventSink = do
   logResult <- openSessionLog repository "issue-revision-appserver" 0 Nothing
   sessionLog <- case logResult of
     Left message -> eventSink (ReviewProtocolWarning backend.backendProvider message) >> pure Nothing
@@ -416,6 +438,7 @@ startResolvedReviewClient backend roster workflowConfig repository eventSink = d
   let client =
         ReviewClient
           { reviewBackend = backend,
+            reviewProcessRegistered = processRegistered,
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -504,6 +527,10 @@ spawnReviewConnection client identifier reviewIssue = case backendAssignment cli
             hSetBuffering inputHandle LineBuffering
             hSetBuffering outputHandle LineBuffering
             (processManaged, groupLeaderProblem) <- managedProcess processHandle
+            -- Registered with whoever owns this client before the connection
+            -- is even built, so no window exists in which this process is
+            -- running and nothing durable names it.
+            client.reviewProcessRegistered reviewIssue processManaged
             mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) client.reviewSessionLog
             connection <- newReviewConnection identifier inputHandle processHandle processManaged
             -- What this connection's two readers share. Held beside the
@@ -592,6 +619,57 @@ stopReviewConnection connection = do
   killManagedProcess connection.connectionManaged
   ignoreIOException (hClose connection.connectionInput)
 
+-- | Settle one review thread and nothing else (SAG-10, requirement 11).
+--
+-- Which is the whole difficulty: what "one thread" owns depends on the
+-- backend's process shape, and the two shapes have no common answer.
+--
+-- Under 'ProcessPerThread' the thread /is/ a process, so ending it means
+-- taking its connection out of the pool and stopping it — the provider
+-- process, its input handle, its tool subprocesses, and the tool re-entry
+-- endpoint serving it. Under 'SharedProcess' every other live thread is
+-- multiplexed onto that same connection, so stopping it would end them too;
+-- there the thread owns only its tool subprocesses, and the connection is
+-- deliberately left running.
+--
+-- The tool kill is common to both and runs first either way, because a
+-- @kanban_run_claude@ CLI or a @gh@ call started by this thread is this
+-- thread's descendant under either shape.
+--
+-- Never the client. A child action ending must not end the host or a sibling
+-- (requirement 11), so this is the only teardown an action's termination is
+-- allowed to reach; 'stopReviewClient' belongs to the host's own shutdown.
+finishReviewThread :: ReviewClient -> ReviewThreadId -> IO ()
+finishReviewThread client threadId = do
+  -- The remote turn first, and only under a shared process.
+  --
+  -- Killing tool subprocesses and dropping bookkeeping stops nothing the
+  -- provider is doing: under 'ProcessPerThread' that is fine, because the
+  -- thread's whole process is torn down below, but under 'SharedProcess' the
+  -- connection stays up by design and the turn simply keeps running. The
+  -- action would be marked terminal while its provider went on working —
+  -- spending quota, and reaching @kanban_github_issue@ — with no session left
+  -- that could stop it.
+  --
+  -- Interrupting is the only operation that ends one thread's turn without
+  -- touching the connection every sibling shares, which is why it is the one
+  -- used here. Best-effort: a turn that has already ended refuses the
+  -- interrupt, and that refusal is the outcome this wanted anyway.
+  when (client.reviewBackend.backendProcessShape == SharedProcess) $ do
+    running <- Map.lookup threadId <$> readMVar client.reviewActiveTurns
+    forM_ running (void . interruptReview client threadId)
+  killReviewTools client threadId
+  modifyMVar_ client.reviewActiveTurns (pure . Map.delete threadId)
+  modifyMVar_ client.reviewInterrupts (pure . Map.delete threadId)
+  modifyMVar_ client.reviewThreadIssues (pure . Map.delete threadId)
+  when (client.reviewBackend.backendProcessShape == ProcessPerThread) $ do
+    let identifier = threadId.reviewThreadConnection
+    found <- lookupConnection client.reviewConnections identifier
+    takeConnection client.reviewConnections identifier
+    mapM_ stopReviewConnection found
+    proxy <- takeReviewToolProxy client identifier
+    mapM_ destroyReviewToolProxy proxy
+
 clientShuttingDownMessage :: ReviewClient -> Text
 clientShuttingDownMessage client = backendSentence client <> " client is shutting down"
 
@@ -623,6 +701,7 @@ newReviewClientForTesting roster bounds repositoryRoot repositorySlug eventSink 
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
+            reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -724,6 +803,46 @@ addRecordingReviewConnectionForTesting client = do
 reviewConnectionsForTesting :: ReviewClient -> IO [ReviewConnection]
 reviewConnectionsForTesting client = attachedConnections client.reviewConnections
 
+-- | Every provider process this client currently holds.
+--
+-- One for a shared-process backend, one per live review thread for a
+-- process-per-thread one. The repository review host registers these with its
+-- own supervisor so they are recorded, verifiable, and reachable by the
+-- ordinary recovery path: a host that dies uncleanly otherwise leaves them
+-- orphaned with nothing durable naming them.
+reviewConnectionProcesses :: ReviewClient -> IO [ManagedProcess]
+reviewConnectionProcesses client = map (.connectionManaged) <$> attachedConnections client.reviewConnections
+
+-- | The process serving one thread, when that process is the thread's alone.
+--
+-- Under 'ProcessPerThread' a thread /is/ a process, so the action that owns
+-- the thread owns the process too, and it is recorded on that action's own
+-- durable state. That is what lets a termination or a stale-worker recovery
+-- reach it with no host left to ask: a host registers these with its own
+-- supervisor, and a supervisor that has died takes that record's usefulness
+-- with it.
+--
+-- Under 'SharedProcess' this is deliberately empty. The one process serves
+-- every thread, so recording it against a child would let that child's
+-- termination kill every sibling — the opposite of requirement 11 — and
+-- ending a thread there is 'finishReviewThread'\'s interrupt instead.
+reviewThreadOwnProcesses :: ReviewClient -> ReviewThreadId -> IO [ManagedProcess]
+reviewThreadOwnProcesses client threadId = case client.reviewBackend.backendProcessShape of
+  SharedProcess -> pure []
+  ProcessPerThread -> do
+    connection <- lookupConnection client.reviewConnections threadId.reviewThreadConnection
+    pure (maybe [] ((: []) . (.connectionManaged)) connection)
+
+-- | Where this client writes the raw traffic that belongs to no one review
+-- thread — the handshake, the diagnostics, a line it could not parse.
+--
+-- The repository review host records this as its /own/ log, because it is the
+-- host's session rather than any child's. Each child keeps a raw log of the
+-- traffic routed to it, which is what a shared-process backend's one
+-- interleaved transcript cannot give any of them.
+reviewClientLogPath :: ReviewClient -> Maybe FilePath
+reviewClientLogPath client = sessionLogPath <$> client.reviewSessionLog
+
 -- | A 'newReviewClientForTesting' whose one connection records what the
 -- client writes to it.
 newRecordingReviewClientForTesting :: ModelRoster -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
@@ -737,6 +856,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   let client =
         ReviewClient
           { reviewBackend = placeholderReviewBackend,
+            reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
             reviewInterrupts = interrupts,
@@ -794,7 +914,12 @@ initializeConnection client connection outputHandle = do
               ]
         ]
 
-beginIssueReview :: ReviewClient -> Int -> IO (Either Text ())
+-- Reports the processes this review's own connection is served by, so the
+-- action that asked for it can record them on its own durable state before
+-- any thread has been announced. Empty under a shared connection, which no
+-- one action owns; see 'reviewThreadOwnProcesses' for why that distinction
+-- has to be kept.
+beginIssueReview :: ReviewClient -> Int -> IO (Either Text [ManagedProcess])
 beginIssueReview client issueNumber = case backendAssignment client of
   -- Consulted before a connection is acquired, so a roster that cannot
   -- supply this backend's cell refuses with a visible reason and starts no
@@ -809,10 +934,15 @@ beginIssueReview client issueNumber = case backendAssignment client of
     acquired <- acquireReviewConnection client issueNumber
     case acquired of
       Left message -> pure (Left message)
-      Right connection -> case client.reviewBackend.backendProtocol of
-        AppServerProtocol -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
-        StreamJsonProtocol -> openStreamedReview client connection issueNumber
+      Right connection -> do
+        started <- case client.reviewBackend.backendProtocol of
+          AppServerProtocol -> sendRequest client connection (PendingThreadStart issueNumber) "thread/start" (threadParams assignment)
+          StreamJsonProtocol -> openStreamedReview client connection issueNumber
+        pure (owned connection <$ started)
   where
+    owned connection = case client.reviewBackend.backendProcessShape of
+      SharedProcess -> []
+      ProcessPerThread -> [connection.connectionManaged]
     threadParams assignment =
       object
         [ "cwd" .= client.reviewRepositoryRoot,

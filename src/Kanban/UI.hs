@@ -64,9 +64,6 @@ import Kanban.GitHub (newHistoryTraversal)
 import Kanban.Process (killManagedProcess, managedProcessStopsWithDashboard)
 import Kanban.Repository (RepositoryRoster, rosterDegradationNotices)
 import Kanban.Repository.Authority (BoardAuthority (..), acquireBoardAuthority)
-import Kanban.Review
-  ( stopReviewClient
-  )
 import Kanban.Models (loadModelRoster, loadedOperatingMode)
 import Kanban.Settings
   ( loadSettings
@@ -277,12 +274,10 @@ runHeldDashboard authority options config repository roster = do
             appBoardRefreshQueued = False,
             appRefreshCoordinator = refreshCoordinator,
             appQuitPending = False,
-            appReviewBackend = ReviewBackendStopped,
             appReviewSessions = Map.empty,
             appReviewUndelivered = Map.empty,
             appSolveSessions = Map.empty,
             appSolveProcesses = Map.empty,
-            appCanonicalReviewProcesses = Map.empty,
             appPullRequestReviewSessions = Map.empty,
             appPullRequestProcesses = Map.empty,
             appWorkers = Map.empty,
@@ -295,11 +290,11 @@ runHeldDashboard authority options config repository roster = do
           }
   (finalState, finalVty) <-
     customMainWithDefaultVty (Just eventChannel) application (refreshVisibleBoard initialState)
-  case finalState.appReviewBackend of
-    ReviewBackendReady client -> stopReviewClient client
-    _ -> pure ()
+  -- Nothing review-shaped is stopped here any more. The embedded review
+  -- client and every issue action's process belong to the repository review
+  -- host, which is a detached worker like any other and outlives this
+  -- dashboard on purpose (requirement 3).
   mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appSolveProcesses))
-  mapM_ killManagedProcess (Map.elems finalState.appCanonicalReviewProcesses)
   mapM_ killManagedProcess (filter managedProcessStopsWithDashboard (Map.elems finalState.appPullRequestProcesses))
   Vty.shutdown finalVty
 

@@ -55,6 +55,7 @@ module Kanban.Preflight
     gatherPreflightEnvironment,
     minimumClaudeVersion,
     minimumCodexVersion,
+    preflightBlocker,
     preflightDiagnostic,
     preflightDiagnosticDetail,
     problemLabel,

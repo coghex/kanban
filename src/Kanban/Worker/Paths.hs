@@ -38,7 +38,8 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..))
 import Kanban.Worker.Types
-  ( PullRequestWorkerTask (..),
+  ( IssueActionWorkerTask (..),
+    PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -66,13 +67,27 @@ descriptorForSpec spec = do
         workerDescriptorAckPath = directory </> base <> ".ack",
         workerDescriptorLeasePath = leasePath,
         workerDescriptorLeaseOwnerPath = leasePath </> "owner.json",
-        workerDescriptorPendingTerminationPath = directory </> base <> ".pending-termination"
+        workerDescriptorPendingTerminationPath = directory </> base <> ".pending-termination",
+        workerDescriptorHandoffPath = directory </> base <> ".handing-off",
+        workerDescriptorCommandPath = directory </> base <> ".commands.jsonl",
+        workerDescriptorCommandAckPath = directory </> base <> ".command-acks.jsonl"
       }
 
+-- | The item a task reserves, which is what the one-live-worker invariant is
+-- keyed by.
+--
+-- An issue action takes @issue-action-\<n\>@ rather than the solver's
+-- @issue-\<n\>@ deliberately (requirement 13): a solve and a review of the
+-- same issue may run at once, and folding them onto one key would make the
+-- second of them refuse. The review host takes one repository-wide key,
+-- because the worker directory is already per-repository and the host is the
+-- single 'Kanban.Review.ReviewClient' owner within it.
 workerLeaseKey :: WorkerTask -> FilePath
 workerLeaseKey task = case task of
   SolveWorkerTaskKind solveTask -> "issue-" <> show solveTask.solveWorkerIssueNumber
   PullRequestWorkerTaskKind pullRequestTask -> "pr-" <> show pullRequestTask.pullRequestWorkerNumber
+  IssueHostWorkerTaskKind _ -> "issue-host"
+  IssueActionWorkerTaskKind actionTask -> "issue-action-" <> show actionTask.issueActionIssueNumber
 
 workerDirectory :: Repository -> IO FilePath
 workerDirectory repository = do

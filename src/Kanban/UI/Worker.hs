@@ -1,9 +1,9 @@
 module Kanban.UI.Worker
   ( applyWorkerProtocolEvent,
     attachDiscoveredWorker,
-    orphanMessage,
     recoveredAutoSolveParentSession,
     recoveredPullRequestSession,
+    recoveredReviewSession,
     recoveredSolveSession,
     registerWorker,
     startPendingWorkerMonitors,
@@ -19,7 +19,6 @@ import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
 import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError, loadedOperatingMode)
@@ -36,7 +35,8 @@ import Kanban.Solve
     solveAssignment
   )
 import Kanban.Worker
-  ( ProcessIdentity,
+  ( IssueActionWorkerTask (..),
+    ProcessIdentity,
     PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
@@ -50,12 +50,21 @@ import Kanban.Worker
 import Kanban.UI.Keys (BoardAction (..), actionKeyText)
 import Kanban.UI.Types
 import Kanban.UI.Util
+import Kanban.UI.Session (orphanMessage)
 import Kanban.UI.SessionCore
 import Kanban.UI.State
 import Kanban.UI.AutoSolve
 import Kanban.UI.Transcript
 import Kanban.UI.Solve
 import Kanban.UI.PullRequest
+import Kanban.UI.Review
+  ( applyCanonicalIssueReview,
+    applyIssueActionFinished,
+    applyIssueActionOrphans,
+    applyReviewDiagnostic,
+    applyReviewEvent,
+    applyReviewInput,
+  )
 
 registerWorker :: WorkerDescriptor -> EventM Name AppState ()
 registerWorker descriptor = do
@@ -88,6 +97,10 @@ applyWorkerProtocolEvent descriptor workerEvent = do
         suppressIfResolvedSolve task.solveWorkerIssueNumber (applySolveEvent (SolveDiagnostic task.solveWorkerIssueNumber message))
       WorkerOrphansDetected outcome processes -> applySolveOrphans task.solveWorkerIssueNumber outcome processes
       WorkerFinished outcome -> applySolveEvent (SolveProcessFinished task.solveWorkerIssueNumber outcome)
+      -- A solve worker journals none of the three review kinds.
+      WorkerReviewEvent _ -> pure ()
+      WorkerReviewInput _ _ _ -> pure ()
+      WorkerCanonicalReviewFinished _ _ -> pure ()
     PullRequestWorkerTaskKind task ->
       -- This worker is already running, so its brand is the one its own
       -- specification recorded rather than one resolved live: a mode change
@@ -114,6 +127,39 @@ applyWorkerProtocolEvent descriptor workerEvent = do
               suppressIfResolvedPullRequest task.pullRequestWorkerNumber (applyPullRequestFlowEvent (PullRequestFlowDiagnostic task.pullRequestWorkerNumber message))
             WorkerOrphansDetected outcome processes -> applyPullRequestOrphans task.pullRequestWorkerNumber outcome processes
             WorkerFinished outcome -> applyPullRequestFlowEvent (PullRequestProcessFinished task.pullRequestWorkerNumber outcome)
+            -- A pull-request worker journals none of the three review kinds.
+            WorkerReviewEvent _ -> pure ()
+            WorkerReviewInput _ _ _ -> pure ()
+            WorkerCanonicalReviewFinished _ _ -> pure ()
+    -- One durable issue action, replayed into the overlay it belongs to.
+    --
+    -- Every arm hands the journaled record straight to the same handler a
+    -- live event has always reached. That is what makes requirement 4 true by
+    -- construction rather than by a second rendering kept in step by hand: a
+    -- dashboard that never closed and one that reattached an hour later run
+    -- the same transitions over the same events, so they arrive at the same
+    -- bounded transcript suffix, the same pending interaction, the same
+    -- activity, and the same follow state.
+    IssueActionWorkerTaskKind task -> case workerEvent of
+      WorkerReviewEvent reviewEvent -> applyReviewEvent task.issueActionIssueNumber reviewEvent
+      WorkerReviewInput identifier display rejected -> applyReviewInput task.issueActionIssueNumber identifier display rejected
+      WorkerCanonicalReviewFinished stage result ->
+        applyCanonicalIssueReview task.issueActionIssueNumber stage result
+      WorkerDiagnostic message -> applyReviewDiagnostic task.issueActionIssueNumber message
+      WorkerOrphansDetected outcome processes ->
+        applyIssueActionOrphans task.issueActionIssueNumber outcome processes
+      WorkerFinished outcome -> applyIssueActionFinished task.issueActionIssueNumber outcome
+      -- The identifiers a child records travel on its state file, which the
+      -- overlay reads directly; nothing in the transcript changes for them.
+      WorkerProviderStarted _ -> pure ()
+      WorkerProviderSpawning _ -> pure ()
+      WorkerLogOpened _ -> pure ()
+      WorkerSessionIdentified _ -> pure ()
+      WorkerAgentOutput _ -> pure ()
+    -- The host itself renders no session: it is the container its children's
+    -- sessions run inside, and its own journal carries only what belongs to
+    -- no child.
+    IssueHostWorkerTaskKind _ -> pure ()
   case workerEvent of
     WorkerFinished _ -> do
       modify
@@ -178,14 +224,6 @@ applyPullRequestOrphans number outcome processes = do
   modifyAutoSolveForPullRequest number (\session -> session {sessionActivity = "PR agent left orphaned subprocesses; press " <> actionKeyText ShowProcesses})
   setNotice ("PR workflow #" <> showText number <> " is orphaned; press " <> actionKeyText ShowProcesses <> " to inspect it or " <> actionKeyText KillWorking <> " to kill it")
 
--- | The orphan-pending activity text for a still-unverified outcome: a
--- deadline that left survivors behind reads distinctly from ordinary
--- subprocesses surviving a solver/PR agent that ran to completion.
-orphanMessage :: SolveOutcome -> Text -> Text -> Text
-orphanMessage outcome count subject
-  | isDeadlineOutcome outcome = "deadline exceeded; " <> count <> " subprocesses survived termination; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
-  | otherwise = count <> " subprocesses survived " <> subject <> "; press " <> actionKeyText KillWorking <> " to terminate the orphaned process tree"
-
 attachDiscoveredWorker :: WorkerDescriptor -> EventM Name AppState ()
 attachDiscoveredWorker descriptor = do
   state <- get
@@ -203,6 +241,11 @@ tryStartWorkerMonitor descriptor = do
       sessionReady = case descriptor.workerDescriptorSpec.workerTask of
         SolveWorkerTaskKind task -> Map.member task.solveWorkerIssueNumber state.appSolveSessions
         PullRequestWorkerTaskKind task -> Map.member task.pullRequestWorkerNumber state.appPullRequestReviewSessions
+        IssueActionWorkerTaskKind task -> Map.member task.issueActionIssueNumber state.appReviewSessions
+        -- The host has no session to wait for, and its journal still has to
+        -- be read: a client that could not start reports it there, and a
+        -- child waiting on that host would otherwise wait silently.
+        IssueHostWorkerTaskKind _ -> True
   when (sessionReady && not alreadyMonitoring) $ do
     modify (\current -> current {appWorkerMonitors = Set.insert identifier current.appWorkerMonitors})
     eventChannel <- (.appEventChannel) <$> get
@@ -252,6 +295,51 @@ workerSessionEnsured descriptor state = case descriptor.workerDescriptorSpec.wor
                       (recoveredPullRequestSession current.appModelRoster (priorTickGeneration task.pullRequestWorkerNumber current.appPullRequestReviewSessions) descriptor pullRequest task)
                       current.appPullRequestReviewSessions
                 }
+  IssueActionWorkerTaskKind task
+    | Map.member task.issueActionIssueNumber state.appReviewSessions -> state
+    | Just issue <- issueFromBoard state.appBoard task.issueActionIssueNumber ->
+        state
+          { appReviewSessions =
+              Map.insert
+                task.issueActionIssueNumber
+                (recoveredReviewSession state descriptor issue task)
+                state.appReviewSessions
+          }
+    | otherwise -> noticeSetOverStartupReport ("An issue action for #" <> showText task.issueActionIssueNumber <> " is running, but the issue is absent from the cached board; press " <> actionKeyText RefreshAll <> " to refresh") state
+  -- The host renders nothing of its own. Its children each get the session
+  -- above, and a host row appears in the processes overlay through
+  -- 'Kanban.UI.Session.agentSessionEntries' rather than through a session.
+  IssueHostWorkerTaskKind _ -> state
+
+-- | A review session restored from a running issue action.
+--
+-- Empty of transcript on purpose, and that is the whole trick: every line the
+-- action has ever produced is in its durable journal, and the monitor started
+-- for it replays that journal from byte zero through
+-- 'Kanban.UI.Review.applyReviewEvent'. So the reconstruction is the live
+-- dashboard's own transitions run again over the same events, which is what
+-- makes the bounded transcript suffix, the pending interaction, the activity,
+-- and the follow state come out identical to what a dashboard that never
+-- closed is showing (requirement 4) — rather than a second rendering that has
+-- to be kept in step with the first by hand.
+recoveredReviewSession :: AppState -> WorkerDescriptor -> Issue -> IssueActionWorkerTask -> ReviewSession
+recoveredReviewSession state descriptor issue task =
+  newAgentSession
+    (priorTickGeneration task.issueActionIssueNumber state.appReviewSessions)
+    ReviewStarting
+    "replaying issue action"
+    (Just descriptor.workerDescriptorSpec.workerCreatedAt)
+    (plainTranscript "")
+    ReviewDetail
+      { reviewSessionIssue = issue,
+        reviewSessionStage = task.issueActionStage,
+        reviewSessionThreadId = Nothing,
+        reviewSessionTurnId = Nothing,
+        reviewSessionPending = Nothing,
+        reviewSessionUndelivered = [],
+        reviewSessionAwaiting = [],
+        reviewSessionRestored = Nothing
+      }
 
 -- | A solve session restored from a running worker.
 --

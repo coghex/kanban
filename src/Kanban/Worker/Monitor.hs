@@ -19,14 +19,16 @@ module Kanban.Worker.Monitor
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless)
-import Data.Maybe (catMaybes, mapMaybe)
+import Control.Monad (forM_, unless)
+import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
 import Kanban.Solve (SolveOutcome (..))
+import Kanban.Worker.Command (reconcileIssueActionClaims)
 import Kanban.Worker.Journal
-  ( decodeJournalLine,
+  ( appendWorkerEvent,
+    newEventJournalLock, decodeJournalLine,
     drainJournalBeforeExit,
     emitEnvelope,
     isTerminalEnvelope,
@@ -40,7 +42,7 @@ import Kanban.Worker.Termination
     terminateRecordedStateProcessesWith,
   )
 import Kanban.Worker.Types
-  ( WorkerDescriptor (..),
+  ( WorkerEnvelope (..), WorkerDescriptor (..),
     WorkerEvent (..),
     WorkerId (..),
     WorkerSpec (..),
@@ -64,10 +66,49 @@ monitorWorker descriptor eventSink = loop 0
           let envelopes = mapMaybe decodeJournalLine unseen
           mapM_ (emitEnvelope descriptor eventSink) envelopes
           if any isTerminalEnvelope envelopes
-            then pure ()
+            then repairTerminalPrefix descriptor envelopes
             else do
               recovered <- recoverIfWorkerStopped descriptor eventSink newConsumed
               unless recovered $ threadDelay workerMonitorIntervalMicros >> loop newConsumed
+
+-- | Completes a settle that wrote its terminal envelope and died before it
+-- recorded the terminal state.
+--
+-- A settle closes the journal first precisely so this prefix is the one that
+-- survives a crash, and that only works if something completes it. Nothing
+-- did: replay stops at the terminal envelope, and stopping is what skipped
+-- the recovery pass that would otherwise have noticed. The result was a
+-- transcript that ends and a child that stays running, discoverable, and
+-- holding its lease for ever.
+--
+-- Nothing is appended here — the envelope is already the journal's last
+-- record, and this exists to honour that rather than add to it — and the
+-- outcome written is the envelope's own, not a fresh diagnosis of a worker
+-- that had already said how it ended.
+repairTerminalPrefix :: WorkerDescriptor -> [WorkerEnvelope] -> IO ()
+repairTerminalPrefix descriptor envelopes = do
+  stateResult <- readWorkerState descriptor
+  case stateResult of
+    Left _ -> pure ()
+    Right state
+      | WorkerTerminal _ <- state.workerStateStatus -> pure ()
+      | otherwise -> forM_ (terminalOutcomeOf envelopes) $ \outcome -> do
+          now <- getCurrentTime
+          writeState
+            descriptor
+            state
+              { workerStateStatus = WorkerTerminal outcome,
+                workerStateProviderPid = Nothing,
+                workerStateProviderIdentity = Nothing,
+                workerStateHeartbeatAt = now
+              }
+          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
+          releaseWorkerLease descriptor
+
+-- | The outcome a terminal envelope in this batch carries.
+terminalOutcomeOf :: [WorkerEnvelope] -> Maybe SolveOutcome
+terminalOutcomeOf envelopes =
+  listToMaybe [outcome | envelope <- envelopes, WorkerFinished outcome <- [envelope.workerEnvelopeEvent]]
 
 -- A provider is deliberately subordinate to its persistent supervisor.  If
 -- that supervisor disappears, fail closed instead of leaving an invisible
@@ -108,7 +149,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
         presence <- if null identities then pure IdentityAbsent else checkIdentityPresenceWith takeSnapshot identities
         case presence of
           IdentityAbsent -> do
-            drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+            drained <- drainAfterReconciling
             case drained of
               Nothing -> pure False
               Just sawFinished -> do
@@ -135,7 +176,7 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                   if not (providerOk && recordedOk)
                     then reportStaleRecoveryPending state
                     else do
-                      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+                      drained <- drainAfterReconciling
                       case drained of
                         Nothing -> pure False
                         Just sawFinished -> do
@@ -159,6 +200,13 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                                     workerStateHeartbeatAt = now,
                                     workerStateLastActivity = "worker failed closed"
                                   }
+                          -- On the journal, not only to whoever is attached
+                          -- now. A dashboard reattaching later replays that
+                          -- journal and nothing else, so an action whose
+                          -- terminal record went only to a live sink reads as
+                          -- one that never ended — and its journal stays open
+                          -- to the appends the envelope exists to stop.
+                          closeJournalWith outcome sawFinished
                           writeState descriptor terminalState
                           ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
                           releaseWorkerLease descriptor
@@ -167,13 +215,29 @@ recoverIfWorkerStoppedWith takeSnapshot descriptor eventSink consumedJournalByte
                           pure True
   where
     spec = descriptor.workerDescriptorSpec
+    -- Every finalization path drains the journal before it reports a terminal
+    -- outcome, and every one of them owes an issue action the same thing
+    -- first: an answer for any command its dead host claimed and never
+    -- settled. Reconciling before the drain is what delivers those answers
+    -- through the drain itself, so a dashboard learns where its message went
+    -- by the one path it already reads. A no-op for every other worker.
+    drainAfterReconciling = do
+      reconcileIssueActionClaims descriptor
+      drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+    -- The terminal envelope this recovery owes the journal, unless the
+    -- journal already carried one — in which case the worker closed its own
+    -- and a second would be a record after the last record.
+    closeJournalWith outcome sawFinished =
+      unless sawFinished $ do
+        journal <- newEventJournalLock
+        appendWorkerEvent descriptor journal (WorkerFinished outcome)
     -- Reached only once the supervisor is confirmed absent by its durably
     -- recorded launch identity — its single call site above has no other
     -- entry condition, and deliberately no elapsed-time one. No state file
     -- ever appeared, so nothing was ever started to terminate beyond the
     -- lease itself.
     finalizeMissingState = do
-      drained <- drainJournalBeforeExit descriptor eventSink consumedJournalBytes
+      drained <- drainAfterReconciling
       case drained of
         Nothing -> pure False
         Just sawFinished -> do

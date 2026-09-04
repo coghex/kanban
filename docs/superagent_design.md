@@ -1487,6 +1487,292 @@ unless their typed contract exposes an override.
   automatic recommendation policy.
 - **Open questions:** `None`; provider-internal subagents remain opaque and
   owned by the parent.
+- **Topology as implemented:** one durable detached review host per canonical
+  repository, owning that repository's `ReviewClient` and its connection pool,
+  with each initial review, rereview, and revision an independently durable
+  child action of it.
+
+  The split is what lets both adapter process shapes coexist without either
+  being emulated. A `SharedProcess` backend multiplexes concurrent children
+  through the host's one connection; a `ProcessPerThread` backend gives each
+  child its own connection and process. Separate detached workers could not
+  share a connection at all, and independent per-issue processes could not
+  express the shared one, so the host holds the client and the children hold
+  everything that is theirs: specification, state, event journal and raw log,
+  dashboard-input command ledger and acknowledgements, lease
+  (`issue-action-<n>`, deliberately apart from the solver's `issue-<n>`),
+  termination state, and terminal result.
+
+  Isolation is child-scoped in both shapes. Ending or recovering one child
+  settles that child's thread or per-thread process and its descendants and
+  never the host, a sibling, a sibling's lease, or a sibling's events. Under a
+  shared connection that boundary is the owning thread and turn; under a
+  process-per-thread one it is the connection the thread owns.
+
+  The host takes no bound of its own. The four-hour persistent-worker deadline
+  bounds one provider turn, and applying it to a container of independently
+  bounded children would settle children still inside their own — and, on a
+  shared connection, take every sibling down with the process. So each child is
+  bounded individually from its own creation, and the host's life is derived:
+  it exits once it holds no live child, which is also what stops it retaining a
+  lease or a discovery record that would block a later start.
+
+  Startup collection follows the topology: a child whose host is live is never
+  collected, and a host with a live or unacknowledged-terminal child is never
+  collected either, on top of every rule the pass already applied. Both of
+  those read the counterpart's durable state, and a record that is /gone/ is
+  not the same answer as one that will not decode: the pass works from a
+  snapshot of the directory and removes a worker's state before its
+  specification, so a counterpart collected earlier in the same pass is still
+  in that snapshot with its state already removed. Reading that as "cannot
+  prove it is gone" made the pass depend on the order the filesystem handed
+  its records over — which is how it passed on one and not the other.
+
+  Several orderings the review rounds found are closed explicitly. A child can
+  be settled — by a termination command, its own bound, or a dead connection —
+  between asking the provider for a thread and the provider announcing one,
+  because that announcement is asynchronous; settled children therefore stay
+  addressable, and a thread or canonical subprocess that arrives afterwards is
+  closed rather than left owned by nothing. And the host registers its client's
+  connection processes with its own supervisor rather than recording itself as
+  its own provider: a provider pid with no verifiable identity is what every
+  termination path reads as unresolvable, which left a host kill recording a
+  pending termination it could never complete. Those registrations happen at
+  the moment a connection is created rather than on the next poll, because a
+  process-per-thread backend spawns one to announce a thread and a host killed
+  in that gap would leak it.
+
+  Three more come from the second round. A thread announcement names only an
+  issue on the wire, and a settled action releases its lease immediately — so
+  a replacement action for the same issue could take the first action's
+  thread; announcements now resolve by start order instead. A command applied
+  and then not acknowledged was owed again on the next poll, sending the same
+  steer twice; commands are claimed before they are applied, so an unwritable
+  ledger means nothing was applied and a written claim means it is never
+  applied again. And a child had no raw evidence of its own under a
+  shared-process backend, whose one client transcript interleaves every
+  thread; each child now keeps its own, and the client's belongs to the host.
+
+  The third round closed four more. Settled children are retained by action id
+  rather than by issue, so two settled actions for one issue cannot overwrite
+  each other and lose a pending announcement. A host is live only until it is
+  disproven — terminal, or an identity a successful snapshot does not contain
+  — because a host that died just after persisting a running state would
+  otherwise be handed children it can never adopt. Command identifiers carry a
+  process-local sequence, since a clock and a pid do not separate two presses
+  in one tick and the ledger deduplicates by that identifier. And a claim left
+  standing by a host that died mid-delivery is settled by the next host as an
+  outcome nobody observed, and journaled as undelivered, so the command is
+  never re-applied and the message is not silently lost.
+
+  The fourth round closed four more. Feedback and resend validate the turn
+  they were written for, not only the thread, so a message meant to steer one
+  turn cannot steer the next or open a fresh one. A command queued behind a
+  termination in the same batch is refused rather than acted on, and settling
+  clears the thread as well as the turn so no thread-scoped check still reads
+  a settled child as addressable. A child that had already started under a
+  host that then died is recovered rather than restarted — its claims
+  answered, its evidence replayed, an unknown outcome reported — which is what
+  requirement 15 asks for. And a re-homed child's specification is rewritten
+  to name the host serving it, because leaving it naming a dead one gave
+  discovery and the cache collection pass a different owner from the truth.
+
+  The fifth round closed two. Exempting the host from the deadline watchdog
+  was not one edit: the supervisor's completion claim, its orphan poll, and
+  its lease release each defer to that watchdog once the bound elapses, and
+  each waits on a handshake only the watchdog fills — so a host older than
+  four hours never exited and held this repository's host lease against every
+  later one. The deadline now has a single spelling that answers "none" for an
+  unbounded task, and every deferral reads it. And a delivery's journal entry
+  is written before its acknowledgement, so a failed acknowledgement leaves the
+  ledger holding only a claim while the journal holds the answer; the next host
+  reconciles the two by command id rather than reporting a delivered message as
+  one nobody observed.
+
+  The sixth round closed four orderings the first five left. The client
+  registers each connection at creation rather than at the owner's next poll.
+  A canonical subprocess is installed against its child before the settle
+  claim is re-read, so the two orderings are exhaustive instead of racing a
+  check against an install. Retirement inserts before it removes, so an
+  announcement in the handoff window finds both maps rather than neither. And
+  ending a child under a shared connection interrupts its turn: killing tool
+  subprocesses and dropping bookkeeping stops nothing the provider is doing,
+  so the action would have been marked terminal while its thread kept
+  working.
+
+  The seventh round closed two. A command that ends an action journals its own
+  line before the settle writes the child's terminal envelope, because a
+  monitor stops replaying at that envelope and a line after it is either never
+  seen or seen and mistaken for the action resuming; the overlay's own
+  transition is terminal-safe as well, so the ordering holds whichever way a
+  replay meets the two. And a launch waits for evidence that some host has
+  actually taken its child on rather than re-asking which host is live: the
+  host it was given can complete its final adoption scan and be on its way out
+  while still reporting a running state, so predicting adoption is impossible
+  from the launch side and observing it is not.
+
+  The eighth round closed two. A command names the thread and turn the overlay
+  was showing rather than the newest the child has recorded: the two differ for
+  as long as a journal event takes to reach Brick, and a durable read in that
+  window addresses a turn the user never saw, which the host's own staleness
+  check would then accept. And "nothing follows the terminal envelope" became a
+  property of the journal rather than a discipline — the envelope and the
+  journal's closure happen under one lock, so a canonical result returning
+  while a termination commits cannot append past it and give a reattached
+  dashboard an approval a live one never saw. What outlives an action is
+  recorded on the host instead.
+
+  The ninth round closed two dependencies that were never real. A canonical
+  stage's whole work is `approve_issues.py`, and its preflight asks only for
+  that backend and the reviewers it selects — so a host that started an
+  embedded client before it had seen any child made every gate and rereview
+  fail on an install with no in-app provider session at all. The client is
+  started when a revision first needs one, and a canonical stage neither
+  requires nor spawns one. And claim reconciliation moved off the host: the
+  path that answers a claim a dead host left standing is the same one whether
+  a replacement host adopts the child or a reattached dashboard's own
+  stale-worker recovery terminalizes it, and only the first of those two ran
+  it — so the reattachment case wrote the terminal envelope over a standing
+  claim and lost the message the dashboard had already cleared from its input
+  line.
+
+  The tenth round closed the last of the admission race. Round 7 replaced
+  predicting which host would take a child with observing that one had, and
+  the timeout arm of that wait went on predicting: it ensured a host and
+  returned, and the host ensuring hands back can be the one already inside its
+  idle teardown. Two things changed. The host now records a handoff marker
+  before the final scan its exit rests on, and everything asking which host a
+  new child may go to reads a marked host as none — which orders admission
+  against exit, since a launch writes its child before it reads liveness, and
+  makes the stranding interleaving unreachable rather than unlikely. And the
+  wait no longer ends at an ensure: every arm loops back to the same question,
+  and exhausting it is reported as a failed launch that removes the child's
+  records, not as a success with nothing running.
+
+  The eleventh round closed three. Applying a command and recording that it
+  was applied became one step against the action ending, because a settle
+  between them closed the journal and left the provider holding a message the
+  acknowledgement called accepted and the transcript had no trace of; and the
+  claim reconciliation stopped appending to a journal that had already carried
+  a terminal envelope, which is the same rule everything else obeys. A rehome
+  whose specification write fails now refuses the adoption instead of running
+  the child under its dead host's name — the retry that path promised could
+  never happen, since an adopted child is one the host holds and later scans
+  skip it. And a re-homed child continues its own raw log instead of opening
+  another, because a fresh log's name carries an issue number and a timestamp
+  but no action id, so the evidence the child had actually produced was left
+  addressable by nothing.
+
+  The twelfth round closed one. A process-per-thread connection was named
+  only on the host's own census, and that record is exactly as useful as the
+  host: a host that has died is precisely when a termination has nobody to ask
+  to finish a thread and settles the child from its durable state alone, so
+  the connection outlived the action it served — beside a replacement action
+  for the same issue. The action now records that process on its own state as
+  well. A shared connection is recorded nowhere on a child, and must not be:
+  one process serves every thread there, so a single child's termination would
+  end all of them.
+
+  The thirteenth round closed one, on the overlay's side of the same rule. The
+  two gestures that end an action marked the transcript and moved the phase at
+  the press, before the command was written. That mark is no journal event, so
+  a reattached overlay could not reconstruct it and one action read one way
+  live and another on replay — and a ledger write that failed still announced
+  a kill that had not happened. Ending an action now moves nothing at the
+  press: the host journals the command's own line before applying it and the
+  terminal envelope after, and both overlays apply those two records alike.
+
+  The fourteenth round closed three. One issue now has at most one start
+  outstanding at a time: a settled action keeps its start outstanding so its
+  late thread is still closed, its released lease lets a replacement begin,
+  and two starts for one issue cannot be told apart from an announcement that
+  names only the issue — so each took the other's thread. A per-thread
+  connection is recorded on its child when the review is begun rather than
+  when the thread is announced, because the process exists for the whole of
+  that gap and a host dying inside it left a child whose own state knew of no
+  process to end. And a live host answers a claim its own acknowledgement
+  failed to settle, on its next poll and without re-applying anything; every
+  reader treats a claim as settled, so that one stood until a later adoption
+  or a stale-worker recovery happened to arrive.
+
+  The fifteenth round closed two, and both were of shapes earlier rounds had
+  already named. Attaching an announced thread read the settle claim and then
+  acted on it, which is the check-then-act rounds 6 and 11 each found
+  elsewhere; a termination landing between the two left the settle with no
+  thread to finish and the attach installing one on a terminal action. And
+  recovery adoption rebuilt the child's state from scratch, discarding the
+  connection round 12 had just made it record — in the moment before settling
+  the action and releasing its lease, which is exactly when that record is the
+  only name the process has left. A fix that adds durable state is not done
+  until every path that rebuilds that state carries it.
+
+  The sixteenth round closed the last of that window. A per-thread connection
+  is spawned inside the call that begins a review, and the child took
+  ownership only when that call returned; a host dying in between left a child
+  owning nothing, so terminating it settled the action and released its lease
+  with the provider still running. The client's own registration now names the
+  review a connection was spawned for, and the action holding that issue's
+  outstanding start records it there — the same instant the host does, which
+  is the only moment with no window at all.
+
+  The seventeenth round closed the window on the other side of the terminal
+  event. Settling takes a child off the host's live list, and a dashboard that
+  has not yet been told still writes to it: the poll scans live children and
+  the reconciliation answers only commands already claimed, so a command
+  written there was owed to nobody for ever — with its draft already cleared.
+  The overlay now refuses that submission from the action's own durable state
+  and keeps the text on the line, and both the host and the reconciliation
+  refuse anything that slips past, on the ledger rather than the journal,
+  since the terminal envelope is still the last record the journal takes.
+
+  The eighteenth round closed both halves of the previous one. Checking the
+  action's durable state and writing the command are two steps, and no path
+  read the ledger the refusal was written to — so the residual race still lost
+  the text. The overlay now holds every command it writes until the child's
+  journal accounts for it, and offers back whatever is still held when the
+  terminal event arrives; a command that reached its action journals its line
+  before that envelope, so the two cases are exactly distinguishable. And the
+  dead-host termination fallback writes that envelope at all: it had been
+  recording a terminal state and releasing the lease while leaving the journal
+  open, so a reattaching dashboard replayed an action that never ended.
+
+  The nineteenth round found both of the previous round's fixes applied to one
+  path and not its twin. Stale-worker recovery terminalizes the same actions a
+  direct termination does, by a different route, and it was still recording a
+  terminal state while leaving the journal open. And the release of a held
+  command was skipped whenever a result event had already published the
+  terminal phase — dropped by the very envelope that proves the command was
+  never read. Both now hold wherever the action ends.
+
+  The twentieth round closed three crash and failure paths. Settling now
+  closes the journal before it records the terminal state, because only that
+  prefix is one anything repairs. Having asked the provider for a thread is
+  recorded before the request goes out rather than when the thread comes back,
+  since under a shared connection nothing else distinguishes a host that died
+  mid-request from one that died before asking — and the rerun that followed
+  ran beside a request still live on a connection that outlived its host. And
+  a gesture announces what it asked for only when the command was actually
+  written: every one of them was overwriting the submission's own failure
+  notice with a promise, which is the thing round 13 said must not happen.
+
+  The rounds after the first approval were about the crash window the settle's
+  own ordering creates. Closing the journal before recording the state is only
+  safe if something completes the survivor, and nothing did: a monitor stops
+  replaying at a terminal envelope, and stopping is exactly what skipped the
+  recovery pass that was supposed to notice — so the transcript ended while
+  the child stayed running, discoverable, and holding its lease. That stop is
+  now where the repair happens. The direct-termination fallback reads the same
+  envelope rather than appending a second one over it, which would have put a
+  record after the journal's last record and replaced the outcome the action
+  had already published.
+
+  Two retentions meet in the overlay and are not the same contract. The child's
+  journal and raw log keep every event, bounded only by the worker cache's own
+  retention; the overlay's transcript stays bounded. A reattaching dashboard
+  replays the whole journal through the same transitions a live event takes, so
+  it reconstructs the identical bounded suffix, pending interaction, activity,
+  and follow state — and no overlay bound ever truncates evidence the journal
+  still holds.
 
 ### SAG-3. Run and recover one mission outside the board selection
 

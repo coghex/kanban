@@ -36,11 +36,9 @@ import Kanban.PullRequestFlow (PullRequestAction (..), PullRequestOrigin (..))
 import Kanban.Solve (ResumeProvenance (..), SolveWorkflow (..), SolverBrand (..))
 import Kanban.Tracker (trackerFromIssue)
 import Kanban.UI.AutoSolve (boardPullRequestNumbers)
-import Kanban.Review (ReviewStage (..), ReviewThreadId)
 import Kanban.UI.Board (trackerHeaderText)
 import Kanban.UI.Events (mutatesSelectedWork, readOnlyHistoryGate, settledSessionRefusal)
 import Kanban.UI.Filter (readOnlyHistoryRefusal, readOnlyHistoryRefusalFor, refreshVisibleBoard)
-import Kanban.UI.Review (deferredRevisionLaunches)
 import Kanban.UI.Keys (BoardAction (..))
 import Kanban.UI.Search (entriesFor, selectableRows)
 import Kanban.UI.Selection (selectedEntry)
@@ -56,8 +54,8 @@ import Kanban.Worker
     WorkerTask (..),
   )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
-import Spec.Support.App (testAppState, testReviewSession)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureReviewThread, itemNumber)
+import Spec.Support.App (testAppState)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
 import Test.Hspec
 
 spec :: Spec
@@ -489,27 +487,12 @@ refusalSpec = describe "read-only history refusals" $ do
         | subject <- [IssueId 800, IssueId 801, PullRequestId 820, PullRequestId 830]
       ]
 
-  -- The deferred launch boundary. A revision session is created while the
-  -- review backend is still starting, so the turn it is waiting for is
-  -- started an arbitrary time later — long enough for a refresh to settle the
-  -- issue underneath it.
-  it "starts no deferred revision turn for an issue that settled while the backend started" $ do
-    settled <- settledState
-    let waiting number = withRevisionSession number settled
-        (liveLaunches, settledLaunches) = deferredRevisionLaunches (waiting 800)
-        (staleLaunches, staleRefusals) = deferredRevisionLaunches (waiting 940)
-    -- The issue is still live, so its turn is started and nothing refused.
-    map (.issueNumber) liveLaunches `shouldBe` [800]
-    settledLaunches `shouldBe` []
-    -- The issue settled while the backend was starting, so no turn is
-    -- started — and the session is refused rather than left waiting for one.
-    staleLaunches `shouldBe` []
-    staleRefusals `shouldBe` [(940, expectedNotice (IssueItem (closedIssue 940)))]
-
-  it "leaves a revision session that already has its turn alone" $ do
-    settled <- settledState
-    let running = withRunningRevisionSession 940 settled
-    deferredRevisionLaunches running `shouldBe` ([], [])
+  -- The deferred revision launch boundary is gone with the dashboard's own
+  -- review backend (SAG-10): a review is dispatched to the repository host
+  -- immediately, there is no queue of sessions waiting for a client to come
+  -- up, and the read-only-history refusal is the registry's own
+  -- 'Kanban.Action.Types.ActionTargetHistorical' — worded by the very
+  -- 'readOnlyHistoryNotice' asserted above.
 
   -- The merge chain, refused at the launch decision itself rather than only
   -- at the key press: it outranks the wrong-kind, in-flight and
@@ -765,30 +748,6 @@ withWorker task state =
 testWorkerId :: WorkerId
 testWorkerId = WorkerId "worker-1"
 
--- | A revision session in the state a backend that is still starting leaves
--- behind: created, waiting, and with no turn of its own yet.
-withRevisionSession :: Int -> AppState -> AppState
-withRevisionSession issueNumber = withReviewSessionDetail issueNumber Nothing
-
--- | The same session once its turn has been started, which a later backend
--- start must not launch a second time.
-withRunningRevisionSession :: Int -> AppState -> AppState
-withRunningRevisionSession issueNumber = withReviewSessionDetail issueNumber (Just (fixtureReviewThread "thread-1"))
-
-withReviewSessionDetail :: Int -> Maybe ReviewThreadId -> AppState -> AppState
-withReviewSessionDetail issueNumber threadId state =
-  state {appReviewSessions = Map.singleton issueNumber session}
-  where
-    base = testReviewSession (baseIssue issueNumber []) ReviewStarting
-    session =
-      base
-        { sessionDetail =
-            base.sessionDetail
-              { reviewSessionStage = IssueRevision,
-                reviewSessionThreadId = threadId
-              }
-        }
-
 solveWorkerOn :: Int -> WorkerTask
 solveWorkerOn issueNumber = SolveWorkerTaskKind (SolveWorkerTask issueNumber SolveOnly ClaudeSolver)
 
@@ -822,7 +781,10 @@ testWorkerDescriptor task =
       workerDescriptorAckPath = "/tmp/worker-1.ack",
       workerDescriptorLeasePath = "/tmp/worker-1.lease",
       workerDescriptorLeaseOwnerPath = "/tmp/worker-1.lease.owner",
-      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating"
+      workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating",
+      workerDescriptorHandoffPath = "/tmp/worker-1.handing-off",
+      workerDescriptorCommandPath = "/tmp/worker-1.commands.jsonl",
+      workerDescriptorCommandAckPath = "/tmp/worker-1.command-acks.jsonl"
     }
 
 -- | The dashboard with @item@ selected, at whichever column and row it drew.

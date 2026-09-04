@@ -52,7 +52,7 @@ module Kanban.Action.Dispatch
 where
 
 import Data.List (find)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action.Capability
@@ -77,9 +77,17 @@ import Kanban.ApprovalService
     queryApprovalStatus,
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Kanban.Domain (Label (..), PullRequest (..), Repository, WorkflowConfig)
+import Kanban.Domain (Issue (..), Label (..), PullRequest (..), Repository, WorkflowConfig)
 import Kanban.Models (RecordedAssignment, loadedOperatingMode)
 import Kanban.Preflight (PreflightAction (..))
+import Kanban.Review
+  ( CanonicalIssueReviewResult (..),
+    ReviewEvent (..),
+    ReviewResult (..),
+    ReviewStage (..),
+    ReviewTurnOutcome (..),
+    reviewStageForLabels,
+  )
 import Kanban.PullRequestFlow
   ( PullRequestAction,
     PullRequestOrigin,
@@ -98,6 +106,9 @@ import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..))
 import Kanban.UI.Util (launchAssignment)
 import Kanban.Worker
   ( WorkerDescriptor (..),
+    WorkerEnvelope (..),
+    WorkerEvent (..),
+    readWorkerJournal,
     WorkerLaunchRefusal (..),
     WorkerParent (..),
     WorkerSpec (..),
@@ -106,6 +117,9 @@ import Kanban.Worker
     WorkerTask (..),
     SolveWorkerTask (..),
     PullRequestWorkerTask (..),
+    IssueActionWorkerTask (..),
+    ensureIssueReviewHost,
+    launchIssueAction,
     launchPullRequestWorker,
     launchSolveWorker,
     readWorkerState,
@@ -185,11 +199,6 @@ dispatchAction :: ActionEnvironment -> ActionRequest -> IO (Either ActionRefusal
 dispatchAction environment request = case planAction environment request >>= checkedAgainst environment of
   Left refusal -> pure (Left refusal)
   Right plan -> case plan.planKind of
-    -- Declared, and refused before anything is reached for. No canonical
-    -- review subprocess and no app-server revision turn is started here:
-    -- SAG-10 owns both runners.
-    ReviewIssue -> pure (Left (ActionNotRunnerOwned ReviewIssue))
-    ReviseIssue -> pure (Left (ActionNotRunnerOwned ReviseIssue))
     ObserveApprovalQueue -> pure (Right (ApprovalQueueHandle environment.actionRepository))
     _ -> dispatchProviderTurn environment request plan
 
@@ -211,9 +220,18 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         capability <- actionCapabilityIO environment.actionRepository environment.actionRoster request.requestRecordedAssignment plan.planRoute
         case capability of
           ActionIncapable detail -> pure (Left (ActionCapabilityBlocked plan.planKind detail))
-          ActionCapable -> case assignmentFor plan of
-            Left message -> pure (Left (ActionRoutingUnavailable plan.planKind message))
-            Right cell -> launchFor resolved cell
+          -- An issue action replays no cell, so none is resolved for it. Its
+          -- canonical stage runs @approve_issues.py@, which selects its own
+          -- reviewers and models; its revision stage runs on the host's
+          -- client, whose cell 'Kanban.Review.startReviewClient' resolved
+          -- through the adapter. Asking for one here would be the second
+          -- routing site requirement 8 forbids.
+          ActionCapable -> case plan.planRoute of
+            RouteProvider (ActionIssueReview origin) -> launchIssueActionFor resolved origin
+            RouteProvider (ActionIssueRevision origin) -> launchIssueActionFor resolved origin
+            _ -> case assignmentFor plan of
+              Left message -> pure (Left (ActionRoutingUnavailable plan.planKind message))
+              Right cell -> launchFor resolved cell
   where
     -- One mode for the whole dispatch, off the roster this environment was
     -- built with, so the brand the handle reports and the cell
@@ -239,8 +257,8 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
       RouteProvider (ActionAutoSolve brand) -> resolve (`solveAssignment` brand)
       RouteProvider (ActionPullRequestFlow origin action) ->
         resolve (\roster -> pullRequestAssignment roster origin action)
-      RouteProvider (ActionIssueReview _) -> Left "no runner owns issue review yet"
-      RouteProvider (ActionIssueRevision _) -> Left "no runner owns issue revision yet"
+      RouteProvider (ActionIssueReview _) -> Left issueActionNeedsNoCell
+      RouteProvider (ActionIssueRevision _) -> Left issueActionNeedsNoCell
       RouteApprovalQueue -> Left "the approval queue starts no provider"
       where
         resolve cell = launchAssignment request.requestRecordedAssignment cell environment.actionRoster
@@ -268,14 +286,57 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         held.solveWorkerIssueNumber == resolved.resolvedTargetNumber
           && held.solveWorkerWorkflow == workflow
           && held.solveWorkerBrand == brand
-      PullRequestWorkerTaskKind _ -> False
+      _ -> False
 
     pullRequestTurn resolved origin action task = case task of
       PullRequestWorkerTaskKind held ->
         held.pullRequestWorkerNumber == resolved.resolvedTargetNumber
           && held.pullRequestWorkerAction == action
           && held.pullRequestWorkerOrigin == origin
-      SolveWorkerTaskKind _ -> False
+      _ -> False
+
+    -- The issue action this request wanted, as a fact about a child's task.
+    -- The stage as well as the number, so a rereview request cannot adopt a
+    -- running revision: the two have different authorities, and reporting one
+    -- as the other would name a specification amendment as a verdict.
+    issueActionTurn resolved stage task = case task of
+      IssueActionWorkerTaskKind held ->
+        held.issueActionIssueNumber == resolved.resolvedTargetNumber
+          && held.issueActionStage == stage
+      _ -> False
+
+    -- | One issue action, dispatched to this repository's review host.
+    --
+    -- The host is ensured first and the child second, because a child names
+    -- the host that must run it. Losing the child's lease is a /join/, exactly
+    -- as it is for a solve or a pull request: pressing the review key on an
+    -- issue whose action is already live reattaches to it and opens its
+    -- overlay rather than refusing (requirement 13), and refusing is reserved
+    -- for the fail-closed remainder where the holder cannot be identified.
+    launchIssueActionFor resolved origin = case issueStageFor environment.actionWorkflowConfig plan.planKind resolved of
+      Left refusal -> pure (Left refusal)
+      Right stage -> do
+        host <- ensureIssueReviewHost environment.actionRepository environment.actionConfigPath environment.actionWorkflowConfig
+        case host of
+          Left message -> pure (Left (ActionDispatchFailed plan.planKind message))
+          Right owner -> do
+            launched <-
+              launchIssueAction
+                environment.actionRepository
+                resolved.resolvedTargetNumber
+                stage
+                origin
+                owner
+                environment.actionConfigPath
+                environment.actionWorkflowConfig
+            case launched of
+              Right descriptor -> pure (Right (IssueActionHandle plan.planKind resolved stage descriptor))
+              Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
+              Left (WorkerTurnAlreadyRunning holder detail) -> do
+                held <- workerHoldingTurn environment.actionRepository holder (issueActionTurn resolved stage)
+                pure $ case held of
+                  Nothing -> Left (ActionTurnAlreadyRunning plan.planKind detail)
+                  Just descriptor -> Right (IssueActionHandle plan.planKind resolved stage descriptor)
 
     -- What a launch's answer means, with the one refusal a caller can act on
     -- treated as such.
@@ -394,6 +455,44 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         environment.actionConfigPath
         environment.actionWorkflowConfig
 
+issueActionNeedsNoCell :: Text
+issueActionNeedsNoCell = "an issue action replays no model cell"
+
+-- | The review stage a request's verb means for this issue, refusing the one
+-- disagreement the two verbs can have with the labels.
+--
+-- The stage is label-derived — 'Kanban.Review.reviewStageForLabels' is its one
+-- authority, shared with the board key — and the verb has to agree with what
+-- it says. A @revise_issue@ asked for an issue the labels put at initial
+-- review would otherwise run the interactive coordinator where the canonical
+-- gate belongs, and a @review_issue@ on a changes-requested issue would run
+-- the canonical gate over a specification the reviewer asked to have amended
+-- first.
+--
+-- The board never disagrees: it reads the stage and dispatches the verb that
+-- stage names (requirement 13). A mission plan naming a verb of its own is
+-- what this refuses.
+issueStageFor :: WorkflowConfig -> WorkflowActionKind -> ResolvedTarget -> Either ActionRefusal ReviewStage
+issueStageFor config kind resolved = case resolvedTargetIssue resolved of
+  Nothing -> Left (ActionTargetMismatchedArity kind)
+  Just issue ->
+    let stage = reviewStageForLabels config (map (.labelName) issue.issueLabels)
+     in if verbOwns kind stage
+          then Right stage
+          else Left (ActionLifecycleIncompatible kind (mismatch stage))
+  where
+    -- Which stages each verb owns, which is the same split as the authority:
+    -- @review_issue@ runs the canonical @approve_issues.py@ gate, whose two
+    -- stages are the initial review and the rereview, and @revise_issue@ runs
+    -- the interactive coordinator, whose one stage is the revision.
+    verbOwns ReviseIssue stage = stage == IssueRevision
+    verbOwns _ stage = stage /= IssueRevision
+    mismatch actual =
+      "this issue's labels put it at " <> stageWord actual <> ", which " <> workflowActionKindTitle kind <> " does not run"
+    stageWord InitialReview = "initial review"
+    stageWord IssueRereview = "rereview"
+    stageWord IssueRevision = "revision"
+
 -- ---------------------------------------------------------------------------
 -- The autosolve loop's live wiring
 -- ---------------------------------------------------------------------------
@@ -430,6 +529,7 @@ observeAction environment handle = case observationRefusal environment handle of
       ActionSettled . ActionApprovalQueueReport <$> approvalQueueObservation repository
     WorkerActionHandle kind resolved descriptor attribution ->
       observeWorkerHandle environment kind resolved descriptor attribution
+    IssueActionHandle _ resolved _ descriptor -> observeIssueActionHandle resolved descriptor
     -- Advancing rather than merely reading: an autosolve action's result is
     -- the approval its loop reaches, so observing it moves the loop on a tick.
     AutoSolveActionHandle _ _ _ cursor -> advanceAutoSolveCursor cursor environment
@@ -451,6 +551,7 @@ observationRefusal environment handle =
     target = case handle of
       ApprovalQueueHandle repository -> ActionTargetRepositoryWide repository
       WorkerActionHandle _ resolved _ _ -> ActionTargetItem resolved
+      IssueActionHandle _ resolved _ _ -> ActionTargetItem resolved
       AutoSolveActionHandle resolved _ _ _ -> ActionTargetItem resolved
 
 -- | What one observation of an autosolve action's /current provider turn/
@@ -511,6 +612,61 @@ observeWorkerHandle environment kind resolved descriptor attribution = do
       WorkerOrphaned _ -> ActionRunning "resolving orphaned provider processes"
       WorkerTerminal outcome -> ActionSettled (validateWorkerOutcome environment kind resolved attribution outcome)
 
+issueActionEvidenceRequired :: Text
+issueActionEvidenceRequired = "an issue action's result is read from its own published evidence"
+
+-- | Observe one durable issue action.
+--
+-- The terminal arm is the whole point. A child that exited cleanly has said
+-- only that its stage ran; what it /published/ is in its own journal, written
+-- by the authority that published it — 'WorkerCanonicalReviewFinished' for a
+-- canonical stage, the turn's own completed 'ReviewResult' for a revision.
+-- A child that completed and recorded neither is 'ActionStopped', never an
+-- approval: requirement 6 forbids reporting an indeterminate canonical result
+-- as one, and a clean exit is exactly that.
+observeIssueActionHandle :: ResolvedTarget -> WorkerDescriptor -> IO ActionObservation
+observeIssueActionHandle resolved descriptor = do
+  recorded <- readWorkerState descriptor
+  case recorded of
+    Left message -> pure (ActionRunning ("worker state unavailable: " <> message))
+    Right state -> case state.workerStateStatus of
+      WorkerStarting -> pure (ActionRunning state.workerStateLastActivity)
+      WorkerRunning -> pure (ActionRunning state.workerStateLastActivity)
+      WorkerOrphaned _ -> pure (ActionRunning "resolving orphaned provider processes")
+      WorkerTerminal (SolveNeedsInput detail) -> pure (ActionSettled (ActionNeedsInput detail))
+      WorkerTerminal (SolveFailed detail) -> pure (ActionSettled (ActionFailed detail))
+      WorkerTerminal SolveCompleted ->
+        ActionSettled . publishedIssueReview resolved . map (.workerEnvelopeEvent)
+          <$> readWorkerJournal descriptor
+
+-- | The result an issue action's own evidence records, newest first.
+--
+-- Newest because a child can hold more than one — an interrupted revision
+-- that was resumed publishes its amendment on the turn that finished, not on
+-- the one that was cut short — and the last one written is the one that
+-- stands.
+--
+-- The stage reported is the one the /evidence/ names, not the one the handle
+-- was dispatched with. They are normally the same; where they differ, the
+-- authority that published the result is the one that decided which stage it
+-- published for, and a caller told the dispatched stage instead would be told
+-- what was asked for rather than what happened.
+publishedIssueReview :: ResolvedTarget -> [WorkerEvent] -> ActionOutcome
+publishedIssueReview resolved events = case mapMaybe published (reverse events) of
+  outcome : _ -> outcome
+  [] -> ActionStopped ("issue #" <> showNumber resolved.resolvedTargetNumber <> " recorded no published review result")
+  where
+    published event = case event of
+      WorkerCanonicalReviewFinished recordedStage (Right result) ->
+        Just (ActionIssueReviewed resolved.resolvedTargetNumber recordedStage result.canonicalReviewApproved)
+      -- A canonical invocation that failed is this invocation's failure and
+      -- never a verdict: it may well have posted one before the failure, which
+      -- is exactly why it must not be read as "not approved".
+      WorkerCanonicalReviewFinished _ (Left detail) -> Just (ActionFailed detail)
+      WorkerReviewEvent (ReviewTurnCompleted _ TurnSucceeded _ (Just (_, result))) ->
+        Just (ActionIssueReviewed resolved.resolvedTargetNumber result.reviewResultStage result.reviewResultApproved)
+      _ -> Nothing
+
 -- | What a settled worker actually achieved.
 --
 -- The two failing outcomes pass straight through, because a provider that
@@ -532,11 +688,13 @@ validateWorkerOutcome environment kind resolved attribution outcome = case outco
     ReviewPullRequest -> validatedPullRequestVerdict environment resolved
     RevisePullRequest -> validatedPullRequestVerdict environment resolved
     RepairPullRequest -> validatedPullRequestVerdict environment resolved
-    ReviewIssue -> ActionFailed notRunnerOwned
-    ReviseIssue -> ActionFailed notRunnerOwned
+    -- Neither reaches here. An issue action's terminal result is read off
+    -- its own durable evidence by 'observeIssueActionHandle', because a
+    -- canonical verdict lives in what @approve_issues.py@ reported and never
+    -- in whether the child exited cleanly (requirement 6).
+    ReviewIssue -> ActionStopped issueActionEvidenceRequired
+    ReviseIssue -> ActionStopped issueActionEvidenceRequired
     ObserveApprovalQueue -> ActionFailed "the approval queue owns no worker"
-  where
-    notRunnerOwned = actionRefusalMessage (ActionNotRunnerOwned kind)
 
 -- | The pull request a finished solve opened, if exactly one is attributable
 -- to it.

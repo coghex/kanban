@@ -15,6 +15,7 @@ module Kanban.Review.Canonical
     issueReviewerNotFoundMessage,
     issueReviewerRecordFromBytes,
     issueReviewerRecordPath,
+    canonicalLaunchOutcome,
     renderCanonicalIssueReviewResult,
     resolveCanonicalIssueReviewer,
     resolveCanonicalIssueReviewerAt,
@@ -44,6 +45,7 @@ import Kanban.CommandCapture
     renderWindow,
     startCapture,
   )
+import Kanban.ApprovalService (ApprovalController, ApprovalUnavailable, liveApprovalContention)
 import Kanban.Domain (Repository (..))
 import Kanban.ManagedPaths
   ( ManagedComponent (..),
@@ -410,3 +412,42 @@ canonicalCommandBounds =
     { commandDeadlineMicros = 60 * 60 * 1000 * 1000,
       commandCaptureGraceMicros = captureGraceMicros
     }
+
+-- | One canonical launch's sequence: the preflight, then the approval-service
+-- interlock, then the spawn.
+--
+-- The interlock sits /between/ the two rather than ahead of both. The preflight
+-- runs several probes — executables, authentication, installed bundles — and
+-- the service can take the backend's approval lock while they do, so a check
+-- taken before it can be stale by the time the spawn happens. This position is
+-- the last instant before a competing canonical child would be started, which
+-- is the only place a reading of live state cannot go stale before the thing it
+-- guards.
+--
+-- It is asked of the controller rather than of the board's newest observation,
+-- because that observation is up to a whole poll interval old.
+--
+-- Both dependencies are parameters so that window is exercisable: a test
+-- supplies a preflight that changes what the controller reports and establishes
+-- that the spawn never ran.
+canonicalLaunchOutcome ::
+  ReviewStage ->
+  Text ->
+  Either ApprovalUnavailable ApprovalController ->
+  IO (Maybe Text) ->
+  IO (Either Text result) ->
+  IO (Either Text result)
+canonicalLaunchOutcome stage identity controller preflight spawn = do
+  blocked <- preflight
+  case blocked of
+    Just message -> pure (Left message)
+    Nothing -> do
+      -- A revision performs no canonical backend review, so it contends for
+      -- nothing and is never asked about.
+      contended <-
+        if stage == IssueRevision
+          then pure Nothing
+          else liveApprovalContention identity controller
+      case contended of
+        Just notice -> pure (Left notice)
+        Nothing -> spawn

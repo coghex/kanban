@@ -941,16 +941,122 @@ successfully, so normal review transitions never present a generic command
 approval prompt.
 
 Review overlays contain a bounded, mouse-wheel-scrollable transcript, one-line
-input, structured questions, command approvals, and tabs for all in-memory
+input, structured questions, command approvals, and tabs for all open
 sessions. `Esc` from normal mode, a normal-mode `q`, or an outside click hides
 the overlay without interrupting work; selecting the issue
 and pressing `r` reopens it. `Tab` switches sessions, Enter sends feedback or a
-follow-up turn, and Ctrl-C interrupts the active turn. Enter is live only while
+follow-up turn, and Ctrl-C interrupts the active turn of an interactive
+revision or ends a canonical stage's whole action, which does not resume.
+Enter is live only while
 something is still there to read the draft: a session in a terminal phase, and
 a canonical review stage in any phase, takes no follow-up at all, while an
 interrupted app-server revision remains resumable and does. Only running turns
 chain short spinner ticks; completed, hidden, and idle sessions schedule no
-redraws. Quitting terminates the owned app-server process.
+redraws.
+
+An issue review, rereview, and revision are runner-owned, so quitting stops
+none of them. Each is a durable child action of the repository review host
+described in the persistent-worker milestone below, and the host owns the
+app-server process, not the dashboard.
+
+Two different retentions meet in that overlay, and they are not the same
+contract. The child's event journal and raw log hold every event the action
+ever produced, bounded only by the worker cache's own retention. The overlay's
+transcript is bounded as it always was. A child's terminal envelope is the last record in its journal: a monitor stops
+replaying there, so anything appended after it would be seen by a dashboard
+that reattaches and not by one that was watching. Whatever outlives an action
+— a provider thread announced after it was settled, a canonical gate that
+finished while it was being terminated — is recorded on the host's own journal
+instead, where it is evidence without being replay.
+
+Ending an action moves nothing in the overlay at the press. Both gestures that
+end one — the kill, and Ctrl-C on a canonical stage — used to mark the
+transcript and move the phase before the command had even been written, and no
+reattached overlay can reconstruct a mark that is not a journal event; it also
+announced a kill that a failed ledger write meant had not happened. The
+transition belongs to the evidence instead: the host journals the command's
+own line before it applies it and the child's terminal envelope after, and a
+live overlay applies those two records exactly as a reattached one does.
+
+A dashboard reattaching to a live
+action replays that whole journal through the same transitions a live event
+takes, so it arrives at the same bounded transcript suffix, the same pending
+question or approval, the same activity, and the same scroll-follow state a
+dashboard that never closed would be showing — and no overlay bound, replay
+path, or transcript reconstruction ever truncates evidence the journal still
+holds.
+
+A gesture announces what it asked for only once the command carrying it was
+written. An unwritable ledger means nothing was requested, and the failure the
+submission reports is the notice that says so — one an announcement would
+overwrite with a promise.
+
+Every input the overlay sends — a structured answer, an approval decision,
+feedback or steering, a deliberate resend of a refused steer, an active-turn
+interrupt, and ending the whole action — travels to that child as a durable,
+correlated command with an acknowledgement written back. A command is claimed
+before it is applied and settled after, and a command carrying any
+acknowledgement is never applied again — so a retry, a replay, a restart, and
+an acknowledgement that could not be written all still deliver it exactly
+once. A command written to an action that has already ended is refused rather than
+owed: settling takes a child off the host's live list, and a dashboard that
+has not yet seen its terminal event still writes to it — so nothing would ever
+look at that command again while the draft it came from had been cleared. The
+overlay refuses such a submission itself, from the action's own durable state
+rather than its picture of it, and keeps the text on the line. That check and
+the write are still two steps, so the overlay also holds what it wrote until
+the child's journal accounts for it: a command that reached its action
+journals its line before that action's terminal envelope, so anything still
+held when the terminal event arrives is a message the action never read, and
+it is offered back to the input line rather than lost. That release is not
+conditional on the envelope being what settled the session: a result event can
+publish the terminal phase first, and that phase stands, but the envelope is
+still the last thing the journal can say and what is held at that point was
+still never read. Ending an action and
+interrupting a turn are held by nothing, carrying no text of their own. The
+host and the reconciliation each refuse anything that slips past, on the
+ledger rather than the journal, because the terminal envelope is still the
+last record that journal takes.
+
+A claim left standing is an attempt whose result was never observed, and
+whatever next reaches that action answers it — including the action's own live
+host, on its next poll, since every reader treats a claim as settled and a
+final acknowledgement that could not be written would otherwise stand until
+some later host or recovery pass arrived — from the child's journal where
+that records what was delivered, and as unobserved only where it does not.
+Adoption by a replacement host is one such arrival and the reattached
+dashboard's own stale-worker recovery is the other, so the reconciliation is
+one shared step both run rather than something only re-hosting performs: an
+action whose host died and which no replacement adopts is still terminalized,
+and terminalizing it over a standing claim would lose a message the overlay
+had already cleared from its input line.
+The journal entry is written before the acknowledgement precisely so a failed
+acknowledgement leaves the answer recoverable rather than turning a delivered
+message into one reported as lost. Applying a command and recording that it
+was applied are one step against the action ending: a settle between them
+would close the journal, leaving the provider holding a message the
+acknowledgement calls accepted and the transcript has no trace of. The two
+orderings are exhaustive rather than racing — a delivery already under way
+finishes both steps before a settle takes effect, and one that has not started
+finds the action settled and is refused without being applied. The
+reconciliation above appends nothing to a journal that has already carried a
+terminal envelope, for the same reason nothing else may; it still settles the
+ledger, so the command is never re-applied, and what a terminal action gives
+up is only having its text offered back. Command identifiers carry a process-local sequence as well
+as a clock and a pid, because two presses in one clock tick would otherwise
+deduplicate to one. Every
+command that acts on a thread names the thread, turn, or request the overlay
+was showing when it was submitted — not the newest the action has recorded,
+which can already have moved on while a journal event was still in flight — and is refused rather than retargeted when the child has since
+moved on — including feedback, whose turn must still be the turn the child is
+on, so a message meant to steer one turn never steers the next or opens a
+fresh one. Ending the action is the one command that names none, because it
+ends the child whichever thread it is on, and everything queued behind it is
+refused rather than acted on. A
+question raised while no dashboard was running stays pending and is answerable
+by the one that arrives next; a command the owning session rejects is
+acknowledged as rejected and its text handed back to the input line rather
+than left looking sent.
 
 Solve, PR, and review overlays are three presentations of one session record.
 Everything not specific to the kind of agent behind them — status derivation,
@@ -2524,8 +2630,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   neither, possibly live with only this process's in-memory refusal covering it,
   refuses the quit and reports that instead: halting there would drop the one
   thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
-  and then end it from outside. A live interactive review still refuses the quit
-  exactly as it did, and is asked first.
+  and then end it from outside. That stray `gh` is the only thing that refuses
+  the quit at all: an issue review, revision, solve, or pull-request agent is
+  runner-owned and may safely be left running.
 - That in-memory refusal is the repository's for the rest of the process, not
   the finished job's. Any job may end holding a group back this way — a
   background history page spawns `gh` under the same durable record a
@@ -3613,7 +3720,12 @@ canonical-review interlock, and the board refresh a result requires — and the
 sidebar reaches that seam through an `approve_issues.py` control drawn directly
 above the drainer's, which `a` and a plain left click both press. Native GitHub
 sub-issue membership, canonical v2 issue-review sessions, embedded revision
-questions, and the first resumable issue-solve flow are implemented. The
+questions, and the first resumable issue-solve flow are implemented. Issue
+review, rereview, and revision are now durable as well: each runs as an
+independently leased child action of one detached review host per canonical
+repository, survives the dashboard, and is reattached to and replayed by the
+next one, with every dashboard input travelling to it as a correlated,
+acknowledged, exactly-once command. The
 external usage-command escape hatch is also implemented. Broader
 provider-version fixtures remain for subsequent slices.
 
@@ -3805,9 +3917,9 @@ The first solve/autosolve-compatible slice is implemented.
   carry their own literals.
 - Solver processes stream structured CLI output into a bounded, hideable
   overlay, retain their resumable session identifiers, and run as owned process
-  groups. Solve and PR providers are owned by detached, repository-scoped
-  supervisors, so quitting the TUI leaves explicitly started work visible and
-  bounded rather than terminating it.
+  groups. Solve, PR, and issue-review providers are owned by detached,
+  repository-scoped supervisors, so quitting the TUI leaves explicitly started
+  work visible and bounded rather than terminating it.
 - Each detached supervisor writes a private specification, atomic heartbeat
   state, and append-only event journal under the XDG cache. A restarted TUI
   discovers only workers for its repository, reconstructs the session and
@@ -3880,10 +3992,158 @@ The first solve/autosolve-compatible slice is implemented.
   escalation and verifies the supervisor stopped before writing terminal
   state; if a snapshot failure leaves recorded descendants unverified, it
   reports a visible diagnostic and retains the lease instead, and a later
-  successful snapshot completes the pending "killed by user" outcome.
-- App-server issue revisions and the synchronous canonical issue gate remain
-  TUI-owned for now. Quitting is refused while either has a live turn, avoiding
-  accidental invisible work until their protocol state is also durable.
+  successful snapshot completes the pending "killed by user" outcome. An
+  issue action settled this way closes its journal with the same terminal
+  envelope a host would have written, after answering any claim its dead host
+  left standing — and so does the stale-worker recovery a reattached dashboard
+  runs, which reaches the same actions by a different route: a dashboard reattaching to it replays that journal and
+  nothing else, so a terminal state with no envelope in it leaves an action
+  that never appears to end — and leaves the journal open to the appends the
+  envelope exists to stop.
+- Issue review, rereview, and revision are runner-owned too, under one durable
+  detached review host per canonical repository. That host owns the
+  repository's app-server client and its connection pool; each action is an
+  independently durable child of it, with its own specification, state, event
+  journal and raw log, dashboard-input command ledger and acknowledgements,
+  lease, and terminal result. A child's lease is `issue-action-<n>`, kept apart
+  from the solver's `issue-<n>` so a solve and a review of one issue still run
+  at once.
+  Quitting refuses none of them, and a later dashboard discovers the host,
+  reattaches to each child, and replays its evidence.
+  The host takes no deadline of its own: each child is bounded individually
+  from its own creation, and the host exits once it holds no live child, so no
+  host-level bound settles a child still inside its own bound and a host
+  serving nobody leaves neither a lease nor a discovery record behind. Having
+  no deadline means having none anywhere — the supervisor's completion claim,
+  its orphan poll, and its lease release all stand aside for the deadline
+  watchdog once the bound elapses, and a worker with no watchdog that stood
+  aside at any of them would wait for a handshake nobody completes. It
+  records no provider of its own either — it runs no provider turn, and a
+  recorded provider process with no verifiable identity is what every
+  termination path reads as unresolvable — and instead registers its client's
+  actual connection processes with its own supervisor, so they are identified,
+  censused, and reachable by the ordinary kill and recovery paths. The client
+  registers each connection as it creates one, because any later moment leaves
+  an interval in which a process is running and nothing durable names it.
+  That client is started when a revision first needs one and not before. An
+  initial review or rereview runs the canonical backend, whose stage preflight
+  asks for that backend and the reviewers it selects and for no in-app
+  provider session at all, so requiring one to exist before any child had been
+  seen would have failed every gate on an install that has none.
+  Settling a child closes its journal before it records the terminal state,
+  because those are two writes and a host dying between them leaves whichever
+  prefix landed. A closed journal over a state that still reads as running is
+  the repairable one; a terminal state over an open journal is repaired by
+  nothing. What repairs it is the replay itself: a monitor stops at a terminal
+  envelope, so that stop is where a state which has not caught up is
+  completed — with the outcome the envelope already published, releasing the
+  lease, and appending nothing, since the envelope is the journal's last
+  record. Every other path that reaches such a child reads the envelope the
+  same way: the direct-termination fallback repairs from it rather than
+  ending an action a second time under a different outcome.
+  A child settled between asking for a provider thread and the provider
+  announcing one stays addressable until that announcement arrives, and the
+  thread it names is closed rather than left owned by nothing; a canonical
+  subprocess that starts after its child was settled is ended the same way.
+  Attaching that thread and settling the child are one step against each
+  other, not two reads racing: a settle between the check and the attach would
+  find no thread to finish while the attach installed one on an action already
+  terminal, leaving it running under a shared connection with nothing owning
+  it.
+  The wire names only an issue number, and an issue outlives the action that
+  asked, so an announcement resolves to the action whose start is still
+  waiting rather than to whichever child holds that issue now — and one issue
+  has at most one start outstanding at a time. A settled action keeps its
+  start outstanding on purpose, so its late thread is still closed, while its
+  released lease lets a replacement for that issue begin; two outstanding
+  starts cannot be told apart from an announcement naming only the issue, and
+  a response is not promised in request order, so each would take the other's
+  thread. A replacement therefore waits for the earlier start to be answered,
+  bounded by its own deadline rather than waiting forever.
+  Each child keeps a raw log of its own, recorded on its own state: a
+  shared-process backend writes every thread's traffic to one interleaved
+  client transcript, which the host records as its own and which is no
+  child's evidence.
+  Host selection and child admission cannot be made one step from the launch
+  side, so the ordering is established on the host's side instead: a host that
+  has decided to exit records a handoff marker before the scan that decision
+  rests on, and everything asking which host a new child may go to reads a
+  marked host as none. A child written before the marker is therefore seen by
+  that scan and adopted — the marker comes down and the host keeps running —
+  and one written after it belongs to a launch that reads the host as gone and
+  ensures another. A launch writes its child's specification before it reads
+  liveness, so the one interleaving that would strand a child, missed by the
+  scan while reading the host as live, cannot occur.
+  The marker answers that question and no other. Whether a child's named host
+  has gone, which is what permits re-homing, is answered from that host's
+  recorded identity and is deliberately blind to the marker: a host on its way
+  out has not gone, and reading it as gone would let another host take
+  children it is still serving.
+  On top of that ordering a launch waits for evidence that a host has actually
+  taken its child on, since a host ensured is not a child adopted; ensuring
+  never ends that wait, and a wait that ends with no evidence at all is
+  reported as a failed launch whose child's records are removed and whose
+  lease is released, rather than as a success nothing is running. A host also
+  adopts a child whose named host is provably gone —
+  never one a live host is serving. A host counts as live unless it is
+  disproven: terminal, or recording an identity a successful process snapshot
+  does not contain. An unreadable snapshot keeps it, which is the same
+  fail-closed rule lease recovery applies. A child that had never started is
+  re-homed and run; one that had started is re-homed and settled without being
+  restarted, because its provider session belonged to a host that is gone.
+  Having started is recorded before the request goes out, not when a thread
+  comes back: under a shared connection a revision owns no process and holds
+  no thread until its provider announces one, so a host dying in between would
+  otherwise leave a record indistinguishable from a child that never asked for
+  anything — and the rerun that followed would run beside a request still live
+  on a connection that outlived its host.
+  Either way the specification is rewritten to name the host now serving it,
+  since discovery and the collection pass both read ownership from there — and
+  a rewrite that fails refuses the adoption rather than proceeding under the
+  old name, because an adopted child is one the host already holds and every
+  later scan skips it, so nothing would ever revisit the disagreement.
+  Refusing leaves the child a candidate again on the next poll.
+  A re-homed child keeps the processes its own state records, as well: under a
+  process-per-thread backend those name the connection the dead host left
+  running, and a recovery that rebuilt the child's state from scratch would
+  discard the only durable name for it in the moment before settling the
+  action and releasing its lease.
+  A re-homed child continues its own raw log rather than opening another: the
+  name a new one takes carries the issue number and a timestamp but no action
+  id, so a child pointed at a fresh log leaves the evidence it actually
+  produced addressable by nothing.
+  Ending a child settles its provider turn as well as its tooling: under a
+  shared connection the turn is interrupted, since dropping the bookkeeping
+  alone would leave the provider working for an action already marked
+  terminal.
+  Under a process-per-thread backend the thread /is/ a process, so the action
+  owning it records that process on its own durable state and not only on the
+  host's census — in the same instant the host does, which is the spawn
+  itself. The registration the client makes as it creates a connection names
+  the review that connection was spawned for, and the action with that issue's
+  outstanding start takes ownership there. Any later moment — when the start
+  request returns, when the thread is announced — is a window in which the
+  process runs, the host names it, and the child does not, and a host dying
+  inside that window leaves a termination reading only the child's own state
+  and finding nothing to end. That is what a termination or a stale-worker recovery reads
+  when the host is the thing that has died — exactly the case where nobody is
+  left to ask for a thread to be finished — and without it the connection went
+  on running past the action it served, beside a replacement action for the
+  same issue. Under a shared connection nothing is recorded there, and must
+  not be: one process serves every thread, so a child holding it would end
+  every sibling when it was ended.
+  The provider's process shape is the adapter's, unchanged: a shared-process
+  backend multiplexes concurrent children through the host's one connection,
+  and a process-per-thread backend gives each child its own. Ending or
+  recovering one child settles that child's thread or process and its
+  descendants and never the host, a sibling, a sibling's lease, or a sibling's
+  events.
+  Mutation authority is stage-specific and unchanged: `approve_issues.py` alone
+  publishes a canonical review comment or moves a verdict label, and the
+  revision's `kanban_github_issue` tool alone publishes the specification
+  amendment and moves `reviewed:changes` to `reviewed:revised`, never
+  approving. No worker, host, dashboard adapter, or recovery path posts a
+  verdict of its own or reports an unobserved canonical result as approval.
 - Live solve and PR overlays render the animated activity pip beside a
   provider-independent activity timer. Codex command events and Claude Bash
   tool calls expose their sanitized one-line command, keeping long silent

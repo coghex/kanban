@@ -96,6 +96,25 @@ data ReviewClient = ReviewClient
     -- cleanup and full client shutdown cannot both destroy one.
     reviewToolProxies :: MVar (Map ConnectionId ReviewToolProxy),
     reviewEventSink :: ReviewEvent -> IO (),
+    -- | Called with every provider process this client creates, at the
+    -- instant it is created.
+    --
+    -- The repository review host passes its supervisor's own registration
+    -- here (SAG-10), so a connection is recorded, identified, and censused
+    -- before anything else happens to it. Registering after the spawn
+    -- returned, or at the owner's next poll, leaves a window in which a host
+    -- killed uncleanly loses the only durable record of a process it started
+    -- — and an orphaned provider with nothing naming it is exactly what the
+    -- census exists to prevent.
+    --
+    -- The issue names the review this connection was spawned to serve, where
+    -- one did — which under 'ProcessPerThread' is what lets that review's own
+    -- action take durable ownership of the process at the same instant, and
+    -- not one step later. 'Nothing' is a connection no single review owns.
+    --
+    -- A no-op for every other owner, which is what tests and the
+    -- placeholder client pass.
+    reviewProcessRegistered :: Maybe Int -> ManagedProcess -> IO (),
     reviewRepositoryRoot :: FilePath,
     -- | The dashboard's resolved OWNER/NAME (which may come from an
     -- explicit --repo override, e.g. reviewing upstream from a fork
