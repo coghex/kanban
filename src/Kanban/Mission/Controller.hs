@@ -115,6 +115,7 @@ import Kanban.Mission.Reconcile
     MissionOpenDispatch (..),
     MissionStepEvidence (..),
     MissionStepFailure (..),
+    MissionWorkerConclusion (..),
     MissionWorkerReading (..),
     blockedMissionLifecycle,
     cancelledByDependency,
@@ -193,7 +194,20 @@ data MissionDispatchAccepted = MissionDispatchAccepted
   { missionAcceptedSession :: MissionSessionId,
     missionAcceptedProviderSession :: Maybe Text,
     missionAcceptedWorker :: Text,
-    missionAcceptedDetail :: Text
+    missionAcceptedDetail :: Text,
+    -- | The result, where the action had one the moment it was asked.
+    --
+    -- Not every registered action owns a worker. The approval-queue read is
+    -- answered by its own controller as the dispatch is made, so it leaves no
+    -- durable child for a later pass to observe — and a mission that
+    -- registered an invented session for it would spend every later iteration
+    -- looking for a worker that was never going to exist, and settle the step
+    -- as an unknown outcome having thrown the answer away.
+    --
+    -- 'Nothing' for every action that does own a worker, which is the ordinary
+    -- case: its result is the worker's to reach and the evidence pass reads it
+    -- later.
+    missionAcceptedOutcome :: Maybe MissionWorkerConclusion
   }
   deriving stock (Eq, Show)
 
@@ -1048,6 +1062,23 @@ performDispatch controller snapshot step invocation plannedVersion = do
             pure $ case iteration of
               MissionAdvanced _ -> MissionAdvanced (MissionStepBlocked step.missionPlanStepId failure)
               other -> other
+          -- An action answered as it was asked. There is no worker to
+          -- register and nothing for a later pass to observe, so the result is
+          -- written here or it is lost.
+          Right acceptance
+            | Just conclusion <- acceptance.missionAcceptedOutcome -> do
+                _ <-
+                  concludeMissionInvocation
+                    controller.missionControllerInvocations
+                    invocation
+                    (MissionInvocationCompleted (missionConclusionDetail conclusion))
+                    now
+                applyStepLifecycle
+                  controller
+                  snapshot
+                  step.missionPlanStepId
+                  (missionConclusionLifecycle conclusion)
+                  (missionConclusionDetail conclusion)
           Right acceptance -> do
             _ <-
               concludeMissionInvocation
@@ -1073,6 +1104,23 @@ performDispatch controller snapshot step invocation plannedVersion = do
               Right () ->
                 MissionAdvanced
                   (MissionStepDispatched step.missionPlanStepId invocation acceptance.missionAcceptedSession)
+
+-- | Which step lifecycle a conclusion reached without a worker lands in.
+--
+-- The same three answers 'classifyMissionWork' reaches for a worker that
+-- settled, spelled once so an action answered synchronously and one observed
+-- later cannot disagree about what its result meant.
+missionConclusionLifecycle :: MissionWorkerConclusion -> MissionStepLifecycle
+missionConclusionLifecycle conclusion = case conclusion of
+  MissionWorkerSucceeded _ -> MissionStepSucceeded
+  MissionWorkerNeedsInput _ -> MissionStepNeedsInput
+  MissionWorkerFailed failure -> missionStepFailureLifecycle failure
+
+missionConclusionDetail :: MissionWorkerConclusion -> Text
+missionConclusionDetail conclusion = case conclusion of
+  MissionWorkerSucceeded detail -> detail
+  MissionWorkerNeedsInput detail -> detail
+  MissionWorkerFailed failure -> missionStepFailureMessage failure
 
 -- | An invocation whose effect was never attempted, because the precondition
 -- could not be reread.

@@ -60,6 +60,16 @@ import qualified Data.Text as Text
 import Data.Time (getCurrentTime)
 import Kanban.Action
   ( ActionEnvironment (..),
+    ActionObservation (..),
+    ActionOutcome (..),
+    ActionRefusal (..),
+    ActionTarget (..),
+    actionOutcomeMessage,
+    actionOutcomeSucceeded,
+    actionRefusalMessage,
+    observableActionHandle,
+    observeAction,
+    resolveActionTarget,
     ActionHandle,
     ActionRequest (..),
     ActionTargetKind (..),
@@ -105,7 +115,7 @@ import Kanban.Mission.Controller
     startMissionController,
     stopMissionController,
   )
-import Kanban.Mission.Invocation (MissionInvocationId (..), MissionTargetVersion (..))
+import Kanban.Mission.Invocation (MissionInvocationId (..), MissionStaleVersion (..), MissionTargetVersion (..), missionStaleVersionMessage, missionVersionHolds)
 import Kanban.Mission.Paths (openMissionStore)
 import Kanban.Mission.Reconcile
   ( MissionContinuation (..),
@@ -446,6 +456,29 @@ liveMissionDriver options config repository store _ =
       MissionTargetIssue -> IssueId target.missionTargetNumber
       MissionTargetPullRequest -> PullRequestId target.missionTargetNumber
 
+    -- The environment every registry call this driver makes is answered
+    -- against.
+    --
+    -- One construction rather than one per call site, because a dispatch and
+    -- the observation that later judges its result have to agree about the
+    -- repository, the workflow configuration, and the catalog: an observation
+    -- made against a different read would validate a finished run's pull
+    -- request against pull requests the dispatch never saw.
+    actionEnvironmentFor snapshot = do
+      roster <- loadModelRoster
+      now <- getCurrentTime
+      pure
+        ActionEnvironment
+          { actionRepository = repository,
+            actionWorkflowConfig = workflowConfig,
+            actionConfigPath = options.optionConfig,
+            actionRoster = roster,
+            actionCatalog = catalogOf snapshot,
+            actionNow = now,
+            actionWorkerDeadline =
+              WorkerDeadline config.resolvedTimeouts.timeoutsWorkerDeadlineSeconds
+          }
+
     -- One step's evidence.
     --
     -- The board is read only when no registered worker of this step is still
@@ -462,15 +495,101 @@ liveMissionDriver options config repository store _ =
               pure (Right (evidenceOf record (Just ours) Nothing Nothing foreignWork))
         _ -> do
           board <- readBoard
-          pure $ case board of
+          case board of
             -- Reported as a failure to read rather than folded into the
             -- evidence. A board that could not be fetched says nothing about
             -- this step, and passing it off as conflicting work would pause a
             -- mission for the duration of somebody's network outage.
-            Left failure -> Left (missionStepFailureText failure)
-            Right snapshot ->
+            Left failure -> pure (Left (missionStepFailureText failure))
+            Right snapshot -> do
+              judged <- mapM (validatedConclusion step snapshot workers) reading
               let (satisfied, departed) = externalState step snapshot
-               in Right (evidenceOf record reading satisfied departed foreignWork)
+              pure (Right (evidenceOf record judged satisfied departed foreignWork))
+
+    -- What a settled worker actually achieved, decided by the registry rather
+    -- than by this module.
+    --
+    -- A clean exit is not a result. @validateWorkerOutcome@ requires an
+    -- attributable pull request before it will call a solve successful, and an
+    -- issue action's verdict is read from what its child /published/ rather
+    -- than from the fact that it finished — so a mission that read the worker
+    -- state itself and called @SolveCompleted@ a success would report a solve
+    -- that opened nothing, and a canonical review that published nothing, as
+    -- work done. The handle is rebuilt from the worker's own durable record
+    -- ('observableActionHandle') so the same validation the dashboard gets is
+    -- the validation a headless run gets.
+    --
+    -- Only the terminal case is asked. A live worker's classification is
+    -- settled by the reading alone, and this pass is not reached for one.
+    validatedConclusion step snapshot workers reading
+      | reading.missionWorkerLive = pure reading
+      | otherwise = do
+          observed <- observeThroughRegistry step snapshot workers reading
+          pure reading {missionWorkerTerminal = observed}
+
+    observeThroughRegistry step snapshot workers reading =
+      case ( decodeWorkflowActionKind step.missionPlanStepAction,
+             find ((== reading.missionWorkerSession.unMissionSessionId) . workerIdentity) workers
+           ) of
+        (Left decodeError, _) -> pure (Just (unjudged (actionKindDecodeErrorMessage decodeError)))
+        -- Its record has been collected, so there is nothing left to judge it
+        -- by. 'observeSession' reads the same absence the same way.
+        (_, Nothing) -> pure (Just (unjudged "its worker record has been collected"))
+        (Right kind, Just descriptor) -> do
+          settled <- readWorkerState descriptor
+          case settled of
+            -- Unreadable, which is not a finished action: the registry's own
+            -- observation waits on exactly this rather than inventing a result.
+            Left _ -> pure Nothing
+            Right recorded -> case recorded.workerStateStatus of
+              WorkerStarting -> pure Nothing
+              WorkerRunning -> pure Nothing
+              WorkerOrphaned _ -> pure Nothing
+              -- The two the registry passes straight through, decided from the
+              -- sentence the worker itself wrote.
+              WorkerTerminal (SolveNeedsInput detail) -> pure (Just (MissionWorkerNeedsInput detail))
+              WorkerTerminal (SolveFailed detail) -> pure (Just (concludedFrom (settledWorkerFailure detail)))
+              WorkerTerminal SolveCompleted -> judgeCompleted step snapshot kind descriptor
+
+    judgeCompleted step snapshot kind descriptor =
+      case step.missionPlanStepTarget of
+        Nothing -> pure (Just (unjudged "the step names no target to judge its result against"))
+        Just target -> case resolveActionTarget workflowConfig (catalogOf snapshot) identity (targetRefFor target) of
+          Left refusal -> pure (Just (unjudged (actionRefusalMessage refusal)))
+          Right (ActionTargetRepositoryWide _) ->
+            pure (Just (unjudged ("#" <> Text.pack (show target.missionTargetNumber) <> " resolved to the repository rather than an item")))
+          Right (ActionTargetItem resolved) -> case observableActionHandle kind resolved descriptor of
+            -- A run whose record cannot supply what its handle needs. Judging
+            -- it against this caller's baseline instead is the one thing that
+            -- must not happen, so the step reports an outcome nobody can
+            -- establish rather than a result nobody earned.
+            Nothing -> pure (Just (unjudged "its worker recorded no attribution to judge its result against"))
+            Just handle -> do
+              environment <- actionEnvironmentFor snapshot
+              observation <- observeAction environment handle
+              pure $ case observation of
+                Left refusal -> Just (unjudged (actionRefusalMessage refusal))
+                Right (ActionRunning _) -> Nothing
+                Right (ActionSettled outcome) -> Just (concludedFrom outcome)
+
+    -- The registry's validated result, in the mission's own vocabulary.
+    concludedFrom outcome
+      | actionOutcomeSucceeded outcome = MissionWorkerSucceeded (actionOutcomeMessage outcome)
+      | otherwise = case outcome of
+          ActionNeedsInput detail -> MissionWorkerNeedsInput detail
+          _ ->
+            MissionWorkerFailed
+              ( fromMaybe
+                  (MissionFailureGeneric (actionOutcomeMessage outcome))
+                  (missionFailureFromOutcome outcome)
+              )
+
+    -- A worker that finished and cannot be judged. Never a failure of the
+    -- work: nothing here established what it achieved, which is requirement
+    -- 7's unknown outcome exactly.
+    unjudged detail =
+      MissionWorkerFailed
+        (MissionFailureOutcomeUnknown ("its result could not be validated: " <> detail))
 
     evidenceOf record reading satisfied departed foreignWork =
       MissionStepEvidence
@@ -642,8 +761,12 @@ liveMissionDriver options config repository store _ =
       -- The repository's review host owns no item of its own; its children do.
       IssueHostWorkerTaskKind _ -> Nothing
 
+    -- Deliberately silent about a clean exit. What @SolveCompleted@ achieved
+    -- is the registry's to say (see 'validatedConclusion'), and answering it
+    -- here would be the second opinion that reports an unearned success; the
+    -- evidence pass replaces this whole field before anything classifies it.
     conclusionOf recorded = case recorded.workerStateStatus of
-      WorkerTerminal SolveCompleted -> Just (MissionWorkerSucceeded "the registered worker completed")
+      WorkerTerminal SolveCompleted -> Nothing
       WorkerTerminal (SolveNeedsInput detail) -> Just (MissionWorkerNeedsInput detail)
       WorkerTerminal (SolveFailed detail) ->
         Just
@@ -711,24 +834,12 @@ liveMissionDriver options config repository store _ =
     dispatch request = case decodeWorkflowActionKind request.missionDispatchStep.missionPlanStepAction of
       Left decodeError -> pure (Left (MissionFailureConfiguration (actionKindDecodeErrorMessage decodeError)))
       Right kind -> do
-        roster <- loadModelRoster
         board <- readBoard
         case board of
           Left failure -> pure (Left failure)
           Right snapshot -> do
-            now <- getCurrentTime
-            let environment =
-                  ActionEnvironment
-                    { actionRepository = repository,
-                      actionWorkflowConfig = workflowConfig,
-                      actionConfigPath = options.optionConfig,
-                      actionRoster = roster,
-                      actionCatalog = catalogOf snapshot,
-                      actionNow = now,
-                      actionWorkerDeadline =
-                        WorkerDeadline config.resolvedTimeouts.timeoutsWorkerDeadlineSeconds
-                    }
-                base = actionRequest kind identity (maybe TargetRepositoryWide targetRefFor request.missionDispatchTarget)
+            environment <- actionEnvironmentFor snapshot
+            let base = actionRequest kind identity (maybe TargetRepositoryWide targetRefFor request.missionDispatchTarget)
                 -- Requirement 13: the recorded session is resumed when there
                 -- is one, and a fresh session is briefed rather than handed
                 -- the old session's identity.
@@ -747,24 +858,72 @@ liveMissionDriver options config repository store _ =
                       requestInvocation = Just request.missionDispatchInvocation.unMissionInvocationId
                     }
             dispatched <- dispatchAction environment requested
-            pure (either (Left . missionFailureFromRefusal) (Right . acceptance) dispatched)
+            case dispatched of
+              Left refusal -> Left <$> refusedDispatch request refusal
+              Right handle -> Right <$> acceptance environment handle
 
-    acceptance :: ActionHandle -> MissionDispatchAccepted
-    acceptance handle = case actionHandleWorker handle of
+    acceptance :: ActionEnvironment -> ActionHandle -> IO MissionDispatchAccepted
+    acceptance environment handle = case actionHandleWorker handle of
       Just descriptor ->
-        MissionDispatchAccepted
-          { missionAcceptedSession = MissionSessionId (workerIdentity descriptor),
-            missionAcceptedProviderSession = descriptor.workerDescriptorSpec.workerExistingSession,
-            missionAcceptedWorker = workerIdentity descriptor,
-            missionAcceptedDetail = "dispatched through the workflow action registry"
-          }
-      Nothing ->
-        MissionDispatchAccepted
-          { missionAcceptedSession = MissionSessionId "observation",
-            missionAcceptedProviderSession = Nothing,
-            missionAcceptedWorker = "observation",
-            missionAcceptedDetail = "this action owns no worker"
-          }
+        pure
+          MissionDispatchAccepted
+            { missionAcceptedSession = MissionSessionId (workerIdentity descriptor),
+              missionAcceptedProviderSession = descriptor.workerDescriptorSpec.workerExistingSession,
+              missionAcceptedWorker = workerIdentity descriptor,
+              missionAcceptedDetail = "dispatched through the workflow action registry",
+              missionAcceptedOutcome = Nothing
+            }
+      -- A registered action with no worker of its own — the approval-queue
+      -- read. Its answer exists now and will not exist later: nothing durable
+      -- was started, so a session registered for it names a worker no pass can
+      -- find. Asking the registry here is the only moment there is anything to
+      -- ask.
+      Nothing -> do
+        observed <- observeAction environment handle
+        pure
+          MissionDispatchAccepted
+            { missionAcceptedSession = MissionSessionId "observation",
+              missionAcceptedProviderSession = Nothing,
+              missionAcceptedWorker = "observation",
+              missionAcceptedDetail = "this action owns no worker",
+              missionAcceptedOutcome =
+                Just
+                  ( case observed of
+                      Left refusal -> unjudged (actionRefusalMessage refusal)
+                      Right (ActionRunning detail) -> unjudged ("it reported itself still running: " <> detail)
+                      Right (ActionSettled outcome) -> concludedFrom outcome
+                  )
+            }
+
+    -- A refusal, retyped where fresh evidence says it was a race rather than a
+    -- fault.
+    --
+    -- The registry resolves a target against a board read covering open work,
+    -- so a target that closed or merged between the controller's own reread
+    -- and this dispatch does not resolve at all — and \"could not resolve\"
+    -- reaching a mission as a generic failure is the very collapse
+    -- requirement 8 exists to prevent, because nothing was mutated and the
+    -- plan simply needs recomputing. So an unresolved target is asked about
+    -- item by item, and a reading that no longer matches the one this dispatch
+    -- was authorized against is reported as what it is.
+    refusedDispatch request refusal = case (refusal, request.missionDispatchVersion) of
+      (ActionTargetUnresolved _ _, Just recorded) -> staleOrRefused request recorded refusal
+      (ActionTargetNotFound _, Just recorded) -> staleOrRefused request recorded refusal
+      _ -> pure (missionFailureFromRefusal refusal)
+
+    staleOrRefused request recorded refusal = case request.missionDispatchTarget of
+      Nothing -> pure (missionFailureFromRefusal refusal)
+      Just target -> do
+        observed <- observeTarget target
+        pure $ case observed of
+          -- Unreadable too, so nothing was established either way; the
+          -- registry's own refusal stands.
+          Left _ -> missionFailureFromRefusal refusal
+          Right live
+            | missionVersionHolds recorded live -> missionFailureFromRefusal refusal
+            | otherwise ->
+                MissionFailureStaleVersion
+                  (missionStaleVersionMessage (MissionStaleVersion {missionStaleRecorded = recorded, missionStaleObserved = live}))
 
     -- Requirement 11: the controller has already journaled which sessions
     -- these are, and they are already the complete registered subtree; this

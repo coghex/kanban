@@ -88,8 +88,11 @@ module Kanban.Worker
     collectWorkerCacheWith,
     consumeJournalLines,
     readWorkerJournal,
-    -- | Exported so the suite can address a hand-built spec's durable files.
+    -- | Exported so the suite can address a hand-built spec's durable files,
+    -- and write them the way a launch does.
     descriptorForSpec,
+    writePrivateJson,
+    writeState,
     discoverWorkers,
     discoverWorkerHistory,
     launchPullRequestWorker,

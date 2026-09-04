@@ -3439,6 +3439,18 @@ Defaults:
   record that has been collected is evidence of nothing: it is read as an
   unknown ending, never as a clean one, so a parent never settles over a child
   whose outcome no longer exists to be read.
+  What a finished worker achieved is the action registry's to say, not the
+  runner's: a clean exit means the process ended, while whether a solve
+  produced an attributable pull request and whether an issue action published a
+  verdict are action-specific questions the registry already answers. The
+  runner rebuilds the handle from the worker's own durable record and asks, and
+  a run whose record cannot supply what that judgement needs is an unknown
+  outcome rather than a success. A registered action that owns no worker is
+  answered as it is dispatched, in the same iteration, because there is no
+  durable child for a later pass to observe. And a target that reaches a
+  terminal state between the controller's reread and the registry's own
+  resolution is reported as the stale plan it is rather than as a target that
+  could not be resolved.
   A run that reaches a blocked lifecycle stays at its own terminal and asks
   what to do, because that terminal is the only channel carrying the authority
   such a state is resolvable by; exiting first would report the question after

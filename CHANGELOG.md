@@ -56,7 +56,14 @@ created above it.
   at all. A run that blocks stays at that terminal and asks what to do rather
   than exiting past the only person who can answer; end of input, or the word
   for it, ends it. Resolving an unknown outcome releases the launch record as
-  well as the step, so the recovery pass does not undo the answer. The run ends when the
+  well as the step, so the recovery pass does not undo the answer. What a
+  finished worker achieved is decided by the action registry rather than by the
+  runner, so a clean exit that produced no attributable pull request and an
+  issue action that published no verdict are not reported as work done; a
+  registered action that owns no worker is answered in the iteration that
+  dispatched it; and a target that reached a terminal state between the
+  controller's reread and the registry's resolution is a stale plan rather than
+  an unresolvable target. The run ends when the
   mission is terminal, paused, or blocked, and reports the transitions it
   made. It never merges a pull request, applies a verdict label, or reports an
   indeterminate result as a success — and never reads a target's absence from

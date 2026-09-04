@@ -171,6 +171,8 @@ module Kanban.Action
     observeAutoSolveTurn,
     approvalQueueObservation,
     validateWorkerOutcome,
+    observableActionHandle,
+    workerRecordedAttribution,
     attributedSolvePullRequest,
     validatedPullRequestVerdict,
 

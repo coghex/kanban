@@ -46,6 +46,8 @@ module Kanban.Action.Dispatch
 
     -- * Terminal validation
     validateWorkerOutcome,
+    observableActionHandle,
+    workerRecordedAttribution,
     attributedSolvePullRequest,
     validatedPullRequestVerdict,
   )
@@ -391,14 +393,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
     -- The attribution a joined run started with. 'Nothing' when its worker
     -- recorded none, which is a run this caller must not speak for.
-    recordedAttribution _ descriptor = fromParent <$> descriptor.workerDescriptorSpec.workerParent
-      where
-        fromParent parent =
-          ActionAttribution
-            { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
-              attributionStartedAt = parent.workerParentStartedAt,
-              attributionSolverBrand = parent.workerParentSolverBrand
-            }
+    recordedAttribution _ descriptor = workerRecordedAttribution descriptor
 
     workerHandle resolved held descriptor =
       pure (Right (WorkerActionHandle plan.planKind resolved descriptor held))
@@ -534,6 +529,53 @@ runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
 -- ---------------------------------------------------------------------------
 -- Observation
 -- ---------------------------------------------------------------------------
+
+-- | The baseline a worker's own record says its run began from.
+--
+-- 'Nothing' where the worker recorded none, and that absence is load-bearing
+-- rather than a default: a solve's result is judged against the pull requests
+-- that existed when /it/ started, so supplying the asking caller's baseline
+-- instead would credit that run with a pull request it did not open, or refuse
+-- it one it did.
+workerRecordedAttribution :: WorkerDescriptor -> Maybe ActionAttribution
+workerRecordedAttribution descriptor = fromParent <$> descriptor.workerDescriptorSpec.workerParent
+  where
+    fromParent parent =
+      ActionAttribution
+        { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
+          attributionStartedAt = parent.workerParentStartedAt,
+          attributionSolverBrand = parent.workerParentSolverBrand
+        }
+
+-- | The handle a worker this process did not launch can be observed through.
+--
+-- Rebuilt from that worker's own durable specification and nothing else, which
+-- is what makes it usable by a caller that has only /found/ the worker — a
+-- headless runner reattaching after a restart, say. Both facts an observation
+-- needs beyond the descriptor were written down when the worker was created:
+-- the baseline a solve's pull request is attributed against, and the stage an
+-- issue action's published evidence is read for.
+--
+-- Existing because the alternative is a second opinion. A caller that read the
+-- worker's state itself and called a clean exit a success would be skipping
+-- 'validateWorkerOutcome' entirely — reporting a solve that opened no pull
+-- request, or an issue action that published no verdict, as though it had
+-- done what it was asked. What that caller wants is this handle and
+-- 'observeAction'.
+--
+-- 'Nothing' for a worker whose record cannot supply what its handle needs: a
+-- provider turn with no recorded attribution, and the repository review host,
+-- which owns no action of its own. An autosolve handle is never rebuilt here
+-- either — its cursor is a live loop position rather than a durable fact, and
+-- 'Kanban.Action.AutoSolve.beginAutoSolveAction' is the one place it is made.
+observableActionHandle :: WorkflowActionKind -> ResolvedTarget -> WorkerDescriptor -> Maybe ActionHandle
+observableActionHandle kind resolved descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  IssueActionWorkerTaskKind task -> Just (IssueActionHandle kind resolved task.issueActionStage descriptor)
+  SolveWorkerTaskKind _ -> provider
+  PullRequestWorkerTaskKind _ -> provider
+  IssueHostWorkerTaskKind _ -> Nothing
+  where
+    provider = WorkerActionHandle kind resolved descriptor <$> workerRecordedAttribution descriptor
 
 -- | Observe one dispatched action.
 --

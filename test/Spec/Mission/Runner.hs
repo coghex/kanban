@@ -33,11 +33,24 @@ import Control.Monad (forM_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf)
 import Data.Text (Text)
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Time (UTCTime (..), addUTCTime, defaultTimeLocale, formatTime, fromGregorian, secondsToDiffTime)
 import Kanban.Action
-  ( ActionOutcome (..),
+  ( ActionAttribution (..),
+    ActionHandle (..),
+    ActionOutcome (..),
     ActionRefusal (..),
+    ActionTargetKind (..),
+    ResolvedTarget (..),
+    WorkflowActionKind (..),
+    ActionTarget (..),
+    ActionTargetRef (..),
+    CatalogHistory (..),
+    TargetCatalog (..),
+    actionHandleKind,
+    observableActionHandle,
+    resolveActionTarget,
     WorkflowActionKind (SolveIssue),
     settledWorkerFailure,
     targetPreconditionHolds,
@@ -56,14 +69,25 @@ import Kanban.Config
     maximumWorkerDeadlineSeconds,
     resolveGlobalConfig,
   )
-import Kanban.Domain (Repository (..))
+import Kanban.Domain (Issue (..), IssueState (..), NativeSubIssues (..), Repository (..), defaultWorkflowConfig)
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Worker
-  ( WorkerDeadline (..),
+  ( IssueActionWorkerTask (..),
+    IssueHostWorkerTask (..),
+    WorkerDeadline (..),
+    WorkerDescriptor (..),
     WorkerId (..),
+    WorkerParent (..),
     WorkerSpec (..),
+    WorkerState (..),
+    WorkerStatus (..),
+    WorkerTask (..),
+    descriptorForSpec,
+    workerDirectory,
+    writePrivateJson,
+    writeState,
     preconditionStillHolds,
     workerDeadlineReason,
     workerPreconditionRefusal,
@@ -72,9 +96,15 @@ import Kanban.Worker
   )
 import Spec.Support.Board (withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Json (emptyAssigneesJson, emptyLabelsJson, emptySubIssuesJson, githubIndependentPage, issueNodeJson)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
-import Spec.Support.Process (deadlineFixtureSpec)
+import Kanban.Preflight (IssueOrigin (..))
+import Kanban.Review (ReviewStage (..))
+import Kanban.Solve (SolverBrand (..), SolveOutcome (..))
+import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec)
 import System.Directory (doesFileExist, listDirectory)
+import Kanban.Paths (createPrivateDirectory)
+import System.Directory (XdgDirectory (XdgCache))
 import System.FilePath ((</>))
 import qualified Data.Text.IO as TextIO
 import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hIsTerminalDevice, hSetBuffering, withFile)
@@ -101,6 +131,7 @@ spec = describe "the foreground mission runner" $ do
   failureVocabularySpec
   openEffectRecoverySpec
   directionSpec
+  registryJudgementSpec
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -278,7 +309,8 @@ acceptedDispatch request =
     { missionAcceptedSession = MissionSessionId session,
       missionAcceptedProviderSession = Just "provider-1",
       missionAcceptedWorker = session,
-      missionAcceptedDetail = "dispatched"
+      missionAcceptedDetail = "dispatched",
+      missionAcceptedOutcome = Nothing
     }
   where
     session = request.missionDispatchStep.missionPlanStepId.unMissionStepId <> "-0001"
@@ -2465,3 +2497,296 @@ targetOf line = case parseMissionConsoleCommand theMission line of
   Left detail -> Left detail
   Right (MissionChildRequestCommand request) -> Right (targetPair <$> request.missionChildRequestTarget)
   Right other -> Left ("not a child request: " <> Text.pack (show other))
+
+-- ---------------------------------------------------------------------------
+-- Whose judgement a result is
+-- ---------------------------------------------------------------------------
+
+-- | The registry decides what a finished worker achieved, not this module.
+--
+-- A clean exit says only that the process ended. Whether a solve produced an
+-- attributable pull request, and whether an issue action published a verdict
+-- at all, are questions with action-specific answers that
+-- @validateWorkerOutcome@ and @observeIssueActionHandle@ already decide — so a
+-- mission that read the worker state itself and called @SolveCompleted@ a
+-- success would report a solve that opened nothing, and a canonical review
+-- that published nothing, as work done.
+registryJudgementSpec :: Spec
+registryJudgementSpec = describe "who judges a finished worker" $ do
+  it "rebuilds a provider turn's handle from what its own record wrote down" $ do
+    descriptor <- descriptorForSpec (attributedSpec (WorkerId "solve-844-0001"))
+    case observableActionHandle SolveIssue resolvedIssue descriptor of
+      Just (WorkerActionHandle kind _ held attribution) -> do
+        kind `shouldBe` SolveIssue
+        held.workerDescriptorSpec.workerId `shouldBe` WorkerId "solve-844-0001"
+        -- The baseline is the one that run began from, never this caller's.
+        attributionKnownPullRequests attribution `shouldBe` Set.fromList [900, 901]
+        attributionSolverBrand attribution `shouldBe` ClaudeSolver
+      other -> expectationFailure ("unexpected handle: " <> show (fmap actionHandleKind other))
+
+  -- The absence is the fail-closed half. A run whose record cannot say what
+  -- baseline it began from is one no other caller may speak for: judging it
+  -- against a baseline taken now would credit it with a pull request somebody
+  -- else opened, or refuse it the one it opened itself.
+  it "refuses to rebuild a handle the worker's record cannot supply" $ do
+    unattributed <- descriptorForSpec (workerFixtureSpec boardRepository (WorkerId "solve-844-0002") 844)
+    (actionHandleKind <$> observableActionHandle SolveIssue resolvedIssue unattributed)
+      `shouldBe` Nothing
+    -- And the repository's review host owns no action of its own.
+    host <-
+      descriptorForSpec
+        ( (workerFixtureSpec boardRepository (WorkerId "issue-host-0001") 844)
+            {workerTask = IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")}
+        )
+    (actionHandleKind <$> observableActionHandle ReviewIssue resolvedIssue host) `shouldBe` Nothing
+
+  -- An issue action's handle carries the stage, because the stage is what
+  -- decides which published evidence its result is read from.
+  it "carries the stage an issue action's own record names" $ do
+    descriptor <-
+      descriptorForSpec
+        ( (workerFixtureSpec boardRepository (WorkerId "issue-844-0001") 844)
+            { workerTask =
+                IssueActionWorkerTaskKind
+                  ( IssueActionWorkerTask
+                      { issueActionIssueNumber = 844,
+                        issueActionStage = IssueRereview,
+                        issueActionHost = WorkerId "issue-host-0001",
+                        issueActionOrigin = IssueOriginClaude
+                      }
+                  )
+            }
+        )
+    case observableActionHandle ReviewIssue resolvedIssue descriptor of
+      Just (IssueActionHandle kind _ stage _) -> do
+        kind `shouldBe` ReviewIssue
+        stage `shouldBe` IssueRereview
+      other -> expectationFailure ("unexpected handle: " <> show (fmap actionHandleKind other))
+
+  -- The end of it, through the driver a real run uses: a worker that exited
+  -- cleanly with nothing to attribute its result to is not a success.
+  it "never reads a clean exit as success when nothing can validate it" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        stageWorker (workerFixtureSpec boardRepository (WorkerId "solve-844-0001") 844)
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
+          gathered <- driver.missionDriverStepEvidence thePlanStep (stepRecord MissionStepRunning [theParent])
+          case gathered of
+            Left detail -> expectationFailure (Text.unpack detail)
+            Right evidence -> case evidence.missionEvidenceWorker >>= (.missionWorkerTerminal) of
+              Just (MissionWorkerFailed failure) -> do
+                missionStepFailureTag failure `shouldBe` "outcome_unknown"
+                -- The target resolved; what is missing is the baseline its
+                -- result would have to be judged against.
+                Text.unpack (missionStepFailureMessage failure)
+                  `shouldSatisfy` isInfixOf "recorded no attribution"
+              other -> expectationFailure ("a clean exit was judged " <> show other)
+
+  -- Requirement 8's boundary has a second half a controller reread cannot
+  -- cover: the registry resolves against a board read of open work, so a
+  -- target that closes or merges between the reread and the dispatch does not
+  -- resolve at all. \"Could not resolve\" reaching the mission as a generic
+  -- failure is the collapse the typed stale result exists to prevent — nothing
+  -- was mutated, and the plan simply needs recomputing.
+  it "retypes a target that vanished at the dispatch as a stale plan" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        -- The board no longer covers #844, and the item read says why.
+        withFakeGh root (ghBoardAndItem [] (ghItemIn "CLOSED" ["reviewed:approve"])) $ do
+          dispatched <-
+            driver.missionDriverDispatch
+              MissionDispatchRequest
+                { missionDispatchStep = thePlanStep,
+                  missionDispatchTarget = Just theTarget,
+                  missionDispatchVersion = Just (issueVersion ["reviewed:approve"]),
+                  missionDispatchContinuation = MissionFreshSession "brief",
+                  missionDispatchInvocation = MissionInvocationId "solve-844-1"
+                }
+          case dispatched of
+            Right accepted -> expectationFailure ("a vanished target was dispatched: " <> show accepted.missionAcceptedWorker)
+            Left failure -> do
+              missionStepFailureTag failure `shouldBe` "stale_version"
+              -- Which is a replannable step, not a verdict on the work.
+              missionStepFailureLifecycle failure `shouldBe` MissionStepPending
+
+  -- A target that genuinely cannot be read stays the registry's refusal: this
+  -- retyping is evidence-driven, and an unreadable item establishes nothing.
+  it "leaves a refusal alone when the item read cannot establish a change" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardAndItem [] ["#!/bin/sh", "exit 1"]) $ do
+          dispatched <-
+            driver.missionDriverDispatch
+              MissionDispatchRequest
+                { missionDispatchStep = thePlanStep,
+                  missionDispatchTarget = Just theTarget,
+                  missionDispatchVersion = Just (issueVersion ["reviewed:approve"]),
+                  missionDispatchContinuation = MissionFreshSession "brief",
+                  missionDispatchInvocation = MissionInvocationId "solve-844-2"
+                }
+          case dispatched of
+            Right accepted -> expectationFailure ("an unresolvable target was dispatched: " <> show accepted.missionAcceptedWorker)
+            Left failure -> missionStepFailureTag failure `shouldNotBe` "stale_version"
+
+  -- A registered action that owns no worker is answered as it is asked. A
+  -- session registered for one would name a worker no later pass could find,
+  -- and the step would settle as an unknown outcome having thrown the answer
+  -- away.
+  -- The live half: the registry's own approval-queue action owns no worker,
+  -- so the driver has to answer it as it dispatches it or the answer is gone.
+  it "answers the registry's workerless action as it dispatches it" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith []) $ do
+          dispatched <-
+            driver.missionDriverDispatch
+              MissionDispatchRequest
+                { missionDispatchStep = queueStep,
+                  missionDispatchTarget = Nothing,
+                  missionDispatchVersion = Nothing,
+                  missionDispatchContinuation = MissionFreshSession "brief",
+                  missionDispatchInvocation = MissionInvocationId "queue-1"
+                }
+          case dispatched of
+            Left failure -> expectationFailure ("the queue read was refused: " <> Text.unpack (missionStepFailureMessage failure))
+            Right accepted ->
+              -- Whatever the queue said, it said it now. What must never
+              -- happen is a session registered for a worker that does not
+              -- exist and an answer thrown away with it.
+              accepted.missionAcceptedOutcome `shouldSatisfy` (/= Nothing)
+
+  it "settles an action that owns no worker in the iteration that dispatched it" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      writeIORef stage.stageDispatchResult $ \_ ->
+        Right
+          MissionDispatchAccepted
+            { missionAcceptedSession = MissionSessionId "observation",
+              missionAcceptedProviderSession = Nothing,
+              missionAcceptedWorker = "observation",
+              missionAcceptedDetail = "this action owns no worker",
+              missionAcceptedOutcome = Just (MissionWorkerSucceeded "the approval queue is idle")
+            }
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled step MissionStepSucceeded detail) -> do
+          step `shouldBe` theStep
+          detail `shouldBe` "the approval queue is idle"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      -- Nothing was registered for it, because there is nothing to observe.
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotSessions `shouldBe` []
+      outcomeTags store `shouldReturn` [Just "completed"]
+
+-- | A fake @gh@ answering the board read with these issue nodes.
+ghBoardWith :: [String] -> [ByteString.ByteString]
+ghBoardWith nodes =
+  [ "#!/bin/sh",
+    ByteString.pack ("printf '%s' '" <> boardPage nodes <> "'")
+  ]
+
+-- | The registered repository-wide action that owns no worker.
+queueStep :: MissionPlanStep
+queueStep =
+  MissionPlanStep
+    { missionPlanStepId = MissionStepId "queue",
+      missionPlanStepAction = "observe_approval_queue",
+      missionPlanStepSummary = "read the approval queue",
+      missionPlanStepTarget = Nothing,
+      missionPlanStepDependsOn = []
+    }
+
+boardPage :: [String] -> String
+boardPage nodes = githubIndependentPage (Just (nodes, Nothing)) (Just ([], Nothing))
+
+-- | A fake @gh@ that answers the board read and the single-item read
+-- differently, which is the whole point of the race under test: the board no
+-- longer covers the target and the item read says exactly why.
+ghBoardAndItem :: [String] -> [ByteString.ByteString] -> [ByteString.ByteString]
+ghBoardAndItem nodes itemScript =
+  [ "#!/bin/sh",
+    "case \"$1\" in",
+    "  issue|pr)"
+  ]
+    <> map ("    " <>) (drop 1 itemScript)
+    <> [ "    ;;",
+         ByteString.pack ("  *) printf '%s' '" <> boardPage nodes <> "' ;;"),
+         "esac"
+       ]
+
+-- | A solve worker whose record says what its run began from.
+attributedSpec :: WorkerId -> WorkerSpec
+attributedSpec identifier =
+  (workerFixtureSpec boardRepository identifier 844)
+    { workerParent =
+        Just
+          WorkerParent
+            { workerParentIssueNumber = 844,
+              workerParentReviewRound = 0,
+              workerParentSolverBrand = ClaudeSolver,
+              workerParentSolverSession = Nothing,
+              workerParentSolverLogPath = Nothing,
+              workerParentStartedAt = fixedTime,
+              workerParentKnownPullRequests = Set.fromList [900, 901],
+              workerParentPullRequest = Nothing,
+              workerParentSolverAssignment = Nothing
+            }
+    }
+
+-- | Puts a finished worker where discovery finds it, through the two writes
+-- the launcher itself makes.
+stageWorker :: WorkerSpec -> IO ()
+stageWorker staged = do
+  descriptor <- descriptorForSpec staged
+  directory <- workerDirectory staged.workerRepository
+  createPrivateDirectory XdgCache directory
+  writeState descriptor (completedState staged.workerId)
+  written <- writePrivateJson descriptor.workerDescriptorSpecPath staged
+  written `shouldBe` Right ()
+
+completedState :: WorkerId -> WorkerState
+completedState identifier =
+  (runningWorkerState identifier 1 Nothing) {workerStateStatus = WorkerTerminal SolveCompleted}
+
+-- | The one step this mission's plan holds.
+thePlanStep :: MissionPlanStep
+thePlanStep = case theSpecification.missionSpecificationPlan of
+  (step : _) -> step
+  [] -> error "the fixture specification lost its plan"
+
+-- | The resolution a handle is rebuilt against, produced by the registry's own
+-- resolution rather than assembled here.
+resolvedIssue :: ResolvedTarget
+resolvedIssue =
+  case resolveActionTarget defaultWorkflowConfig catalog "coghex/kanban" (TargetByKind ActionTargetIssue 844) of
+    Right (ActionTargetItem resolved) -> resolved
+    other -> error ("the fixture issue did not resolve: " <> show (() <$ other))
+  where
+    catalog =
+      TargetCatalog
+        { catalogRepository = boardRepository,
+          catalogIssues = [missionFixtureIssue],
+          catalogPullRequests = [],
+          catalogHistory = CatalogHistoryAbsent
+        }
+
+missionFixtureIssue :: Issue
+missionFixtureIssue =
+  Issue
+    { issueNumber = 844,
+      issueTitle = "the fixture issue",
+      issueBody = "",
+      issueUrl = "https://github.com/coghex/kanban/issues/844",
+      issueState = IssueOpen,
+      issueLabels = [],
+      issueAssignees = [],
+      issueCreatedAt = fixedTime,
+      issueUpdatedAt = fixedTime,
+      issueLabelOverflow = 0,
+      issueAssigneeOverflow = 0,
+      issueSubIssues = SubIssuesNotRequested,
+      issueDataGaps = []
+    }
