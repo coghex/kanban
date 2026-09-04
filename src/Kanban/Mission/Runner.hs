@@ -106,7 +106,7 @@ import Kanban.Mission.Controller
     startMissionController,
     stopMissionController,
   )
-import Kanban.Mission.Invocation (MissionTargetVersion (..))
+import Kanban.Mission.Invocation (MissionInvocationId (..), MissionTargetVersion (..))
 import Kanban.Mission.Paths (openMissionStore)
 import Kanban.Mission.Reconcile
   ( MissionContinuation (..),
@@ -284,6 +284,7 @@ liveMissionDriver options config repository store _ =
         missionDriverObserveTarget = observeTarget,
         missionDriverStepEvidence = stepEvidence,
         missionDriverObserveSession = observeSession,
+        missionDriverAdoptInvocation = adoptInvocation,
         missionDriverDispatch = dispatch,
         missionDriverTerminate = terminate
       }
@@ -408,6 +409,27 @@ liveMissionDriver options config repository store _ =
                     missionWorkerTerminal = conclusionOf recorded,
                     missionWorkerProviderSession = recorded.workerStateSessionId
                   }
+
+    -- The worker one invocation actually launched, found by the identity the
+    -- launch wrote into its own specification.
+    --
+    -- This machine's records and nothing else, which is what makes it usable
+    -- during recovery: the association was made durable at the moment the
+    -- worker was created, so it survives the crash that lost the conclusion
+    -- the controller was about to write.
+    adoptInvocation invocation = do
+      workers <- discoverWorkerHistory repository
+      pure
+        ( Right
+            ( case [ descriptor
+                   | descriptor <- workers,
+                     descriptor.workerDescriptorSpec.workerInvocation
+                       == Just invocation.unMissionInvocationId
+                   ] of
+                (descriptor : _) -> Just (MissionSessionId (workerIdentity descriptor))
+                [] -> Nothing
+            )
+        )
 
     -- Whether one registered session has ended, for the accounting
     -- requirement 11 asks of a subtree.
@@ -611,7 +633,15 @@ liveMissionDriver options config repository store _ =
                     base {requestExistingSession = Just session, requestResumeProvenance = ResumeAnswer}
                   MissionFreshSession brief ->
                     base {requestUserMessage = brief, requestResumeProvenance = ResumeAnswer}
-                requested = continued {requestExpectedTarget = preconditionOf <$> request.missionDispatchVersion}
+                requested =
+                  continued
+                    { requestExpectedTarget = preconditionOf <$> request.missionDispatchVersion,
+                      -- Written into the worker's own specification, so a
+                      -- crash between this call returning and the controller
+                      -- recording what it got leaves the two able to find each
+                      -- other again.
+                      requestInvocation = Just request.missionDispatchInvocation.unMissionInvocationId
+                    }
             dispatched <- dispatchAction environment requested
             pure (either (Left . missionFailureFromRefusal) (Right . acceptance) dispatched)
 

@@ -625,7 +625,8 @@ examples = do
                   workerConfigPath = Nothing,
                   workerWorkflowConfig = defaultWorkflowConfig,
                   workerAssignment = Just workerFixtureAssignment,
-                  workerExpectedTarget = Nothing
+                  workerExpectedTarget = Nothing,
+                  workerInvocation = Nothing
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-818-overdue-spawn.spec.json"

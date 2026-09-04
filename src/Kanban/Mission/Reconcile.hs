@@ -81,6 +81,7 @@ import Kanban.Action
   ( ActionOutcome (..),
     ActionRefusal (..),
     actionRefusalMessage,
+    targetPreconditionMessage,
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Mission.Invocation
@@ -88,7 +89,6 @@ import Kanban.Mission.Invocation
     MissionInvocationId (..),
     MissionInvocationOutcome (..),
     MissionInvocationState (..),
-    MissionStaleVersion,
     missionInvocationResolved,
     missionStaleVersionMessage,
   )
@@ -137,28 +137,34 @@ data MissionStepFailure
   | -- | The provider declined for capacity reasons.
     MissionFailureCapacity Text
   | -- | The recorded precondition had moved; nothing was mutated.
-    MissionFailureStaleVersion MissionStaleVersion
+    --
+    -- A sentence rather than the two readings, because the same conclusion
+    -- reaches this vocabulary from three places that hold different evidence:
+    -- the controller's own recheck has both readings, the registry's launch
+    -- boundary has both, and a worker that refused its turn hours later has
+    -- only what it wrote down. Requiring the pair would have made two of those
+    -- three report a generic failure instead.
+    MissionFailureStaleVersion Text
   | -- | Something may have happened and no evidence settles it.
     MissionFailureOutcomeUnknown Text
   | MissionFailureGeneric Text
   deriving stock (Eq, Show)
 
--- | One of each, given a stale reading to fill the one constructor that
--- carries something other than a sentence.
+-- | One of each.
 --
 -- Enumerated here rather than in a test, for the reason every other closed
 -- vocabulary in this codebase is: a constructor added without a decision about
 -- what it means is a constructor this list stops covering, and the test that
 -- reads it fails at the addition rather than at the first mission that hits
 -- the new case.
-missionStepFailures :: MissionStaleVersion -> [MissionStepFailure]
-missionStepFailures stale =
+missionStepFailures :: [MissionStepFailure]
+missionStepFailures =
   [ MissionFailureDeadline "",
     MissionFailureAuthentication "",
     MissionFailureConfiguration "",
     MissionFailureExecutable "",
     MissionFailureCapacity "",
-    MissionFailureStaleVersion stale,
+    MissionFailureStaleVersion "",
     MissionFailureOutcomeUnknown "",
     MissionFailureGeneric ""
   ]
@@ -181,17 +187,21 @@ missionStepFailureMessage failure = case failure of
   MissionFailureConfiguration detail -> "configuration: " <> detail
   MissionFailureExecutable detail -> "executable: " <> detail
   MissionFailureCapacity detail -> "capacity: " <> detail
-  MissionFailureStaleVersion stale -> "stale version: " <> missionStaleVersionMessage stale
+  MissionFailureStaleVersion detail -> "stale version: " <> detail
   MissionFailureOutcomeUnknown detail -> "outcome unknown: " <> detail
   MissionFailureGeneric detail -> "failed: " <> detail
 
 -- | Which step lifecycle a failure lands the step in.
 --
--- Only the unknown outcome is different, and that difference is requirement
--- 7's: a step nobody can decide about is not failed, because failed is a
--- conclusion and this is the absence of one.
+-- Two are not @failed@, and neither difference is cosmetic. A step nobody can
+-- decide about is @outcome_unknown@ because failed is a conclusion and this is
+-- the absence of one (requirement 7). And a step refused for a stale
+-- precondition goes back to @pending@: nothing was mutated, the reading it was
+-- planned against is simply out of date, and requirement 8 asks for
+-- replanning rather than a verdict.
 missionStepFailureLifecycle :: MissionStepFailure -> MissionStepLifecycle
 missionStepFailureLifecycle (MissionFailureOutcomeUnknown _) = MissionStepOutcomeUnknown
+missionStepFailureLifecycle (MissionFailureStaleVersion _) = MissionStepPending
 missionStepFailureLifecycle _ = MissionStepFailed
 
 -- | The registry's validated terminal result, typed.
@@ -202,6 +212,7 @@ missionStepFailureLifecycle _ = MissionStepFailed
 missionFailureFromOutcome :: ActionOutcome -> Maybe MissionStepFailure
 missionFailureFromOutcome outcome = case outcome of
   ActionDeadlineExceeded detail -> Just (MissionFailureDeadline detail)
+  ActionTargetMoved detail -> Just (MissionFailureStaleVersion detail)
   ActionFailed detail -> Just (MissionFailureGeneric detail)
   ActionStopped detail -> Just (MissionFailureOutcomeUnknown detail)
   ActionNeedsInput _ -> Nothing
@@ -218,6 +229,11 @@ missionFailureFromOutcome outcome = case outcome of
 -- particular whether the repair is the machine's configuration or the plan.
 missionFailureFromRefusal :: ActionRefusal -> MissionStepFailure
 missionFailureFromRefusal refusal = case refusal of
+  -- Requirement 8's typed result, and it must not fall through to the generic
+  -- arm: nothing was dispatched, so this is a plan to redo rather than work
+  -- that failed.
+  ActionTargetStale _ recorded observed ->
+    MissionFailureStaleVersion (targetPreconditionMessage recorded observed)
   ActionCapabilityBlocked _ detail -> MissionFailureExecutable detail
   ActionRoutingUnavailable _ detail -> MissionFailureConfiguration detail
   ActionDispatchFailed _ detail -> MissionFailureGeneric detail
@@ -369,7 +385,7 @@ classifyMissionWork evidence
       MissionWorkUnresolved (unresolvedDetail state)
   | Just state <- evidence.missionEvidenceInvocation,
     Just (MissionInvocationStale stale) <- state.missionInvocationOutcome =
-      MissionWorkFailedExternally (MissionFailureStaleVersion stale)
+      MissionWorkFailedExternally (MissionFailureStaleVersion (missionStaleVersionMessage stale))
   | otherwise = MissionWorkUnobserved
   where
     unresolvedDetail state =
@@ -539,18 +555,23 @@ cancelledByDependency specification snapshot =
 -- | A step that is still @pending@ and already has an invocation nobody saw
 -- the end of.
 --
--- The exact durable state a crash between the invocation record and the
--- @dispatching@ write leaves, and the reason it needs its own answer: the step
--- reads as pending, so 'nextDispatchableStep' would hand it straight back to a
--- dispatch — repeating an effect that may already have happened, which is the
--- one thing requirement 7 forbids outright. Nothing about the step record
--- distinguishes this from a step that was never dispatched; only the
--- invocation file does.
+-- Both durable states a crash around a launch can leave. A crash before the
+-- @dispatching@ write leaves a step that still reads @pending@, which
+-- 'nextDispatchableStep' would hand straight back to a dispatch — repeating an
+-- effect that may already have happened, the one thing requirement 7 forbids
+-- outright. A crash after the driver returned and before the invocation was
+-- concluded leaves a step reading @dispatching@ beside a worker the mission
+-- started and has not recorded, which the ordinary evidence pass would
+-- classify as somebody else's live work and pause on.
+--
+-- Neither is distinguishable from a step that was never dispatched by looking
+-- at the step record; only the invocation file is. A live run never sees
+-- either, because between the two writes the controller never yields.
 unresolvedDispatchOf :: [MissionInvocationState] -> MissionSpecification -> MissionSnapshot -> Maybe (MissionStepId, MissionInvocationId)
 unresolvedDispatchOf states specification snapshot =
   case [ (step.missionPlanStepId, state.missionInvocationRecord.missionInvocationId)
        | step <- specification.missionSpecificationPlan,
-         lifecycleOf step.missionPlanStepId == Just MissionStepPending,
+         lifecycleOf step.missionPlanStepId `elem` [Just MissionStepPending, Just MissionStepDispatching],
          state <- states,
          state.missionInvocationRecord.missionInvocationStep == step.missionPlanStepId,
          not (missionInvocationResolved state)

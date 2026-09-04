@@ -3417,13 +3417,16 @@ Defaults:
   observed — something may have happened — and it is resolved by fresh
   evidence or by authenticated direction, never by repeating the effect. Its
   identity is also how a replayed request returns the child it already
-  produced instead of launching a second one, and what an unfinished one
-  records is how the two crash windows around a launch are told apart: an
-  invocation opened while its step still reads pending is an effect that may
-  have happened, and one closed with the worker it started is a session to
-  adopt rather than a stranger's. The version it records travels further than
-  the controller, into that worker's own specification, so the last instant
-  before an agent session begins can ask whether it still holds.
+  produced instead of launching a second one, and how the crash windows around
+  a launch are told apart. Its identity is written into the worker the launch
+  creates, so an invocation with no recorded conclusion can still find the
+  worker it became and adopt it; only when no worker names it is the outcome
+  genuinely unknown. The target version it records travels the same way, into
+  that worker's own specification, so the last instant before an agent session
+  begins can ask whether it still holds — and a target that moved, or that
+  cannot be read at all, stops the turn before anything is mutated. Those two
+  refusals stay distinct: a moved target is replanned against a new reading, an
+  unreadable one is waited on.
   `control/requests/` is the channel an attached client takes direction on, and
   everything in it is an ordinary durable operator command with no override
   authority — no credential is stored there or anywhere else, because one

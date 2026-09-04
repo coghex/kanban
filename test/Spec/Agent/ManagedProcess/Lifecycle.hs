@@ -229,7 +229,8 @@ examples = do
                 -- this task does /not/ route to today, so a decoder that
                 -- dropped either could not pass.
                 workerAssignment = Just (RecordedAssignment ClaudeProvider "claude-recorded" "xhigh" "Recorded Claude"),
-                workerExpectedTarget = Nothing
+                workerExpectedTarget = Nothing,
+                workerInvocation = Nothing
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       -- Every PR action a key can spawn has to survive the durable spec, or
@@ -501,7 +502,8 @@ examples = do
                   workerConfigPath = Nothing,
                   workerWorkflowConfig = defaultWorkflowConfig,
                   workerAssignment = Just workerFixtureAssignment,
-                  workerExpectedTarget = Nothing
+                  workerExpectedTarget = Nothing,
+                  workerInvocation = Nothing
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"

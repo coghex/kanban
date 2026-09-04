@@ -512,7 +512,8 @@ repairWorkerDescriptor task =
             -- reattach reads, and what its first resume then resolves once
             -- and records.
             workerAssignment = Nothing,
-            workerExpectedTarget = Nothing
+            workerExpectedTarget = Nothing,
+            workerInvocation = Nothing
           },
       workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
       workerDescriptorRosterPath = "/tmp/pr-900-repair.roster.toml",

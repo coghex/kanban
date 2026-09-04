@@ -558,7 +558,8 @@ workerFixtureSpec repository identifier issueNumber =
       workerConfigPath = Nothing,
       workerWorkflowConfig = defaultWorkflowConfig,
       workerAssignment = Just workerFixtureAssignment,
-      workerExpectedTarget = Nothing
+      workerExpectedTarget = Nothing,
+      workerInvocation = Nothing
     }
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and

@@ -219,6 +219,7 @@ library kanban-internal
     Kanban.Worker.IssueHost
     Kanban.Worker.Monitor
     Kanban.Worker.Paths
+    Kanban.Worker.Precondition
     Kanban.Worker.Termination
     Kanban.Worker.Types
   build-depends:

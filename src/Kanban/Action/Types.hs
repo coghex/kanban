@@ -134,7 +134,7 @@ import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (ResumeProvenance (..), SolverBrand)
-import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason)
+import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason, workerStaleTargetReason)
 import Kanban.Workflow (readOnlyHistoryNotice)
 
 -- ---------------------------------------------------------------------------
@@ -600,6 +600,14 @@ data ActionOutcome
     -- observed. Collapsing it into the generic failure is what made a mission
     -- unable to tell "give it longer" from "this cannot work".
     ActionDeadlineExceeded Text
+  | -- | The launch's recorded target moved before the work could start, and
+    -- the worker refused its own turn rather than act on a plan the target had
+    -- already outgrown (issue #595, requirement 8).
+    --
+    -- Its own constructor for the same reason the deadline has one: nothing
+    -- was mutated and nothing failed, so a controller has to be able to tell
+    -- it from work that went wrong and replan instead of concluding.
+    ActionTargetMoved Text
   | ActionFailed Text
   | -- | An issue action ran to completion and its owning authority
     -- published what that authority publishes: for a canonical initial
@@ -635,6 +643,7 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionNeedsInput _ -> False
   ActionStopped _ -> False
   ActionDeadlineExceeded _ -> False
+  ActionTargetMoved _ -> False
   ActionFailed _ -> False
   -- A published verdict is a completed review whichever way it went, exactly
   -- as a changes-requested pull-request verdict is. What is /not/ success is
@@ -657,6 +666,7 @@ actionOutcomeMessage outcome = case outcome of
   ActionNeedsInput detail -> "needs input: " <> detail
   ActionStopped detail -> "stopped: " <> detail
   ActionDeadlineExceeded detail -> "deadline: " <> detail
+  ActionTargetMoved detail -> "stale target: " <> detail
   ActionFailed detail -> "failed: " <> detail
   ActionIssueReviewed number stage approved ->
     "issue #" <> showNumber number <> " " <> issueStageWord stage <> " " <> issueVerdictWord stage approved
@@ -686,6 +696,7 @@ actionOutcomeMessage outcome = case outcome of
 settledWorkerFailure :: Text -> ActionOutcome
 settledWorkerFailure detail
   | detail == workerDeadlineReason = ActionDeadlineExceeded detail
+  | workerStaleTargetReason `Text.isPrefixOf` detail = ActionTargetMoved detail
   | otherwise = ActionFailed detail
 
 -- | What one observation of a dispatched action found.
@@ -822,7 +833,14 @@ data ActionRequest = ActionRequest
     -- immediately before the launch, and 'Nothing' for a caller with no such
     -- record — a dashboard press acts on the item the operator is looking at
     -- and has nothing older to be stale against.
-    requestExpectedTarget :: Maybe TargetPrecondition
+    requestExpectedTarget :: Maybe TargetPrecondition,
+    -- | The caller's own identifier for this effect, recorded in the
+    -- specification the launch writes (issue #595, requirement 5).
+    --
+    -- Opaque here: the registry never reads it, and carries it only so a
+    -- caller that journals an effect before dispatching can find the worker
+    -- that effect became if it crashes in between.
+    requestInvocation :: Maybe Text
   }
 
 actionRequest :: WorkflowActionKind -> Text -> ActionTargetRef -> ActionRequest
@@ -838,7 +856,8 @@ actionRequest kind repository target =
       requestResumeProvenance = ResumeAnswer,
       requestUserMessage = "",
       requestParent = Nothing,
-      requestExpectedTarget = Nothing
+      requestExpectedTarget = Nothing,
+      requestInvocation = Nothing
     }
 
 -- | Refuse a target that belongs to a repository other than the one the

@@ -33,8 +33,11 @@ created above it.
   moved in between is a typed stale-version result with nothing mutated — a
   result the owning action enforces too, since the recorded version travels
   with the request and is compared against the registry's own read at the last
-  instruction before it starts anything and again inside the worker it
-  launched, just before that worker's agent session begins. The run's own
+  instruction before it starts anything, and again inside the worker it
+  launched — and inside the repository review host before it starts a
+  canonical review or a revision — just before the agent session that will
+  mutate the target begins. A target that moved, or that cannot be read at
+  all, stops the turn without mutating anything. The run's own
   terminal is its authenticated console: a line typed there is handed to the
   controller inside the process, never written down, and can pause or resume
   the mission, resolve an unknown outcome, end a registered subtree, or

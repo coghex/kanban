@@ -58,7 +58,16 @@ import Kanban.Domain (Repository (..))
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.Worker (WorkerDeadline (..), WorkerId (..), WorkerSpec (..), preconditionStillHolds, workerDeadlineReason)
+import Kanban.Worker
+  ( WorkerDeadline (..),
+    WorkerId (..),
+    WorkerSpec (..),
+    preconditionStillHolds,
+    workerDeadlineReason,
+    workerPreconditionRefusal,
+    workerStaleTargetReason,
+    workerUnverifiedTargetReason,
+  )
 import Spec.Support.Board (withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (testOptions)
@@ -232,7 +241,9 @@ data Stage = Stage
     stageDispatches :: IORef [MissionDispatchRequest],
     stageTerminated :: IORef [[MissionSessionId]],
     -- | The sessions the driver will report as ended.
-    stageSessions :: IORef [MissionSessionId]
+    stageSessions :: IORef [MissionSessionId],
+    -- | The worker each invocation will be found to have launched.
+    stageAdoptions :: IORef [(MissionInvocationId, MissionSessionId)]
   }
 
 newStage :: IO Stage
@@ -241,6 +252,7 @@ newStage =
     <$> newIORef (repeat (Right (issueVersion ["reviewed:approve"])))
     <*> newIORef id
     <*> newIORef (Right . acceptedDispatch)
+    <*> newIORef []
     <*> newIORef []
     <*> newIORef []
     <*> newIORef []
@@ -292,6 +304,9 @@ stagedDriver stage _ _ =
         missionDriverObserveSession = \session -> do
           settled <- readIORef stage.stageSessions
           pure (Right (if session `elem` settled then Just endedObservation else Nothing)),
+        missionDriverAdoptInvocation = \invocation -> do
+          launched <- readIORef stage.stageAdoptions
+          pure (Right (lookup invocation launched)),
         missionDriverDispatch = \request -> do
           atomicModifyIORef' stage.stageDispatches (\seen -> (seen <> [request], ()))
           ($ request) <$> readIORef stage.stageDispatchResult,
@@ -882,7 +897,7 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
       case iteration of
         MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
           step `shouldBe` theStep
-          Text.unpack detail `shouldSatisfy` isInfixOf "never left pending"
+          Text.unpack detail `shouldSatisfy` isInfixOf "no worker records it"
         other -> expectationFailure ("a journaled invocation was dispatched again: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
 
@@ -921,6 +936,36 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
     dispatchedButUnregistered [closed] registered `shouldBe` Nothing
     dispatchedButUnregistered [closed] settled `shouldBe` Nothing
     dispatchedButUnregistered [openInvocationState] dispatching `shouldBe` Nothing
+
+  -- The narrowest window of the three: the driver launched a worker and the
+  -- controller died before recording which. The launch wrote the invocation's
+  -- identity into that worker's own specification, so the two find each other
+  -- again and the mission adopts its own worker instead of pausing on it.
+  it "adopts the worker an open invocation launched, rather than pausing on it" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
+      openInvocation store
+      writeIORef stage.stageAdoptions [(MissionInvocationId "solve-844-1", MissionSessionId "solve-844-0001")]
+      iteration <- oneIteration store stage
+      iteration `shouldBe` MissionAdvanced (MissionStepAttached theStep (MissionSessionId "solve-844-0001"))
+      readIORef stage.stageDispatches `shouldReturn` []
+      -- The invocation is closed with what it turned out to have launched, so
+      -- the next run reads an ordinary dispatched record rather than this
+      -- window again.
+      recorded <- currentInvocations store
+      map (fmap missionInvocationOutcomeTag . (.missionInvocationOutcome)) recorded `shouldBe` [Just "dispatched"]
+      snapshot <- currentSnapshot store
+      map (.missionSessionId) snapshot.missionSnapshotSessions
+        `shouldBe` [MissionSessionId "solve-844-0001"]
+
+  it "falls back to an unknown outcome when no worker records the invocation" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
+      openInvocation store
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled _ MissionStepOutcomeUnknown detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "no worker records it"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
 
   it "reconciles a crash after the launch from the worker's own evidence" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
@@ -1630,22 +1675,41 @@ workerPreconditionSpec = describe "the precondition a worker carries" $ do
         case moved of
           Nothing -> expectationFailure "a moved target was allowed to start its turn"
           Just detail -> do
+            workerPreconditionRefusal detail `shouldBe` Just workerStaleTargetReason
             Text.unpack detail `shouldSatisfy` isInfixOf "its labels changed"
-            Text.unpack detail `shouldSatisfy` isInfixOf "nothing was dispatched"
       withFakeGh root (ghItem ["reviewed:approve"]) $
         preconditionStillHolds launched `shouldReturn` Nothing
 
-  -- And an unreachable network is not a refusal. This worker holds its lease
-  -- and its turn is about to start; declining on a failed read would turn an
-  -- outage into a wave of refused work, and the packaged workflow's own gates
-  -- reread what they mutate regardless.
-  it "starts the turn when the reading could not be taken at all" $
+  -- Fail-closed, and this is the half that matters. Requirement 8 permits the
+  -- mutation only if the exact recorded precondition still holds, and a target
+  -- that cannot be read has not been shown to hold anything; nothing
+  -- downstream carries the expectation to a later check, so starting the
+  -- session anyway would act on a plan nobody has verified since the launch.
+  it "refuses the turn when the reading could not be taken at all" $
     withIsolatedGh $ \root -> do
       let launched =
             (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
               {workerExpectedTarget = Just (preconditionOf (issueVersion ["reviewed:approve"]))}
-      withFakeGh root ["#!/bin/sh", "echo 'gh: could not connect' >&2", "exit 1"] $
-        preconditionStillHolds launched `shouldReturn` Nothing
+      withFakeGh root ["#!/bin/sh", "echo 'gh: could not connect' >&2", "exit 1"] $ do
+        unverified <- preconditionStillHolds launched
+        case unverified of
+          Nothing -> expectationFailure "an unreadable target was allowed to start its turn"
+          Just detail -> do
+            workerPreconditionRefusal detail `shouldBe` Just workerUnverifiedTargetReason
+            Text.unpack detail `shouldSatisfy` isInfixOf "could not connect"
+
+  -- The two refusals stay apart because they call for different repairs: a
+  -- moved target is replanned against a new reading, an unreadable one is
+  -- waited on.
+  it "tells the two refusals apart, and both from an ordinary failure" $ do
+    workerPreconditionRefusal (workerStaleTargetReason <> ": #844 changed")
+      `shouldBe` Just workerStaleTargetReason
+    workerPreconditionRefusal (workerUnverifiedTargetReason <> ": gh failed")
+      `shouldBe` Just workerUnverifiedTargetReason
+    workerPreconditionRefusal "the provider exited 1" `shouldBe` Nothing
+    -- And the stale one types all the way through to a replannable step.
+    (missionStepFailureTag <$> missionFailureFromOutcome (settledWorkerFailure (workerStaleTargetReason <> ": #844 changed")))
+      `shouldBe` Just "stale_version"
 
 -- | A temporary root with @$XDG_CACHE_HOME@ redirected into it.
 --
@@ -1683,12 +1747,7 @@ ghItem labels =
 failureVocabularySpec :: Spec
 failureVocabularySpec = describe "the typed results a step can reach" $ do
   it "keeps all eight distinguishable" $ do
-    let stale =
-          MissionStaleVersion
-            { missionStaleRecorded = issueVersion ["a"],
-              missionStaleObserved = issueVersion ["b"]
-            }
-        tags = map missionStepFailureTag (missionStepFailures stale)
+    let tags = map missionStepFailureTag missionStepFailures
     tags
       `shouldBe` [ "deadline",
                    "authentication",
@@ -1730,6 +1789,20 @@ failureVocabularySpec = describe "the typed results a step can reach" $ do
     missionStepFailureLifecycle (MissionFailureOutcomeUnknown "") `shouldBe` MissionStepOutcomeUnknown
     missionStepFailureLifecycle (MissionFailureDeadline "") `shouldBe` MissionStepFailed
     missionStepFailureLifecycle (MissionFailureGeneric "") `shouldBe` MissionStepFailed
+
+  -- Requirement 8's typed result must survive the trip through the registry's
+  -- refusal vocabulary. Falling through to the generic arm would have made a
+  -- race that mutated nothing look like work that failed.
+  it "keeps a stale refusal typed, and returns the step to a replannable state" $ do
+    let recorded = preconditionOf (issueVersion ["reviewed:approve"])
+        observed = preconditionOf (issueVersion ["reviewed:approve", "blocked"])
+        failure = missionFailureFromRefusal (ActionTargetStale SolveIssue recorded observed)
+    missionStepFailureTag failure `shouldBe` "stale_version"
+    missionStepFailureLifecycle failure `shouldBe` MissionStepPending
+    Text.unpack (missionStepFailureMessage failure) `shouldSatisfy` isInfixOf "nothing was dispatched"
+    -- And the other failures still land where they did.
+    missionStepFailureLifecycle (MissionFailureGeneric "") `shouldBe` MissionStepFailed
+    missionStepFailureLifecycle (MissionFailureOutcomeUnknown "") `shouldBe` MissionStepOutcomeUnknown
 
   it "refuses a dispatch the owning authority declined, without concluding the mission" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do

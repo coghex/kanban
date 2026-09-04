@@ -541,7 +541,8 @@ discoveredWorker =
             workerConfigPath = Nothing,
             workerWorkflowConfig = defaultWorkflowConfig,
             workerAssignment = Nothing,
-            workerExpectedTarget = Nothing
+            workerExpectedTarget = Nothing,
+            workerInvocation = Nothing
           },
       workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
       workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",

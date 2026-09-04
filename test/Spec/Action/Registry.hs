@@ -1472,7 +1472,8 @@ solveWorkerDescriptor repository issueNumber workflow = do
         workerConfigPath = Nothing,
         workerWorkflowConfig = defaultWorkflowConfig,
         workerAssignment = Nothing,
-        workerExpectedTarget = Nothing
+        workerExpectedTarget = Nothing,
+        workerInvocation = Nothing
       }
 
 -- | A durable issue action's descriptor, with no file written yet.
@@ -1495,7 +1496,8 @@ issueActionDescriptor repository issueNumber stage host = do
         workerConfigPath = Nothing,
         workerWorkflowConfig = defaultWorkflowConfig,
         workerAssignment = Nothing,
-        workerExpectedTarget = Nothing
+        workerExpectedTarget = Nothing,
+        workerInvocation = Nothing
       }
 
 -- | Publishes a running repository review host, so a dispatch adopts it
@@ -1549,7 +1551,8 @@ seedLiveIssueHost repository = do
           workerConfigPath = Nothing,
           workerWorkflowConfig = defaultWorkflowConfig,
           workerAssignment = Nothing,
-          workerExpectedTarget = Nothing
+          workerExpectedTarget = Nothing,
+          workerInvocation = Nothing
         }
   publishWorkerSpec descriptor
   -- Running, with no recorded identity: a host whose supervisor has only just
@@ -1593,7 +1596,8 @@ pullRequestWorkerDescriptor repository number = do
           workerConfigPath = Nothing,
           workerWorkflowConfig = defaultWorkflowConfig,
           workerAssignment = Nothing,
-          workerExpectedTarget = Nothing
+          workerExpectedTarget = Nothing,
+          workerInvocation = Nothing
         }
   directory <- workerDirectory repository
   createDirectoryIfMissing True directory

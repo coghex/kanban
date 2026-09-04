@@ -260,7 +260,21 @@ data WorkerSpec = WorkerSpec
     -- 'Nothing' for a caller with no such record, and for every specification
     -- written before this field existed: a dashboard press acts on the item
     -- the operator is looking at and has nothing older to be stale against.
-    workerExpectedTarget :: Maybe TargetPrecondition
+    workerExpectedTarget :: Maybe TargetPrecondition,
+    -- | The caller's own identifier for the effect this launch is (issue
+    -- #595, requirement 5).
+    --
+    -- Written into the specification at the moment the worker is created,
+    -- which is what makes the association recoverable. A controller journals
+    -- an invocation, dispatches, and only then records which worker it got;
+    -- a crash in that window leaves an invocation naming no worker and a
+    -- worker nobody claims. With this the two find each other again — the
+    -- recovery pass looks for the worker whose specification names the
+    -- invocation it is holding — instead of the mission reading its own
+    -- worker as somebody else's.
+    --
+    -- Opaque to the worker layer, which never interprets it.
+    workerInvocation :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
@@ -288,6 +302,7 @@ instance FromJSON WorkerSpec where
       <*> object .:? "workerWorkflowConfig" .!= defaultWorkflowConfig
       <*> object .:? "workerAssignment" .!= Nothing
       <*> object .:? "workerExpectedTarget" .!= Nothing
+      <*> object .:? "workerInvocation" .!= Nothing
 
 data WorkerEvent
   = WorkerProviderStarted Int

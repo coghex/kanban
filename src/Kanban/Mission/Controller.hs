@@ -84,7 +84,8 @@ import Kanban.Mission.Control
     runnerCommand,
   )
 import Kanban.Mission.Invocation
-  ( MissionIntendedEffect (..),
+  ( missionStaleVersionMessage,
+    MissionIntendedEffect (..),
     MissionInvocation (..),
     MissionInvocationId (..),
     MissionInvocationOutcome (..),
@@ -215,6 +216,17 @@ data MissionDriver = MissionDriver
     -- tree. 'Nothing' means it has not ended, which keeps its parent
     -- nonterminal — as does a reading that could not be taken at all.
     missionDriverObserveSession :: MissionSessionId -> IO (Either Text (Maybe MissionTerminalObservation)),
+    -- | The session an invocation actually launched, if one exists.
+    --
+    -- The other half of requirement 5's recoverability. An invocation is
+    -- journaled, dispatched, and only then concluded with the worker it got;
+    -- a crash in that window leaves an invocation naming no worker and a
+    -- worker this mission started but has not recorded — which, without this,
+    -- the next run reads as somebody else's live work and pauses on. The
+    -- launch writes the invocation's identity into the worker's own
+    -- specification, so the association survives the crash that lost the
+    -- conclusion.
+    missionDriverAdoptInvocation :: MissionInvocationId -> IO (Either Text (Maybe MissionSessionId)),
     missionDriverDispatch :: MissionDispatchRequest -> IO (Either MissionStepFailure MissionDispatchAccepted),
     -- | Ends exactly the registered sessions named, which the controller has
     -- already journaled and which is already the complete subtree.
@@ -588,17 +600,41 @@ advanceSteps controller snapshot = do
     Right states -> case dispatchedButUnregistered states snapshot of
       Just (step, session) -> registerDispatchedSession controller snapshot step session
       Nothing -> case unresolvedDispatchOf states controller.missionControllerSpecification snapshot of
-        Just (step, invocation) ->
-          applyStepLifecycle
-            controller
-            snapshot
-            step
-            MissionStepOutcomeUnknown
-            ( "invocation "
-                <> invocation.unMissionInvocationId
-                <> " was journaled and this step never left pending; whether its effect happened is unknown"
-            )
+        Just (step, invocation) -> resolveOpenInvocation controller snapshot step invocation
         Nothing -> advanceReconciled controller snapshot
+
+-- | What to make of an invocation this store never saw the end of.
+--
+-- Asked of the launch itself rather than guessed at. If a worker's own
+-- specification names this invocation then the effect happened, the worker is
+-- this mission's, and the right answer is to adopt it — which is what the
+-- association exists for. Only when no such worker can be found is the outcome
+-- genuinely unknown, and requirement 7 is explicit that such a step is
+-- resolved by direction or fresh evidence and never by trying again.
+resolveOpenInvocation :: MissionController -> MissionSnapshot -> MissionStepId -> MissionInvocationId -> IO MissionIteration
+resolveOpenInvocation controller snapshot step invocation = do
+  adopted <- controller.missionControllerDriver.missionDriverAdoptInvocation invocation
+  case adopted of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right (Just session) -> do
+      now <- getCurrentTime
+      _ <-
+        concludeMissionInvocation
+          controller.missionControllerInvocations
+          invocation
+          (MissionInvocationDispatched session.unMissionSessionId)
+          now
+      registerDispatchedSession controller snapshot step session
+    Right Nothing ->
+      applyStepLifecycle
+        controller
+        snapshot
+        step
+        MissionStepOutcomeUnknown
+        ( "invocation "
+            <> invocation.unMissionInvocationId
+            <> " was journaled and no worker records it; whether its effect happened is unknown"
+        )
 
 -- | Adopts a worker an invocation records but the snapshot never registered.
 --
@@ -883,7 +919,7 @@ performDispatch controller snapshot step invocation plannedVersion = do
               snapshot
               step.missionPlanStepId
               MissionStepPending
-              (missionStepFailureMessage (MissionFailureStaleVersion stale))
+              (missionStepFailureMessage (MissionFailureStaleVersion (missionStaleVersionMessage stale)))
       _ -> do
         let reading = liveReadingFor snapshot step.missionPlanStepId
         accepted <-
@@ -1248,7 +1284,12 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
         (_, Left detail) -> pure (Left (MissionFailureOutcomeUnknown detail))
         (Just recorded, Right (Just observed))
           | not (missionVersionHolds recorded observed) ->
-              pure (Left (MissionFailureStaleVersion (MissionStaleVersion recorded observed)))
+              pure
+                ( Left
+                    ( MissionFailureStaleVersion
+                        (missionStaleVersionMessage (MissionStaleVersion recorded observed))
+                    )
+                )
         (_, Right currentVersion) ->
           controller.missionControllerDriver.missionDriverDispatch
             MissionDispatchRequest
