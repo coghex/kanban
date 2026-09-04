@@ -106,7 +106,7 @@ import Kanban.Worker
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, realProcessSnapshotTool, withPreflightMachine)
 import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory, removeFile)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
@@ -1732,11 +1732,55 @@ collectionSpec = describe "collecting host and child records" $ do
       collectWorkerCache testRepository
       doesFileExist host.workerDescriptorSpecPath `shouldReturn` True
 
+  -- The child is inside its own retention window here, which is what makes
+  -- this the rule it says it is: a child past that window is collected by its
+  -- own gate whether or not anyone acknowledged it, so a host measured
+  -- against one would be answering a question about a record that no longer
+  -- exists.
   it "keeps them while a terminal child is still unacknowledged" $
-    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host _ -> do
+    withRetainedChildTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
       acknowledgeWorker host
       collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
       doesFileExist host.workerDescriptorSpecPath `shouldReturn` True
+
+  -- The pass visits records in the order the filesystem hands them over, and
+  -- 'removeWorkerArtifacts' clears a worker's state before its specification
+  -- — so a host collected earlier in the same pass is still in this pass's
+  -- history with its state already gone. Reading that as "cannot prove the
+  -- host is gone" kept every child of a host that had just been collected,
+  -- which is why this suite passed on one filesystem's ordering and not
+  -- another's.
+  it "collects a child whose host was collected earlier in the same pass" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      -- Exactly what the host's own collection leaves behind on its way to
+      -- removing the specification last.
+      removeFile host.workerDescriptorStatePath
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` False
+
+  -- And the same in the other direction, since a host's retention reads its
+  -- children's records the same way.
+  it "collects a host whose child was collected earlier in the same pass" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      removeFile child.workerDescriptorStatePath
+      collectWorkerCache testRepository
+      doesFileExist host.workerDescriptorSpecPath `shouldReturn` False
+
+  -- The fail-closed reading this rests on is still there: a record that is
+  -- present and will not decode is not proof of anything, and keeps its
+  -- counterpart.
+  it "keeps a child whose host record is present but unreadable" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      writeFile host.workerDescriptorStatePath "{"
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
 
   -- The command ledger is a companion artifact like the journal, so a
   -- collection that left it behind would accumulate a person's typed guidance
@@ -2680,7 +2724,16 @@ withIssueAction body =
 
 -- | A host and one child of it, each published in the status the caller names.
 withHostTopology :: WorkerStatus -> WorkerStatus -> (WorkerDescriptor -> WorkerDescriptor -> IO result) -> IO result
-withHostTopology hostStatus childStatus body =
+withHostTopology hostStatus childStatus = withHostTopologyAged hostStatus childStatus expiredHeartbeat
+
+-- | The same topology with the child inside the retention window, so its own
+-- records survive the pass and the rules that read them have something to
+-- read.
+withRetainedChildTopology :: WorkerStatus -> WorkerStatus -> (WorkerDescriptor -> WorkerDescriptor -> IO result) -> IO result
+withRetainedChildTopology hostStatus childStatus = withHostTopologyAged hostStatus childStatus getCurrentTime
+
+withHostTopologyAged :: WorkerStatus -> WorkerStatus -> IO UTCTime -> (WorkerDescriptor -> WorkerDescriptor -> IO result) -> IO result
+withHostTopologyAged hostStatus childStatus childHeartbeat body =
   withTemporaryCacheRoot $ \temporaryRoot ->
     withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
       directory <- workerDirectory testRepository
@@ -2692,10 +2745,11 @@ withHostTopology hostStatus childStatus body =
       -- collectable only once acknowledged /and/ superseded -- and a test
       -- measured there would pass whatever the host/child rules did. Past it,
       -- the only thing left holding a record is the topology.
-      now <- expiredHeartbeat
+      hostNow <- expiredHeartbeat
+      childNow <- childHeartbeat
       mapM_
-        (\(descriptor, status) -> publish descriptor status now)
-        [(host, hostStatus), (child, childStatus)]
+        (\(descriptor, status, heartbeat) -> publish descriptor status heartbeat)
+        [(host, hostStatus, hostNow), (child, childStatus, childNow)]
       body host child
   where
     hostId = WorkerId "host-1"

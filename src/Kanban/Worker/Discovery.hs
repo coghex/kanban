@@ -358,13 +358,19 @@ heldByHostTopology history descriptor = case descriptor.workerDescriptorSpec.wor
       Nothing -> pure False
       Just host -> do
         stateResult <- readWorkerState host
-        pure $ case stateResult of
-          Right hostState -> case hostState.workerStateStatus of
+        case stateResult of
+          Right hostState -> pure $ case hostState.workerStateStatus of
             WorkerTerminal _ -> False
             _ -> True
           -- A host record that will not decode cannot prove the host is gone,
-          -- and this is a deletion: keep the child.
-          Left _ -> True
+          -- and this is a deletion: keep the child. Gone entirely is a
+          -- different answer from unreadable, though, and telling them apart
+          -- is what makes this pass independent of the order it visits
+          -- records in: this history is a snapshot, so a host collected
+          -- earlier in the same pass is still in it with its state already
+          -- removed, and reading that as "cannot prove it is gone" would keep
+          -- every child of a host that had just been collected.
+          Left _ -> stateStillThere host
     anyChildOutstanding = or <$> mapM childOutstanding (filter ownedByThisHost history)
     ownedByThisHost candidate = case candidate.workerDescriptorSpec.workerTask of
       IssueActionWorkerTaskKind task -> task.issueActionHost == descriptor.workerDescriptorSpec.workerId
@@ -372,10 +378,18 @@ heldByHostTopology history descriptor = case descriptor.workerDescriptorSpec.wor
     childOutstanding child = do
       stateResult <- readWorkerState child
       case stateResult of
-        Left _ -> pure True
+        -- Same distinction, in the other direction: a child collected earlier
+        -- in this pass is not an outstanding child, and holding its host on
+        -- the strength of records that have just been removed would keep
+        -- every host whose children the pass had already tidied.
+        Left _ -> stateStillThere child
         Right childState -> case childState.workerStateStatus of
           WorkerTerminal _ -> not <$> doesFileExist child.workerDescriptorAckPath
           _ -> pure True
+    -- Whether a record that would not decode is present at all. Present and
+    -- unreadable is the fail-closed case this layer has always taken; absent
+    -- is a record something has already removed.
+    stateStillThere candidate = doesFileExist candidate.workerDescriptorStatePath
 
 -- | Whether a newer worker is durable proof that this one's workflow step was
 -- superseded: a same-repository spec discovery already decoded, ordered after

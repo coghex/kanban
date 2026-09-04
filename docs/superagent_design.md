@@ -1519,7 +1519,14 @@ unless their typed contract exposes an override.
 
   Startup collection follows the topology: a child whose host is live is never
   collected, and a host with a live or unacknowledged-terminal child is never
-  collected either, on top of every rule the pass already applied.
+  collected either, on top of every rule the pass already applied. Both of
+  those read the counterpart's durable state, and a record that is /gone/ is
+  not the same answer as one that will not decode: the pass works from a
+  snapshot of the directory and removes a worker's state before its
+  specification, so a counterpart collected earlier in the same pass is still
+  in that snapshot with its state already removed. Reading that as "cannot
+  prove it is gone" made the pass depend on the order the filesystem handed
+  its records over — which is how it passed on one and not the other.
 
   Several orderings the review rounds found are closed explicitly. A child can
   be settled — by a termination command, its own bound, or a dead connection —
