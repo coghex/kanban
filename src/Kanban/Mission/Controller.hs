@@ -94,6 +94,7 @@ import Kanban.Mission.Invocation
     MissionTargetVersion (..),
     concludeMissionInvocation,
     missionInvocationFor,
+    missionInvocationResolved,
     missionVersionHolds,
     newMissionInvocationId,
     readMissionInvocations,
@@ -895,12 +896,13 @@ reconcileOneStep controller snapshot = go candidates
                   go rest
               | otherwise ->
                   Just
-                    <$> applyStepLifecycle controller snapshot step.missionPlanStepId MissionStepSucceeded detail
+                    <$> applyStepOutcome controller snapshot gatheredEvidence step.missionPlanStepId MissionStepSucceeded detail
             MissionWorkFailedExternally failure ->
               Just
-                <$> applyStepLifecycle
+                <$> applyStepOutcome
                   controller
                   snapshot
+                  gatheredEvidence
                   step.missionPlanStepId
                   (missionStepFailureLifecycle failure)
                   (missionStepFailureMessage failure)
@@ -908,7 +910,7 @@ reconcileOneStep controller snapshot = go candidates
               | record.missionStepRecordLifecycle == MissionStepNeedsInput -> go rest
               | otherwise ->
                   Just
-                    <$> applyStepLifecycle controller snapshot step.missionPlanStepId MissionStepNeedsInput detail
+                    <$> applyStepOutcome controller snapshot gatheredEvidence step.missionPlanStepId MissionStepNeedsInput detail
             MissionWorkConflicting detail -> do
               iteration <- applyMissionLifecycle controller snapshot MissionPaused detail
               pure (Just iteration)
@@ -916,7 +918,7 @@ reconcileOneStep controller snapshot = go candidates
               | record.missionStepRecordLifecycle == MissionStepOutcomeUnknown -> go rest
               | otherwise ->
                   Just
-                    <$> applyStepLifecycle controller snapshot step.missionPlanStepId MissionStepOutcomeUnknown detail
+                    <$> applyStepOutcome controller snapshot gatheredEvidence step.missionPlanStepId MissionStepOutcomeUnknown detail
             -- Nothing outside this mission has anything to say about a step
             -- that is already under way. That is not a step to wait on: its
             -- worker is not live (a live one classifies as attachable), no
@@ -928,9 +930,10 @@ reconcileOneStep controller snapshot = go candidates
               | record.missionStepRecordLifecycle == MissionStepOutcomeUnknown -> go rest
               | otherwise ->
                   Just
-                    <$> applyStepLifecycle
+                    <$> applyStepOutcome
                       controller
                       snapshot
+                      gatheredEvidence
                       step.missionPlanStepId
                       MissionStepOutcomeUnknown
                       "no live worker, no recorded result, and no evidence of what became of it"
@@ -1151,8 +1154,20 @@ applyCommand controller snapshot command = case command.missionCommandPayload of
             )
         pure refused
     | otherwise -> do
-        iteration <- applyStepLifecycle controller snapshot step MissionStepPending ("user override: " <> detail)
-        finish iteration ("user override on " <> step.unMissionStepId)
+        -- The override has to reach the invocation file, not just the step
+        -- record. An open invocation for this step is what the recovery pass
+        -- reads /before/ anything looks at step lifecycles, so a step handed
+        -- back to @pending@ while its launch is still unresolved is taken
+        -- straight back to @outcome_unknown@ on the very next iteration and
+        -- the operator's direction is undone by the safeguard meant to wait
+        -- for it. Requirement 7 names authenticated direction as one of the
+        -- two things that may resolve such a record, and this is it.
+        released <- releaseOpenInvocations controller step detail
+        case released of
+          Left message -> pure (MissionControllerFailed message)
+          Right () -> do
+            iteration <- applyStepLifecycle controller snapshot step MissionStepPending ("user override: " <> detail)
+            finish iteration ("user override on " <> step.unMissionStepId)
   MissionTerminateSubtreeCommand session reason
     | not (overrideAuthorized command.missionCommandAuthority) ->
         refuse command "only the runner's own console may terminate a registered subtree"
@@ -1169,6 +1184,42 @@ applyCommand controller snapshot command = case command.missionCommandPayload of
       journalCommand controller submitted ("refused: " <> detail)
       consumeMissionCommand submitted
       pure (MissionAdvanced (MissionCommandRefused submitted.missionCommandId detail))
+
+-- | Closes every launch of one step that this store never saw the end of,
+-- on the operator's word.
+--
+-- 'MissionInvocationAbandoned' rather than an unknown outcome, and the
+-- difference is the authority: an unknown outcome is what a run writes when it
+-- looked and could not tell, and this is a person who /can/ tell saying the
+-- effect never happened and the step may be planned again. Nothing else in
+-- this module may write it for a dispatch, which is why the override is the
+-- only path here.
+releaseOpenInvocations :: MissionController -> MissionStepId -> Text -> IO (Either Text ())
+releaseOpenInvocations controller step detail = do
+  recorded <-
+    readMissionInvocations
+      controller.missionControllerMission
+      controller.missionControllerStore.missionStoreRepository
+      controller.missionControllerInvocations
+  case recorded of
+    Left message -> pure (Left message)
+    Right states -> do
+      now <- getCurrentTime
+      results <-
+        mapM
+          ( \state ->
+              concludeMissionInvocation
+                controller.missionControllerInvocations
+                state.missionInvocationRecord.missionInvocationId
+                (MissionInvocationAbandoned ("user override: " <> detail))
+                now
+          )
+          [ state
+          | state <- states,
+            not (missionInvocationResolved state),
+            state.missionInvocationRecord.missionInvocationStep == step
+          ]
+      pure (sequence_ results)
 
 -- | Requirement 11's explicit, journaled, recursive termination.
 terminateSubtree :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionSessionId -> Text -> IO MissionIteration
@@ -1478,6 +1529,31 @@ applyStepLifecycle controller snapshot step lifecycle detail = do
     Left message -> MissionControllerFailed message
     Right () -> MissionAdvanced (MissionStepReconciled step lifecycle detail)
 
+-- | The same write, carrying what this pass learned about the session behind
+-- the step.
+--
+-- Every reconciliation has just read the live worker, and a fresh launch's
+-- provider session is only knowable from that read: the launch itself
+-- registered the session before the provider had named its own. Recording it
+-- in the write the reconciliation was making anyway is what lets a later turn
+-- of the same step resume the conversation instead of starting another one,
+-- and costs no extra transition to do it.
+applyStepOutcome :: MissionController -> MissionSnapshot -> MissionStepEvidence -> MissionStepId -> MissionStepLifecycle -> Text -> IO MissionIteration
+applyStepOutcome controller snapshot evidence step lifecycle detail = do
+  written <- writeStep controller snapshot step lifecycle detail (learnedSession evidence)
+  pure $ case written of
+    Left message -> MissionControllerFailed message
+    Right () -> MissionAdvanced (MissionStepReconciled step lifecycle detail)
+
+-- | The session identity a piece of evidence can teach the snapshot.
+--
+-- No parent: this is a session the mission already registered, and its lineage
+-- was settled when it was.
+learnedSession :: MissionStepEvidence -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text)
+learnedSession evidence = do
+  reading <- evidence.missionEvidenceWorker
+  pure (reading.missionWorkerSession, Nothing, reading.missionWorkerProviderSession)
+
 -- | The same write, for the intermediate state a dispatch passes through.
 --
 -- Not a transition: an iteration reports the one thing it achieved, and
@@ -1532,9 +1608,22 @@ applyMissionLifecycle controller snapshot lifecycle detail = do
 registerSession :: MissionController -> MissionStepId -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text) -> [MissionSessionNode] -> [MissionSessionNode]
 registerSession _ _ Nothing nodes = nodes
 registerSession controller step (Just (identity, parent, providerSession)) nodes
-  | any ((== identity) . (.missionSessionId)) nodes = nodes
+  | any ((== identity) . (.missionSessionId)) nodes = map learn nodes
   | otherwise = nodes <> [node]
   where
+    -- Idempotent, but not inert. A launch registers the session before the
+    -- provider has named its own, and that name only appears in the worker's
+    -- durable state some time later — so the node this mission holds would
+    -- never learn it, and requirement 13's resume would brief a fresh session
+    -- every time even though there was one to continue.
+    --
+    -- Filling in an absence only. A node that already names a provider session
+    -- keeps it: a different name is a different session, and quietly
+    -- rewriting it would change which conversation a resume continues.
+    learn candidate
+      | candidate.missionSessionId /= identity = candidate
+      | candidate.missionSessionProviderSessionId /= Nothing = candidate
+      | otherwise = candidate {missionSessionProviderSessionId = providerSession}
     node =
       MissionSessionNode
         { missionSessionId = identity,

@@ -180,6 +180,7 @@ module Kanban.Mission
     consumeMissionCommand,
     overrideAuthorized,
     parseMissionConsoleCommand,
+    parseConsoleTarget,
 
     -- * Reconciliation
     MissionStepFailure (..),
@@ -244,7 +245,8 @@ module Kanban.Mission
     runMissionWith,
     liveMissionDriver,
     decidingWorkerReading,
-    drainMissionConsole,
+    MissionConsole (..),
+    terminalMissionConsole,
     drainMissionConsoleWith,
     missionVersionOf,
     preconditionOf,

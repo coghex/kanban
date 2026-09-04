@@ -3439,6 +3439,15 @@ Defaults:
   record that has been collected is evidence of nothing: it is read as an
   unknown ending, never as a clean one, so a parent never settles over a child
   whose outcome no longer exists to be read.
+  A run that reaches a blocked lifecycle stays at its own terminal and asks
+  what to do, because that terminal is the only channel carrying the authority
+  such a state is resolvable by; exiting first would report the question after
+  closing the one door out of it. End of input, or the word for it, ends the
+  run on the state it was already reporting, and a redirected standard input is
+  never prompted any more than it is read. An authenticated override reaches
+  the launch record as well as the step, since an unresolved launch is what the
+  recovery pass reads first and a step handed back without it would be taken
+  straight to `outcome_unknown` again on the next pass.
   `control/requests/` is the channel an attached client takes direction on, and
   everything in it is an ordinary durable operator command with no override
   authority — no credential is stored there or anywhere else, because one

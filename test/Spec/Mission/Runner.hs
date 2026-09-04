@@ -28,6 +28,8 @@
 module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
+import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (forM_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf)
 import Data.Text (Text)
@@ -74,7 +76,10 @@ import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import Spec.Support.Process (deadlineFixtureSpec)
 import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
-import System.IO (Handle, IOMode (ReadMode), withFile)
+import qualified Data.Text.IO as TextIO
+import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hIsTerminalDevice, hSetBuffering, withFile)
+import System.Process (createPipe)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -95,6 +100,7 @@ spec = describe "the foreground mission runner" $ do
   workerPreconditionSpec
   failureVocabularySpec
   openEffectRecoverySpec
+  directionSpec
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -1618,7 +1624,7 @@ consoleSpec = describe "the runner's own console" $ do
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
           withConsole "override solve-844 let me in\n" $ \handle ->
-            drainMissionConsole handle controller
+            drainMissionConsoleWith (hIsTerminalDevice handle) handle controller
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> pure ()
@@ -1816,13 +1822,22 @@ withIsolatedGh action = withTemporaryCacheRoot $ \root ->
 -- The state and instant match 'issueVersion', so the only fact that can differ
 -- is the one an example varies.
 ghItem :: [Text] -> [ByteString.ByteString]
-ghItem labels =
+ghItem = ghItemIn "OPEN"
+
+-- | The same, in a lifecycle state an example chooses.
+--
+-- @gh@ spells these @OPEN@, @CLOSED@, and @MERGED@; the read under test is
+-- what lowercases them, so the fixture must not do it here.
+ghItemIn :: String -> [Text] -> [ByteString.ByteString]
+ghItemIn state labels =
   [ "#!/bin/sh",
     ByteString.pack
       ( "printf '%s' '"
           <> "{\"number\":844,\"updatedAt\":\""
           <> iso8601
-          <> "\",\"state\":\"OPEN\",\"labels\":["
+          <> "\",\"state\":\""
+          <> state
+          <> "\",\"labels\":["
           <> intercalate "," ["{\"name\":\"" <> Text.unpack name <> "\"}" | name <- labels]
           <> "]}'"
       )
@@ -2195,3 +2210,258 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
           Text.unpack detail `shouldSatisfy` isInfixOf "could not be reread"
         other -> expectationFailure ("unexpected iteration: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
+
+-- ---------------------------------------------------------------------------
+-- Direction
+-- ---------------------------------------------------------------------------
+
+-- | The half of requirement 14 a run has to stay alive for.
+--
+-- An unknown outcome is resolvable by authenticated direction and by nothing
+-- else, and the only authenticated channel is this run's own terminal. A run
+-- that wrote @waiting_input@ and exited on the next pass therefore closed the
+-- one door out of the state it had just entered: the operator learned of it
+-- from a report printed after the process was gone, and a later run exited for
+-- the same reason before they could answer.
+directionSpec :: Spec
+directionSpec = describe "directing a run that has blocked" $ do
+  it "asks the operator what to do, and acts on the answer" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      -- A launch this store never saw the end of, which is what drives the
+      -- mission into waiting_input a couple of passes from now.
+      openInvocation store
+      (readEnd, writeEnd) <- createPipe
+      hSetBuffering writeEnd LineBuffering
+      asked <- newEmptyMVar
+      said <- newIORef []
+      finished <- newEmptyMVar
+      let console =
+            MissionConsole
+              { missionConsoleInput = readEnd,
+                missionConsoleIsTerminal = pure True,
+                missionConsoleAnnounce = \spoken -> do
+                  atomicModifyIORef' said (\seen -> (seen <> [spoken], ()))
+                  putMVar asked spoken
+              }
+      _ <-
+        forkIO
+          ( runMissionWith (Just console) store boardRepository theMission (stagedDriver stage)
+              >>= putMVar finished
+          )
+      -- It says what it is stuck on before it waits, which is the whole point:
+      -- an operator cannot answer a question nobody asked.
+      firstAsk <- awaitConsole asked
+      Text.unpack firstAsk `shouldSatisfy` isInfixOf "waiting for an answer"
+      Text.unpack firstAsk `shouldSatisfy` isInfixOf "detach"
+      TextIO.hPutStrLn writeEnd "override solve-844 it never ran"
+      -- The override resolves the step; the mission is still blocked, so it
+      -- asks again rather than assuming that was the whole answer.
+      _ <- awaitConsole asked
+      TextIO.hPutStrLn writeEnd "resume"
+      -- Resumed, the freed step is dispatchable again — which is only true
+      -- because the override reached the invocation file as well as the step
+      -- record.
+      _ <- awaitConsole asked
+      hClose writeEnd
+      report <- awaitConsole finished
+      case report of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right run -> do
+          run.missionRunConclusion
+            `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+          map missionTransitionMessage run.missionRunTransitions
+            `shouldSatisfy` any (isInfixOf "user override on solve-844" . Text.unpack)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      length <$> readIORef said `shouldReturn` 3
+
+  -- End of input is an answer, and so is saying so. Neither may be mistaken
+  -- for a line to parse.
+  it "ends the run on a closed console, and on the word for it" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      openInvocation store
+      forM_ ["", "detach\n", "QUIT\n"] $ \typed -> do
+        said <- newIORef []
+        report <- withConsole typed $ \handle ->
+          runMissionWith (Just (spokenConsole handle said)) store boardRepository theMission (stagedDriver stage)
+        case report of
+          Left detail -> expectationFailure (Text.unpack detail)
+          Right run ->
+            run.missionRunConclusion
+              `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+        readIORef stage.stageDispatches `shouldReturn` []
+
+  -- The exclusion that makes the prompt authority rather than a formality. A
+  -- handle that is not this process's terminal is another process's output,
+  -- and a run reading direction off it would be taking orders from whatever
+  -- wrote the pipe.
+  it "never prompts a handle that is not this process's terminal" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      openInvocation store
+      said <- newIORef []
+      report <- withConsole "override solve-844 let me in\n" $ \handle ->
+        runMissionWith
+          (Just ((spokenConsole handle said) {missionConsoleIsTerminal = pure False}))
+          store
+          boardRepository
+          theMission
+          (stagedDriver stage)
+      case report of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right run ->
+          run.missionRunConclusion
+            `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+      readIORef said `shouldReturn` []
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  -- A terminal mission is over, and no console makes it otherwise.
+  it "does not prompt on a mission that has finished" $
+    withMission (snapshotWith MissionCompleted [stepRecord MissionStepSucceeded []] []) $ \store stage -> do
+      said <- newIORef []
+      report <- withConsole "resume\n" $ \handle ->
+        runMissionWith (Just (spokenConsole handle said)) store boardRepository theMission (stagedDriver stage)
+      case report of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right run -> run.missionRunConclusion `shouldBe` Right (MissionHaltTerminal MissionCompleted)
+      readIORef said `shouldReturn` []
+
+  it "releases the step's open launch on the operator's word, and only then" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown []] []) $ \store stage -> do
+      openInvocation store
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          -- A pause is direction too, and it resolves nothing: only the
+          -- override says the effect never happened.
+          submitConsoleCommand controller "c-pause" (MissionPauseCommand "not yet")
+          _ <- missionControllerIteration controller
+          outcomeTags store `shouldReturn` [Nothing]
+          submitConsoleCommand controller "c-free" (MissionUserOverrideCommand theStep "it never ran")
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandApplied "c-free" _) -> pure ()
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      outcomeTags store `shouldReturn` [Just "abandoned"]
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepPending
+
+  -- A child line that names no target resolves to the whole repository, which
+  -- every item-scoped action refuses; so the grammar has to be able to say
+  -- which item, and the item has to survive all the way to the dispatch.
+  it "carries the item a console child line named through to the dispatch" $
+    withLiveParent $ \_ stage controller -> do
+      case parseMissionConsoleCommand theMission "child r-30 solve-844-0001 review_pull_request pr#900" of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right payload -> submitConsoleCommand controller "c-target" payload
+      iteration <- missionControllerIteration controller
+      case iteration of
+        MissionAdvanced (MissionCommandApplied "c-target" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "registered child"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      dispatched <- readIORef stage.stageDispatches
+      map (fmap targetPair . (.missionDispatchTarget)) dispatched
+        `shouldBe` [Just (MissionTargetPullRequest, 900)]
+
+  it "parses the item a child line names, and refuses a spelling it cannot" $ do
+    targetOf "child r-1 solve-844-0001 review_issue issue#844"
+      `shouldBe` Right (Just (MissionTargetIssue, 844))
+    targetOf "child r-1 solve-844-0001 review_pull_request PR#900"
+      `shouldBe` Right (Just (MissionTargetPullRequest, 900))
+    -- No target is still a request: an action that works on the repository
+    -- rather than on one item takes none.
+    targetOf "child r-1 solve-844-0001 report_approval_queue" `shouldBe` Right Nothing
+    parseConsoleTarget "issue#844" `shouldBe` Right (MissionTarget MissionTargetIssue 844 Nothing)
+    mapM_
+      (\spelled -> parseConsoleTarget spelled `shouldSatisfy` either (isInfixOf "issue#<number>" . Text.unpack) (const False))
+      ["900", "pr#0", "pr#nine", "branch#900", "pr#", "#900", "pr#900#2"]
+
+  -- Requirement 8's reread has to be able to see a target that reached a
+  -- terminal state, which is the most ordinary reason a plan is out of date. A
+  -- read that only covers open work reports the commonest staleness there is
+  -- as a target it could not resolve.
+  it "reads a target that closed since the plan as a fact, not as an absence" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghItemIn "CLOSED" ["reviewed:approve"]) $ do
+          observed <- driver.missionDriverObserveTarget theTarget
+          case observed of
+            Left detail -> expectationFailure ("a closed target could not be read: " <> Text.unpack detail)
+            Right version -> do
+              version.missionVersionState `shouldBe` "closed"
+              version.missionVersionNumber `shouldBe` 844
+              -- And that is what makes it a stale plan rather than a failure.
+              missionVersionHolds (issueVersion ["reviewed:approve"]) version `shouldBe` False
+        withFakeGh root (ghItemIn "OPEN" ["reviewed:approve"]) $ do
+          unchanged <- driver.missionDriverObserveTarget theTarget
+          fmap (missionVersionHolds (issueVersion ["reviewed:approve"])) unchanged `shouldBe` Right True
+
+  -- A launch registers its session before the provider has named its own, so
+  -- the identity a resume needs only appears in the worker's durable state
+  -- afterwards. Without learning it, every continuation briefs a fresh session
+  -- over a conversation that was there to be continued.
+  it "learns a fresh launch's provider session, and resumes it on the next turn" $ do
+    let unnamed = (sessionNode "solve-844-0001" Nothing Nothing) {missionSessionProviderSessionId = Nothing}
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] [unnamed]) $ \store stage -> do
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence
+          { missionEvidenceWorker =
+              Just
+                MissionWorkerReading
+                  { missionWorkerSession = theParent,
+                    missionWorkerLive = False,
+                    missionWorkerCompatible = True,
+                    missionWorkerTerminal = Just (MissionWorkerFailed (MissionFailureStaleVersion "#844 changed")),
+                    missionWorkerProviderSession = Just "provider-live"
+                  }
+          }
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          first <- missionControllerIteration controller
+          case first of
+            MissionAdvanced (MissionStepReconciled _ MissionStepPending _) -> pure ()
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          learned <- currentSnapshot store
+          map (.missionSessionProviderSessionId) learned.missionSnapshotSessions
+            `shouldBe` [Just "provider-live"]
+          -- The turn after it: the dispatch continues that session rather than
+          -- briefing a new one.
+          writeIORef stage.stageEvidence id
+          _ <- missionControllerIteration controller
+          dispatched <- readIORef stage.stageDispatches
+          map (.missionDispatchContinuation) dispatched
+            `shouldBe` [MissionResumeSession "provider-live"]
+          stopMissionController controller
+
+-- | A console over a handle, collecting whatever the run says.
+spokenConsole :: Handle -> IORef [Text] -> MissionConsole
+spokenConsole handle said =
+  MissionConsole
+    { missionConsoleInput = handle,
+      missionConsoleIsTerminal = pure True,
+      missionConsoleAnnounce = \spoken -> atomicModifyIORef' said (\seen -> (seen <> [spoken], ()))
+    }
+
+-- | Waits for the run to say something, rather than for a wall clock.
+--
+-- The bound is a deadlock guard and nothing else: every wait here is answered
+-- by the run itself, so a timeout means the handshake broke, not that the
+-- machine was slow.
+awaitConsole :: MVar result -> IO result
+awaitConsole slot = do
+  taken <- timeout (30 * 1000 * 1000) (takeMVar slot)
+  case taken of
+    Just result -> pure result
+    Nothing -> fail "the run neither asked for direction nor finished"
+
+targetPair :: MissionTarget -> (MissionTargetKind, Int)
+targetPair target = (target.missionTargetKind, target.missionTargetNumber)
+
+targetOf :: Text -> Either Text (Maybe (MissionTargetKind, Int))
+targetOf line = case parseMissionConsoleCommand theMission line of
+  Left detail -> Left detail
+  Right (MissionChildRequestCommand request) -> Right (targetPair <$> request.missionChildRequestTarget)
+  Right other -> Left ("not a child request: " <> Text.pack (show other))

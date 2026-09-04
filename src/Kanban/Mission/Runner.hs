@@ -38,10 +38,11 @@ module Kanban.Mission.Runner
     missionRunReportLines,
     missionRunSucceeded,
     runMissionMode,
+    MissionConsole (..),
+    terminalMissionConsole,
     runMissionWith,
     liveMissionDriver,
     decidingWorkerReading,
-    drainMissionConsole,
     drainMissionConsoleWith,
     missionVersionOf,
     preconditionOf,
@@ -61,7 +62,6 @@ import Kanban.Action
   ( ActionEnvironment (..),
     ActionHandle,
     ActionRequest (..),
-    ActionTarget (..),
     ActionTargetKind (..),
     ActionTargetRef (..),
     CatalogHistory (..),
@@ -70,13 +70,10 @@ import Kanban.Action
     targetPreconditionNumber,
     actionHandleWorker,
     actionKindDecodeErrorMessage,
-    actionRefusalMessage,
     actionRequest,
     decodeWorkflowActionKind,
     dispatchAction,
-    resolveActionTarget,
     settledWorkerFailure,
-    targetPreconditionFor,
   )
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
@@ -90,6 +87,7 @@ import Kanban.Domain
     WorkflowConfig (..),
   )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, newGhFetchGuard, newGhRecordLock)
+import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Mission.Control (parseMissionConsoleCommand)
 import Kanban.Mission.Controller
   ( MissionController (..),
@@ -111,7 +109,7 @@ import Kanban.Mission.Invocation (MissionInvocationId (..), MissionTargetVersion
 import Kanban.Mission.Paths (openMissionStore)
 import Kanban.Mission.Reconcile
   ( MissionContinuation (..),
-    MissionHalt,
+    MissionHalt (..),
     MissionStepEvidence (..),
     MissionStepFailure (..),
     MissionWorkerConclusion (..),
@@ -151,7 +149,8 @@ import Kanban.Worker
     readWorkerState,
     terminateWorker,
   )
-import System.IO (Handle, hGetLine, hIsTerminalDevice, hReady, stdin)
+import qualified Data.Text.IO as TextIO
+import System.IO (Handle, hGetLine, hIsTerminalDevice, hReady, stdin, stdout)
 
 -- | What one foreground run did, in the order it did it.
 data MissionRunReport = MissionRunReport
@@ -228,20 +227,64 @@ runMissionMode options config repository identifier
         Right store ->
           runMissionWith
             -- This process's own terminal is the authenticated console
-            -- requirement 14 names. 'drainMissionConsole' is what decides
-            -- whether this handle qualifies; a redirected stdin is
-            -- unauthenticated process input and is never read.
-            (Just stdin)
+            -- requirement 14 names. The console itself is what decides whether
+            -- this handle qualifies; a redirected stdin is unauthenticated
+            -- process input and is never read.
+            (Just terminalMissionConsole)
             store
             repository
             (MissionId (Text.strip identifier))
             (liveMissionDriver options config repository)
 
+-- | The operator's end of a run: where an authenticated line comes from, and
+-- where this run says something back.
+--
+-- A record rather than a bare handle because a blocked mission has to be able
+-- to /ask/. The run reports its transitions when it ends, which is exactly the
+-- wrong moment for the one thing an operator must answer while it is still
+-- going: a mission that reaches an unknown outcome can be resolved by
+-- authenticated direction and by nothing else (requirement 7), and a durable
+-- file command carries no such authority by design, so a run that exited
+-- before saying it was stuck left the operator no way in at all.
+data MissionConsole = MissionConsole
+  { missionConsoleInput :: Handle,
+    -- | Whether that handle is this process's own terminal. The seam a fixture
+    -- uses; production supplies 'hIsTerminalDevice' and nothing else does.
+    missionConsoleIsTerminal :: IO Bool,
+    missionConsoleAnnounce :: Text -> IO ()
+  }
+
+-- | This process's terminal, which is the only console production has.
+terminalMissionConsole :: MissionConsole
+terminalMissionConsole =
+  MissionConsole
+    { missionConsoleInput = stdin,
+      missionConsoleIsTerminal = hIsTerminalDevice stdin,
+      missionConsoleAnnounce = TextIO.hPutStrLn stdout
+    }
+
+-- | What a blocked run does with the operator's answer.
+data MissionDirection
+  = -- | A line was taken and handed to the controller; carry on.
+    MissionDirectionTaken
+  | -- | Nothing more is coming — end of input, an unusable console, or the
+    -- operator said so. The run ends on the halt it was already reporting.
+    MissionDirectionEnded
+  deriving stock (Eq, Show)
+
+-- | The words that leave a blocked mission exactly as it is.
+--
+-- Spelled out rather than inferred from a parse failure, because \"I do not
+-- want to answer this now\" and \"I typed that wrong\" are different answers and
+-- only the first should end the run.
+missionConsoleDetachWords :: [Text]
+missionConsoleDetachWords = ["detach", "quit", "exit"]
+
 -- | The loop, with the driver injected.
 --
 -- The seam a fixture uses: everything below this point is the controller's own
 -- progression, and everything the driver does is the outside world.
-runMissionWith :: Maybe Handle -> MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either Text MissionRunReport)
+runMissionWith :: Maybe MissionConsole -> MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either Text MissionRunReport)
 runMissionWith console store repository mission buildDriver = do
   started <- startMissionController store repository mission buildDriver
   case started of
@@ -254,15 +297,60 @@ runMissionWith console store repository mission buildDriver = do
     loop controller remaining transitions
       | remaining <= 0 = pure (concluded transitions (Left budgetExhausted))
       | otherwise = do
-          mapM_ (\handle -> drainMissionConsole handle controller) console
+          mapM_ (\typed -> drainMissionConsoleWith typed.missionConsoleIsTerminal typed.missionConsoleInput controller) console
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced transition -> loop controller (remaining - 1) (transition : transitions)
             MissionAwaiting _ -> do
               threadDelay missionRunnerPollMicros
               loop controller remaining transitions
-            MissionStopped halt -> pure (concluded transitions (Right halt))
+            MissionStopped halt -> stopped controller remaining transitions halt
             MissionControllerFailed detail -> pure (concluded transitions (Left detail))
+
+    -- A terminal mission is over and nothing anybody types changes that. A
+    -- /blocked/ one is the opposite: it is waiting for precisely the authority
+    -- this console carries, so the run says what it is stuck on and waits for
+    -- an answer instead of exiting past the only person who can give one.
+    stopped controller remaining transitions halt = case (halt, console) of
+      (MissionHaltBlocked _ _, Just typed) -> do
+        direction <- await typed controller halt
+        case direction of
+          MissionDirectionTaken -> loop controller remaining transitions
+          MissionDirectionEnded -> pure (concluded transitions (Right halt))
+      _ -> pure (concluded transitions (Right halt))
+
+    -- The budget is deliberately not spent here. It bounds automatic progress,
+    -- and this pass makes none: it blocks on a person, so it cannot spin, and
+    -- an answer that changes nothing simply asks again.
+    await typed controller halt = do
+      usable <- try @IOException typed.missionConsoleIsTerminal
+      case usable of
+        Right True -> do
+          announced <-
+            try @IOException
+              ( typed.missionConsoleAnnounce
+                  ( missionHaltMessage halt
+                      <> "; type a command to direct it, or "
+                      <> Text.intercalate "/" missionConsoleDetachWords
+                      <> " to leave it as it stands"
+                  )
+              )
+          case announced of
+            Left _ -> pure MissionDirectionEnded
+            Right () -> answer typed controller
+        _ -> pure MissionDirectionEnded
+
+    answer typed controller = do
+      -- End of input is an answer too, and the ordinary one: a console that
+      -- has closed cannot be asked again.
+      line <- try @IOException (Text.pack <$> hGetLine typed.missionConsoleInput)
+      case line of
+        Left _ -> pure MissionDirectionEnded
+        Right spoken
+          | Text.toLower (Text.strip spoken) `elem` missionConsoleDetachWords -> pure MissionDirectionEnded
+          | otherwise -> do
+              submitConsoleLine controller spoken
+              pure MissionDirectionTaken
     concluded transitions conclusion =
       MissionRunReport
         { missionRunMission = mission,
@@ -330,22 +418,33 @@ liveMissionDriver options config repository store _ =
           catalogHistory = CatalogHistoryAbsent
         }
 
-    -- The live reading of one target, taken through the registry's own
-    -- resolution and its own precondition derivation.
+    -- The live reading of one target, taken item by item.
     --
-    -- Shared rather than re-extracted, so the record the controller journals
-    -- and the record `dispatchProviderTurn` compares against at the launch
-    -- boundary are the same reading of the same item. Two derivations here
-    -- would be two chances to disagree about what "unchanged" means.
+    -- Not through a board read, and the reason is the whole point of a
+    -- precondition. A board read covers open work, so an issue closed or a
+    -- pull request merged since the plan was made does not resolve at all —
+    -- and an unresolvable target reaches 'performDispatch' as a precondition
+    -- that could not be read, which ends the run, rather than as the stale
+    -- version it actually is, which returns the step to replanning. A target
+    -- that reached a terminal state is the most ordinary reason a plan is out
+    -- of date; it must be a fact this read can report.
+    --
+    -- It is also the same read the worker takes at its own boundary
+    -- ('Kanban.Worker.preconditionStillHolds'), normalized into the same
+    -- spellings 'targetPreconditionForItem' produces from a board item, so
+    -- every comparison in the chain is between two readings that agree about
+    -- what "unchanged" means.
     observeTarget target = do
-      board <- readBoard
-      pure $ case board of
-        Left failure -> Left (missionStepFailureText failure)
-        Right snapshot -> case resolveActionTarget workflowConfig (catalogOf snapshot) identity (targetRefFor target) of
-          Left refusal -> Left (actionRefusalMessage refusal)
-          Right (ActionTargetRepositoryWide _) ->
-            Left ("#" <> Text.pack (show target.missionTargetNumber) <> " resolved to the repository rather than an item")
-          Right (ActionTargetItem resolved) -> Right (missionVersionOf (targetPreconditionFor resolved))
+      recordLock <- newGhRecordLock
+      guard <- newGhFetchGuard recordLock
+      observed <- observeTargetPrecondition guard repository (itemIdFor target)
+      pure $ case observed of
+        Left failure -> Left (missionStepFailureText (missionFailureFromProviderError failure))
+        Right precondition -> Right (missionVersionOf precondition)
+
+    itemIdFor target = case target.missionTargetKind of
+      MissionTargetIssue -> IssueId target.missionTargetNumber
+      MissionTargetPullRequest -> PullRequestId target.missionTargetNumber
 
     -- One step's evidence.
     --
@@ -696,15 +795,11 @@ liveMissionDriver options config repository store _ =
 -- Non-blocking: only lines already buffered are taken, so a mission with a
 -- live worker and a silent operator advances at its own pace. A line that does
 -- not parse is journaled as a rejected command and consumes nothing else.
-drainMissionConsole :: Handle -> MissionController -> IO ()
-drainMissionConsole handle = drainMissionConsoleWith (hIsTerminalDevice handle) handle
-
--- | 'drainMissionConsole' with the console test injected.
---
--- The seam a fixture uses, and the reason it is a seam: the property worth
--- testing is what the runner does with a line once it decides the handle is a
--- console, and arranging a real terminal to say so costs a pseudo-terminal.
--- Production supplies 'hIsTerminalDevice' and nothing else does.
+-- The terminal test is a parameter, and that is a seam rather than a
+-- convenience: the property worth testing is what the runner does with a line
+-- once it has decided the handle is a console, and arranging a real terminal
+-- to say so costs a pseudo-terminal. Production supplies 'hIsTerminalDevice'
+-- through 'terminalMissionConsole' and nothing else does.
 drainMissionConsoleWith :: IO Bool -> Handle -> MissionController -> IO ()
 drainMissionConsoleWith isConsole handle controller = do
   usable <- try @IOException isConsole
@@ -727,18 +822,28 @@ drainMissionConsoleWith isConsole handle controller = do
                   submit typed
                   drain (taken + 1)
             _ -> pure ()
-    submit typed = do
-      commandId <- newConsoleCommandId
-      case parseMissionConsoleCommand controller.missionControllerMission typed of
-        Left detail -> reportUnparsed commandId typed detail
-        -- Handed to the controller inside this process rather than written
-        -- anywhere. That is what makes it authenticated: there is no artefact
-        -- for another process to read, copy, or replay.
-        Right payload -> submitConsoleCommand controller commandId payload
+    submit = submitConsoleLine controller
+
+-- | One typed line, parsed and handed to the controller.
+--
+-- Shared by the drain and by the prompt a blocked run puts up, so an answer
+-- typed at either arrives with the same authority and an unparsable one leaves
+-- the same trace. Two spellings of this would be two chances for the
+-- interactive path to be the lenient one.
+submitConsoleLine :: MissionController -> Text -> IO ()
+submitConsoleLine controller typed = do
+  commandId <- newConsoleCommandId
+  case parseMissionConsoleCommand controller.missionControllerMission typed of
+    Left detail -> reportUnparsed commandId detail
+    -- Handed to the controller inside this process rather than written
+    -- anywhere. That is what makes it authenticated: there is no artefact for
+    -- another process to read, copy, or replay.
+    Right payload -> submitConsoleCommand controller commandId payload
+  where
     -- A line the console could not turn into a command still has to leave a
     -- trace: the operator typed it, and a silently dropped instruction is
     -- indistinguishable from one that was carried out.
-    reportUnparsed commandId typed detail = do
+    reportUnparsed commandId detail = do
       now <- getCurrentTime
       _ <-
         recordMissionEvent

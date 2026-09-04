@@ -62,6 +62,7 @@ module Kanban.Mission.Control
     consumeMissionCommand,
     overrideAuthorized,
     parseMissionConsoleCommand,
+    parseConsoleTarget,
   )
 where
 
@@ -69,6 +70,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Text.Read (decimal)
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import Kanban.Mission.Paths
@@ -87,6 +89,7 @@ import Kanban.Mission.Types
     MissionSessionId (..),
     MissionStepId (..),
     MissionTarget (..),
+    MissionTargetKind (..),
     missionCommandSchemaVersion,
   )
 import System.Directory (removeFile)
@@ -181,8 +184,12 @@ overrideAuthorized MissionAttachedClient = False
 --     the step (requirement 14).
 --   [@terminate \<session\> \<reason\>@] end that registered subtree
 --     (requirement 11).
---   [@child \<request\> \<parent\> \<action\>@] register and launch a child
---     of a live registered session (requirement 12).
+--   [@child \<request\> \<parent\> \<action\> [\<target\>]@] register and launch
+--     a child of a live registered session (requirement 12). The target is
+--     written @issue#844@ or @pr#900@ and is optional: an action that works on
+--     the repository rather than on one item takes none, and an item-scoped
+--     action given none is refused by the registry with the target it wanted
+--     named, rather than silently resolved to the whole repository.
 parseMissionConsoleCommand :: MissionId -> Text -> Either Text MissionCommandPayload
 parseMissionConsoleCommand mission line = case Text.words (Text.strip line) of
   [] -> Left "an empty line is not a command"
@@ -198,17 +205,9 @@ parseMissionConsoleCommand mission line = case Text.words (Text.strip line) of
               (MissionSessionId session)
               (joined rest "the operator ended it")
           )
-  ["child", requestId, parent, action] ->
-    Right
-      ( MissionChildRequestCommand
-          MissionChildRequest
-            { missionChildRequestId = requestId,
-              missionChildRequestMission = mission,
-              missionChildRequestParent = MissionSessionId parent,
-              missionChildRequestAction = action,
-              missionChildRequestTarget = Nothing
-            }
-      )
+  ["child", requestId, parent, action] -> Right (childRequest requestId parent action Nothing)
+  ["child", requestId, parent, action, target] ->
+    (childRequest requestId parent action . Just) <$> parseConsoleTarget target
   (verb : _) ->
     Left
       ( "unknown command "
@@ -218,6 +217,43 @@ parseMissionConsoleCommand mission line = case Text.words (Text.strip line) of
   where
     joined [] fallback = fallback
     joined parts _ = Text.unwords parts
+    childRequest requestId parent action target =
+      MissionChildRequestCommand
+        MissionChildRequest
+          { missionChildRequestId = requestId,
+            missionChildRequestMission = mission,
+            missionChildRequestParent = MissionSessionId parent,
+            missionChildRequestAction = action,
+            missionChildRequestTarget = target
+          }
+
+-- | The item a console line names, written the way a person writes it.
+--
+-- @issue#844@ and @pr#900@, and nothing looser. Every repository has an issue
+-- \#844 and a pull request \#844 and they are not the same item, so the kind is
+-- part of the spelling rather than something the registry is left to guess;
+-- and a number that is not one is refused here, where the operator can see the
+-- refusal, rather than resolved into a target nobody asked for.
+parseConsoleTarget :: Text -> Either Text MissionTarget
+parseConsoleTarget spelled = case Text.breakOn "#" spelled of
+  (kind, rest)
+    | Just number <- Text.stripPrefix "#" rest,
+      Just resolved <- lookup (Text.toLower kind) kinds,
+      Right (value, "") <- decimal number,
+      value > 0 ->
+        Right MissionTarget {missionTargetKind = resolved, missionTargetNumber = value, missionTargetTitle = Nothing}
+  _ ->
+    Left
+      ( "a child's target is written issue#<number> or pr#<number>, not "
+          <> spelled
+      )
+  where
+    kinds =
+      [ ("issue", MissionTargetIssue),
+        ("issues", MissionTargetIssue),
+        ("pr", MissionTargetPullRequest),
+        ("pull", MissionTargetPullRequest)
+      ]
 
 -- | The wire record a client writes.
 data MissionCommandFile = MissionCommandFile

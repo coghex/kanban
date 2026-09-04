@@ -51,8 +51,12 @@ created above it.
   terminal is its authenticated console: a line typed there is handed to the
   controller inside the process, never written down, and can pause or resume
   the mission, resolve an unknown outcome, end a registered subtree, or
-  register a child, while a redirected standard input is never read and a
-  command that arrives as a file carries no override authority at all. The run ends when the
+  register a child against a named item, while a redirected standard input is
+  never read and a command that arrives as a file carries no override authority
+  at all. A run that blocks stays at that terminal and asks what to do rather
+  than exiting past the only person who can answer; end of input, or the word
+  for it, ends it. Resolving an unknown outcome releases the launch record as
+  well as the step, so the recovery pass does not undo the answer. The run ends when the
   mission is terminal, paused, or blocked, and reports the transitions it
   made. It never merges a pull request, applies a verdict label, or reports an
   indeterminate result as a success — and never reads a target's absence from
