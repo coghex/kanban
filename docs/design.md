@@ -4033,8 +4033,14 @@ The first solve/autosolve-compatible slice is implemented.
   Settling a child closes its journal before it records the terminal state,
   because those are two writes and a host dying between them leaves whichever
   prefix landed. A closed journal over a state that still reads as running is
-  repaired by stale recovery, which terminalizes the state and adds no second
-  envelope; a terminal state over an open journal is repaired by nothing.
+  the repairable one; a terminal state over an open journal is repaired by
+  nothing. What repairs it is the replay itself: a monitor stops at a terminal
+  envelope, so that stop is where a state which has not caught up is
+  completed — with the outcome the envelope already published, releasing the
+  lease, and appending nothing, since the envelope is the journal's last
+  record. Every other path that reaches such a child reads the envelope the
+  same way: the direct-termination fallback repairs from it rather than
+  ending an action a second time under a different outcome.
   A child settled between asking for a provider thread and the provider
   announcing one stays addressable until that announcement arrives, and the
   thread it names is closed rather than left owned by nothing; a canonical

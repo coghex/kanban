@@ -8,7 +8,7 @@
 -- it, and what the host does with a command when it reads one.
 module Spec.Agent.IssueHost (spec) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, join, void, when)
 import Data.IORef (atomicModifyIORef', newIORef)
@@ -94,6 +94,8 @@ import Kanban.Worker
     issueActionTask,
     issueHostGone,
     neverAdopted,
+    monitorWorker,
+    acquireWorkerLeaseFor,
     reconcileIssueActionClaims,
     confirmIssueActionAdoptedWith,
     readWorkerJournal,
@@ -106,7 +108,7 @@ import Kanban.Worker
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, realProcessSnapshotTool, withPreflightMachine)
 import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeFile)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
@@ -766,6 +768,55 @@ lifecycleSpec = describe "one running host" $ do
         journaled <- journalEvents descriptor
         [event | event@(WorkerFinished _) <- journaled]
           `shouldBe` [WorkerFinished (SolveFailed "the issue action was terminated")]
+
+  -- Round 22's first blocker, and the gap in the round-20 test beside it:
+  -- that one drove 'recoverIfWorkerStoppedWith' directly, and the real path
+  -- never reaches it. 'monitorWorker' stops replaying at a terminal envelope,
+  -- and stopping is exactly what skipped the recovery that was supposed to
+  -- complete the settle — so the transcript ended while the child stayed
+  -- running, discoverable, and holding its lease for ever.
+  it "completes a half-settled child through the monitor that replays it" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        now <- getCurrentTime
+        descriptor <- halfSettledChild (addUTCTime (-600) now)
+        emitted <- newMVar []
+        monitored <-
+          forkIO (monitorWorker descriptor (\_ _ event -> modifyMVar_ emitted (pure . (<> [event]))))
+        recorded <-
+          awaitJust "the monitor never completed the settle" $ do
+            held <- decodeChildState descriptor
+            pure (if maybe False (terminalState . (.workerStateStatus)) held then held else Nothing)
+        recorded.workerStateStatus
+          `shouldBe` WorkerTerminal (SolveFailed "the issue action was terminated")
+        -- The envelope it found, replayed once, and no second one written.
+        journaled <- journalEvents descriptor
+        [event | event@(WorkerFinished _) <- journaled]
+          `shouldBe` [WorkerFinished (SolveFailed "the issue action was terminated")]
+        -- And the lease is free, which is the thing a child left running
+        -- holds against every later action for its issue.
+        doesDirectoryExist descriptor.workerDescriptorLeasePath `shouldReturn` False
+        killThread monitored
+
+  -- Round 22's second blocker. The dead-host fallback reaches the same
+  -- half-settled child by the other route, and appended a second terminal
+  -- envelope over the first — a record after the journal's last record, and
+  -- a different outcome from the one the action had already published.
+  it "repairs a half-settled child rather than ending it a second time" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        now <- getCurrentTime
+        descriptor <- halfSettledChild (addUTCTime (-600) now)
+        terminateWorker descriptor
+        -- No command: the host is provably gone, so this settles directly.
+        readReviewCommands descriptor `shouldReturn` []
+        journaled <- journalEvents descriptor
+        [event | event@(WorkerFinished _) <- journaled]
+          `shouldBe` [WorkerFinished (SolveFailed "the issue action was terminated")]
+        recorded <- decodeChildState descriptor
+        -- The outcome the action published, not a kill it never received.
+        fmap (.workerStateStatus) recorded
+          `shouldBe` Just (WorkerTerminal (SolveFailed "the issue action was terminated"))
 
   -- Round 20's second blocker. Under a shared connection a revision owns no
   -- process and holds no thread until its provider announces one, so a host
@@ -2567,6 +2618,26 @@ awaitMaybe probe = go (1200 :: Int)
         Nothing
           | remaining <= 0 -> pure Nothing
           | otherwise -> threadDelay 25000 >> go (remaining - 1)
+
+-- | A child whose settle wrote its terminal envelope and died before it
+-- recorded the terminal state: the journal ends, the state says running, the
+-- lease is still held, and the host that was doing it is gone.
+halfSettledChild :: UTCTime -> IO WorkerDescriptor
+halfSettledChild heartbeat = do
+  descriptor <-
+    descriptorForSpec
+      ( specFor
+          (WorkerId "half-settled-action")
+          (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-that-died") IssueOriginClaude))
+      )
+  createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+  writeChildState
+    descriptor
+    (runningChildState descriptor heartbeat) {workerStateWorkerIdentity = Just departedIdentity}
+  seedJournal descriptor [WorkerFinished (SolveFailed "the issue action was terminated")]
+  Right () <- acquireWorkerLeaseFor descriptor
+  pure descriptor
 
 -- | Whether the host said it could not record itself as a child's owner.
 refusesOwnership :: WorkerEvent -> Bool

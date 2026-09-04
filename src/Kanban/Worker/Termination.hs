@@ -35,10 +35,10 @@ import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.IORef (IORef, atomicModifyIORef', readIORef)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Kanban.Process
   ( IdentityPresence (..),
     ProcessIdentity (..),
@@ -59,11 +59,12 @@ import Kanban.Worker.Command
     appendReviewCommand,
     newReviewCommandId,
   )
-import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock)
+import Kanban.Worker.Journal (appendWorkerEvent, newEventJournalLock, readWorkerJournal)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (ignoreFileOperation, readWorkerState, writeState)
 import Kanban.Worker.Types
   ( IssueActionWorkerTask (..),
+    WorkerEnvelope (..),
     ProviderSlot (..),
     WorkerDescriptor (..),
     WorkerEvent (..),
@@ -114,6 +115,23 @@ terminateWorkerWith takeSnapshot descriptor = do
 -- Fails closed on an unreadable snapshot, like every other judgement in this
 -- layer: a host that cannot be proven gone is treated as live, and the
 -- command waits for it.
+-- | The terminal outcome this action's journal has already published, if any.
+--
+-- Its presence is the whole of the "half-settled" test: a settle writes the
+-- envelope before the state, so a journal that ends over a state that does
+-- not is a settle that was interrupted between the two.
+journalTerminalOutcome :: WorkerDescriptor -> IO (Maybe SolveOutcome)
+journalTerminalOutcome descriptor = do
+  journaled <- readWorkerJournal descriptor
+  pure (listToMaybe [outcome | envelope <- journaled, WorkerFinished outcome <- [envelope.workerEnvelopeEvent]])
+
+-- | What the state records this action was doing last. A kill says so; a
+-- settle this only completed says what that settle said.
+terminalActivityFor :: Maybe SolveOutcome -> Text
+terminalActivityFor published = case published of
+  Nothing -> "killed by user"
+  Just _ -> "ended before its state was recorded"
+
 terminateIssueActionWith :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> WorkerState -> IO ()
 terminateIssueActionWith takeSnapshot descriptor state = do
   hostPresence <- hostIdentityPresence
@@ -125,7 +143,14 @@ terminateIssueActionWith takeSnapshot descriptor state = do
       if recordedOk
         then do
           now <- getCurrentTime
-          let outcome = SolveFailed "killed by user"
+          -- An action whose journal already ends can only be one thing: a
+          -- settle that wrote its envelope and died before recording the
+          -- state. Its outcome is the one it published, and appending a
+          -- second envelope over it would put a record after the journal's
+          -- last record — the thing the envelope exists to prevent — and
+          -- leave two dashboards disagreeing about which one ended it.
+          published <- journalTerminalOutcome descriptor
+          let outcome = fromMaybe (SolveFailed "killed by user") published
           -- Before the envelope, because nothing may follow one: a claim this
           -- action's dead host left standing is answered while the journal
           -- can still say so, rather than by a later pass appending input
@@ -136,8 +161,9 @@ terminateIssueActionWith takeSnapshot descriptor state = do
           -- nothing else, so a terminal state with no envelope leaves it
           -- reading an action that never ends — and leaves the journal open
           -- to exactly the appends the envelope exists to stop.
-          journal <- newEventJournalLock
-          appendWorkerEvent descriptor journal (WorkerFinished outcome)
+          when (isNothing published) $ do
+            journal <- newEventJournalLock
+            appendWorkerEvent descriptor journal (WorkerFinished outcome)
           writeState
             descriptor
             state
@@ -145,7 +171,7 @@ terminateIssueActionWith takeSnapshot descriptor state = do
                 workerStateProviderPid = Nothing,
                 workerStateProviderIdentity = Nothing,
                 workerStateHeartbeatAt = now,
-                workerStateLastActivity = "killed by user"
+                workerStateLastActivity = terminalActivityFor published
               }
           ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
           releaseWorkerLease descriptor

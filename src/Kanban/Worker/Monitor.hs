@@ -19,8 +19,8 @@ module Kanban.Worker.Monitor
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless)
-import Data.Maybe (catMaybes, mapMaybe)
+import Control.Monad (forM_, unless)
+import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
@@ -42,7 +42,7 @@ import Kanban.Worker.Termination
     terminateRecordedStateProcessesWith,
   )
 import Kanban.Worker.Types
-  ( WorkerDescriptor (..),
+  ( WorkerEnvelope (..), WorkerDescriptor (..),
     WorkerEvent (..),
     WorkerId (..),
     WorkerSpec (..),
@@ -66,10 +66,49 @@ monitorWorker descriptor eventSink = loop 0
           let envelopes = mapMaybe decodeJournalLine unseen
           mapM_ (emitEnvelope descriptor eventSink) envelopes
           if any isTerminalEnvelope envelopes
-            then pure ()
+            then repairTerminalPrefix descriptor envelopes
             else do
               recovered <- recoverIfWorkerStopped descriptor eventSink newConsumed
               unless recovered $ threadDelay workerMonitorIntervalMicros >> loop newConsumed
+
+-- | Completes a settle that wrote its terminal envelope and died before it
+-- recorded the terminal state.
+--
+-- A settle closes the journal first precisely so this prefix is the one that
+-- survives a crash, and that only works if something completes it. Nothing
+-- did: replay stops at the terminal envelope, and stopping is what skipped
+-- the recovery pass that would otherwise have noticed. The result was a
+-- transcript that ends and a child that stays running, discoverable, and
+-- holding its lease for ever.
+--
+-- Nothing is appended here — the envelope is already the journal's last
+-- record, and this exists to honour that rather than add to it — and the
+-- outcome written is the envelope's own, not a fresh diagnosis of a worker
+-- that had already said how it ended.
+repairTerminalPrefix :: WorkerDescriptor -> [WorkerEnvelope] -> IO ()
+repairTerminalPrefix descriptor envelopes = do
+  stateResult <- readWorkerState descriptor
+  case stateResult of
+    Left _ -> pure ()
+    Right state
+      | WorkerTerminal _ <- state.workerStateStatus -> pure ()
+      | otherwise -> forM_ (terminalOutcomeOf envelopes) $ \outcome -> do
+          now <- getCurrentTime
+          writeState
+            descriptor
+            state
+              { workerStateStatus = WorkerTerminal outcome,
+                workerStateProviderPid = Nothing,
+                workerStateProviderIdentity = Nothing,
+                workerStateHeartbeatAt = now
+              }
+          ignoreFileOperation (removeFile descriptor.workerDescriptorPendingTerminationPath)
+          releaseWorkerLease descriptor
+
+-- | The outcome a terminal envelope in this batch carries.
+terminalOutcomeOf :: [WorkerEnvelope] -> Maybe SolveOutcome
+terminalOutcomeOf envelopes =
+  listToMaybe [outcome | envelope <- envelopes, WorkerFinished outcome <- [envelope.workerEnvelopeEvent]]
 
 -- A provider is deliberately subordinate to its persistent supervisor.  If
 -- that supervisor disappears, fail closed instead of leaving an invisible

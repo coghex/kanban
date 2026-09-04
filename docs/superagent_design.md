@@ -1755,6 +1755,17 @@ unless their typed contract exposes an override.
   written: every one of them was overwriting the submission's own failure
   notice with a promise, which is the thing round 13 said must not happen.
 
+  The rounds after the first approval were about the crash window the settle's
+  own ordering creates. Closing the journal before recording the state is only
+  safe if something completes the survivor, and nothing did: a monitor stops
+  replaying at a terminal envelope, and stopping is exactly what skipped the
+  recovery pass that was supposed to notice — so the transcript ended while
+  the child stayed running, discoverable, and holding its lease. That stop is
+  now where the repair happens. The direct-termination fallback reads the same
+  envelope rather than appending a second one over it, which would have put a
+  record after the journal's last record and replaced the outcome the action
+  had already published.
+
   Two retentions meet in the overlay and are not the same contract. The child's
   journal and raw log keep every event, bounded only by the worker cache's own
   retention; the overlay's transcript stays bounded. A reattaching dashboard
