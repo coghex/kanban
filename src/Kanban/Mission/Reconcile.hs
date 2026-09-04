@@ -476,20 +476,31 @@ missionLifecycleBlocks lifecycle =
 -- what makes the runner provably non-resident: there is no lifecycle it idles
 -- in, so a mission that reaches an answerable state ends the process instead
 -- of waiting beside it (§3's non-goal).
-missionRunnerHalt :: MissionSnapshot -> Maybe MissionHalt
-missionRunnerHalt snapshot
+missionRunnerHalt :: MissionSnapshot -> [MissionInvocationState] -> Maybe MissionHalt
+missionRunnerHalt snapshot states
   | missionLifecycleIsTerminal lifecycle = Just (MissionHaltTerminal lifecycle)
-  -- Read off the steps rather than off the lifecycle, because @waiting_input@
-  -- is written for several reasons and only one of them is indeterminate: a
-  -- mission waiting for an answer to a question is not the same stop as one
-  -- waiting to be told what became of an effect it may already have had.
-  | missionLifecycleBlocks lifecycle,
-    any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps =
-      Just (MissionHaltIndeterminate lifecycle blockedDetail)
+  -- Read off the record rather than off the lifecycle, because
+  -- @waiting_input@ is written for several reasons and only one of them is
+  -- indeterminate: a mission waiting for an answer to a question is not the
+  -- same stop as one waiting to be told what became of an effect it may
+  -- already have had.
+  --
+  -- And read off /both/ halves of that record. A plan step's unknown outcome
+  -- is written on its step; the two effects with no step record of their own —
+  -- a registered child and a subtree termination — have nowhere to write it
+  -- but their own invocation, so a run that consulted the steps alone would
+  -- exit zero over exactly the effects nobody can account for.
+  | missionLifecycleBlocks lifecycle, indeterminate = Just (MissionHaltIndeterminate lifecycle blockedDetail)
   | missionLifecycleBlocks lifecycle = Just (MissionHaltBlocked lifecycle blockedDetail)
   | otherwise = Nothing
   where
     lifecycle = snapshot.missionSnapshotLifecycle
+    indeterminate =
+      any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
+        || any unknownOutcome states
+    unknownOutcome state = case state.missionInvocationOutcome of
+      Just (MissionInvocationUnknown _) -> True
+      _ -> False
     blockedDetail = case lifecycle of
       MissionWaitingInput -> "it is waiting for an answer this runner cannot supply"
       MissionWaitingBarrier -> "it is waiting on a barrier outside this runner"

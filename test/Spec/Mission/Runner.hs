@@ -311,6 +311,8 @@ data Stage = Stage
     -- launch's opening record and its closing one.
     stageOnDispatch :: IORef (IO ()),
     stageTerminated :: IORef [[MissionSessionId]],
+    -- | The sessions a termination will report it could not signal.
+    stageUnreached :: IORef [MissionSessionId],
     -- | The sessions the driver will report an observation for.
     stageSessions :: IORef [MissionSessionId],
     -- | The observation it reports for them. Settled by default; an example
@@ -328,6 +330,7 @@ newStage =
     <*> newIORef (Right . acceptedDispatch)
     <*> newIORef []
     <*> newIORef (pure ())
+    <*> newIORef []
     <*> newIORef []
     <*> newIORef []
     <*> newIORef endedObservation
@@ -391,7 +394,8 @@ stagedDriver stage _ _ =
           ($ request) <$> readIORef stage.stageDispatchResult,
         missionDriverTerminate = \sessions -> do
           atomicModifyIORef' stage.stageTerminated (\seen -> (seen <> [sessions], ()))
-          pure (Right ())
+          unreached <- readIORef stage.stageUnreached
+          pure (Right unreached)
       }
 
 -- | A store, a specification, and a snapshot, under a state root nothing else
@@ -456,7 +460,7 @@ openChildInvocation store requestId = writeInvocation store $
     { missionInvocationId = childInvocationFor requestId,
       missionInvocationMission = theMission,
       missionInvocationRepository = MissionRepository "coghex" "kanban",
-      missionInvocationStep = MissionStepId ("child-" <> requestId),
+      missionInvocationStep = childStepId theParent requestId,
       missionInvocationAction = "review_pull_request",
       missionInvocationTarget = Nothing,
       missionInvocationVersion = Nothing,
@@ -908,12 +912,12 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
     filter missionLifecycleBlocks missionLifecycles `shouldBe` blocked
     filter missionLifecycleAdvances missionLifecycles `shouldBe` advanceable
     sequence_
-      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] [])) `shouldSatisfy` (\(_, halt) -> halt /= Nothing)
+      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] []) []) `shouldSatisfy` (\(_, halt) -> halt /= Nothing)
         | lifecycle <- missionLifecycles,
           lifecycle `notElem` advanceable
       ]
     sequence_
-      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] [])) `shouldBe` (lifecycle, Nothing)
+      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] []) []) `shouldBe` (lifecycle, Nothing)
         | lifecycle <- advanceable
       ]
 
@@ -2017,7 +2021,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       iteration <- oneIteration store stage
       iteration
         `shouldBe` MissionAdvanced
-          (MissionStepAttached (MissionStepId "child-r-20") (MissionSessionId "child-r-20-0001"))
+          (MissionStepAttached (childStepId theParent "r-20") (MissionSessionId "child-r-20-0001"))
       readIORef stage.stageDispatches `shouldReturn` []
       snapshot <- currentSnapshot store
       [ (node.missionSessionId, node.missionSessionParent)
@@ -2037,7 +2041,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       iteration <- oneIteration store stage
       iteration
         `shouldBe` MissionAdvanced
-          (MissionStepAttached (MissionStepId "child-r-21") (MissionSessionId "child-r-21-0001"))
+          (MissionStepAttached (childStepId theParent "r-21") (MissionSessionId "child-r-21-0001"))
       readIORef stage.stageDispatches `shouldReturn` []
       snapshot <- currentSnapshot store
       [ (node.missionSessionId, node.missionSessionParent)
@@ -2065,7 +2069,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       snapshot.missionSnapshotLifecycle `shouldBe` MissionWaitingInput
       -- A second run reads the halt rather than reopening the question.
       second <- oneIteration store stage
-      second `shouldBe` MissionStopped (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+      second `shouldBe` MissionStopped (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
       readIORef stage.stageDispatches `shouldReturn` []
 
   it "classifies a child's open launch purely, and never a plan step's as one" $ do
@@ -2081,7 +2085,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
                   { missionInvocationId = childInvocationFor "r-23",
                     missionInvocationMission = theMission,
                     missionInvocationRepository = MissionRepository "coghex" "kanban",
-                    missionInvocationStep = MissionStepId "child-r-23",
+                    missionInvocationStep = childStepId theParent "r-23",
                     missionInvocationAction = "review_pull_request",
                     missionInvocationTarget = Nothing,
                     missionInvocationVersion = Nothing,
@@ -2094,7 +2098,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
     case unresolvedDispatchOf [childState] theSpecification snapshot of
       Nothing -> expectationFailure "a child's open launch was not recognized"
       Just dispatch -> do
-        dispatch.missionOpenDispatchStep `shouldBe` MissionStepId "child-r-23"
+        dispatch.missionOpenDispatchStep `shouldBe` childStepId theParent "r-23"
         dispatch.missionOpenDispatchParent `shouldBe` Just theParent
         missionOpenDispatchIsChild snapshot dispatch `shouldBe` True
     -- The plan step's own window still reads as a plan step's, so the two
@@ -2110,7 +2114,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
     dispatchedButUnregistered
       [childState {missionInvocationOutcome = Just (MissionInvocationDispatched "child-r-23-0001")}]
       snapshot
-      `shouldBe` Just (MissionStepId "child-r-23", MissionSessionId "child-r-23-0001", Just theParent)
+      `shouldBe` Just (childStepId theParent "r-23", MissionSessionId "child-r-23-0001", Just theParent)
 
   -- The termination's own crash window, and the dangerous one: the signal may
   -- already have been delivered, so the one answer never available is "do it
@@ -2145,8 +2149,83 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       -- The signal is never repeated, on this pass or the next.
       readIORef stage.stageTerminated `shouldReturn` []
       second <- oneIteration store stage
-      second `shouldBe` MissionStopped (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+      second `shouldBe` MissionStopped (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
       readIORef stage.stageTerminated `shouldReturn` []
+
+  -- An effect closed as unknown is the mission's one indeterminate record, and
+  -- the two effects that carry it have no step to write it on. A run that read
+  -- only the steps would exit zero over exactly the launches nobody can
+  -- account for.
+  it "reports a run that closed a child as unknown as a failure, not a blocked stop" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-60"
+      report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
+      case report of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right run -> do
+          run.missionRunConclusion
+            `shouldSatisfy` either (const False) missionHaltIsIndeterminate
+          missionRunSucceeded run `shouldBe` False
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+
+  -- And the operator can resolve it, which is the other half: a record closed
+  -- as unknown that no direction could reach would hold the mission for good.
+  it "lets an authenticated override release a launch closed as unknown" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-61"
+      _ <- oneIteration store stage
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand
+            controller
+            "c-resolve"
+            (MissionUserOverrideCommand (childStepId theParent "r-61") "it never ran")
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandApplied "c-resolve" _) -> pure ()
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      -- The file keeps both lines; the later one is the one that stands.
+      outcomeTags store `shouldReturn` [Just "abandoned"]
+
+  -- A termination that could not reach every registered session is not a
+  -- termination. Claiming one would put in the durable record, as fact, that a
+  -- descendant was ended when nothing signalled it.
+  it "does not close a termination that never reached the whole subtree" $ do
+    let root = MissionSessionId "solve-844-0001"
+        sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" root]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [root]] sessions) $ \store stage -> do
+      writeIORef stage.stageUnreached [MissionSessionId "child-1"]
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandApplied "c-end" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "not wholly reached"
+            MissionAdvanced (MissionSubtreeTerminated _ _) ->
+              expectationFailure "a partial termination was reported as a whole one"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      -- The record stays open, so the next pass reconciles it from the
+      -- sessions rather than believing this one.
+      outcomeTags store `shouldReturn` [Nothing]
+
+  -- The live half: a session whose worker record cannot be found was not
+  -- signalled by this call, and saying so is the only thing that keeps the
+  -- controller from recording a termination that did not happen.
+  it "reports the registered sessions a real termination could not signal" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+      driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+      stageWorker (workerFixtureSpec boardRepository (WorkerId "solve-844-0001") 844)
+      terminated <-
+        driver.missionDriverTerminate [theParent, MissionSessionId "child-collected-0001"]
+      terminated `shouldBe` Right [MissionSessionId "child-collected-0001"]
 
   it "recognizes an open termination and nothing else as one" $ do
     let terminationState effect outcome =

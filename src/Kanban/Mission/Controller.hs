@@ -97,7 +97,6 @@ import Kanban.Mission.Invocation
     MissionTargetVersion (..),
     concludeMissionInvocation,
     missionInvocationFor,
-    missionInvocationResolved,
     missionInvocationSequence,
     missionVersionHolds,
     newMissionInvocationId,
@@ -261,7 +260,7 @@ data MissionDriver = MissionDriver
     missionDriverDispatch :: MissionDispatchRequest -> IO (Either MissionStepFailure MissionDispatchAccepted),
     -- | Ends exactly the registered sessions named, which the controller has
     -- already journaled and which is already the complete subtree.
-    missionDriverTerminate :: [MissionSessionId] -> IO (Either Text ())
+    missionDriverTerminate :: [MissionSessionId] -> IO (Either Text [MissionSessionId])
   }
 
 -- ---------------------------------------------------------------------------
@@ -585,9 +584,17 @@ missionControllerIteration controller = do
           mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
           case commands.missionCommandsAccepted of
             (command : _) -> applyCommand controller snapshot command
-            [] -> case missionRunnerHalt snapshot of
-              Just halt -> pure (MissionStopped halt)
-              Nothing -> advance controller snapshot
+            [] -> do
+              recorded <-
+                readMissionInvocations
+                  controller.missionControllerMission
+                  controller.missionControllerStore.missionStoreRepository
+                  controller.missionControllerInvocations
+              case recorded of
+                Left detail -> pure (MissionControllerFailed detail)
+                Right states -> case missionRunnerHalt snapshot states of
+                  Just halt -> pure (MissionStopped halt)
+                  Nothing -> advance controller snapshot
 
 -- | Queues one command built inside this process, with runner authority.
 --
@@ -1341,10 +1348,21 @@ releaseOpenInvocations controller step detail = do
           )
           [ state
           | state <- states,
-            not (missionInvocationResolved state),
+            releasable state,
             state.missionInvocationRecord.missionInvocationStep == step
           ]
       pure (sequence_ results)
+  where
+    -- Open, or closed as an outcome nobody could establish. The second is the
+    -- one the operator most needs to be able to reach: a run that closed a
+    -- launch as unknown has said it cannot tell what happened, and if that
+    -- record could not then be resolved the mission would be stuck on it for
+    -- good. Appending the operator's answer over it is what the file is for —
+    -- it keeps both lines, and the later one is the one that stands.
+    releasable state = case state.missionInvocationOutcome of
+      Nothing -> True
+      Just (MissionInvocationUnknown _) -> True
+      Just _ -> False
 
 -- | Requirement 11's explicit, journaled, recursive termination.
 terminateSubtree :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionSessionId -> Text -> IO MissionIteration
@@ -1409,26 +1427,53 @@ performTermination controller snapshot command session reason = do
         )
       terminated <- controller.missionControllerDriver.missionDriverTerminate identities
       concluded <- getCurrentTime
-      -- The one conclusion whose failure is not propagated, because this
-      -- record has a recovery path of its own: an open termination is what
-      -- 'resolveOpenTermination' reads on the next run, and it reconciles it
-      -- from the sessions themselves. Stopping here instead would leave the
-      -- command file unconsumed as well, and a replayed termination is
-      -- answered from this same record — so failing would trade a recoverable
-      -- record for two.
-      _ <-
-        concludeMissionInvocation
-          controller.missionControllerInvocations
-          invocation
-          ( case terminated of
-              Left detail -> MissionInvocationRefused detail
-              Right () -> MissionInvocationCompleted ("ended " <> Text.pack (show (length identities)) <> " session(s)")
-          )
-          concluded
-      consumeMissionCommand command
-      pure $ case terminated of
-        Left detail -> MissionControllerFailed detail
-        Right () -> MissionAdvanced (MissionSubtreeTerminated session (length identities))
+      case terminated of
+        Left detail -> do
+          -- The one conclusion whose failure is not propagated, because this
+          -- record has a recovery path of its own: an open termination is what
+          -- 'resolveOpenTermination' reads on the next run, and it reconciles
+          -- it from the sessions themselves. Stopping here instead would leave
+          -- the command file unconsumed as well, and a replayed termination is
+          -- answered from this same record — so failing would trade a
+          -- recoverable record for two.
+          _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationRefused detail) concluded
+          consumeMissionCommand command
+          pure (MissionControllerFailed detail)
+        -- Every registered session signalled, so the record may say so.
+        Right [] -> do
+          _ <-
+            concludeMissionInvocation
+              controller.missionControllerInvocations
+              invocation
+              (MissionInvocationCompleted ("ended " <> Text.pack (show (length identities)) <> " session(s)"))
+              concluded
+          consumeMissionCommand command
+          pure (MissionAdvanced (MissionSubtreeTerminated session (length identities)))
+        -- Some member of the subtree was never reached. The record stays open
+        -- rather than claiming a termination that did not happen to all of
+        -- it: the next iteration's own reconciliation observes the sessions
+        -- and closes it as completed if they have all ended after all, and as
+        -- unknown — with the mission halting for direction — if they have not.
+        Right unreached -> do
+          journalCommand
+            controller
+            command
+            ( "signalled "
+                <> Text.pack (show (length identities - length unreached))
+                <> " of "
+                <> Text.pack (show (length identities))
+                <> " registered session(s); "
+                <> Text.intercalate ", " (map (.unMissionSessionId) unreached)
+                <> " could not be reached"
+            )
+          consumeMissionCommand command
+          pure
+            ( MissionAdvanced
+                ( MissionCommandApplied
+                    command.missionCommandId
+                    ("the subtree under " <> session.unMissionSessionId <> " was not wholly reached")
+                )
+            )
 
 -- | Requirement 12's registered child request.
 --

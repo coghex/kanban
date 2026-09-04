@@ -1005,14 +1005,24 @@ liveMissionDriver options config repository store _ =
     -- Requirement 11: the controller has already journaled which sessions
     -- these are, and they are already the complete registered subtree; this
     -- ends exactly those and nothing else.
+    --
+    -- What it reports back is the ones it could /not/ signal, and that is the
+    -- whole of the difference between a termination and a claim to have made
+    -- one. A session whose worker record cannot be found was not signalled by
+    -- this call — it may have ended on its own, or it may be running under a
+    -- record that has been collected — and answering the caller as though the
+    -- subtree were ended would let the controller close its journal as
+    -- completed over a descendant nothing reached.
     terminate sessions = do
       workers <- discoverWorkerHistory repository
-      mapM_ (endOne workers) sessions
-      pure (Right ())
+      unreached <- mapM (endOne workers) sessions
+      pure (Right (mapMaybe id unreached))
 
     endOne workers session = case find ((== session.unMissionSessionId) . workerIdentity) workers of
-      Nothing -> pure ()
-      Just descriptor -> terminateWorker descriptor
+      Nothing -> pure (Just session)
+      Just descriptor -> do
+        terminateWorker descriptor
+        pure Nothing
 
 -- | Submits every complete line waiting at the runner's own console.
 --
