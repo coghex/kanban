@@ -37,7 +37,17 @@ created above it.
   launched — and inside the repository review host before it starts a
   canonical review or a revision — just before the agent session that will
   mutate the target begins. A target that moved, or that cannot be read at
-  all, stops the turn without mutating anything. The run's own
+  all, stops the turn without mutating anything; the first is replanned and
+  the second is an unknown outcome the mission waits on rather than a step
+  that failed. The two effects with no step record of their own are recovered
+  from the same journal: a registered child's launch records the parent it was
+  asked for by, so a crash before the session write puts the child back under
+  that parent, and an open subtree termination is closed only when every
+  registered session under it can be observed to have ended — anything less
+  halts the mission for direction instead of signalling twice. A collected
+  worker record reads as an unknown ending rather than a clean one, so a
+  parent never settles over a child whose outcome is no longer there to read.
+  The run's own
   terminal is its authenticated console: a line typed there is handed to the
   controller inside the process, never written down, and can pause or resume
   the mission, resolve an unknown outcome, end a registered subtree, or

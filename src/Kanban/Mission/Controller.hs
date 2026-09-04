@@ -108,18 +108,19 @@ import Kanban.Mission.Lease
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), missionDirectory, missionInvocationPath)
 import Kanban.Mission.Reconcile
-  ( dispatchedButUnregistered,
-    unresolvedDispatchOf,
-    MissionContinuation (..),
+  ( MissionContinuation (..),
     MissionExternalWork (..),
     MissionHalt,
+    MissionOpenDispatch (..),
     MissionStepEvidence (..),
     MissionStepFailure (..),
     MissionWorkerReading (..),
     blockedMissionLifecycle,
     cancelledByDependency,
     classifyMissionWork,
+    dispatchedButUnregistered,
     missionContinuation,
+    missionOpenDispatchIsChild,
     missionRunnerHalt,
     missionSessionSubtree,
     missionStepFailureLifecycle,
@@ -128,6 +129,8 @@ import Kanban.Mission.Reconcile
     nextDispatchableStep,
     settledMissionLifecycle,
     stepHasUnsettledDescendants,
+    unresolvedDispatchOf,
+    unresolvedTerminationOf,
   )
 import Kanban.Mission.Store (readMissionSnapshot, readMissionSpecification, recordMissionEvent, writeMissionSnapshot)
 import Kanban.Mission.Types
@@ -135,6 +138,7 @@ import Kanban.Mission.Types
     MissionId (..),
     MissionLifecycle (..),
     MissionPause (..),
+    MissionObservedOutcome (..),
     MissionPlanStep (..),
     MissionProcessOwnership (..),
     MissionReconciliation (..),
@@ -586,10 +590,11 @@ advance controller snapshot = do
 -- | Reconcile, then dispatch, then settle.
 advanceSteps :: MissionController -> MissionSnapshot -> IO MissionIteration
 advanceSteps controller snapshot = do
-  -- Both crash windows are answered from the invocation file before anything
-  -- else looks at the step records, because in both of them the step record is
-  -- exactly what a run that never dispatched would have left and only the
-  -- invocation file knows better.
+  -- Every crash window is answered from the invocation file before anything
+  -- else looks at the step records, because in each of them the step record is
+  -- exactly what a run that never dispatched would have left — and for the two
+  -- effects with no step record at all, the invocation file is the only place
+  -- they were ever described.
   recorded <-
     readMissionInvocations
       controller.missionControllerMission
@@ -597,11 +602,16 @@ advanceSteps controller snapshot = do
       controller.missionControllerInvocations
   case recorded of
     Left detail -> pure (MissionControllerFailed detail)
-    Right states -> case dispatchedButUnregistered states snapshot of
-      Just (step, session) -> registerDispatchedSession controller snapshot step session
-      Nothing -> case unresolvedDispatchOf states controller.missionControllerSpecification snapshot of
-        Just (step, invocation) -> resolveOpenInvocation controller snapshot step invocation
-        Nothing -> advanceReconciled controller snapshot
+    -- The termination first, because it is the one open effect that may
+    -- already have ended the very sessions the passes below would otherwise
+    -- read as live work to wait on.
+    Right states -> case unresolvedTerminationOf states of
+      Just (invocation, session) -> resolveOpenTermination controller snapshot invocation session
+      Nothing -> case dispatchedButUnregistered states snapshot of
+        Just (step, session, parent) -> registerDispatchedSession controller snapshot step session parent
+        Nothing -> case unresolvedDispatchOf states controller.missionControllerSpecification snapshot of
+          Just dispatch -> resolveOpenInvocation controller snapshot dispatch
+          Nothing -> advanceReconciled controller snapshot
 
 -- | What to make of an invocation this store never saw the end of.
 --
@@ -611,8 +621,8 @@ advanceSteps controller snapshot = do
 -- association exists for. Only when no such worker can be found is the outcome
 -- genuinely unknown, and requirement 7 is explicit that such a step is
 -- resolved by direction or fresh evidence and never by trying again.
-resolveOpenInvocation :: MissionController -> MissionSnapshot -> MissionStepId -> MissionInvocationId -> IO MissionIteration
-resolveOpenInvocation controller snapshot step invocation = do
+resolveOpenInvocation :: MissionController -> MissionSnapshot -> MissionOpenDispatch -> IO MissionIteration
+resolveOpenInvocation controller snapshot dispatch = do
   adopted <- controller.missionControllerDriver.missionDriverAdoptInvocation invocation
   case adopted of
     Left detail -> pure (MissionControllerFailed detail)
@@ -624,25 +634,107 @@ resolveOpenInvocation controller snapshot step invocation = do
           invocation
           (MissionInvocationDispatched session.unMissionSessionId)
           now
-      registerDispatchedSession controller snapshot step session
-    Right Nothing ->
-      applyStepLifecycle
-        controller
-        snapshot
-        step
-        MissionStepOutcomeUnknown
-        ( "invocation "
-            <> invocation.unMissionInvocationId
-            <> " was journaled and no worker records it; whether its effect happened is unknown"
-        )
+      registerDispatchedSession controller snapshot step session dispatch.missionOpenDispatchParent
+    Right Nothing
+      -- A registered child, whose unknown outcome has no step record to be
+      -- written on. Closing the invocation is what stops the next iteration
+      -- asking the same question of the same absent evidence for ever, and the
+      -- halt beside it is what requirement 7 asks for instead of a retry: the
+      -- launch may have happened, so only authenticated direction resolves it.
+      | missionOpenDispatchIsChild snapshot dispatch -> do
+          now <- getCurrentTime
+          _ <-
+            concludeMissionInvocation
+              controller.missionControllerInvocations
+              invocation
+              (MissionInvocationUnknown unknownDetail)
+              now
+          applyMissionLifecycle controller snapshot MissionWaitingInput unknownDetail
+      | otherwise ->
+          applyStepLifecycle
+            controller
+            snapshot
+            step
+            MissionStepOutcomeUnknown
+            unknownDetail
+  where
+    invocation = dispatch.missionOpenDispatchInvocation
+    step = dispatch.missionOpenDispatchStep
+    unknownDetail =
+      "invocation "
+        <> invocation.unMissionInvocationId
+        <> " was journaled and no worker records it; whether its effect happened is unknown"
+
+-- | What to make of a subtree termination this store never saw the end of.
+--
+-- The signal may already have been delivered, so the one answer that is never
+-- available is \"do it again\". What is available is the sessions themselves:
+-- if every registered session under the recorded root can be observed to have
+-- ended, the termination demonstrably did what it was for and the record is
+-- closed as completed. Anything less — one still running, one whose worker
+-- record has been collected, one whose state will not decode — settles
+-- nothing, so the record is closed as unknown and the mission halts for
+-- authenticated direction rather than carrying an effect nobody can account
+-- for into the passes below.
+--
+-- A subtree with nothing in it closes the record too, and that is not the
+-- vacuous case it looks like: nothing ever removes a node from the session
+-- tree, so an empty subtree is a termination that had nothing registered to
+-- signal rather than evidence that has gone missing.
+resolveOpenTermination :: MissionController -> MissionSnapshot -> MissionInvocationId -> MissionSessionId -> IO MissionIteration
+resolveOpenTermination controller snapshot invocation root = do
+  observations <- mapM observe (missionSessionSubtree snapshot root)
+  now <- getCurrentTime
+  case sequence observations of
+    Left unreadable -> pure (MissionControllerFailed unreadable)
+    Right settled
+      | all id settled -> do
+          _ <-
+            concludeMissionInvocation
+              controller.missionControllerInvocations
+              invocation
+              ( MissionInvocationCompleted
+                  ( "every registered session under "
+                      <> root.unMissionSessionId
+                      <> " has ended"
+                  )
+              )
+              now
+          -- Reported as the termination it is rather than as a repair: the
+          -- subtree is ended, and this iteration is what established it.
+          pure (MissionAdvanced (MissionSubtreeTerminated root (length settled)))
+      | otherwise -> do
+          _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationUnknown detail) now
+          applyMissionLifecycle controller snapshot MissionWaitingInput detail
+  where
+    detail =
+      "termination "
+        <> invocation.unMissionInvocationId
+        <> " was journaled and the subtree under "
+        <> root.unMissionSessionId
+        <> " cannot be shown to have ended; whether the signal was delivered is unknown"
+    -- Ended, and shown to have ended. An observation of 'MissionObservedUnknown'
+    -- is the honest \"its record is gone and nothing says how it went\", which
+    -- proves nothing about a signal.
+    observe node = do
+      observed <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId
+      pure $ case observed of
+        Left failure -> Left failure
+        Right Nothing -> Right False
+        Right (Just observation) -> Right (case observation.missionObservationOutcome of
+          MissionObservedExit _ -> True
+          MissionObservedSignalled _ -> True
+          MissionObservedUnknown -> False)
 
 -- | Adopts a worker an invocation records but the snapshot never registered.
 --
 -- A repair rather than a reattachment: the next pass reattaches through the
 -- ordinary evidence path once the session is in the tree where that path can
--- see it.
-registerDispatchedSession :: MissionController -> MissionSnapshot -> MissionStepId -> MissionSessionId -> IO MissionIteration
-registerDispatchedSession controller snapshot step session = do
+-- see it. The lineage comes from the invocation rather than from the snapshot,
+-- because for a registered child the snapshot is exactly what does not have
+-- it yet.
+registerDispatchedSession :: MissionController -> MissionSnapshot -> MissionStepId -> MissionSessionId -> Maybe MissionSessionId -> IO MissionIteration
+registerDispatchedSession controller snapshot step session parent = do
   written <-
     writeStep
       controller
@@ -650,7 +742,7 @@ registerDispatchedSession controller snapshot step session = do
       step
       MissionStepRunning
       ("adopted session " <> session.unMissionSessionId <> " from its invocation record")
-      (Just (session, Nothing, Nothing))
+      (Just (session, parent, Nothing))
   pure $ case written of
     Left detail -> MissionControllerFailed detail
     Right () -> MissionAdvanced (MissionStepAttached step session)
@@ -874,6 +966,8 @@ dispatchStep controller snapshot step = do
               missionInvocationTarget = step.missionPlanStepTarget,
               missionInvocationVersion = plannedVersion,
               missionInvocationEffect = MissionEffectDispatch step.missionPlanStepAction,
+              -- A plan step is nobody's child.
+              missionInvocationParent = Nothing,
               missionInvocationAt = now
             }
       case journaled of
@@ -1121,6 +1215,7 @@ performTermination controller snapshot command session reason = do
           missionInvocationTarget = Nothing,
           missionInvocationVersion = Nothing,
           missionInvocationEffect = MissionEffectTerminateSubtree session.unMissionSessionId,
+          missionInvocationParent = Nothing,
           missionInvocationAt = now
         }
   case journaled of
@@ -1274,6 +1369,11 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
           missionInvocationTarget = request.missionChildRequestTarget,
           missionInvocationVersion = plannedVersion,
           missionInvocationEffect = MissionEffectDispatch request.missionChildRequestAction,
+          -- Written before the launch because it is what recovery needs after
+          -- one: the session node carrying this link is the very write a crash
+          -- here loses, and a child put back without it is a session no
+          -- termination reaches and no parent waits for.
+          missionInvocationParent = Just request.missionChildRequestParent.unMissionSessionId,
           missionInvocationAt = now
         }
   case journaled of

@@ -70,7 +70,7 @@ import Kanban.Worker
   )
 import Spec.Support.Board (withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
-import Spec.Support.Fixtures (testOptions)
+import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import Spec.Support.Process (deadlineFixtureSpec)
 import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -94,6 +94,7 @@ spec = describe "the foreground mission runner" $ do
   deadlineSpec
   workerPreconditionSpec
   failureVocabularySpec
+  openEffectRecoverySpec
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -358,6 +359,78 @@ currentInvocations store = case missionInvocationPath store.missionStoreDirector
 
 stepLifecycle :: MissionSnapshot -> Maybe MissionStepLifecycle
 stepLifecycle snapshot = (.missionStepRecordLifecycle) <$> missionStepRecordFor theStep snapshot
+
+-- | The parent every registered child in these examples is asked for by.
+theParent :: MissionSessionId
+theParent = MissionSessionId "solve-844-0001"
+
+-- | The invocation identity 'launchChild' mints, spelled the way the
+-- controller spells it so a fixture cannot drift from the thing it stands in
+-- for.
+childInvocationId :: Text -> MissionInvocationId
+childInvocationId requestId = MissionInvocationId ("child-" <> theParent.unMissionSessionId <> "-" <> requestId)
+
+-- | The durable state a crash around a registered child's launch leaves: the
+-- opening record, its step invented from the request, and the lineage the
+-- session write was going to carry.
+openChildInvocation :: MissionStore -> Text -> IO ()
+openChildInvocation store requestId = writeInvocation store $
+  MissionInvocation
+    { missionInvocationId = childInvocationId requestId,
+      missionInvocationMission = theMission,
+      missionInvocationRepository = MissionRepository "coghex" "kanban",
+      missionInvocationStep = MissionStepId ("child-" <> requestId),
+      missionInvocationAction = "review_pull_request",
+      missionInvocationTarget = Nothing,
+      missionInvocationVersion = Nothing,
+      missionInvocationEffect = MissionEffectDispatch "review_pull_request",
+      missionInvocationParent = Just theParent.unMissionSessionId,
+      missionInvocationAt = fixedTime
+    }
+
+-- | The same for a subtree termination.
+openTerminationInvocation :: MissionStore -> Text -> IO ()
+openTerminationInvocation store commandId = writeInvocation store $
+  MissionInvocation
+    { missionInvocationId = MissionInvocationId ("terminate-" <> commandId),
+      missionInvocationMission = theMission,
+      missionInvocationRepository = MissionRepository "coghex" "kanban",
+      missionInvocationStep = MissionStepId "-",
+      missionInvocationAction = "terminate_subtree",
+      missionInvocationTarget = Nothing,
+      missionInvocationVersion = Nothing,
+      missionInvocationEffect = MissionEffectTerminateSubtree theParent.unMissionSessionId,
+      missionInvocationParent = Nothing,
+      missionInvocationAt = fixedTime
+    }
+
+writeInvocation :: MissionStore -> MissionInvocation -> IO ()
+writeInvocation store record = case missionInvocationPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> do
+    written <- recordMissionInvocation path record
+    written `shouldBe` Right ()
+
+concludeInvocation :: MissionStore -> MissionInvocationId -> MissionInvocationOutcome -> IO ()
+concludeInvocation store identity outcome = case missionInvocationPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> do
+    concluded <- concludeMissionInvocation path identity outcome fixedTime
+    concluded `shouldBe` Right ()
+
+outcomeTags :: MissionStore -> IO [Maybe Text]
+outcomeTags store = map (fmap missionInvocationOutcomeTag . (.missionInvocationOutcome)) <$> currentInvocations store
+
+-- | A snapshot whose only registered session is the live parent, with the
+-- step it belongs to still running.
+withRegisteredParent :: (MissionStore -> Stage -> IO result) -> IO result
+withRegisteredParent =
+  withMission
+    ( snapshotWith
+        MissionRunning
+        [stepRecord MissionStepRunning [theParent]]
+        [sessionNode "solve-844-0001" Nothing Nothing]
+    )
 
 -- ---------------------------------------------------------------------------
 -- Launch mode
@@ -810,6 +883,7 @@ openInvocationState =
             missionInvocationTarget = Just theTarget,
             missionInvocationVersion = Just (issueVersion ["reviewed:approve"]),
             missionInvocationEffect = MissionEffectDispatch "solve_issue",
+            missionInvocationParent = Nothing,
             missionInvocationAt = fixedTime
           },
       missionInvocationOutcome = Nothing
@@ -841,6 +915,7 @@ openInvocation store = case missionInvocationPath store.missionStoreDirectory th
             missionInvocationTarget = Just theTarget,
             missionInvocationVersion = Just (issueVersion ["reviewed:approve"]),
             missionInvocationEffect = MissionEffectDispatch "solve_issue",
+            missionInvocationParent = Nothing,
             missionInvocationAt = fixedTime
           }
     written `shouldBe` Right ()
@@ -905,7 +980,8 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
     let stillPending = snapshotWith MissionRunning [stepRecord MissionStepPending []] []
         alreadyRunning = snapshotWith MissionRunning [stepRecord MissionStepRunning []] []
         open = openInvocationState
-    fst <$> unresolvedDispatchOf [open] theSpecification stillPending `shouldBe` Just theStep
+    (.missionOpenDispatchStep) <$> unresolvedDispatchOf [open] theSpecification stillPending
+      `shouldBe` Just theStep
     unresolvedDispatchOf [open] theSpecification alreadyRunning `shouldBe` Nothing
     unresolvedDispatchOf [] theSpecification stillPending `shouldBe` Nothing
 
@@ -928,11 +1004,16 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
 
   it "classifies that window purely too" $ do
     let dispatching = snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []
-        registered = snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []
+        -- Registration is the session tree, which is where a child's is too.
+        registered =
+          snapshotWith
+            MissionRunning
+            [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]]
+            [sessionNode "solve-844-0001" Nothing Nothing]
         settled = snapshotWith MissionRunning [stepRecord MissionStepSucceeded []] []
         closed = openInvocationState {missionInvocationOutcome = Just (MissionInvocationDispatched "solve-844-0001")}
     dispatchedButUnregistered [closed] dispatching
-      `shouldBe` Just (theStep, MissionSessionId "solve-844-0001")
+      `shouldBe` Just (theStep, MissionSessionId "solve-844-0001", Nothing)
     dispatchedButUnregistered [closed] registered `shouldBe` Nothing
     dispatchedButUnregistered [closed] settled `shouldBe` Nothing
     dispatchedButUnregistered [openInvocationState] dispatching `shouldBe` Nothing
@@ -968,7 +1049,16 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
       readIORef stage.stageDispatches `shouldReturn` []
 
   it "reconciles a crash after the launch from the worker's own evidence" $
-    withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
+    -- The registration landed whole: one snapshot write puts the session on
+    -- the step record and in the session tree, so a crash after it leaves
+    -- both.
+    withMission
+      ( snapshotWith
+          MissionRunning
+          [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]]
+          [sessionNode "solve-844-0001" Nothing settledObservation]
+      )
+      $ \store stage -> do
       openInvocation store
       case missionInvocationPath store.missionStoreDirectory theMission of
         Left message -> fail (Text.unpack message)
@@ -1815,3 +1905,293 @@ failureVocabularySpec = describe "the typed results a step can reach" $ do
         other -> expectationFailure ("unexpected iteration: " <> show other)
       recorded <- currentInvocations store
       map (fmap missionInvocationOutcomeTag . (.missionInvocationOutcome)) recorded `shouldBe` [Just "refused"]
+
+-- ---------------------------------------------------------------------------
+-- The effects that have no step record
+-- ---------------------------------------------------------------------------
+
+-- | The two external effects a plan step's recovery cannot speak for.
+--
+-- A registered child's step is invented from the request and appears in no
+-- plan, and nothing writes a step record for it; a subtree termination has no
+-- step at all. Both are journaled before they happen like every other effect,
+-- so both leave a crash window — the child's around its launch, the
+-- termination's after its signal — and neither can be resolved by writing an
+-- unknown outcome onto a step record that does not exist.
+openEffectRecoverySpec :: Spec
+openEffectRecoverySpec = describe "an open effect with no step record" $ do
+  -- The window between the driver returning and the snapshot write. For a
+  -- child that write is the only record of its existence, so without the
+  -- lineage on the invocation the launched child would be a session under no
+  -- parent, reached by no termination and waited for by nobody.
+  it "puts a launched child back under its parent after a crash before the write" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-20"
+      concludeInvocation store (childInvocationId "r-20") (MissionInvocationDispatched "child-r-20-0001")
+      iteration <- oneIteration store stage
+      iteration
+        `shouldBe` MissionAdvanced
+          (MissionStepAttached (MissionStepId "child-r-20") (MissionSessionId "child-r-20-0001"))
+      readIORef stage.stageDispatches `shouldReturn` []
+      snapshot <- currentSnapshot store
+      [ (node.missionSessionId, node.missionSessionParent)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [(MissionSessionId "child-r-20-0001", Just theParent)]
+
+  -- The narrower window: the record was flushed, the launch may or may not
+  -- have happened, and the worker itself is the evidence. It carries the
+  -- invocation identity, so the mission adopts its own child rather than
+  -- treating it as work somebody else started.
+  it "adopts the child an open invocation launched, and registers its lineage" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-21"
+      writeIORef stage.stageAdoptions [(childInvocationId "r-21", MissionSessionId "child-r-21-0001")]
+      iteration <- oneIteration store stage
+      iteration
+        `shouldBe` MissionAdvanced
+          (MissionStepAttached (MissionStepId "child-r-21") (MissionSessionId "child-r-21-0001"))
+      readIORef stage.stageDispatches `shouldReturn` []
+      snapshot <- currentSnapshot store
+      [ (node.missionSessionId, node.missionSessionParent)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [(MissionSessionId "child-r-21-0001", Just theParent)]
+      outcomeTags store `shouldReturn` [Just "dispatched"]
+
+  -- And when no worker names it, the answer is the one requirement 7 allows:
+  -- stop for direction. Closing the record is what keeps the next iteration
+  -- from asking the same question of the same absent evidence for ever, and it
+  -- licenses nothing — the child is never launched a second time.
+  it "halts for direction when nothing records the child an open invocation may have launched" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-22"
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionLifecycleSet MissionWaitingInput detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "no worker records it"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionWaitingInput
+      -- A second run reads the halt rather than reopening the question.
+      second <- oneIteration store stage
+      second `shouldBe` MissionStopped (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "classifies a child's open launch purely, and never a plan step's as one" $ do
+    let snapshot =
+          snapshotWith
+            MissionRunning
+            [stepRecord MissionStepRunning [theParent]]
+            [sessionNode "solve-844-0001" Nothing Nothing]
+        childState =
+          MissionInvocationState
+            { missionInvocationRecord =
+                MissionInvocation
+                  { missionInvocationId = childInvocationId "r-23",
+                    missionInvocationMission = theMission,
+                    missionInvocationRepository = MissionRepository "coghex" "kanban",
+                    missionInvocationStep = MissionStepId "child-r-23",
+                    missionInvocationAction = "review_pull_request",
+                    missionInvocationTarget = Nothing,
+                    missionInvocationVersion = Nothing,
+                    missionInvocationEffect = MissionEffectDispatch "review_pull_request",
+                    missionInvocationParent = Just theParent.unMissionSessionId,
+                    missionInvocationAt = fixedTime
+                  },
+              missionInvocationOutcome = Nothing
+            }
+    case unresolvedDispatchOf [childState] theSpecification snapshot of
+      Nothing -> expectationFailure "a child's open launch was not recognized"
+      Just dispatch -> do
+        dispatch.missionOpenDispatchStep `shouldBe` MissionStepId "child-r-23"
+        dispatch.missionOpenDispatchParent `shouldBe` Just theParent
+        missionOpenDispatchIsChild snapshot dispatch `shouldBe` True
+    -- The plan step's own window still reads as a plan step's, so the two
+    -- resolutions never trade places.
+    let planSnapshot = snapshotWith MissionRunning [stepRecord MissionStepPending []] []
+    case unresolvedDispatchOf [openInvocationState] theSpecification planSnapshot of
+      Nothing -> expectationFailure "the plan step's open launch was not recognized"
+      Just dispatch -> do
+        dispatch.missionOpenDispatchParent `shouldBe` Nothing
+        missionOpenDispatchIsChild planSnapshot dispatch `shouldBe` False
+    -- And a child whose session is already in the tree is not an open launch
+    -- at all, whatever its record says.
+    dispatchedButUnregistered
+      [childState {missionInvocationOutcome = Just (MissionInvocationDispatched "child-r-23-0001")}]
+      snapshot
+      `shouldBe` Just (MissionStepId "child-r-23", MissionSessionId "child-r-23-0001", Just theParent)
+
+  -- The termination's own crash window, and the dangerous one: the signal may
+  -- already have been delivered, so the one answer never available is "do it
+  -- again". Nothing in the record says whether it was, so the sessions
+  -- themselves are asked.
+  it "closes an open termination the registered sessions can be shown to have ended" $ do
+    -- Already observed to have ended, so the ordinary session pass has nothing
+    -- of its own to record and the open termination is what this iteration
+    -- meets.
+    let sessions =
+          [ sessionNode "solve-844-0001" Nothing settledObservation,
+            sessionNode "child-1" (Just theParent) settledObservation
+          ]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      writeIORef stage.stageSessions [theParent, MissionSessionId "child-1"]
+      iteration <- oneIteration store stage
+      iteration `shouldBe` MissionAdvanced (MissionSubtreeTerminated theParent 2)
+      outcomeTags store `shouldReturn` [Just "completed"]
+      readIORef stage.stageTerminated `shouldReturn` []
+
+  it "halts for direction on an open termination the sessions cannot settle" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionLifecycleSet MissionWaitingInput detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "whether the signal was delivered is unknown"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+      -- The signal is never repeated, on this pass or the next.
+      readIORef stage.stageTerminated `shouldReturn` []
+      second <- oneIteration store stage
+      second `shouldBe` MissionStopped (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+      readIORef stage.stageTerminated `shouldReturn` []
+
+  it "recognizes an open termination and nothing else as one" $ do
+    let terminationState effect outcome =
+          MissionInvocationState
+            { missionInvocationRecord =
+                MissionInvocation
+                  { missionInvocationId = MissionInvocationId "terminate-c-end",
+                    missionInvocationMission = theMission,
+                    missionInvocationRepository = MissionRepository "coghex" "kanban",
+                    missionInvocationStep = MissionStepId "-",
+                    missionInvocationAction = "terminate_subtree",
+                    missionInvocationTarget = Nothing,
+                    missionInvocationVersion = Nothing,
+                    missionInvocationEffect = effect,
+                    missionInvocationParent = Nothing,
+                    missionInvocationAt = fixedTime
+                  },
+              missionInvocationOutcome = outcome
+            }
+        open = terminationState (MissionEffectTerminateSubtree "solve-844-0001") Nothing
+        closed = terminationState (MissionEffectTerminateSubtree "solve-844-0001") (Just (MissionInvocationCompleted "done"))
+    unresolvedTerminationOf [open] `shouldBe` Just (MissionInvocationId "terminate-c-end", theParent)
+    unresolvedTerminationOf [closed] `shouldBe` Nothing
+    unresolvedTerminationOf [openInvocationState] `shouldBe` Nothing
+
+  -- A worker's terminal artifacts are collectable after their retention
+  -- whatever the worker did, so the record of a child that failed, stopped to
+  -- ask, or was never observed is gone by exactly the route a completed one's
+  -- is. Reading the absence as a clean exit would hand a parent the one thing
+  -- it waits for on no evidence at all.
+  it "reads a collected worker record as unknown rather than as a clean exit" $
+    withRegisteredParent $ \store _ -> do
+      driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+      observed <- driver.missionDriverObserveSession (MissionSessionId "child-collected-0001")
+      case observed of
+        Right (Just observation) -> do
+          observation.missionObservationOutcome `shouldBe` MissionObservedUnknown
+          missionSessionDisposition (sessionNode "child-collected-0001" (Just theParent) (Just observation))
+            `shouldBe` MissionSessionUnverifiable
+        other -> expectationFailure ("unexpected observation: " <> show (fmap (fmap (.missionObservationOutcome)) other))
+
+  it "keeps a parent nonterminal over a child whose record was collected" $ do
+    let collected =
+          MissionTerminalObservation
+            { missionObservationAt = fixedTime,
+              missionObservationOutcome = MissionObservedUnknown,
+              missionObservationDetail = Just "its worker record has been collected; how it ended is unrecorded"
+            }
+        sessions =
+          [ sessionNode "solve-844-0001" Nothing settledObservation,
+            sessionNode "child-1" (Just theParent) (Just collected)
+          ]
+        snapshot = snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions
+    stepHasUnsettledDescendants snapshot theStep `shouldBe` True
+    -- And the same parent over a child that was observed to end may settle.
+    let ended = sessions >>= \node ->
+          [ if node.missionSessionId == MissionSessionId "child-1"
+              then node {missionSessionObservation = settledObservation}
+              else node
+          ]
+    stepHasUnsettledDescendants (snapshot {missionSnapshotSessions = ended}) theStep `shouldBe` False
+
+  -- A step's session list accumulates, so a replanned step carries its
+  -- abandoned attempt and its replacement. Answering from the first reading
+  -- available would let the terminal old worker conclude a step whose
+  -- replacement is still running, and the reconciliation that followed would
+  -- launch a third beside it.
+  it "answers a replanned step from its live session, not its oldest one" $ do
+    let old =
+          MissionWorkerReading
+            { missionWorkerSession = MissionSessionId "solve-844-0001",
+              missionWorkerLive = False,
+              missionWorkerCompatible = True,
+              missionWorkerTerminal = Just (MissionWorkerSucceeded "the registered worker completed"),
+              missionWorkerProviderSession = Just "provider-1"
+            }
+        replacement =
+          MissionWorkerReading
+            { missionWorkerSession = MissionSessionId "solve-844-0002",
+              missionWorkerLive = True,
+              missionWorkerCompatible = True,
+              missionWorkerTerminal = Nothing,
+              missionWorkerProviderSession = Just "provider-2"
+            }
+        opaque = replacement {missionWorkerSession = MissionSessionId "solve-844-0003", missionWorkerCompatible = False}
+    decidingWorkerReading [old, replacement] `shouldBe` Just replacement
+    -- A compatible live session outranks an opaque one whichever order they
+    -- were registered in.
+    decidingWorkerReading [opaque, replacement] `shouldBe` Just replacement
+    decidingWorkerReading [replacement, opaque] `shouldBe` Just replacement
+    -- With nothing live, the most recent terminal attempt answers.
+    decidingWorkerReading [old, old {missionWorkerSession = MissionSessionId "solve-844-0004"}]
+      `shouldBe` Just (old {missionWorkerSession = MissionSessionId "solve-844-0004"})
+    decidingWorkerReading [] `shouldBe` Nothing
+
+  -- The other half of the worker's fail-closed precondition. A turn refused
+  -- because the target could not be read at all mutated nothing and learned
+  -- nothing, and the documented repair is to wait for a reading — so it must
+  -- not reach the mission as a permanently failed step.
+  it "reconciles an unreadable-target refusal to an unknown outcome, not a failure" $ do
+    let refusal = workerUnverifiedTargetReason <> ": gh: could not connect"
+    settledWorkerFailure refusal `shouldBe` ActionStopped refusal
+    (missionStepFailureTag <$> missionFailureFromOutcome (settledWorkerFailure refusal))
+      `shouldBe` Just "outcome_unknown"
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store stage -> do
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence
+          { missionEvidenceWorker =
+              Just
+                MissionWorkerReading
+                  { missionWorkerSession = theParent,
+                    missionWorkerLive = False,
+                    missionWorkerCompatible = True,
+                    -- Exactly the conclusion the live driver derives from a
+                    -- worker that settled with this sentence.
+                    missionWorkerTerminal =
+                      Just
+                        ( MissionWorkerFailed
+                            ( maybe
+                                (MissionFailureGeneric refusal)
+                                id
+                                (missionFailureFromOutcome (settledWorkerFailure refusal))
+                            )
+                        ),
+                    missionWorkerProviderSession = Nothing
+                  }
+          }
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+          step `shouldBe` theStep
+          Text.unpack detail `shouldSatisfy` isInfixOf "could not be reread"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []

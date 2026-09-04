@@ -134,7 +134,7 @@ import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (ResumeProvenance (..), SolverBrand)
-import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason, workerStaleTargetReason)
+import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason, workerStaleTargetReason, workerUnverifiedTargetReason)
 import Kanban.Workflow (readOnlyHistoryNotice)
 
 -- ---------------------------------------------------------------------------
@@ -697,6 +697,15 @@ settledWorkerFailure :: Text -> ActionOutcome
 settledWorkerFailure detail
   | detail == workerDeadlineReason = ActionDeadlineExceeded detail
   | workerStaleTargetReason `Text.isPrefixOf` detail = ActionTargetMoved detail
+  -- A turn refused because the recorded target could not be reread at all.
+  -- Nothing was mutated and nothing was learned, so this is the absence of a
+  -- conclusion rather than one: 'ActionStopped' is the outcome that carries
+  -- that, and a mission reads it as an unknown outcome to be resolved by fresh
+  -- evidence or direction. Calling it a failure would turn one unreachable
+  -- network into a permanently failed step, which is precisely the collapse
+  -- 'Kanban.Worker.workerUnverifiedTargetReason' exists to keep apart from a
+  -- target that demonstrably moved.
+  | workerUnverifiedTargetReason `Text.isPrefixOf` detail = ActionStopped detail
   | otherwise = ActionFailed detail
 
 -- | What one observation of a dispatched action found.

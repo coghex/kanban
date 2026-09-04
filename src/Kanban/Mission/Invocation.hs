@@ -192,6 +192,21 @@ data MissionInvocation = MissionInvocation
     missionInvocationTarget :: Maybe MissionTarget,
     missionInvocationVersion :: Maybe MissionTargetVersion,
     missionInvocationEffect :: MissionIntendedEffect,
+    -- | The registered session this effect's result belongs under, for a
+    -- dispatch a parent asked for.
+    --
+    -- Lineage rather than decoration. A child's session node is the only
+    -- record that puts it inside a subtree, and it is written /after/ the
+    -- launch; a crash in between leaves a running child that the snapshot
+    -- never registered and, unlike a plan step, has no step record for
+    -- recovery to recognize it by. Carrying the parent here — before the
+    -- launch, in the one file written for exactly this — is what lets a later
+    -- run put the child back under the parent that asked for it instead of
+    -- adopting it as an orphan or leaving it unaccounted for.
+    --
+    -- 'Nothing' for every effect no parent asked for, which is all of them
+    -- except a registered child request.
+    missionInvocationParent :: Maybe Text,
     missionInvocationAt :: UTCTime
   }
   deriving stock (Eq, Show, Generic)
@@ -212,6 +227,21 @@ data MissionInvocationOutcome
     -- read failed, or the durable marker that precedes a launch could not be
     -- written, and in neither case did anything reach the owning authority.
     MissionInvocationAbandoned Text
+  | -- | Closed without ever learning what happened.
+    --
+    -- Not a contradiction of the \"an open record /is/ the unknown outcome\"
+    -- rule above but its terminal form, and it exists because two effects have
+    -- nowhere else to record that a run looked and could not tell. A plan
+    -- step's unknown outcome is written on the step, which is what stops the
+    -- next iteration reaching for it again; a registered child and a subtree
+    -- termination have no step record to write it on, so leaving their record
+    -- open would make every later iteration reopen the same question and
+    -- reread the same absent evidence.
+    --
+    -- It licenses nothing. The effect may or may not have happened, the
+    -- mission halts for authenticated direction the moment this is written,
+    -- and no path anywhere reads it as permission to attempt the effect again.
+    MissionInvocationUnknown Text
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -222,6 +252,7 @@ missionInvocationOutcomeTag outcome = case outcome of
   MissionInvocationRefused _ -> "refused"
   MissionInvocationStale _ -> "stale_version"
   MissionInvocationAbandoned _ -> "abandoned"
+  MissionInvocationUnknown _ -> "outcome_unknown"
 
 -- | One invocation as the whole file describes it.
 data MissionInvocationState = MissionInvocationState

@@ -40,6 +40,7 @@ module Kanban.Mission.Runner
     runMissionMode,
     runMissionWith,
     liveMissionDriver,
+    decidingWorkerReading,
     drainMissionConsole,
     drainMissionConsoleWith,
     missionVersionOf,
@@ -355,7 +356,7 @@ liveMissionDriver options config repository store _ =
       workers <- discoverWorkerHistory repository
       readings <- mapM (readingFor step workers) record.missionStepRecordSessions
       foreignWork <- foreignLiveWork step record workers
-      let reading = firstJust readings
+      let reading = decidingWorkerReading (mapMaybe id readings)
       case reading of
         Just ours
           | ours.missionWorkerLive ->
@@ -383,10 +384,6 @@ liveMissionDriver options config repository store _ =
           missionEvidenceDeparted = departed,
           missionEvidenceForeign = foreignWork
         }
-
-    firstJust values = case mapMaybe id values of
-      (value : _) -> Just value
-      [] -> Nothing
 
     readingFor step workers session =
       case find ((== session.unMissionSessionId) . workerIdentity) workers of
@@ -442,6 +439,14 @@ liveMissionDriver options config repository store _ =
     observeSession session = do
       workers <- discoverWorkerHistory repository
       case find ((== session.unMissionSessionId) . workerIdentity) workers of
+        -- Collected, and that is all it says. A worker's terminal artifacts
+        -- are collectable after their retention whatever the worker did, so
+        -- the record of a child that failed, stopped to ask a question, or
+        -- was never observed at all is gone by exactly the same route as a
+        -- child that completed. Reporting the absence as a clean exit would
+        -- hand a parent the one thing it is waiting for — a conclusive child
+        -- outcome — on the strength of no evidence whatever, and let it settle
+        -- over a child nothing ever accounted for.
         Nothing -> do
           now <- getCurrentTime
           pure
@@ -449,8 +454,8 @@ liveMissionDriver options config repository store _ =
                 ( Just
                     MissionTerminalObservation
                       { missionObservationAt = now,
-                        missionObservationOutcome = MissionObservedExit 0,
-                        missionObservationDetail = Just "its worker record has been collected"
+                        missionObservationOutcome = MissionObservedUnknown,
+                        missionObservationDetail = Just "its worker record has been collected; how it ended is unrecorded"
                       }
                 )
             )
@@ -767,6 +772,29 @@ targetRefFor target =
         MissionTargetPullRequest -> ActionTargetPullRequest
     )
     target.missionTargetNumber
+
+-- | Which of a step's registered sessions answers for it.
+--
+-- A step's session list accumulates rather than replaces: one that was
+-- replanned after a stale race carries the abandoned attempt and its
+-- replacement, oldest first. Taking the first reading available would let a
+-- terminal old worker answer for a step whose replacement is still running —
+-- and because that replacement is registered, the foreign-work pass does not
+-- report it either, so the step would be reconciled back to pending and
+-- dispatched a third time beside a live second one. That is the repeated
+-- effect requirement 7 forbids outright.
+--
+-- So a live session wins, and a compatible live one wins over an opaque live
+-- one, because the compatible reading is the one whose intent is proven. Only
+-- when nothing registered is still running does a terminal reading answer, and
+-- then it is the most recent: the latest attempt is the one whose conclusion
+-- is the step's.
+decidingWorkerReading :: [MissionWorkerReading] -> Maybe MissionWorkerReading
+decidingWorkerReading present = case filter (.missionWorkerLive) present of
+  [] -> case reverse present of
+    (newest : _) -> Just newest
+    [] -> Nothing
+  live@(first : _) -> Just (fromMaybe first (find (.missionWorkerCompatible) live))
 
 -- | The durable record of a precondition, and the precondition it records.
 --

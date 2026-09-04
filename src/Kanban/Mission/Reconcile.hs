@@ -58,7 +58,10 @@ module Kanban.Mission.Reconcile
     settledMissionLifecycle,
     blockedMissionLifecycle,
     cancelledByDependency,
+    MissionOpenDispatch (..),
+    missionOpenDispatchIsChild,
     unresolvedDispatchOf,
+    unresolvedTerminationOf,
     dispatchedButUnregistered,
 
     -- * The registered session tree
@@ -85,7 +88,8 @@ import Kanban.Action
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Mission.Invocation
-  ( MissionInvocation (..),
+  ( MissionIntendedEffect (..),
+    MissionInvocation (..),
     MissionInvocationId (..),
     MissionInvocationOutcome (..),
     MissionInvocationState (..),
@@ -552,37 +556,103 @@ cancelledByDependency specification snapshot =
       Nothing -> False
     lifecycleOf step = (.missionStepRecordLifecycle) <$> missionStepRecordFor step snapshot
 
--- | A step that is still @pending@ and already has an invocation nobody saw
--- the end of.
+-- | A launch that is still open, with the lineage its repair needs.
 --
--- Both durable states a crash around a launch can leave. A crash before the
+-- The durable states a crash around a launch can leave. A crash before the
 -- @dispatching@ write leaves a step that still reads @pending@, which
 -- 'nextDispatchableStep' would hand straight back to a dispatch — repeating an
 -- effect that may already have happened, the one thing requirement 7 forbids
 -- outright. A crash after the driver returned and before the invocation was
 -- concluded leaves a step reading @dispatching@ beside a worker the mission
 -- started and has not recorded, which the ordinary evidence pass would
--- classify as somebody else's live work and pause on.
+-- classify as somebody else's live work and pause on. And a registered
+-- child's launch leaves neither, because a child has no step record at all:
+-- its whole existence is the invocation and the session write that was about
+-- to follow it.
 --
--- Neither is distinguishable from a step that was never dispatched by looking
--- at the step record; only the invocation file is. A live run never sees
--- either, because between the two writes the controller never yields.
-unresolvedDispatchOf :: [MissionInvocationState] -> MissionSpecification -> MissionSnapshot -> Maybe (MissionStepId, MissionInvocationId)
+-- None of the three is distinguishable from a launch that never happened by
+-- looking at the step records; only the invocation file is. A live run never
+-- sees any of them, because between the two writes the controller never
+-- yields.
+unresolvedDispatchOf :: [MissionInvocationState] -> MissionSpecification -> MissionSnapshot -> Maybe MissionOpenDispatch
 unresolvedDispatchOf states specification snapshot =
-  case [ (step.missionPlanStepId, state.missionInvocationRecord.missionInvocationId)
-       | step <- specification.missionSpecificationPlan,
-         lifecycleOf step.missionPlanStepId `elem` [Just MissionStepPending, Just MissionStepDispatching],
-         state <- states,
-         state.missionInvocationRecord.missionInvocationStep == step.missionPlanStepId,
-         not (missionInvocationResolved state)
-       ] of
+  case filter open (plannedDispatches <> childDispatches) of
     (found : _) -> Just found
     [] -> Nothing
   where
+    open dispatch = not (missionInvocationResolved dispatch.missionOpenDispatchState)
+    plannedDispatches =
+      [ openDispatchOf state
+      | step <- specification.missionSpecificationPlan,
+        lifecycleOf step.missionPlanStepId `elem` [Just MissionStepPending, Just MissionStepDispatching],
+        state <- states,
+        isDispatch state,
+        state.missionInvocationRecord.missionInvocationStep == step.missionPlanStepId
+      ]
+    -- The same window around a registered child's launch, which the plan walk
+    -- above cannot see: a child's step is invented from the request and is in
+    -- no plan, and nothing writes a step record for it, so the invocation file
+    -- is the only place its launch is described at all. Recognized by the
+    -- lineage the launch recorded, so an ordinary dispatch is never swept in
+    -- here and a child is never missed for want of a plan entry.
+    childDispatches =
+      [ openDispatchOf state
+      | state <- states,
+        isDispatch state,
+        Just _ <- [state.missionInvocationRecord.missionInvocationParent],
+        missionStepRecordFor state.missionInvocationRecord.missionInvocationStep snapshot == Nothing
+      ]
+    isDispatch state = case state.missionInvocationRecord.missionInvocationEffect of
+      MissionEffectDispatch _ -> True
+      MissionEffectTerminateSubtree _ -> False
+    openDispatchOf state =
+      MissionOpenDispatch
+        { missionOpenDispatchStep = state.missionInvocationRecord.missionInvocationStep,
+          missionOpenDispatchInvocation = state.missionInvocationRecord.missionInvocationId,
+          missionOpenDispatchParent = MissionSessionId <$> state.missionInvocationRecord.missionInvocationParent,
+          missionOpenDispatchState = state
+        }
     lifecycleOf step = (.missionStepRecordLifecycle) <$> missionStepRecordFor step snapshot
 
--- | A step whose invocation records a dispatched worker its own record does
--- not list.
+-- | One launch this store never saw the end of, with the lineage its repair
+-- needs.
+data MissionOpenDispatch = MissionOpenDispatch
+  { missionOpenDispatchStep :: MissionStepId,
+    missionOpenDispatchInvocation :: MissionInvocationId,
+    -- | The parent to register a recovered child under. 'Nothing' for a plan
+    -- step, which is nobody's child.
+    missionOpenDispatchParent :: Maybe MissionSessionId,
+    missionOpenDispatchState :: MissionInvocationState
+  }
+  deriving stock (Eq, Show)
+
+-- | Whether this open launch is a registered child's rather than a plan
+-- step's, which decides where its unknown outcome can be written down.
+missionOpenDispatchIsChild :: MissionSnapshot -> MissionOpenDispatch -> Bool
+missionOpenDispatchIsChild snapshot dispatch =
+  missionStepRecordFor dispatch.missionOpenDispatchStep snapshot == Nothing
+
+-- | A subtree termination this store never saw the end of.
+--
+-- The other half of the same crash window, and the more dangerous half: the
+-- signal may already have been delivered. Nothing here decides that it was —
+-- the caller reconciles it from what the registered sessions can be observed
+-- to be doing now, and requires authenticated direction when that evidence
+-- settles nothing. What this must never do is let the effect be repeated on
+-- the strength of the record, which is why an unresolved termination is
+-- reported rather than left for the ordinary command path to reissue.
+unresolvedTerminationOf :: [MissionInvocationState] -> Maybe (MissionInvocationId, MissionSessionId)
+unresolvedTerminationOf states =
+  case [ (state.missionInvocationRecord.missionInvocationId, MissionSessionId session)
+       | state <- states,
+         not (missionInvocationResolved state),
+         MissionEffectTerminateSubtree session <- [state.missionInvocationRecord.missionInvocationEffect]
+       ] of
+    (found : _) -> Just found
+    [] -> Nothing
+
+-- | A launch whose invocation records a dispatched worker the session tree
+-- does not hold.
 --
 -- The other crash window: the driver returned, the worker is running, the
 -- invocation was closed with its identity — and the snapshot write that would
@@ -590,19 +660,39 @@ unresolvedDispatchOf states specification snapshot =
 -- a step with no sessions, finds a live worker it cannot account for, and
 -- pauses the mission for work it started itself.
 --
+-- Registration is judged by the session tree rather than by the step record\'s
+-- own list of identifiers, and that is what makes this cover a registered
+-- child as well as a plan step. One snapshot write makes both entries, so for
+-- a plan step the two questions have the same answer; for a child there is no
+-- step record to ask at all, and the tree is the only place its registration
+-- was ever going to live. The parent travels back with it for the same
+-- reason: a child put back without its lineage is a session no termination
+-- reaches and no parent waits for, which is the accounting hole the
+-- registration existed to close.
+--
 -- The conclusion is the durable association the repair is built from, which is
 -- why it is written before the snapshot rather than after.
-dispatchedButUnregistered :: [MissionInvocationState] -> MissionSnapshot -> Maybe (MissionStepId, MissionSessionId)
+dispatchedButUnregistered :: [MissionInvocationState] -> MissionSnapshot -> Maybe (MissionStepId, MissionSessionId, Maybe MissionSessionId)
 dispatchedButUnregistered states snapshot =
-  case [ (state.missionInvocationRecord.missionInvocationStep, MissionSessionId worker)
+  case [ ( record.missionInvocationStep,
+           MissionSessionId worker,
+           MissionSessionId <$> record.missionInvocationParent
+         )
        | state <- states,
          Just (MissionInvocationDispatched worker) <- [state.missionInvocationOutcome],
-         Just record <- [missionStepRecordFor state.missionInvocationRecord.missionInvocationStep snapshot],
-         not (missionStepLifecycleIsTerminal record.missionStepRecordLifecycle),
-         MissionSessionId worker `notElem` record.missionStepRecordSessions
+         let record = state.missionInvocationRecord,
+         stepIsOpen record.missionInvocationStep,
+         not (registered (MissionSessionId worker))
        ] of
     (found : _) -> Just found
     [] -> Nothing
+  where
+    registered identity = any ((== identity) . (.missionSessionId)) snapshot.missionSnapshotSessions
+    -- A child has no step record, and its absence is not a terminal step: it
+    -- is the record that was never going to exist.
+    stepIsOpen step = case missionStepRecordFor step snapshot of
+      Nothing -> True
+      Just record -> not (missionStepLifecycleIsTerminal record.missionStepRecordLifecycle)
 
 -- ---------------------------------------------------------------------------
 -- The registered session tree

@@ -3426,7 +3426,19 @@ Defaults:
   begins can ask whether it still holds — and a target that moved, or that
   cannot be read at all, stops the turn before anything is mutated. Those two
   refusals stay distinct: a moved target is replanned against a new reading, an
-  unreadable one is waited on.
+  unreadable one is waited on, and the mission records the second as an unknown
+  outcome rather than as a step that failed. Two effects have no step record to
+  carry that outcome on, and each is recovered from the record instead. A
+  registered child's launch records the parent it was asked for by, so a crash
+  before the session write puts the child back under that parent rather than
+  leaving a running session nothing accounts for; and an open subtree
+  termination is settled by observing the registered sessions themselves —
+  every one of them shown to have ended closes it, and anything less halts the
+  mission for authenticated direction, because a signal that may already have
+  been delivered is never sent again on the strength of the record. A worker
+  record that has been collected is evidence of nothing: it is read as an
+  unknown ending, never as a clean one, so a parent never settles over a child
+  whose outcome no longer exists to be read.
   `control/requests/` is the channel an attached client takes direction on, and
   everything in it is an ordinary durable operator command with no override
   authority — no credential is stored there or anywhere else, because one
