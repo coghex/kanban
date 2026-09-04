@@ -29,7 +29,7 @@ module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (forM_)
+import Control.Monad (forM_, join)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
 import Data.Text (Text)
@@ -106,6 +106,7 @@ import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixt
 import System.Directory (doesFileExist, listDirectory)
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
+import System.Posix.Files (setFileMode)
 import System.FilePath ((</>))
 import qualified Data.Text.IO as TextIO
 import System.IO (BufferMode (LineBuffering), Handle, IOMode (ReadMode), hClose, hIsTerminalDevice, hSetBuffering, withFile)
@@ -306,6 +307,9 @@ data Stage = Stage
     -- its own rather than the one its parent already registered.
     stageDispatchResult :: IORef (MissionDispatchRequest -> Either MissionStepFailure MissionDispatchAccepted),
     stageDispatches :: IORef [MissionDispatchRequest],
+    -- | Run inside the driver's dispatch, which is the one moment between a
+    -- launch's opening record and its closing one.
+    stageOnDispatch :: IORef (IO ()),
     stageTerminated :: IORef [[MissionSessionId]],
     -- | The sessions the driver will report an observation for.
     stageSessions :: IORef [MissionSessionId],
@@ -323,6 +327,7 @@ newStage =
     <*> newIORef id
     <*> newIORef (Right . acceptedDispatch)
     <*> newIORef []
+    <*> newIORef (pure ())
     <*> newIORef []
     <*> newIORef []
     <*> newIORef endedObservation
@@ -382,6 +387,7 @@ stagedDriver stage _ _ =
           pure (Right (lookup invocation launched)),
         missionDriverDispatch = \request -> do
           atomicModifyIORef' stage.stageDispatches (\seen -> (seen <> [request], ()))
+          join (readIORef stage.stageOnDispatch)
           ($ request) <$> readIORef stage.stageDispatchResult,
         missionDriverTerminate = \sessions -> do
           atomicModifyIORef' stage.stageTerminated (\seen -> (seen <> [sessions], ()))
@@ -902,12 +908,12 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
     filter missionLifecycleBlocks missionLifecycles `shouldBe` blocked
     filter missionLifecycleAdvances missionLifecycles `shouldBe` advanceable
     sequence_
-      [ (lifecycle, missionRunnerHalt lifecycle) `shouldSatisfy` (\(_, halt) -> halt /= Nothing)
+      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] [])) `shouldSatisfy` (\(_, halt) -> halt /= Nothing)
         | lifecycle <- missionLifecycles,
           lifecycle `notElem` advanceable
       ]
     sequence_
-      [ (lifecycle, missionRunnerHalt lifecycle) `shouldBe` (lifecycle, Nothing)
+      [ (lifecycle, missionRunnerHalt (snapshotWith lifecycle [] [])) `shouldBe` (lifecycle, Nothing)
         | lifecycle <- advanceable
       ]
 
@@ -2333,9 +2339,12 @@ directionSpec = describe "directing a run that has blocked" $ do
         Left detail -> expectationFailure (Text.unpack detail)
         Right run -> do
           run.missionRunConclusion
-            `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+            `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
           map missionTransitionMessage run.missionRunTransitions
             `shouldSatisfy` any (isInfixOf "user override on solve-844" . Text.unpack)
+          -- And the run says so: a mission stopped on a step nothing could
+          -- establish the outcome of is never reported as a success (§16).
+          missionRunSucceeded run `shouldBe` False
       length <$> readIORef stage.stageDispatches `shouldReturn` 1
       length <$> readIORef said `shouldReturn` 3
 
@@ -2352,7 +2361,7 @@ directionSpec = describe "directing a run that has blocked" $ do
           Left detail -> expectationFailure (Text.unpack detail)
           Right run ->
             run.missionRunConclusion
-              `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+              `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
         readIORef stage.stageDispatches `shouldReturn` []
 
   -- The exclusion that makes the prompt authority rather than a formality. A
@@ -2374,7 +2383,7 @@ directionSpec = describe "directing a run that has blocked" $ do
         Left detail -> expectationFailure (Text.unpack detail)
         Right run ->
           run.missionRunConclusion
-            `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+            `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
       readIORef said `shouldReturn` []
       readIORef stage.stageDispatches `shouldReturn` []
 
@@ -3014,6 +3023,44 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
           case reread of
             Right states -> expectationFailure ("two openings were collapsed into " <> show (length states))
             Left detail -> Text.unpack detail `shouldSatisfy` isInfixOf "under one identity"
+
+  -- The closing record is durable state like any other. Discarding a failure
+  -- to write it left the step recorded as running beside a launch the file
+  -- still called open — and nothing revisits a running step's invocation, so
+  -- the mission could complete over a record that never closed.
+  it "stops the run when a launch's conclusion cannot be written" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      -- Sealed at the one moment that matters: after the opening record
+      -- reached the disk and before the closing one is attempted.
+      writeIORef stage.stageOnDispatch (() <$ sealInvocationJournal store)
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionControllerFailed _ -> pure ()
+        other -> expectationFailure ("a lost conclusion was not reported: " <> show other)
+      case missionInvocationPath store.missionStoreDirectory theMission of
+        Left message -> expectationFailure (Text.unpack message)
+        Right path -> unsealInvocationJournal path
+      -- And the step is left where the crash windows already expect to find
+      -- it, rather than as work the mission believes is under way.
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldSatisfy` (/= Just MissionStepRunning)
+
+-- | Makes the invocation journal unappendable, the way a read-only state
+-- directory does, and gives back what is needed to undo it.
+sealInvocationJournal :: MissionStore -> IO FilePath
+sealInvocationJournal store = case missionInvocationPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> do
+    -- The journal itself, made unwritable. The opening record has already
+    -- created it, so the close is the next thing to open it for append — and
+    -- that open fails, which is the failure this example is about. Whatever
+    -- takes the write away (a permission change, a full filesystem) reaches
+    -- the writer the same way.
+    setFileMode path 0o400
+    pure path
+
+unsealInvocationJournal :: FilePath -> IO ()
+unsealInvocationJournal path = setFileMode path 0o600
 
 -- | The counter an invocation identity ends with, which is the part a mint
 -- taken from a moving number contributes.

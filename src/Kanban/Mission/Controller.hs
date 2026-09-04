@@ -585,7 +585,7 @@ missionControllerIteration controller = do
           mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
           case commands.missionCommandsAccepted of
             (command : _) -> applyCommand controller snapshot command
-            [] -> case missionRunnerHalt snapshot.missionSnapshotLifecycle of
+            [] -> case missionRunnerHalt snapshot of
               Just halt -> pure (MissionStopped halt)
               Nothing -> advance controller snapshot
 
@@ -655,13 +655,8 @@ resolveOpenInvocation controller snapshot dispatch = do
     Left detail -> pure (MissionControllerFailed detail)
     Right (Just session) -> do
       now <- getCurrentTime
-      _ <-
-        concludeMissionInvocation
-          controller.missionControllerInvocations
-          invocation
-          (MissionInvocationDispatched session.unMissionSessionId)
-          now
-      registerDispatchedSession controller snapshot step session dispatch.missionOpenDispatchParent
+      closing controller invocation (MissionInvocationDispatched session.unMissionSessionId) now $
+        registerDispatchedSession controller snapshot step session dispatch.missionOpenDispatchParent
     Right Nothing
       -- A registered child, whose unknown outcome has no step record to be
       -- written on. Closing the invocation is what stops the next iteration
@@ -670,13 +665,8 @@ resolveOpenInvocation controller snapshot dispatch = do
       -- launch may have happened, so only authenticated direction resolves it.
       | missionOpenDispatchIsChild snapshot dispatch -> do
           now <- getCurrentTime
-          _ <-
-            concludeMissionInvocation
-              controller.missionControllerInvocations
-              invocation
-              (MissionInvocationUnknown unknownDetail)
-              now
-          applyMissionLifecycle controller snapshot MissionWaitingInput unknownDetail
+          closing controller invocation (MissionInvocationUnknown unknownDetail) now $
+            applyMissionLifecycle controller snapshot MissionWaitingInput unknownDetail
       | otherwise ->
           applyStepLifecycle
             controller
@@ -715,24 +705,18 @@ resolveOpenTermination controller snapshot invocation root = do
   case sequence observations of
     Left unreadable -> pure (MissionControllerFailed unreadable)
     Right settled
-      | all id settled -> do
-          _ <-
-            concludeMissionInvocation
-              controller.missionControllerInvocations
-              invocation
-              ( MissionInvocationCompleted
-                  ( "every registered session under "
-                      <> root.unMissionSessionId
-                      <> " has ended"
-                  )
-              )
-              now
-          -- Reported as the termination it is rather than as a repair: the
-          -- subtree is ended, and this iteration is what established it.
-          pure (MissionAdvanced (MissionSubtreeTerminated root (length settled)))
-      | otherwise -> do
-          _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationUnknown detail) now
-          applyMissionLifecycle controller snapshot MissionWaitingInput detail
+      | all id settled ->
+          closing
+            controller
+            invocation
+            (MissionInvocationCompleted ("every registered session under " <> root.unMissionSessionId <> " has ended"))
+            now
+            -- Reported as the termination it is rather than as a repair: the
+            -- subtree is ended, and this iteration is what established it.
+            (pure (MissionAdvanced (MissionSubtreeTerminated root (length settled))))
+      | otherwise ->
+          closing controller invocation (MissionInvocationUnknown detail) now $
+            applyMissionLifecycle controller snapshot MissionWaitingInput detail
   where
     detail =
       "termination "
@@ -1110,13 +1094,13 @@ performDispatch controller snapshot step invocation plannedVersion = do
         | not (missionVersionHolds recorded observed) -> do
             let stale = MissionStaleVersion {missionStaleRecorded = recorded, missionStaleObserved = observed}
             now <- getCurrentTime
-            _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationStale stale) now
-            applyStepLifecycle
-              controller
-              snapshot
-              step.missionPlanStepId
-              MissionStepPending
-              (missionStepFailureMessage (MissionFailureStaleVersion (missionStaleVersionMessage stale)))
+            closing controller invocation (MissionInvocationStale stale) now $
+              applyStepLifecycle
+                controller
+                snapshot
+                step.missionPlanStepId
+                MissionStepPending
+                (missionStepFailureMessage (MissionFailureStaleVersion (missionStaleVersionMessage stale)))
       _ -> do
         let reading = liveReadingFor snapshot step.missionPlanStepId
         accepted <-
@@ -1131,13 +1115,7 @@ performDispatch controller snapshot step invocation plannedVersion = do
               }
         now <- getCurrentTime
         case accepted of
-          Left failure -> do
-            _ <-
-              concludeMissionInvocation
-                controller.missionControllerInvocations
-                invocation
-                (MissionInvocationRefused (missionStepFailureMessage failure))
-                now
+          Left failure -> closing controller invocation (MissionInvocationRefused (missionStepFailureMessage failure)) now $ do
             iteration <-
               applyStepLifecycle
                 controller
@@ -1152,26 +1130,20 @@ performDispatch controller snapshot step invocation plannedVersion = do
           -- register and nothing for a later pass to observe, so the result is
           -- written here or it is lost.
           Right acceptance
-            | Just conclusion <- acceptance.missionAcceptedOutcome -> do
-                _ <-
-                  concludeMissionInvocation
-                    controller.missionControllerInvocations
-                    invocation
-                    (MissionInvocationCompleted (missionConclusionDetail conclusion))
-                    now
-                applyStepLifecycle
+            | Just conclusion <- acceptance.missionAcceptedOutcome ->
+                closing
                   controller
-                  snapshot
-                  step.missionPlanStepId
-                  (missionConclusionLifecycle conclusion)
-                  (missionConclusionDetail conclusion)
-          Right acceptance -> do
-            _ <-
-              concludeMissionInvocation
-                controller.missionControllerInvocations
-                invocation
-                (MissionInvocationDispatched acceptance.missionAcceptedWorker)
-                now
+                  invocation
+                  (MissionInvocationCompleted (missionConclusionDetail conclusion))
+                  now
+                  ( applyStepLifecycle
+                      controller
+                      snapshot
+                      step.missionPlanStepId
+                      (missionConclusionLifecycle conclusion)
+                      (missionConclusionDetail conclusion)
+                  )
+          Right acceptance -> closing controller invocation (MissionInvocationDispatched acceptance.missionAcceptedWorker) now $ do
             written <-
               writeStep
                 controller
@@ -1190,6 +1162,25 @@ performDispatch controller snapshot step invocation plannedVersion = do
               Right () ->
                 MissionAdvanced
                   (MissionStepDispatched step.missionPlanStepId invocation acceptance.missionAcceptedSession)
+
+-- | Closes an invocation, and stops the run if that record cannot be written.
+--
+-- Discarding the failure is what let a step be written as @running@ beside a
+-- launch the file still calls open. Nothing revisits a running step's
+-- invocation — the recovery pass only reads @pending@ and @dispatching@ ones —
+-- so the mission could go on to complete over a record that never closed, and
+-- the journal would carry an effect nobody ever saw the end of into every
+-- later run.
+--
+-- Stopping instead leaves the step exactly where the crash windows already
+-- expect to find it, which is the point: the next run reads the same open
+-- invocation the same way and closes it from the worker the launch created.
+closing :: MissionController -> MissionInvocationId -> MissionInvocationOutcome -> UTCTime -> IO MissionIteration -> IO MissionIteration
+closing controller invocation outcome at continue = do
+  closed <- concludeMissionInvocation controller.missionControllerInvocations invocation outcome at
+  case closed of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right () -> continue
 
 -- | Which step lifecycle a conclusion reached without a worker lands in.
 --
@@ -1418,6 +1409,13 @@ performTermination controller snapshot command session reason = do
         )
       terminated <- controller.missionControllerDriver.missionDriverTerminate identities
       concluded <- getCurrentTime
+      -- The one conclusion whose failure is not propagated, because this
+      -- record has a recovery path of its own: an open termination is what
+      -- 'resolveOpenTermination' reads on the next run, and it reconciles it
+      -- from the sessions themselves. Stopping here instead would leave the
+      -- command file unconsumed as well, and a replayed termination is
+      -- answered from this same record — so failing would trade a recoverable
+      -- record for two.
       _ <-
         concludeMissionInvocation
           controller.missionControllerInvocations
@@ -1613,13 +1611,7 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
               }
       concluded <- getCurrentTime
       case accepted of
-        Left failure -> do
-          _ <-
-            concludeMissionInvocation
-              controller.missionControllerInvocations
-              invocation
-              (MissionInvocationRefused (missionStepFailureMessage failure))
-              concluded
+        Left failure -> closing controller invocation (MissionInvocationRefused (missionStepFailureMessage failure)) concluded $ do
           journalCommand controller command ("child request failed: " <> missionStepFailureMessage failure)
           consumeMissionCommand command
           pure (MissionAdvanced (MissionCommandRefused command.missionCommandId (missionStepFailureMessage failure)))
@@ -1629,29 +1621,18 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
         -- waiting on a worker no pass can find, and throw away the answer
         -- that already exists.
         Right acceptance
-          | Just conclusion <- acceptance.missionAcceptedOutcome -> do
-              _ <-
-                concludeMissionInvocation
-                  controller.missionControllerInvocations
-                  invocation
-                  (MissionInvocationCompleted (missionConclusionDetail conclusion))
-                  concluded
-              journalCommand controller command ("child request answered: " <> missionConclusionDetail conclusion)
-              consumeMissionCommand command
-              pure
-                ( MissionAdvanced
-                    ( MissionCommandApplied
-                        command.missionCommandId
-                        ("child request answered: " <> missionConclusionDetail conclusion)
-                    )
-                )
-        Right acceptance -> do
-          _ <-
-            concludeMissionInvocation
-              controller.missionControllerInvocations
-              invocation
-              (MissionInvocationDispatched acceptance.missionAcceptedWorker)
-              concluded
+          | Just conclusion <- acceptance.missionAcceptedOutcome ->
+              closing controller invocation (MissionInvocationCompleted (missionConclusionDetail conclusion)) concluded $ do
+                journalCommand controller command ("child request answered: " <> missionConclusionDetail conclusion)
+                consumeMissionCommand command
+                pure
+                  ( MissionAdvanced
+                      ( MissionCommandApplied
+                          command.missionCommandId
+                          ("child request answered: " <> missionConclusionDetail conclusion)
+                      )
+                  )
+        Right acceptance -> closing controller invocation (MissionInvocationDispatched acceptance.missionAcceptedWorker) concluded $ do
           -- The child joins the session tree under the parent that asked for
           -- it. Without the lineage it would be a session nothing accounts
           -- for: no termination would reach it and no parent would wait.

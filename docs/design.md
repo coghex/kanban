@@ -3467,7 +3467,14 @@ Defaults:
   A run that reaches a blocked lifecycle stays at its own terminal and asks
   what to do, because that terminal is the only channel carrying the authority
   such a state is resolvable by; exiting first would report the question after
-  closing the one door out of it. End of input, or the word for it, ends the
+  closing the one door out of it. A run that ends on a step nothing could
+  establish the outcome of reports failure, which is the promise above that an
+  indeterminate result is never a success; every other blocked stop is a
+  mission doing what it was asked and reports none. And a conclusion that
+  cannot be written stops the run rather than being discarded: a step recorded
+  as running beside a launch the file still calls open is one no later pass
+  revisits, so the mission would go on to complete over a record that never
+  closed. End of input, or the word for it, ends the
   run on the state it was already reporting, and a redirected standard input is
   never prompted any more than it is read. An authenticated override reaches
   the launch record as well as the step, since an unresolved launch is what the

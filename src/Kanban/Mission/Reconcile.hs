@@ -51,6 +51,7 @@ module Kanban.Mission.Reconcile
     missionLifecycleAdvances,
     missionLifecycleBlocks,
     missionRunnerHalt,
+    missionHaltIsIndeterminate,
 
     -- * Plan progression
     missionStepRecordFor,
@@ -411,12 +412,31 @@ data MissionHalt
     -- can move: an answer, a barrier, capacity, a resume, or a recovery
     -- decision.
     MissionHaltBlocked MissionLifecycle Text
+  | -- | Blocked, and blocked on a step nothing could establish the outcome of.
+    --
+    -- Its own halt because it is the one stop this run may not report as a
+    -- success: \"an indeterminate result is never a success\" is the contract,
+    -- and a mission waiting for an answer about work that /might/ have
+    -- happened is exactly that. Every other blocked state is a mission doing
+    -- what it was asked — pausing, waiting for capacity, waiting for a person
+    -- — and reporting one of those as a failure would make an ordinary,
+    -- correct stop look like a broken run.
+    MissionHaltIndeterminate MissionLifecycle Text
   deriving stock (Eq, Show)
 
 missionHaltMessage :: MissionHalt -> Text
 missionHaltMessage (MissionHaltTerminal lifecycle) = "mission " <> missionLifecycleTag lifecycle
 missionHaltMessage (MissionHaltBlocked lifecycle detail) =
   "mission " <> missionLifecycleTag lifecycle <> ": " <> detail
+missionHaltMessage (MissionHaltIndeterminate lifecycle detail) =
+  "mission " <> missionLifecycleTag lifecycle <> ": " <> detail <> ", and a step's outcome is unknown"
+
+-- | Whether this halt leaves something nobody has established.
+--
+-- The one question @kanban --mission@'s exit status turns on.
+missionHaltIsIndeterminate :: MissionHalt -> Bool
+missionHaltIsIndeterminate (MissionHaltIndeterminate _ _) = True
+missionHaltIsIndeterminate _ = False
 
 -- | The three lifecycles a controller may advance from.
 --
@@ -456,12 +476,20 @@ missionLifecycleBlocks lifecycle =
 -- what makes the runner provably non-resident: there is no lifecycle it idles
 -- in, so a mission that reaches an answerable state ends the process instead
 -- of waiting beside it (§3's non-goal).
-missionRunnerHalt :: MissionLifecycle -> Maybe MissionHalt
-missionRunnerHalt lifecycle
+missionRunnerHalt :: MissionSnapshot -> Maybe MissionHalt
+missionRunnerHalt snapshot
   | missionLifecycleIsTerminal lifecycle = Just (MissionHaltTerminal lifecycle)
+  -- Read off the steps rather than off the lifecycle, because @waiting_input@
+  -- is written for several reasons and only one of them is indeterminate: a
+  -- mission waiting for an answer to a question is not the same stop as one
+  -- waiting to be told what became of an effect it may already have had.
+  | missionLifecycleBlocks lifecycle,
+    any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps =
+      Just (MissionHaltIndeterminate lifecycle blockedDetail)
   | missionLifecycleBlocks lifecycle = Just (MissionHaltBlocked lifecycle blockedDetail)
   | otherwise = Nothing
   where
+    lifecycle = snapshot.missionSnapshotLifecycle
     blockedDetail = case lifecycle of
       MissionWaitingInput -> "it is waiting for an answer this runner cannot supply"
       MissionWaitingBarrier -> "it is waiting on a barrier outside this runner"

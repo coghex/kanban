@@ -200,6 +200,7 @@ module Kanban.Mission
     classifyMissionWork,
     MissionHalt (..),
     missionHaltMessage,
+    missionHaltIsIndeterminate,
     missionLifecycleAdvances,
     missionLifecycleBlocks,
     missionRunnerHalt,

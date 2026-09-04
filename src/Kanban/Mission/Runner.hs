@@ -129,6 +129,7 @@ import Kanban.Mission.Reconcile
     missionFailureFromRefusal,
     missionStepFailureMessage,
     missionHaltMessage,
+    missionHaltIsIndeterminate,
   )
 import Kanban.Mission.Store (listMissions, recordMissionEvent)
 import Kanban.Mission.Types
@@ -171,14 +172,23 @@ data MissionRunReport = MissionRunReport
   }
   deriving stock (Eq, Show)
 
--- | A halt is not a failure, whichever halt it is.
+-- | A halt is not a failure, with one exception.
 --
--- A mission that stopped for an answer did exactly what requirement 1 asks of
--- it. Only a run that could not read or write its own durable record, or that
--- ran out of iterations, is unsuccessful.
+-- A mission that stopped for an answer, for capacity, or because somebody
+-- paused it did exactly what requirement 1 asks of it, and reporting any of
+-- those as a failed run would make a correct stop look like a broken one. A
+-- run that could not read or write its own durable record, or that ran out of
+-- iterations, is unsuccessful.
+--
+-- And so is a mission that stopped on a step nothing could establish the
+-- outcome of. That is the contract §16 states outright — an indeterminate
+-- result is never reported as a success — and it is the whole reason
+-- @outcome_unknown@ is a lifecycle of its own rather than a kind of failure:
+-- something may have happened, nobody can say what, and a run that exited
+-- zero over it would tell its caller the mission was fine.
 missionRunSucceeded :: MissionRunReport -> Bool
 missionRunSucceeded report = case report.missionRunConclusion of
-  Right _ -> True
+  Right halt -> not (missionHaltIsIndeterminate halt)
   Left _ -> False
 
 -- | The run, rendered for a terminal.
@@ -318,12 +328,16 @@ runMissionWith console store repository mission buildDriver = do
             MissionStopped halt -> stopped controller remaining transitions halt
             MissionControllerFailed detail -> pure (concluded transitions (Left detail))
 
-    -- A terminal mission is over and nothing anybody types changes that. A
-    -- /blocked/ one is the opposite: it is waiting for precisely the authority
-    -- this console carries, so the run says what it is stuck on and waits for
-    -- an answer instead of exiting past the only person who can give one.
+    -- A terminal mission is over and nothing anybody types changes that.
+    -- Every other halt is the opposite: blocked or indeterminate, it is
+    -- waiting for precisely the authority this console carries, so the run
+    -- says what it is stuck on and waits for an answer instead of exiting past
+    -- the only person who can give one. The indeterminate halt in particular
+    -- is the one requirement 7 says only direction or fresh evidence
+    -- resolves — exiting past that would be exiting past the repair.
     stopped controller remaining transitions halt = case (halt, console) of
-      (MissionHaltBlocked _ _, Just typed) -> do
+      _ | MissionHaltTerminal _ <- halt -> pure (concluded transitions (Right halt))
+      (_, Just typed) -> do
         direction <- await typed controller halt
         case direction of
           MissionDirectionTaken -> loop controller remaining transitions
