@@ -46,6 +46,11 @@ data Options = Options
     optionAscii :: Bool,
     optionNoCache :: Bool,
     optionConfig :: Maybe FilePath,
+    -- | @--mission@, carrying the identifier as typed. Validated where a
+    -- mission store can be opened rather than here: "this is not a mission
+    -- identifier" and "this repository has no such mission" are the same
+    -- refusal to a parser and two different ones to the person who typed it.
+    optionMission :: Maybe String,
     optionWorkerSpec :: Maybe FilePath,
     optionReviewTools :: Maybe FilePath
   }
@@ -86,6 +91,14 @@ data LaunchMode
     -- whether the occurrences name one brand, and a malformed one refuses
     -- ahead of every mode here.
     PingQueryMode
+  | -- | @--mission@, carrying the identifier it named.
+    --
+    -- Last before the dashboard, and deliberately so. Every mode above it
+    -- answers a question and exits without touching durable state; this one
+    -- claims a mission's advancement lease and starts registered work, so an
+    -- invocation that also names an observational mode gets the observation
+    -- and starts nothing (§5).
+    MissionMode String
   | -- | The dashboard.
     DashboardMode
   deriving stock (Eq, Show)
@@ -99,6 +112,7 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
     | options.optionDoctor -> DoctorMode
     | options.optionUsage -> UsageQueryMode
     | not (null options.optionPing) -> PingQueryMode
+    | Just mission <- options.optionMission -> MissionMode mission
     | otherwise -> DashboardMode
 
 -- | Whether this mode reaches a model provider, and so has nothing to do when
@@ -122,6 +136,17 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
 -- not start and so must answer in exactly this case, @--glyph-test@ asks the
 -- terminal rather than a provider, and the dashboard is a board-only Kanban in
 -- this mode rather than a refused one.
+--
+-- The mission runner is the one worth stating at length, because it plainly
+-- /does/ reach providers and still answers 'False'. Refusing it wholesale on
+-- an install whose @models.toml@ loads nothing would make an unusable roster
+-- block the reconciliation and recovery requirements 6 and 7 ask to stay
+-- possible for a mission that is already under way — reattaching to a live
+-- worker, resolving an unknown outcome, ending a subtree, and recording what
+-- happened all need no provider at all. So the mode starts, and a transition
+-- that would launch a provider-backed action worker fails there instead, in
+-- the no-agent vocabulary the roster already supplies. The gate is at the
+-- launch, not at the process.
 launchModeNeedsProvider :: LaunchMode -> Bool
 launchModeNeedsProvider mode = case mode of
   UsageQueryMode -> True
@@ -130,6 +155,7 @@ launchModeNeedsProvider mode = case mode of
   ReviewToolServerMode _ -> False
   GlyphTestMode -> False
   DoctorMode -> False
+  MissionMode _ -> False
   DashboardMode -> False
 
 -- | What a mode says instead of running, given the roster the invocation
@@ -240,6 +266,13 @@ optionsParser =
           ( long "config"
               <> metavar "FILE"
               <> help "Override the global configuration path"
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "mission"
+              <> metavar "MISSION_ID"
+              <> help "Advance exactly this mission in the foreground, then exit"
           )
       )
     <*> optional

@@ -110,6 +110,7 @@ module Kanban.Action
     ActionOutcome (..),
     actionOutcomeSucceeded,
     actionOutcomeMessage,
+    settledWorkerFailure,
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,

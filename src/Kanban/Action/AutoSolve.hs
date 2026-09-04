@@ -666,7 +666,7 @@ settledSolverTurn progress status
       Just (WorkerTerminal SolveCompleted) ->
         Right . (.autoSolveCompletionProgress) <$> autoSolveAfterCompletion progress
       Just (WorkerTerminal (SolveNeedsInput detail)) -> Just (Left (ActionNeedsInput detail))
-      Just (WorkerTerminal (SolveFailed detail)) -> Just (Left (ActionFailed detail))
+      Just (WorkerTerminal (SolveFailed detail)) -> Just (Left (settledWorkerFailure detail))
       _ -> Nothing
 
 -- | The cursor a dispatched autosolve action's handle carries.

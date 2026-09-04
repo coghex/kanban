@@ -183,10 +183,15 @@ library kanban-internal
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
+    Kanban.Mission.Control
+    Kanban.Mission.Controller
     Kanban.Mission.Digest
+    Kanban.Mission.Invocation
     Kanban.Mission.Journal
     Kanban.Mission.Lease
     Kanban.Mission.Paths
+    Kanban.Mission.Reconcile
+    Kanban.Mission.Runner
     Kanban.Mission.Session
     Kanban.Mission.Store
     Kanban.Mission.Types
@@ -290,6 +295,7 @@ test-suite kanban-test
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
     Spec.Mission
+    Spec.Mission.Runner
     Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity

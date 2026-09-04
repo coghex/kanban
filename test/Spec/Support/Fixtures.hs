@@ -326,6 +326,7 @@ testOptions =
       optionAscii = False,
       optionNoCache = False,
       optionConfig = Nothing,
+      optionMission = Nothing,
       optionWorkerSpec = Nothing,
       optionReviewTools = Nothing
     }
@@ -368,6 +369,7 @@ fullFixtureToml =
     <> "claude_seconds = 90\n"
     <> "ping_codex_seconds = 130\n"
     <> "ping_claude_seconds = 140\n"
+    <> "worker_deadline_seconds = 7200\n"
     <> "\n"
     <> "[usage.codex]\n"
     <> "command = [\"/usr/local/bin/my-codex-usage\", \"--json\"]\n"
@@ -389,6 +391,7 @@ fullFixtureToml =
     <> "[repositories.\"coghex/kanban\".timeouts]\n"
     <> "github_seconds = 15\n"
     <> "ping_claude_seconds = 150\n"
+    <> "worker_deadline_seconds = 3600\n"
     <> "\n"
     <> "[repositories.\"other/repo\".workflow]\n"
     <> "approval_label = \"should-not-apply\"\n"

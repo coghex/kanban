@@ -52,6 +52,7 @@ import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
+import qualified Spec.Mission.Runner as MissionRunner
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -200,6 +201,10 @@ suiteGroups =
     -- neither can overlap the other. Its own cost is small enough to ride
     -- along anywhere.
     SuiteGroup "Spec.Mission" UsageLane Mission.spec,
+    -- Filesystem and pure work only: the controller's one contact with the
+    -- outside world is staged, so this group starts no process and reads no
+    -- network and can ride in the cheapest lane.
+    SuiteGroup "Spec.Mission.Runner" PingLane MissionRunner.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,

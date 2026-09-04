@@ -42,7 +42,7 @@ import Kanban.UI.AutoSolve
   )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
-  ( PullRequestWorkerTask (..),
+  ( WorkerDeadline (..), PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -324,7 +324,8 @@ environmentFor repository =
             catalogPullRequests = [],
             catalogHistory = CatalogHistoryLoaded (CompletedHistory [] [] epoch)
           },
-      actionNow = epoch
+      actionNow = epoch,
+      actionWorkerDeadline = WorkerDeadline 600
     }
 
 targetUnderLoop :: ResolvedTarget

@@ -124,6 +124,8 @@ Initial options:
 --json                            with --usage, write the machine-readable document
 --ping codex|claude               start that provider's window with one deliberate
                                   model request, then exit
+--mission MISSION_ID              advance exactly that mission in the foreground,
+                                  then exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -138,8 +140,10 @@ brand, and supplying `--ping` more than once — including twice with the same
 brand — are all errors that exit non-zero without launching any provider.
 That refusal happens before any mode is selected, so it holds however else the
 invocation is spelled: `kanban --doctor --ping nope` reports the unknown brand
-and exits non-zero rather than running the doctor and succeeding. Only refusal
-comes first; a well-formed `--ping` still yields to the modes below.
+and exits non-zero rather than running the doctor and succeeding, and
+`kanban --mission m --ping nope` does the same rather than starting the
+mission runner. Only refusal comes first; a well-formed `--ping` still yields
+to the modes below.
 
 Startup sequence:
 
@@ -176,8 +180,12 @@ remote. It never enters the TUI and never starts a background refresh.
 
 `--ping` short-circuits it on the same terms as `--usage`, and after it: the
 run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
-`--usage`, `--ping`, and exactly one of them runs. A ping is the only mode
-that spends the user's quota (section 14), so every observational mode wins
+`--usage`, `--ping`, and exactly one of them runs. `--mission` is not among
+them — it is not run-and-exit, it advances durable work — but it is selected
+after all four and before the dashboard, so an invocation naming a mission and
+an observational mode runs the observation and starts nothing. A ping is the
+only mode that spends the user's quota (section 14), so every observational
+mode wins
 over it; an invocation naming one of them — `kanban --doctor --ping codex` —
 runs that mode and launches no ping. Ping mode establishes a repository
 identity where it can, and never requires one: `--repo` names a repository
@@ -206,6 +214,35 @@ and where that is set — and starts no window rather than redirecting one onto
 the other account. That refusal comes after the no-agent one, so an install
 that loads nothing still says so in the mode's own words rather than naming a
 brand.
+
+`--mission` advances exactly one mission in the foreground and then exits. It
+takes the stable identifier of one mission and operates only on that mission:
+a missing, malformed, unknown, or repository-mismatched identifier is reported
+as itself and refuses, and no such refusal ever resolves to a different
+mission. Choosing among a repository's missions, and arbitrating between them,
+belong to the repository scheduler and are deliberately absent here.
+
+It resolves configuration and a repository as the dashboard does, and takes
+neither a board lease nor a provider gate. The lease it does take is that
+mission's own advancement lease (section 16): a second runner on the same
+mission refuses cleanly, while a dashboard attached to it reads the durable
+record and submits ordinary operator commands without competing for anything.
+The provider gate is skipped because reattaching to a live worker, resolving an
+unknown outcome, and ending a registered subtree all need no provider at all —
+an unusable `models.toml` would otherwise block the recovery of a mission
+already under way. A transition that would launch a provider-backed worker
+fails at that launch instead, in the no-agent wording above.
+
+The run ends when the mission becomes terminal, paused, or blocked —
+`waiting_input`, `waiting_barrier`, `waiting_capacity`, `paused`, or
+`interrupted` — and reports the transitions it made. Reaching one of those is
+not an error: it is the runner saying the mission needs something it cannot
+supply. While registered work is live the runner waits on that worker's own
+durable state and on this mission's records, never on a timed GitHub refresh
+(section 3); GitHub is read when a step is planned, immediately before an
+effect, and when a settled worker's result has to be validated. The runner
+never merges a pull request, never applies a verdict label, and never reports
+an indeterminate result as a success.
 
 ## 6. Layout
 
@@ -2447,9 +2484,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   The lease has no staleness rule of Kanban's own — no PID file, no heartbeat,
   no timeout, no reaper — because the kernel releases a dead holder's locks,
   which is the whole recovery story. Only dashboard mode takes it: `--worker`,
-  `--glyph-test`, `--doctor`, `--usage` and `--ping` do not, having no board
-  and no durable record to serialise against. Any acquisition failure other
-  than confirmed contention fails startup rather than proceeding unheld, since
+  `--glyph-test`, `--doctor`, `--usage`, `--ping` and `--mission` do not,
+  having no board and no durable record to serialise against. `--mission` is
+  the one worth stating: it does take a lease, but that lease is the selected
+  mission's own advancement lease under the state root (section 16), which
+  serialises advancement of one mission rather than access to this
+  repository's `gh` record. A mission runner and a dashboard on the same
+  repository therefore run side by side, which is exactly the attachment the
+  mission contract expects. Any acquisition failure other than confirmed
+  contention fails startup rather than proceeding unheld, since
   a board that could not establish the lease has not established that it is
   alone. The durable record and the restart-time reclaim refusal remain what
   covers a board that has exited.
@@ -3255,6 +3298,8 @@ Suggested paths:
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/specification.json
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/snapshot.json
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/events.jsonl
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/invocations.jsonl
+~/.local/state/kanban/missions/<owner>-<repo>/<mission>/control/requests/<id>.json
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/lease/owner.json
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.log
 ~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.seal.json
@@ -3348,6 +3393,23 @@ Defaults:
   included; and no write ever treats that silence as permission, so
   "is one already there?" is always a question for the filesystem rather than
   for a successful decode.
+- A mission a controller advances holds two further records, and each answers
+  a question the four above cannot. `invocations.jsonl` is written *before*
+  every external effect and flushed to the disk before that effect is
+  attempted: it carries a stable invocation identity, the owning action, the
+  target identity, the exact target version the effect was authorized against,
+  and what the effect was going to be, and a second record closes it with what
+  happened. An opening record with no closing one is an outcome nobody
+  observed — something may have happened — and it is resolved by fresh
+  evidence or by authenticated direction, never by repeating the effect. Its
+  identity is also how a replayed request returns the child it already
+  produced instead of launching a second one. `control/requests/` is the
+  channel a controller takes direction on; a command file naming the secret
+  the running controller minted in memory is that controller's own console and
+  may record a `user_override` or resolve an unknown outcome, and every other
+  command is recorded as an ordinary durable operator command with no such
+  authority. The secret is never written to the store, so an attached client
+  cannot obtain one.
 - Every mission record also carries the repository and the mission it belongs
   to, and a record whose identity disagrees with the directory it sits in is
   refused rather than adopted — the specification, the snapshot, each journal
@@ -3469,10 +3531,24 @@ Configurable repository semantics include:
 - Provider timeouts, defaults: GitHub 30 s, Codex 10 s, Claude 45 s, and the
   deliberate-ping bounds `ping_codex_seconds` and `ping_claude_seconds`, both
   120 s (section 14). The GitHub timeout bounds one page of a traversal — open
-  or completed — rather than the whole of either (section 13). Every one of
-  them is a positive whole number of seconds, small enough to convert to
-  microseconds without overflowing, and inherits globally or per repository on
-  the same terms.
+  or completed — rather than the whole of either (section 13). Each of those
+  five is a positive whole number of seconds, small enough to convert to
+  microseconds without overflowing, because each of them is consulted at the
+  moment the request it bounds is made, and each inherits globally or per
+  repository on the same terms.
+- The action-worker deadline `worker_deadline_seconds`, default 14400 (four
+  hours), in the same `[timeouts]` table and inheriting on those same terms.
+  Unlike the five above it bounds no request this process makes: it is
+  resolved once at a launch and recorded in that worker's own durable
+  specification, so every action worker — solve, pull-request, issue-host,
+  issue-action, and every registry-dispatched worker — carries the value its
+  launch was configured with. Its accepted range is therefore not the
+  microsecond ceiling but 1 through one documented maximum of 604800 seconds
+  (seven days); zero, a negative value, and anything above that maximum are
+  configuration errors naming the full key path, since a bound no watchdog
+  would reach is not a bound. A worker already running is never re-resolved:
+  recovery and reattachment read the value its specification recorded,
+  whatever the configuration says by then.
 - External usage provider commands (section 14).
 - The per-provider solve-round estimate `estimated_percent_per_solve_round`
   (section 14), a whole percentage from 1 through 100 with no default. It is a
@@ -3725,7 +3801,13 @@ review, rereview, and revision are now durable as well: each runs as an
 independently leased child action of one detached review host per canonical
 repository, survives the dashboard, and is reattached to and replayed by the
 next one, with every dashboard input travelling to it as a correlated,
-acknowledged, exactly-once command. The
+acknowledged, exactly-once command. A named mission can now be advanced
+outside the board as well: `kanban --mission` claims that mission's own
+advancement lease, reconciles its durable record against live worker and
+GitHub state, journals every effect before attempting it, and makes at most
+one transition per pass through the workflow action registry until the mission
+is terminal, paused, or blocked. Repository-wide mission selection, capacity
+arbitration, and unattended scheduling are not implemented. The
 external usage-command escape hatch is also implemented. Broader
 provider-version fixtures remain for subsequent slices.
 

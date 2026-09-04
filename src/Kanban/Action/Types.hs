@@ -86,6 +86,7 @@ module Kanban.Action.Types
     ActionOutcome (..),
     actionOutcomeSucceeded,
     actionOutcomeMessage,
+    settledWorkerFailure,
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,
@@ -120,7 +121,7 @@ import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (ResumeProvenance (..), SolverBrand)
-import Kanban.Worker (WorkerDescriptor, WorkerParent)
+import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason)
 import Kanban.Workflow (readOnlyHistoryNotice)
 
 -- ---------------------------------------------------------------------------
@@ -557,6 +558,17 @@ data ActionOutcome
     ActionPullRequestVerdict Int PullRequestVerdict
   | ActionNeedsInput Text
   | ActionStopped Text
+  | -- | The launch's recorded finite bound elapsed and the watchdog ended the
+    -- turn (issue #595, requirement 16).
+    --
+    -- Its own constructor rather than an 'ActionFailed' carrying a
+    -- recognizable sentence, because a controller has to /decide/ differently
+    -- about it: a deadline says the work was still going when its budget ran
+    -- out, which is neither a refused authority, an absent executable, an
+    -- exhausted provider quota, a moved precondition, nor an outcome nobody
+    -- observed. Collapsing it into the generic failure is what made a mission
+    -- unable to tell "give it longer" from "this cannot work".
+    ActionDeadlineExceeded Text
   | ActionFailed Text
   | -- | An issue action ran to completion and its owning authority
     -- published what that authority publishes: for a canonical initial
@@ -591,6 +603,7 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionPullRequestVerdict _ verdict -> verdict /= PullRequestVerdictPending
   ActionNeedsInput _ -> False
   ActionStopped _ -> False
+  ActionDeadlineExceeded _ -> False
   ActionFailed _ -> False
   -- A published verdict is a completed review whichever way it went, exactly
   -- as a changes-requested pull-request verdict is. What is /not/ success is
@@ -612,6 +625,7 @@ actionOutcomeMessage outcome = case outcome of
   ActionPullRequestVerdict number verdict -> "PR #" <> showNumber number <> " " <> verdictWord verdict
   ActionNeedsInput detail -> "needs input: " <> detail
   ActionStopped detail -> "stopped: " <> detail
+  ActionDeadlineExceeded detail -> "deadline: " <> detail
   ActionFailed detail -> "failed: " <> detail
   ActionIssueReviewed number stage approved ->
     "issue #" <> showNumber number <> " " <> issueStageWord stage <> " " <> issueVerdictWord stage approved
@@ -630,6 +644,18 @@ actionOutcomeMessage outcome = case outcome of
     verdictWord PullRequestVerdictApproved = "is approved"
     verdictWord PullRequestVerdictChangesRequested = "has requested changes"
     verdictWord PullRequestVerdictPending = "has no verdict yet"
+
+-- | A settled worker's failure detail, typed.
+--
+-- One reading, in one place, so the three observation paths that meet a
+-- terminal @SolveFailed@ cannot disagree about whether it was a deadline. The
+-- sentence compared against is 'Kanban.Worker.workerDeadlineReason' itself —
+-- the same constant the watchdog writes — rather than a phrase spelled again
+-- here, which is what keeps the two from drifting apart silently.
+settledWorkerFailure :: Text -> ActionOutcome
+settledWorkerFailure detail
+  | detail == workerDeadlineReason = ActionDeadlineExceeded detail
+  | otherwise = ActionFailed detail
 
 -- | What one observation of a dispatched action found.
 data ActionObservation
@@ -726,7 +752,18 @@ data ActionEnvironment = ActionEnvironment
     actionConfigPath :: Maybe FilePath,
     actionRoster :: Either RosterLoadError ModelRoster,
     actionCatalog :: TargetCatalog,
-    actionNow :: UTCTime
+    actionNow :: UTCTime,
+    -- | The resolved finite bound every worker this environment launches
+    -- records in its own specification (issue #595, requirement 15).
+    --
+    -- Resolved by the caller from configuration and carried here rather than
+    -- read at each launch, for the same reason the catalog is: the registry is
+    -- the one plain-IO boundary a dashboard and a headless mission runner both
+    -- launch through, so a bound resolved once per environment is a bound both
+    -- of them provably applied. Recovery never consults it — a worker already
+    -- under way is bounded by the value its own 'WorkerSpec' recorded, whatever
+    -- the configuration says now.
+    actionWorkerDeadline :: WorkerDeadline
   }
 
 -- | One request. 'actionRequest' builds the ordinary shape; the resume fields

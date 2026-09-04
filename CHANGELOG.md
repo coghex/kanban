@@ -15,6 +15,34 @@ created above it.
 
 ### Unreleased
 
+- `kanban --mission <id>` advances exactly one mission in the foreground and
+  then exits. It operates only on the mission it was named — a missing,
+  malformed, unknown, or repository-mismatched identifier is reported as
+  itself and never resolves to a different mission — and it selects nothing:
+  repository-wide mission selection and unattended scheduling remain
+  unimplemented. The mode is chosen after every observational mode and before
+  the dashboard, so an invocation that also names `--doctor`, `--usage`, or a
+  well-formed `--ping` runs that mode and starts nothing, while a malformed
+  `--ping` still refuses ahead of both. It takes no board lease, so it runs
+  beside an open dashboard; what it takes is that mission's own advancement
+  lease, which refuses a second runner cleanly while leaving an attached
+  dashboard free to read the record and submit ordinary operator commands.
+  Every external effect is journaled and flushed before it is attempted and
+  the target is reread immediately before it, so a crash leaves an outcome
+  nobody observed rather than an effect nobody recorded, and a target that
+  moved in between is a typed stale-version result with nothing mutated. The
+  run ends when the mission is terminal, paused, or blocked, and reports the
+  transitions it made. It never merges a pull request, applies a verdict
+  label, or reports an indeterminate result as a success.
+- A new `[timeouts]` key, `worker_deadline_seconds`, sets the deadline every
+  action worker records at launch — solve, pull-request, issue-host,
+  issue-action, and every registry-dispatched worker alike. Omitting it keeps
+  the four hours (14400 seconds) that were previously fixed in the code. The
+  accepted range is 1 through 604800 seconds (seven days); zero, a negative
+  value, and anything above that maximum fail startup naming the full key
+  path. Editing it affects only workers launched afterwards: one already
+  running keeps the bound its own durable specification recorded.
+
 - A report or design document processed before it has ever been on the
   publication branch now takes its first disposition instead of stranding the
   run. `publish_coordination_doc.py --check-pending` reports the document's

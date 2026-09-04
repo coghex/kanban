@@ -316,7 +316,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     launchIssueActionFor resolved origin = case issueStageFor environment.actionWorkflowConfig plan.planKind resolved of
       Left refusal -> pure (Left refusal)
       Right stage -> do
-        host <- ensureIssueReviewHost environment.actionRepository environment.actionConfigPath environment.actionWorkflowConfig
+        host <- ensureIssueReviewHost environment.actionRepository environment.actionConfigPath environment.actionWorkflowConfig environment.actionWorkerDeadline
         case host of
           Left message -> pure (Left (ActionDispatchFailed plan.planKind message))
           Right owner -> do
@@ -329,6 +329,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
                 owner
                 environment.actionConfigPath
                 environment.actionWorkflowConfig
+                environment.actionWorkerDeadline
             case launched of
               Right descriptor -> pure (Right (IssueActionHandle plan.planKind resolved stage descriptor))
               Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
@@ -438,6 +439,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         parent
         environment.actionConfigPath
         environment.actionWorkflowConfig
+        environment.actionWorkerDeadline
 
     launchPullRequest :: ResolvedTarget -> PullRequestOrigin -> PullRequestAction -> RecordedAssignment -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
     launchPullRequest resolved origin action cell =
@@ -454,6 +456,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         request.requestParent
         environment.actionConfigPath
         environment.actionWorkflowConfig
+        environment.actionWorkerDeadline
 
 issueActionNeedsNoCell :: Text
 issueActionNeedsNoCell = "an issue action replays no model cell"
@@ -586,7 +589,7 @@ observeAutoSolveTurn _ resolved descriptor = do
       WorkerRunning -> ActionRunning state.workerStateLastActivity
       WorkerOrphaned _ -> ActionRunning "resolving orphaned provider processes"
       WorkerTerminal (SolveNeedsInput detail) -> ActionSettled (ActionNeedsInput detail)
-      WorkerTerminal (SolveFailed detail) -> ActionSettled (ActionFailed detail)
+      WorkerTerminal (SolveFailed detail) -> ActionSettled (settledWorkerFailure detail)
       WorkerTerminal SolveCompleted ->
         ActionRunning
           ( "the current provider turn for autosolve #"
@@ -634,7 +637,7 @@ observeIssueActionHandle resolved descriptor = do
       WorkerRunning -> pure (ActionRunning state.workerStateLastActivity)
       WorkerOrphaned _ -> pure (ActionRunning "resolving orphaned provider processes")
       WorkerTerminal (SolveNeedsInput detail) -> pure (ActionSettled (ActionNeedsInput detail))
-      WorkerTerminal (SolveFailed detail) -> pure (ActionSettled (ActionFailed detail))
+      WorkerTerminal (SolveFailed detail) -> pure (ActionSettled (settledWorkerFailure detail))
       WorkerTerminal SolveCompleted ->
         ActionSettled . publishedIssueReview resolved . map (.workerEnvelopeEvent)
           <$> readWorkerJournal descriptor
@@ -675,7 +678,7 @@ publishedIssueReview resolved events = case mapMaybe published (reverse events) 
 validateWorkerOutcome :: ActionEnvironment -> WorkflowActionKind -> ResolvedTarget -> ActionAttribution -> SolveOutcome -> ActionOutcome
 validateWorkerOutcome environment kind resolved attribution outcome = case outcome of
   SolveNeedsInput detail -> ActionNeedsInput detail
-  SolveFailed detail -> ActionFailed detail
+  SolveFailed detail -> settledWorkerFailure detail
   SolveCompleted -> case kind of
     SolveIssue -> attributedSolvePullRequest environment resolved attribution
     -- Deliberately not the opened pull request. An autosolve action concludes

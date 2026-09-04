@@ -141,6 +141,104 @@ module Kanban.Mission
     archiveMission,
     deleteMission,
 
+    -- * The invocation journal
+    MissionInvocationId (..),
+    MissionTargetVersion (..),
+    MissionIntendedEffect (..),
+    missionIntendedEffectTag,
+    MissionInvocation (..),
+    MissionInvocationOutcome (..),
+    missionInvocationOutcomeTag,
+    MissionStaleVersion (..),
+    missionStaleVersionMessage,
+    missionVersionHolds,
+    MissionInvocationState (..),
+    missionInvocationResolved,
+    missionInvocationFor,
+    unresolvedMissionInvocations,
+    newMissionInvocationId,
+    recordMissionInvocation,
+    concludeMissionInvocation,
+    readMissionInvocations,
+    missionInvocationPath,
+
+    -- * The runner-owned control channel
+    MissionControlEndpoint (..),
+    MissionCommandAuthority (..),
+    missionCommandAuthorityTag,
+    MissionCommandPayload (..),
+    missionCommandPayloadTag,
+    MissionChildRequest (..),
+    MissionSubmittedCommand (..),
+    MissionCommandRejection (..),
+    missionCommandRejectionMessage,
+    MissionCommandRead (..),
+    openMissionControl,
+    attachMissionControl,
+    submitMissionCommand,
+    readMissionCommands,
+    consumeMissionCommand,
+    overrideAuthorized,
+
+    -- * Reconciliation
+    MissionStepFailure (..),
+    missionStepFailures,
+    missionStepFailureTag,
+    missionStepFailureMessage,
+    missionStepFailureLifecycle,
+    missionFailureFromOutcome,
+    missionFailureFromRefusal,
+    missionFailureFromProviderError,
+    MissionExternalWork (..),
+    missionExternalWorkTag,
+    MissionWorkerReading (..),
+    MissionWorkerConclusion (..),
+    MissionStepEvidence (..),
+    classifyMissionWork,
+    MissionHalt (..),
+    missionHaltMessage,
+    missionLifecycleAdvances,
+    missionLifecycleBlocks,
+    missionRunnerHalt,
+    missionStepRecordFor,
+    nextDispatchableStep,
+    settledMissionLifecycle,
+    blockedMissionLifecycle,
+    cancelledByDependency,
+    missionSessionSubtree,
+    stepHasUnsettledDescendants,
+    MissionContinuation (..),
+    missionContinuation,
+    missionRecoveryBrief,
+    missionRecoveryBriefLimit,
+
+    -- * The controller
+    MissionDriver (..),
+    MissionInventory (..),
+    MissionDispatchRequest (..),
+    MissionDispatchAccepted (..),
+    MissionStartRefusal (..),
+    missionStartRefusalMessage,
+    MissionController (..),
+    MissionAttachment (..),
+    startMissionController,
+    attachToMission,
+    stopMissionController,
+    MissionTransition (..),
+    missionTransitionMessage,
+    MissionIteration (..),
+    missionControllerIteration,
+
+    -- * The foreground runner
+    MissionRunReport (..),
+    missionRunReportLines,
+    missionRunSucceeded,
+    runMissionMode,
+    runMissionWith,
+    liveMissionDriver,
+    missionRunnerPollMicros,
+    missionRunnerIterationBudget,
+
     -- * The lease
     MissionLease (..),
     MissionLeaseOwner (..),
@@ -154,7 +252,10 @@ module Kanban.Mission
   )
 where
 
+import Kanban.Mission.Control
+import Kanban.Mission.Controller
 import Kanban.Mission.Digest (sha256Hex)
+import Kanban.Mission.Invocation
 import Kanban.Mission.Journal (MissionJournalLine (..))
 import Kanban.Mission.Lease
   ( MissionHolderPresence (..),
@@ -166,7 +267,9 @@ import Kanban.Mission.Lease
     readMissionLeaseOwner,
     releaseMissionLease,
   )
-import Kanban.Mission.Paths (MissionRead (..), missionStoreRoot)
+import Kanban.Mission.Paths (MissionRead (..), missionInvocationPath, missionStoreRoot)
+import Kanban.Mission.Reconcile
+import Kanban.Mission.Runner
 import Kanban.Mission.Session
   ( MissionSessionTreeError (..),
     missionSessionTreeErrorMessage,

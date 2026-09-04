@@ -36,6 +36,10 @@ module Kanban.Mission.Paths
     missionSpecificationPath,
     missionSnapshotPath,
     missionJournalPath,
+    missionInvocationPath,
+    missionControlDirectory,
+    missionControlTokenPath,
+    missionControlRequestDirectory,
     missionLeasePath,
     missionLeaseOwnerPath,
     missionArchiveDirectory,
@@ -175,13 +179,17 @@ missionDirectory store mission
   where
     name = Text.unpack mission.unMissionId
 
-missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory :: FilePath -> MissionId -> Either Text FilePath
+missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionInvocationPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory, missionControlDirectory, missionControlTokenPath, missionControlRequestDirectory :: FilePath -> MissionId -> Either Text FilePath
 missionSpecificationPath store mission = (</> "specification.json") <$> missionDirectory store mission
 missionSnapshotPath store mission = (</> "snapshot.json") <$> missionDirectory store mission
 missionJournalPath store mission = (</> "events.jsonl") <$> missionDirectory store mission
+missionInvocationPath store mission = (</> "invocations.jsonl") <$> missionDirectory store mission
 missionLeasePath store mission = (</> "lease") <$> missionDirectory store mission
 missionLeaseOwnerPath store mission = (</> "owner.json") <$> missionLeasePath store mission
 missionArchiveDirectory store mission = (</> "archive") <$> missionDirectory store mission
+missionControlDirectory store mission = (</> "control") <$> missionDirectory store mission
+missionControlTokenPath store mission = (</> "token.json") <$> missionControlDirectory store mission
+missionControlRequestDirectory store mission = (</> "requests") <$> missionControlDirectory store mission
 
 -- | The archived copy of one session's log, and the seal record beside it.
 --

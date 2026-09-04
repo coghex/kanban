@@ -52,7 +52,7 @@ import Kanban.Solve
     solveAssignment,
   )
 import Kanban.Worker
-  ( IssueActionWorkerTask (..),
+  ( WorkerDeadline (..), IssueActionWorkerTask (..),
     IssueHostWorkerTask (..),
     issueActionTask,
     discoverWorkerHistory,
@@ -156,7 +156,8 @@ environmentOf catalog =
       actionConfigPath = Just "/tmp/kanban-registry-fixture/config.toml",
       actionRoster = Right defaultRoster,
       actionCatalog = catalog,
-      actionNow = epoch
+      actionNow = epoch,
+      actionWorkerDeadline = WorkerDeadline 600
     }
 
 resolveIn :: TargetCatalog -> ActionTargetRef -> Either ActionRefusal ActionTarget

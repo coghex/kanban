@@ -66,6 +66,7 @@ module Kanban.Worker
     defaultIssueHostTuning,
     runIssueReviewHostWith,
     WorkerSpec (..),
+    WorkerDeadline (..),
     WorkerState (..),
     WorkerStatus (..),
     SupervisorCells (..),
@@ -231,6 +232,7 @@ import Kanban.Worker.Types
     SolveWorkerTask (..),
     issueActionTask,
     issueHostTask,
+    WorkerDeadline (..),
     WorkerDescriptor (..),
     WorkerEnvelope (..),
     WorkerEvent (..),
@@ -252,8 +254,8 @@ import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle),
 -- roster to resolve for itself: the launch boundary is where a session's
 -- cell is decided once (see 'Kanban.UI.Util.launchAssignment'), and this is
 -- where that decision becomes durable.
-launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
@@ -267,15 +269,15 @@ launchSolveWorker assignment repository issueNumber workflow brand existingSessi
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
         workerAssignment = Just assignment
       }
 
 -- | The pull-request twin of 'launchSolveWorker', assignment and all.
-launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
@@ -289,7 +291,7 @@ launchPullRequestWorker assignment repository number origin action existingSessi
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
         workerAssignment = Just assignment
@@ -356,8 +358,8 @@ liveIssueReviewHost repository = do
 -- join the solve and pull-request launches make when they lose an item's
 -- lease. Only a loss whose winner cannot be named is a refusal, because then
 -- a host is running and this caller does not know which.
-ensureIssueReviewHost :: Repository -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerId)
-ensureIssueReviewHost repository configPath workflowConfig = do
+ensureIssueReviewHost :: Repository -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either Text WorkerId)
+ensureIssueReviewHost repository configPath workflowConfig deadline = do
   existing <- liveIssueReviewHost repository
   case existing of
     Just descriptor -> pure (Right descriptor.workerDescriptorSpec.workerId)
@@ -378,8 +380,11 @@ ensureIssueReviewHost repository configPath workflowConfig = do
               workerCreatedAt = now,
               -- Carried because every specification has one; never read,
               -- because 'boundedByDeadline' exempts a host from the watchdog
-              -- and its children are bounded individually.
-              workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+              -- and its children are bounded individually. It is still the
+              -- resolved value rather than a constant, so nothing in a
+              -- specification this release writes disagrees with the
+              -- configuration the launch was made under.
+              workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
               workerConfigPath = configPath,
               workerWorkflowConfig = workflowConfig,
               workerAssignment = Nothing
@@ -401,8 +406,8 @@ ensureIssueReviewHost repository configPath workflowConfig = do
 -- write fails, exactly as every other launch orders those two — a
 -- specification a host could adopt while no lease reserved its issue is how
 -- two children for one issue would come to exist.
-launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchIssueAction repository issueNumber stage origin host configPath workflowConfig = do
+launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchIssueAction repository issueNumber stage origin host configPath workflowConfig deadline = do
   now <- getCurrentTime
   actionId <- newWorkerId "issue-action" issueNumber
   let spec =
@@ -416,7 +421,7 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
             workerUserMessage = "",
             workerParent = Nothing,
             workerCreatedAt = now,
-            workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+            workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
             workerConfigPath = configPath,
             workerWorkflowConfig = workflowConfig,
             -- An action starts no provider turn of its own to replay a cell
@@ -440,7 +445,7 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
         Right () -> do
-          confirmed <- confirmIssueActionAdopted repository descriptor configPath workflowConfig
+          confirmed <- confirmIssueActionAdopted repository descriptor configPath workflowConfig deadline
           case confirmed of
             Right () -> pure (Right descriptor)
             -- Nothing took the child on, and the wait above has already tried
@@ -478,12 +483,12 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
 -- a host is ensured regardless, so a child is never left with nobody asked.
 --
 -- Fast in the ordinary case: adoption lands within one host poll.
-confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> IO (Either Text ())
-confirmIssueActionAdopted repository descriptor configPath workflowConfig =
+confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either Text ())
+confirmIssueActionAdopted repository descriptor configPath workflowConfig deadline =
   confirmIssueActionAdoptedWith
     issueActionAdoptionAttempts
     issueActionAdoptionPollMicros
-    (ensureIssueReviewHost repository configPath workflowConfig)
+    (ensureIssueReviewHost repository configPath workflowConfig deadline)
     repository
     descriptor
 
@@ -1749,9 +1754,6 @@ terminalActivity (SolveFailed _) = "failed"
 
 showProcessCount :: [value] -> Text
 showProcessCount values = Text.pack (show (length values))
-
-defaultWorkerMaxRuntimeSeconds :: Int
-defaultWorkerMaxRuntimeSeconds = 4 * 60 * 60
 
 workerHeartbeatIntervalMicros :: Int
 workerHeartbeatIntervalMicros = 5 * 1000 * 1000

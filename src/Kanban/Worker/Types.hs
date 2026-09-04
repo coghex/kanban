@@ -25,6 +25,7 @@ module Kanban.Worker.Types
     issueHostTask,
     WorkerParent (..),
     WorkerSpec (..),
+    WorkerDeadline (..),
     WorkerEvent (..),
     WorkerStatus (..),
     WorkerState (..),
@@ -53,6 +54,19 @@ import Kanban.Review
     ReviewThreadId,
   )
 import Kanban.Solve (AgentEvent, ResumeProvenance (..), SolveOutcome, SolveWorkflow, SolverBrand)
+
+-- | The finite bound a launch resolves and records in the specification it
+-- writes.
+--
+-- A newtype rather than a bare 'Int' because every launch below already takes
+-- an issue or pull-request number, and two positional integers whose meanings
+-- are "which item" and "how many seconds" is exactly the pair a caller can
+-- transpose without the compiler noticing. What lands in
+-- 'workerMaxRuntimeSeconds' stays an unconditional finite 'Int': the bound is
+-- resolved before a specification is written and is never absent, optional, or
+-- unbounded there (issue #595, requirement 15).
+newtype WorkerDeadline = WorkerDeadline {workerDeadlineSeconds :: Int}
+  deriving stock (Eq, Ord, Show)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
   deriving stock (Eq, Ord, Show, Generic)
