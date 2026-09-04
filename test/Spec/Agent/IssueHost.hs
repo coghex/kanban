@@ -1176,7 +1176,7 @@ lifecycleSpec = describe "one running host" $ do
     withRunningHostNoProvider $ \host -> do
       child <- publishChild host "action-1" 594 InitialReview
       _ <- awaitCallsFor host 1 isCanonicalCall
-      putMVar host.hostCanonicalProcess (managedProcessGroup 1)
+      putMVar host.hostCanonicalProcess unsignallableProcessGroup
       putMVar host.hostCanonicalFinished ()
       state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       state.workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
@@ -1210,7 +1210,7 @@ lifecycleSpec = describe "one running host" $ do
       Right () <- appendReviewCommand child termination
       _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       -- The gate reports its process and then its verdict, both too late.
-      putMVar host.hostCanonicalProcess (managedProcessGroup 1)
+      putMVar host.hostCanonicalProcess unsignallableProcessGroup
       -- Give the stage every chance to append after the terminal envelope.
       threadDelay 300000
       journaled <- journalEvents child
@@ -1251,7 +1251,7 @@ lifecycleSpec = describe "one running host" $ do
       _ <- awaitCallsFor host 1 isBeginCall
       registered <- readMVar host.hostRegistered
       pids <- mapM managedProcessPid registered
-      pids `shouldBe` [Just 1]
+      pids `shouldBe` [Just 2147483647]
 
   -- Round 6's second blocker. Reading the settle claim before installing the
   -- canonical subprocess is a read a termination can win behind: the settle
@@ -1271,7 +1271,7 @@ lifecycleSpec = describe "one running host" $ do
       Right () <- appendReviewCommand child termination
       _ <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
       -- Only now does the gate report its subprocess.
-      putMVar host.hostCanonicalProcess (managedProcessGroup 1)
+      putMVar host.hostCanonicalProcess unsignallableProcessGroup
       -- The host records that the late process was ended rather than
       -- installed onto an action nothing would settle again. On the host,
       -- because the child's journal ended at its terminal envelope.
@@ -1353,7 +1353,7 @@ lifecycleSpec = describe "one running host" $ do
         held <- readMVar host.hostRegistered
         pure (if null held then Nothing else Just held)
       pids <- mapM managedProcessPid registered
-      pids `shouldBe` [Just 1]
+      pids `shouldBe` [Just 2147483647]
       -- Registered once, however many polls have run.
       readMVar host.hostRegistered >>= (\held -> length held `shouldBe` 1)
 
@@ -2167,7 +2167,7 @@ withRunningHostUsing overrideProvider body =
               Just refuse -> refuse startingSpec register sink
               Nothing -> do
                 putMVar sinkCell sink
-                register Nothing (managedProcessGroup 1)
+                register Nothing unsignallableProcessGroup
                 pure (Right (recordingProvider sendGate beginGate threadProcesses register record))
       hostDescriptor <- descriptorForSpec hostSpecification
       LazyByteString.writeFile hostDescriptor.workerDescriptorSpecPath (encode hostSpecification)
@@ -2255,10 +2255,9 @@ recordingProvider gate beginGate threadProcesses register record =
         Right () <$ record (SendMessage thread message),
       providerInterruptTurn = \thread turnId -> Right () <$ record (InterruptTurn thread turnId),
       providerFinishThread = record . FinishThread,
-      -- One connection, as a shared-process backend holds. Identity 1 is
-      -- init, which is always present, so registering it exercises the real
-      -- path without spawning anything.
-      providerProcesses = pure [managedProcessGroup 1],
+      -- One connection, as a shared-process backend holds — a stand-in that
+      -- exercises the real registration path without spawning anything.
+      providerProcesses = pure [unsignallableProcessGroup],
       -- Empty by default, which is a shared connection's answer. A test that
       -- wants the process-per-thread shape fills this.
       providerThreadProcesses = const (readMVar threadProcesses),
@@ -2304,6 +2303,20 @@ endEveryChild repository = do
     settledOrGone descriptor = do
       recorded <- decodeChildState descriptor
       pure (if maybe True (terminalState . (.workerStateStatus)) recorded then Just () else Nothing)
+
+-- | A process group the fixture hands to the host, which the host may then
+-- signal without consequence.
+--
+-- Deliberately not group 1. Settling a child signals its canonical
+-- subprocess's group, and @killpg@ on group 1 is a broadcast to every process
+-- the caller may signal. That is not hypothetical: it is what made this
+-- suite's own CI runner take a SIGINT and abandon four of its five lanes on
+-- Linux, while the same tests passed on Darwin, which refuses the broadcast.
+--
+-- Above any pid a kernel will allocate, so every signal aimed at it finds no
+-- group and is the no-op the fixture wants.
+unsignallableProcessGroup :: ManagedProcess
+unsignallableProcessGroup = managedProcessGroup 2147483647
 
 hostIdUnderTest :: WorkerId
 hostIdUnderTest = WorkerId "host-under-test"
