@@ -2776,7 +2776,8 @@ specFor identifier task =
       workerMaxRuntimeSeconds = 600,
       workerConfigPath = Nothing,
       workerWorkflowConfig = defaultWorkflowConfig,
-      workerAssignment = Nothing
+      workerAssignment = Nothing,
+      workerExpectedTarget = Nothing
     }
 
 fixtureTime :: UTCTime

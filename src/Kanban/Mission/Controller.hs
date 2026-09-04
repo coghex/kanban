@@ -56,6 +56,7 @@ module Kanban.Mission.Controller
     missionTransitionMessage,
     MissionIteration (..),
     missionControllerIteration,
+    submitConsoleCommand,
   )
 where
 
@@ -73,7 +74,6 @@ import Kanban.Mission.Control
     MissionCommandRejection (..),
     MissionControlEndpoint (..),
     MissionSubmittedCommand (..),
-    attachMissionControl,
     consumeMissionCommand,
     missionCommandAuthorityTag,
     missionCommandPayloadTag,
@@ -81,6 +81,7 @@ import Kanban.Mission.Control
     openMissionControl,
     overrideAuthorized,
     readMissionCommands,
+    runnerCommand,
   )
 import Kanban.Mission.Invocation
   ( MissionIntendedEffect (..),
@@ -106,7 +107,9 @@ import Kanban.Mission.Lease
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), missionDirectory, missionInvocationPath)
 import Kanban.Mission.Reconcile
-  ( MissionContinuation (..),
+  ( dispatchedButUnregistered,
+    unresolvedDispatchOf,
+    MissionContinuation (..),
     MissionExternalWork (..),
     MissionHalt,
     MissionStepEvidence (..),
@@ -280,6 +283,15 @@ data MissionController = MissionController
     -- | The invocations this store had never seen the end of when the run
     -- started. Reported, never retried.
     missionControllerUnresolved :: [MissionInvocationState],
+    -- | Commands this process built from its own console, waiting to be
+    -- applied.
+    --
+    -- In memory and nowhere else, which is the whole of what makes them
+    -- authenticated: nothing on disk carries this authority, so nothing on
+    -- disk can claim it. The cost is that a console line typed and not yet
+    -- applied does not survive a crash, which is the right trade for a line
+    -- someone can simply type again.
+    missionControllerConsole :: IORef [MissionSubmittedCommand],
     -- | Command files this run has already reported as unusable.
     --
     -- A file that will not decode is left exactly where it is — it may be a
@@ -344,6 +356,7 @@ startMissionController store repository mission buildDriver = do
                   (_, Left detail) -> releaseMissionLease lease >> pure (Left (MissionRecordUnreadable mission detail))
                   (Right inventory, Right recorded) -> do
                     reported <- newIORef Set.empty
+                    console <- newIORef []
                     now <- getCurrentTime
                     _ <-
                       recordMissionEvent
@@ -376,6 +389,7 @@ startMissionController store repository mission buildDriver = do
                               missionControllerInvocations = invocationPath,
                               missionControllerInventory = inventory,
                               missionControllerUnresolved = unresolvedMissionInvocations recorded,
+                              missionControllerConsole = console,
                               missionControllerReported = reported
                             }
                       )
@@ -394,7 +408,7 @@ attachToMission store repository mission = do
   case loaded of
     Left refusal -> pure (Left refusal)
     Right (specification, snapshot) -> do
-      attached <- attachMissionControl store mission
+      attached <- openMissionControl store mission
       pure $ case attached of
         Left detail -> Left (MissionStoreUnusable detail)
         Right endpoint ->
@@ -517,13 +531,36 @@ missionControllerIteration controller = do
     MissionUnreadable detail -> pure (MissionControllerFailed detail)
     MissionRefused detail -> pure (MissionControllerFailed detail)
     MissionPresent snapshot -> do
-      commands <- readMissionCommands controller.missionControllerControl
-      mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
-      case commands.missionCommandsAccepted of
-        (command : _) -> applyCommand controller snapshot command
-        [] -> case missionRunnerHalt snapshot.missionSnapshotLifecycle of
-          Just halt -> pure (MissionStopped halt)
-          Nothing -> advance controller snapshot
+      -- The runner's own console first, and not as a preference: it is the
+      -- only channel that can resolve an unknown outcome or lift a pause, so a
+      -- queue of file commands must not be able to delay it.
+      typed <- takeConsoleCommand controller
+      case typed of
+        Just command -> applyCommand controller snapshot command
+        Nothing -> do
+          commands <- readMissionCommands controller.missionControllerControl
+          mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
+          case commands.missionCommandsAccepted of
+            (command : _) -> applyCommand controller snapshot command
+            [] -> case missionRunnerHalt snapshot.missionSnapshotLifecycle of
+              Just halt -> pure (MissionStopped halt)
+              Nothing -> advance controller snapshot
+
+-- | Queues one command built inside this process, with runner authority.
+--
+-- The one way to produce an authenticated command, and it is a function call
+-- rather than a channel: a caller that can reach it is already inside the
+-- controller.
+submitConsoleCommand :: MissionController -> Text -> MissionCommandPayload -> IO ()
+submitConsoleCommand controller commandId payload = do
+  command <- runnerCommand commandId payload
+  atomicModifyIORef' controller.missionControllerConsole (\queued -> (queued <> [command], ()))
+
+takeConsoleCommand :: MissionController -> IO (Maybe MissionSubmittedCommand)
+takeConsoleCommand controller =
+  atomicModifyIORef' controller.missionControllerConsole $ \queued -> case queued of
+    [] -> ([], Nothing)
+    (command : rest) -> (rest, Just command)
 
 -- | Reconcile, then dispatch, then settle — the first of the three that has
 -- something to do.
@@ -537,6 +574,53 @@ advance controller snapshot = do
 -- | Reconcile, then dispatch, then settle.
 advanceSteps :: MissionController -> MissionSnapshot -> IO MissionIteration
 advanceSteps controller snapshot = do
+  -- Both crash windows are answered from the invocation file before anything
+  -- else looks at the step records, because in both of them the step record is
+  -- exactly what a run that never dispatched would have left and only the
+  -- invocation file knows better.
+  recorded <-
+    readMissionInvocations
+      controller.missionControllerMission
+      controller.missionControllerStore.missionStoreRepository
+      controller.missionControllerInvocations
+  case recorded of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right states -> case dispatchedButUnregistered states snapshot of
+      Just (step, session) -> registerDispatchedSession controller snapshot step session
+      Nothing -> case unresolvedDispatchOf states controller.missionControllerSpecification snapshot of
+        Just (step, invocation) ->
+          applyStepLifecycle
+            controller
+            snapshot
+            step
+            MissionStepOutcomeUnknown
+            ( "invocation "
+                <> invocation.unMissionInvocationId
+                <> " was journaled and this step never left pending; whether its effect happened is unknown"
+            )
+        Nothing -> advanceReconciled controller snapshot
+
+-- | Adopts a worker an invocation records but the snapshot never registered.
+--
+-- A repair rather than a reattachment: the next pass reattaches through the
+-- ordinary evidence path once the session is in the tree where that path can
+-- see it.
+registerDispatchedSession :: MissionController -> MissionSnapshot -> MissionStepId -> MissionSessionId -> IO MissionIteration
+registerDispatchedSession controller snapshot step session = do
+  written <-
+    writeStep
+      controller
+      snapshot
+      step
+      MissionStepRunning
+      ("adopted session " <> session.unMissionSessionId <> " from its invocation record")
+      (Just (session, Nothing, Nothing))
+  pure $ case written of
+    Left detail -> MissionControllerFailed detail
+    Right () -> MissionAdvanced (MissionStepAttached step session)
+
+advanceReconciled :: MissionController -> MissionSnapshot -> IO MissionIteration
+advanceReconciled controller snapshot = do
   reconciled <- reconcileOneStep controller snapshot
   case reconciled of
     Just iteration -> pure iteration

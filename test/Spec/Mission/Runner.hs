@@ -27,11 +27,12 @@
 -- retried on the strength of the record alone.
 module Spec.Mission.Runner (spec) where
 
+import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (isInfixOf)
+import Data.List (intercalate, isInfixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime (..), addUTCTime, fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, defaultTimeLocale, formatTime, fromGregorian, secondsToDiffTime)
 import Kanban.Action
   ( ActionOutcome (..),
     ActionRefusal (..),
@@ -57,11 +58,12 @@ import Kanban.Domain (Repository (..))
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
-import Kanban.Worker (WorkerDeadline (..), WorkerId (..), WorkerSpec (..), workerDeadlineReason)
+import Kanban.Worker (WorkerDeadline (..), WorkerId (..), WorkerSpec (..), preconditionStillHolds, workerDeadlineReason)
+import Spec.Support.Board (withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Process (deadlineFixtureSpec)
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import System.IO (Handle, IOMode (ReadMode), withFile)
 import Test.Hspec
@@ -81,6 +83,7 @@ spec = describe "the foreground mission runner" $ do
   consoleSpec
   preconditionBoundarySpec
   deadlineSpec
+  workerPreconditionSpec
   failureVocabularySpec
 
 -- ---------------------------------------------------------------------------
@@ -528,11 +531,6 @@ leaseSpec = describe "the advancement lease" $ do
               attachment.missionAttachmentSnapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
               submitted <- submitMissionCommand attachment.missionAttachmentControl "c-1" (MissionPauseCommand "operator asked")
               submitted `shouldBe` Right ()
-              -- It holds no secret of its own, and there is nowhere for it to
-              -- obtain one: the runner's secret is never written down, so an
-              -- attached client's command carries no override authority
-              -- however it is submitted (requirement 14).
-              attachment.missionAttachmentControl.missionControlSecret `shouldBe` Nothing
           stopMissionController controller
       -- And it dispatched nothing. It holds no driver at all, which is what
       -- makes requirement 4's "must not independently dispatch work" a
@@ -783,6 +781,33 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
           missionRunSucceeded run `shouldBe` True
       readIORef stage.stageDispatches `shouldReturn` []
 
+-- | The invocation 'openInvocation' writes, as the reader returns it.
+openInvocationState :: MissionInvocationState
+openInvocationState =
+  MissionInvocationState
+    { missionInvocationRecord =
+        MissionInvocation
+          { missionInvocationId = MissionInvocationId "solve-844-1",
+            missionInvocationMission = theMission,
+            missionInvocationRepository = MissionRepository "coghex" "kanban",
+            missionInvocationStep = theStep,
+            missionInvocationAction = "solve_issue",
+            missionInvocationTarget = Just theTarget,
+            missionInvocationVersion = Just (issueVersion ["reviewed:approve"]),
+            missionInvocationEffect = MissionEffectDispatch "solve_issue",
+            missionInvocationAt = fixedTime
+          },
+      missionInvocationOutcome = Nothing
+    }
+
+-- | Closes the invocation 'openInvocation' wrote.
+concludeOpenInvocation :: MissionStore -> MissionInvocationOutcome -> IO ()
+concludeOpenInvocation store outcome = case missionInvocationPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> do
+    concluded <- concludeMissionInvocation path (MissionInvocationId "solve-844-1") outcome fixedTime
+    concluded `shouldBe` Right ()
+
 -- | The durable state a crash between the invocation record and the launch
 -- leaves: one opened invocation and no conclusion.
 openInvocation :: MissionStore -> IO ()
@@ -845,6 +870,57 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
       readIORef stage.stageDispatches `shouldReturn` []
       recorded <- currentInvocations store
       map missionInvocationResolved recorded `shouldBe` [False]
+
+  -- The window between the invocation record and the `dispatching` write. The
+  -- step record is exactly what a run that never dispatched would have left,
+  -- so only the invocation file knows better — and dispatching again would
+  -- repeat an effect that may already have happened.
+  it "never re-dispatches a pending step whose invocation was already journaled" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      openInvocation store
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+          step `shouldBe` theStep
+          Text.unpack detail `shouldSatisfy` isInfixOf "never left pending"
+        other -> expectationFailure ("a journaled invocation was dispatched again: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "classifies that window purely, from the record alone" $ do
+    let stillPending = snapshotWith MissionRunning [stepRecord MissionStepPending []] []
+        alreadyRunning = snapshotWith MissionRunning [stepRecord MissionStepRunning []] []
+        open = openInvocationState
+    fst <$> unresolvedDispatchOf [open] theSpecification stillPending `shouldBe` Just theStep
+    unresolvedDispatchOf [open] theSpecification alreadyRunning `shouldBe` Nothing
+    unresolvedDispatchOf [] theSpecification stillPending `shouldBe` Nothing
+
+  -- The window between the driver returning and the snapshot write. The
+  -- invocation's conclusion already names the worker, and it is written first
+  -- precisely so this repair has something to work from; without it the next
+  -- run finds a live worker it started and pauses the mission as foreign work.
+  it "adopts a worker its invocation records but the snapshot never registered" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
+      openInvocation store
+      concludeOpenInvocation store (MissionInvocationDispatched "solve-844-0001")
+      iteration <- oneIteration store stage
+      iteration `shouldBe` MissionAdvanced (MissionStepAttached theStep (MissionSessionId "solve-844-0001"))
+      readIORef stage.stageDispatches `shouldReturn` []
+      snapshot <- currentSnapshot store
+      map (.missionSessionId) snapshot.missionSnapshotSessions
+        `shouldBe` [MissionSessionId "solve-844-0001"]
+      missionStepRecordFor theStep snapshot
+        `shouldSatisfy` maybe False ((== [MissionSessionId "solve-844-0001"]) . (.missionStepRecordSessions))
+
+  it "classifies that window purely too" $ do
+    let dispatching = snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []
+        registered = snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []
+        settled = snapshotWith MissionRunning [stepRecord MissionStepSucceeded []] []
+        closed = openInvocationState {missionInvocationOutcome = Just (MissionInvocationDispatched "solve-844-0001")}
+    dispatchedButUnregistered [closed] dispatching
+      `shouldBe` Just (theStep, MissionSessionId "solve-844-0001")
+    dispatchedButUnregistered [closed] registered `shouldBe` Nothing
+    dispatchedButUnregistered [closed] settled `shouldBe` Nothing
+    dispatchedButUnregistered [openInvocationState] dispatching `shouldBe` Nothing
 
   it "reconciles a crash after the launch from the worker's own evidence" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
@@ -1014,12 +1090,7 @@ commandSpec = describe "the runner-owned control channel" $ do
       case started of
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
-          submitted <-
-            submitMissionCommand
-              controller.missionControllerControl
-              "c-override"
-              (MissionUserOverrideCommand theStep "it never ran; try again")
-          submitted `shouldBe` Right ()
+          submitConsoleCommand controller "c-override" (MissionUserOverrideCommand theStep "it never ran; try again")
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionCommandApplied commandId _) -> commandId `shouldBe` "c-override"
@@ -1072,6 +1143,38 @@ commandSpec = describe "the runner-owned control channel" $ do
           length [() | MissionJournalEvent event <- lines', event.missionEventKind == "command_rejected"]
             `shouldBe` 1
 
+  -- Round 2's blocker: a credential durable enough for a second process to
+  -- present is durable enough for a third to copy, and the store is this
+  -- user's — as is every provider session running under it. So there is no
+  -- credential: the authenticated path never becomes a file at all, and every
+  -- file is an ordinary operator command whoever wrote it.
+  it "writes no credential into a submitted command, and grants none by file" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          -- Submitted through the controller's own endpoint, which is the most
+          -- privileged handle anything holds.
+          submitted <-
+            submitMissionCommand
+              controller.missionControllerControl
+              "c-file"
+              (MissionUserOverrideCommand theStep "let me in")
+          submitted `shouldBe` Right ()
+          written <- listDirectory controller.missionControllerControl.missionControlRequests
+          contents <- mapM (readFile . (controller.missionControllerControl.missionControlRequests </>)) written
+          -- Nothing in the store looks like a secret, because none was minted.
+          concat contents `shouldSatisfy` not . isInfixOf "secret"
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandRefused "c-file" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "cannot record a user_override"
+            other -> expectationFailure ("a file command took override authority: " <> show other)
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepOutcomeUnknown
+
   it "distinguishes the two authorities" $ do
     map missionCommandAuthorityTag [MissionRunnerAuthenticated, MissionAttachedClient] `shouldBe` ["runner", "attached"]
     map overrideAuthorized [MissionRunnerAuthenticated, MissionAttachedClient] `shouldBe` [True, False]
@@ -1084,7 +1187,7 @@ commandSpec = describe "the runner-owned control channel" $ do
       case started of
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
-          _ <- submitMissionCommand controller.missionControllerControl "c-pause" (MissionPauseCommand "operator asked")
+          submitConsoleCommand controller "c-pause" (MissionPauseCommand "operator asked")
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionCommandApplied "c-pause" _) -> pure ()
@@ -1107,7 +1210,7 @@ commandSpec = describe "the runner-owned control channel" $ do
       case started of
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
-          _ <- submitMissionCommand controller.missionControllerControl "c-end" (MissionTerminateSubtreeCommand root "operator asked")
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           iteration <- missionControllerIteration controller
           iteration `shouldBe` MissionAdvanced (MissionSubtreeTerminated root 3)
           stopMissionController controller
@@ -1132,10 +1235,10 @@ commandSpec = describe "the runner-owned control channel" $ do
       case started of
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
-          _ <- submitMissionCommand controller.missionControllerControl "c-end" (MissionTerminateSubtreeCommand root "operator asked")
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           first <- missionControllerIteration controller
           first `shouldBe` MissionAdvanced (MissionSubtreeTerminated root 2)
-          _ <- submitMissionCommand controller.missionControllerControl "c-end" (MissionTerminateSubtreeCommand root "operator asked")
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           second <- missionControllerIteration controller
           case second of
             MissionAdvanced (MissionCommandApplied "c-end" detail) ->
@@ -1172,18 +1275,17 @@ commandSpec = describe "the runner-owned control channel" $ do
     map (.missionSessionId) (missionSessionSubtree snapshot root)
       `shouldBe` [root, MissionSessionId "child-1", MissionSessionId "grandchild-1"]
 
--- | The endpoint a client that does not own the run holds.
+-- | The endpoint a client holds.
 --
--- Taken through 'attachMissionControl' rather than built by hand, because the
--- claim being tested is that /that function/ hands out no secret.
+-- There is only one kind: a file channel carries no authority at all, so this
+-- is the same endpoint the runner itself would open and every command written
+-- through it is an ordinary operator command.
 attachToMissionAsClient :: MissionStore -> IO MissionControlEndpoint
 attachToMissionAsClient store = do
-  attached <- attachMissionControl store theMission
+  attached <- openMissionControl store theMission
   case attached of
     Left message -> fail (Text.unpack message)
-    Right endpoint -> do
-      endpoint.missionControlSecret `shouldBe` Nothing
-      pure endpoint
+    Right endpoint -> pure endpoint
 
 -- ---------------------------------------------------------------------------
 -- Child requests
@@ -1193,7 +1295,7 @@ childRequestSpec :: Spec
 childRequestSpec = describe "registered child requests" $ do
   it "registers a child of a live registered parent, once" $
     withLiveParent $ \store stage controller -> do
-      _ <- submitMissionCommand controller.missionControllerControl "c-child" (childRequest "r-1" theMission (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-child" (childRequest "r-1" theMission (MissionSessionId "solve-844-0001"))
       first <- missionControllerIteration controller
       case first of
         MissionAdvanced (MissionCommandApplied "c-child" detail) ->
@@ -1202,7 +1304,7 @@ childRequestSpec = describe "registered child requests" $ do
       length <$> readIORef stage.stageDispatches `shouldReturn` 1
       -- The replay: the same parent and the same request identity, and the
       -- answer already recorded rather than a second launch.
-      _ <- submitMissionCommand controller.missionControllerControl "c-child-again" (childRequest "r-1" theMission (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-child-again" (childRequest "r-1" theMission (MissionSessionId "solve-844-0001"))
       second <- missionControllerIteration controller
       case second of
         MissionAdvanced (MissionCommandApplied "c-child-again" detail) ->
@@ -1216,11 +1318,7 @@ childRequestSpec = describe "registered child requests" $ do
   -- the same discipline: its target is observed, journaled, and rechecked.
   it "journals a target-bearing child's observed version before launching it" $
     withLiveParent $ \store stage controller -> do
-      _ <-
-        submitMissionCommand
-          controller.missionControllerControl
-          "c-target"
-          (targetedChildRequest "r-9" theMission (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-target" (targetedChildRequest "r-9" theMission (MissionSessionId "solve-844-0001"))
       iteration <- missionControllerIteration controller
       case iteration of
         MissionAdvanced (MissionCommandApplied "c-target" _) -> pure ()
@@ -1236,11 +1334,7 @@ childRequestSpec = describe "registered child requests" $ do
       writeIORef
         stage.stageTargets
         [Right (issueVersion ["reviewed:approve"]), Right (issueVersion ["reviewed:approve", "blocked"])]
-      _ <-
-        submitMissionCommand
-          controller.missionControllerControl
-          "c-stale"
-          (targetedChildRequest "r-10" theMission (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-stale" (targetedChildRequest "r-10" theMission (MissionSessionId "solve-844-0001"))
       iteration <- missionControllerIteration controller
       case iteration of
         MissionAdvanced (MissionCommandRefused "c-stale" detail) ->
@@ -1250,11 +1344,7 @@ childRequestSpec = describe "registered child requests" $ do
 
   it "puts a registered child in the tree under the parent that asked for it" $
     withLiveParent $ \store _ controller -> do
-      _ <-
-        submitMissionCommand
-          controller.missionControllerControl
-          "c-lineage"
-          (childRequest "r-11" theMission (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-lineage" (childRequest "r-11" theMission (MissionSessionId "solve-844-0001"))
       _ <- missionControllerIteration controller
       snapshot <- currentSnapshot store
       [ (node.missionSessionId, node.missionSessionParent)
@@ -1265,11 +1355,7 @@ childRequestSpec = describe "registered child requests" $ do
 
   it "rejects a request naming another mission" $
     withLiveParent $ \_ stage controller -> do
-      _ <-
-        submitMissionCommand
-          controller.missionControllerControl
-          "c-cross"
-          (childRequest "r-2" (MissionId "mission-0002") (MissionSessionId "solve-844-0001"))
+      submitConsoleCommand controller "c-cross" (childRequest "r-2" (MissionId "mission-0002") (MissionSessionId "solve-844-0001"))
       iteration <- missionControllerIteration controller
       case iteration of
         MissionAdvanced (MissionCommandRefused "c-cross" detail) ->
@@ -1287,11 +1373,7 @@ childRequestSpec = describe "registered child requests" $ do
       case started of
         Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
         Right controller -> do
-          _ <-
-            submitMissionCommand
-              controller.missionControllerControl
-              "c-settled"
-              (childRequest "r-5" theMission (MissionSessionId "solve-844-0001"))
+          submitConsoleCommand controller "c-settled" (childRequest "r-5" theMission (MissionSessionId "solve-844-0001"))
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionCommandRefused "c-settled" detail) ->
@@ -1302,11 +1384,7 @@ childRequestSpec = describe "registered child requests" $ do
 
   it "rejects a request naming a parent this mission never registered" $
     withLiveParent $ \_ stage controller -> do
-      _ <-
-        submitMissionCommand
-          controller.missionControllerControl
-          "c-dead"
-          (childRequest "r-3" theMission (MissionSessionId "ghost-0001"))
+      submitConsoleCommand controller "c-dead" (childRequest "r-3" theMission (MissionSessionId "ghost-0001"))
       iteration <- missionControllerIteration controller
       case iteration of
         MissionAdvanced (MissionCommandRefused "c-dead" detail) ->
@@ -1517,6 +1595,86 @@ deadlineSpec = describe "the configured action-worker deadline" $ do
       Right (config, _) ->
         WorkerDeadline (resolveGlobalConfig config).resolvedTimeouts.timeoutsWorkerDeadlineSeconds
           `shouldBe` WorkerDeadline 3600
+
+-- ---------------------------------------------------------------------------
+-- The worker's own precondition
+-- ---------------------------------------------------------------------------
+
+workerPreconditionSpec :: Spec
+workerPreconditionSpec = describe "the precondition a worker carries" $ do
+  it "records nothing when the launch recorded nothing" $ do
+    let launched = deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60
+    launched.workerExpectedTarget `shouldBe` Nothing
+    preconditionStillHolds launched `shouldReturn` Nothing
+
+  it "round-trips the recorded expectation through the durable specification" $ do
+    let expected = preconditionOf (issueVersion ["reviewed:approve"])
+        launched =
+          (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
+            {workerExpectedTarget = Just expected}
+    case eitherDecode (encode launched) of
+      Left message -> expectationFailure message
+      Right decoded -> (decoded :: WorkerSpec).workerExpectedTarget `shouldBe` Just expected
+
+  -- The last instant Kanban controls. The launch checked this in another
+  -- process, possibly long ago; everything after this call is an agent session
+  -- whose GitHub writes are its own.
+  it "refuses the turn when the live target has moved since the launch" $
+    withIsolatedGh $ \root -> do
+      let expected = preconditionOf (issueVersion ["reviewed:approve"])
+          launched =
+            (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
+              {workerExpectedTarget = Just expected}
+      withFakeGh root (ghItem ["reviewed:approve", "blocked"]) $ do
+        moved <- preconditionStillHolds launched
+        case moved of
+          Nothing -> expectationFailure "a moved target was allowed to start its turn"
+          Just detail -> do
+            Text.unpack detail `shouldSatisfy` isInfixOf "its labels changed"
+            Text.unpack detail `shouldSatisfy` isInfixOf "nothing was dispatched"
+      withFakeGh root (ghItem ["reviewed:approve"]) $
+        preconditionStillHolds launched `shouldReturn` Nothing
+
+  -- And an unreachable network is not a refusal. This worker holds its lease
+  -- and its turn is about to start; declining on a failed read would turn an
+  -- outage into a wave of refused work, and the packaged workflow's own gates
+  -- reread what they mutate regardless.
+  it "starts the turn when the reading could not be taken at all" $
+    withIsolatedGh $ \root -> do
+      let launched =
+            (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
+              {workerExpectedTarget = Just (preconditionOf (issueVersion ["reviewed:approve"]))}
+      withFakeGh root ["#!/bin/sh", "echo 'gh: could not connect' >&2", "exit 1"] $
+        preconditionStillHolds launched `shouldReturn` Nothing
+
+-- | A temporary root with @$XDG_CACHE_HOME@ redirected into it.
+--
+-- Running @gh@ at all writes this repository's durable process-group record
+-- under the cache root, and a record left in the real one is read by every
+-- later board refresh as a previous board's leftover — which is a failure in
+-- another group entirely, arriving long after the example that caused it.
+withIsolatedGh :: (FilePath -> IO result) -> IO result
+withIsolatedGh action = withTemporaryCacheRoot $ \root ->
+  withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") (action root)
+
+-- | A fake @gh issue view --json@ answering with these labels.
+--
+-- The state and instant match 'issueVersion', so the only fact that can differ
+-- is the one an example varies.
+ghItem :: [Text] -> [ByteString.ByteString]
+ghItem labels =
+  [ "#!/bin/sh",
+    ByteString.pack
+      ( "printf '%s' '"
+          <> "{\"number\":844,\"updatedAt\":\""
+          <> iso8601
+          <> "\",\"state\":\"OPEN\",\"labels\":["
+          <> intercalate "," ["{\"name\":\"" <> Text.unpack name <> "\"}" | name <- labels]
+          <> "]}'"
+      )
+  ]
+  where
+    iso8601 = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" fixedTime
 
 -- ---------------------------------------------------------------------------
 -- The failure vocabulary

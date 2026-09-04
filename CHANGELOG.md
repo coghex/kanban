@@ -33,10 +33,13 @@ created above it.
   moved in between is a typed stale-version result with nothing mutated — a
   result the owning action enforces too, since the recorded version travels
   with the request and is compared against the registry's own read at the last
-  instruction before it starts anything. The run's own terminal is its
-  authenticated console: a line typed there can pause or resume the mission,
-  resolve an unknown outcome, end a registered subtree, or register a child,
-  while a redirected standard input is never read. The run ends when the
+  instruction before it starts anything and again inside the worker it
+  launched, just before that worker's agent session begins. The run's own
+  terminal is its authenticated console: a line typed there is handed to the
+  controller inside the process, never written down, and can pause or resume
+  the mission, resolve an unknown outcome, end a registered subtree, or
+  register a child, while a redirected standard input is never read and a
+  command that arrives as a file carries no override authority at all. The run ends when the
   mission is terminal, paused, or blocked, and reports the transitions it
   made. It never merges a pull request, applies a verdict label, or reports an
   indeterminate result as a success — and never reads a target's absence from

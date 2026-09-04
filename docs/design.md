@@ -246,14 +246,17 @@ an indeterminate result as a success — and absence is not a result: a target
 that has left the open read is an outcome nobody can settle from that read, not
 a step that succeeded.
 
-Its own terminal is the authenticated console. A line typed there is submitted
-through the endpoint the run owns and may pause or resume the mission, record a
-`user_override` that resolves an unknown outcome, end a registered subtree, or
-register a child of a live registered session. A redirected standard input is
-some other process's output, so it is not read at all: that distinction is what
-makes the console an authority rather than a convention, and it is the same
-rule that leaves an attached dashboard able to submit ordinary operator
-commands and nothing more.
+Its own terminal is the authenticated console, and it is authenticated by
+being unreachable rather than by presenting anything. A line typed there is
+turned into a command inside the running process and handed straight to its
+controller, so no artefact exists for another process to read, copy, or replay;
+such a line may pause or resume the mission, record a `user_override` that
+resolves an unknown outcome, end a registered subtree, or register a child of a
+live registered session. A redirected standard input is some other process's
+output and is not read at all. Everything that arrives as a file is an ordinary
+operator command with no override authority, whoever wrote it — which is what
+an attached dashboard submits, and is deliberate: a credential durable enough
+for a second process to present would be durable enough for a third to copy.
 
 ## 6. Layout
 
@@ -3414,15 +3417,18 @@ Defaults:
   observed — something may have happened — and it is resolved by fresh
   evidence or by authenticated direction, never by repeating the effect. Its
   identity is also how a replayed request returns the child it already
-  produced instead of launching a second one, and the version it records is
-  carried to the owning action, which compares it against its own fresh read at
-  the last instruction before it starts anything. `control/requests/` is the
-  channel a controller takes direction on; a command file naming the secret
-  the running controller minted in memory is that controller's own console and
-  may record a `user_override` or resolve an unknown outcome, and every other
-  command is recorded as an ordinary durable operator command with no such
-  authority. The secret is never written to the store, so an attached client
-  cannot obtain one.
+  produced instead of launching a second one, and what an unfinished one
+  records is how the two crash windows around a launch are told apart: an
+  invocation opened while its step still reads pending is an effect that may
+  have happened, and one closed with the worker it started is a session to
+  adopt rather than a stranger's. The version it records travels further than
+  the controller, into that worker's own specification, so the last instant
+  before an agent session begins can ask whether it still holds.
+  `control/requests/` is the channel an attached client takes direction on, and
+  everything in it is an ordinary durable operator command with no override
+  authority — no credential is stored there or anywhere else, because one
+  durable enough for a second process to present would be durable enough for a
+  third to copy.
 - The snapshot's session tree is what an advancing controller registers every
   session it starts in, with the parent that asked for it. That tree is what a
   subtree termination walks and what an owning action's "is a registered child

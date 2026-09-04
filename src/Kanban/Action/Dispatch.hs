@@ -340,6 +340,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
                 environment.actionConfigPath
                 environment.actionWorkflowConfig
                 environment.actionWorkerDeadline
+                request.requestExpectedTarget
             case launched of
               Right descriptor -> pure (Right (IssueActionHandle plan.planKind resolved stage descriptor))
               Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
@@ -450,6 +451,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         environment.actionConfigPath
         environment.actionWorkflowConfig
         environment.actionWorkerDeadline
+        request.requestExpectedTarget
 
     launchPullRequest :: ResolvedTarget -> PullRequestOrigin -> PullRequestAction -> RecordedAssignment -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
     launchPullRequest resolved origin action cell =
@@ -467,6 +469,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         environment.actionConfigPath
         environment.actionWorkflowConfig
         environment.actionWorkerDeadline
+        request.requestExpectedTarget
 
 issueActionNeedsNoCell :: Text
 issueActionNeedsNoCell = "an issue action replays no model cell"

@@ -58,6 +58,8 @@ module Kanban.Mission.Reconcile
     settledMissionLifecycle,
     blockedMissionLifecycle,
     cancelledByDependency,
+    unresolvedDispatchOf,
+    dispatchedButUnregistered,
 
     -- * The registered session tree
     missionSessionSubtree,
@@ -533,6 +535,53 @@ cancelledByDependency specification snapshot =
       Just lifecycle -> missionStepLifecycleIsTerminal lifecycle && lifecycle /= MissionStepSucceeded
       Nothing -> False
     lifecycleOf step = (.missionStepRecordLifecycle) <$> missionStepRecordFor step snapshot
+
+-- | A step that is still @pending@ and already has an invocation nobody saw
+-- the end of.
+--
+-- The exact durable state a crash between the invocation record and the
+-- @dispatching@ write leaves, and the reason it needs its own answer: the step
+-- reads as pending, so 'nextDispatchableStep' would hand it straight back to a
+-- dispatch — repeating an effect that may already have happened, which is the
+-- one thing requirement 7 forbids outright. Nothing about the step record
+-- distinguishes this from a step that was never dispatched; only the
+-- invocation file does.
+unresolvedDispatchOf :: [MissionInvocationState] -> MissionSpecification -> MissionSnapshot -> Maybe (MissionStepId, MissionInvocationId)
+unresolvedDispatchOf states specification snapshot =
+  case [ (step.missionPlanStepId, state.missionInvocationRecord.missionInvocationId)
+       | step <- specification.missionSpecificationPlan,
+         lifecycleOf step.missionPlanStepId == Just MissionStepPending,
+         state <- states,
+         state.missionInvocationRecord.missionInvocationStep == step.missionPlanStepId,
+         not (missionInvocationResolved state)
+       ] of
+    (found : _) -> Just found
+    [] -> Nothing
+  where
+    lifecycleOf step = (.missionStepRecordLifecycle) <$> missionStepRecordFor step snapshot
+
+-- | A step whose invocation records a dispatched worker its own record does
+-- not list.
+--
+-- The other crash window: the driver returned, the worker is running, the
+-- invocation was closed with its identity — and the snapshot write that would
+-- have registered the session never happened. Without this the next run reads
+-- a step with no sessions, finds a live worker it cannot account for, and
+-- pauses the mission for work it started itself.
+--
+-- The conclusion is the durable association the repair is built from, which is
+-- why it is written before the snapshot rather than after.
+dispatchedButUnregistered :: [MissionInvocationState] -> MissionSnapshot -> Maybe (MissionStepId, MissionSessionId)
+dispatchedButUnregistered states snapshot =
+  case [ (state.missionInvocationRecord.missionInvocationStep, MissionSessionId worker)
+       | state <- states,
+         Just (MissionInvocationDispatched worker) <- [state.missionInvocationOutcome],
+         Just record <- [missionStepRecordFor state.missionInvocationRecord.missionInvocationStep snapshot],
+         not (missionStepLifecycleIsTerminal record.missionStepRecordLifecycle),
+         MissionSessionId worker `notElem` record.missionStepRecordSessions
+       ] of
+    (found : _) -> Just found
+    [] -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- The registered session tree

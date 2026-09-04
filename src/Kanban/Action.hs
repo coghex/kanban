@@ -96,8 +96,10 @@ module Kanban.Action
     -- * Preconditions
     TargetPrecondition (..),
     targetPreconditionFor,
+    targetPreconditionForItem,
     targetPreconditionHolds,
     targetPreconditionMessage,
+    targetPreconditionNumber,
 
     -- * Refusals
     StructuralRefusal (..),

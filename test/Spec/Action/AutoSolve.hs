@@ -175,7 +175,8 @@ descriptorCarrying repository name task parent createdAt =
         workerMaxRuntimeSeconds = 600,
         workerConfigPath = Nothing,
         workerWorkflowConfig = defaultWorkflowConfig,
-        workerAssignment = Nothing
+        workerAssignment = Nothing,
+        workerExpectedTarget = Nothing
       }
 
 -- | Write a worker's durable specification and state, as a launch and its

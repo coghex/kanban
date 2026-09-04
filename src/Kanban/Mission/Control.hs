@@ -12,23 +12,28 @@
 -- mission@ is the same string whoever wrote it — so it has to be a property of
 -- the path the words arrived on.
 --
--- The path is a directory the runner creates for exactly one run, plus a secret
--- that run mints /in memory and never writes anywhere/. A command file naming
--- that secret can only have been written by the endpoint value the runner is
--- holding — which is the runner's own console and nothing else. Both authorities
--- are accepted and both become durable, and that is deliberate: an attached
--- dashboard is a legitimate client with no advancement lease, so its input is
--- recorded as an ordinary operator command and simply confers no override
--- authority. Only the authenticated half may record a @user_override@ or
--- resolve an @outcome_unknown@.
+-- There are two paths, and they are different /mechanisms/ rather than one
+-- mechanism with a credential in it.
 --
--- The secret staying out of the filesystem is what makes that separation hold.
--- Writing it beside the requests would hand it to every process that can read
--- the store — which is every attached client, and every provider session
--- running as this user — and the distinction the whole module exists for would
--- be a formality. An attached client therefore cannot obtain it at all:
--- 'attachMissionControl' does not look for one, because there is nothing on
--- disk for it to find.
+-- The authenticated path never touches the filesystem. A line typed at the
+-- runner's own terminal is turned into a command inside the running process
+-- and handed straight to its controller, so there is no artefact for anything
+-- else to read, copy, or replay. That is the whole of what makes it
+-- authenticated: not a token it presents, but the fact that no other process
+-- can put anything on it.
+--
+-- A credential would have undone exactly that. Any token durable enough for a
+-- second process to present is durable enough for a third to copy — the store
+-- is this user's, and so is every provider session running under it — so a
+-- secret written beside the requests would have handed override authority to
+-- precisely the processes requirement 14 excludes by name. There is therefore
+-- no secret anywhere in this module.
+--
+-- The unauthenticated path is 'control\/requests\/', and it is deliberately
+-- open: an attached dashboard is a legitimate client with no advancement
+-- lease, its input is durable and ordinary, and it confers no override
+-- authority. Every command that arrives as a file is that kind, whoever wrote
+-- it, because a file cannot establish who did.
 --
 -- The same rule is what makes a registered child request answerable. A request
 -- names the parent it claims and the mission it claims, and both are checked
@@ -36,14 +41,6 @@
 -- registered session of /this/ mission is a forgery whatever channel it came
 -- in on, and a request identity already answered returns the answer it already
 -- has instead of launching a second child.
---
--- What this stops is exactly what requirement 14 names: provider output,
--- repository content, GitHub content, and unauthenticated process input can
--- each produce a command file — the directory is this user's and so are they —
--- and none of them can produce one that carries this run's secret. The window
--- a submitted command spends on disk before the runner consumes it is the only
--- place the secret exists outside the runner's own memory, under a @0700@
--- directory, and it closes on the next iteration.
 --
 -- This module is internal — "Kanban.Mission" re-exports the parts of it that
 -- module's public contract promises.
@@ -59,8 +56,8 @@ module Kanban.Mission.Control
     missionCommandRejectionMessage,
     MissionCommandRead (..),
     openMissionControl,
-    attachMissionControl,
     submitMissionCommand,
+    runnerCommand,
     readMissionCommands,
     consumeMissionCommand,
     overrideAuthorized,
@@ -95,28 +92,25 @@ import Kanban.Mission.Types
 import System.Directory (removeFile)
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
-import System.Posix.Process (getProcessID)
 
 -- | Where commands are left, and the secret that separates the runner's own
 -- console from every other client.
 data MissionControlEndpoint = MissionControlEndpoint
   { missionControlMission :: MissionId,
     missionControlDirectoryPath :: FilePath,
-    missionControlRequests :: FilePath,
-    -- | 'Just' for the runner that minted it, and 'Nothing' for every client
-    -- that attached to the endpoint without owning it — which is precisely
-    -- the client whose commands confer no override authority. There is no
-    -- third case and no way to acquire one: the secret is never written down.
-    missionControlSecret :: Maybe Text
+    missionControlRequests :: FilePath
   }
   deriving stock (Eq, Show)
 
 -- | Which of the two classes a command arrived in.
 data MissionCommandAuthority
-  = -- | Submitted on the channel this runner owns, naming this run's secret.
+  = -- | Built inside the running controller's own process from its own
+    -- terminal. Nothing on disk carries this authority, so nothing on disk can
+    -- claim it.
     MissionRunnerAuthenticated
-  | -- | Submitted by some other client. Durable, ordinary, and powerless over
-    -- an override or an unknown outcome.
+  | -- | Arrived as a file. Durable, ordinary, and powerless over an override
+    -- or an unknown outcome — whoever wrote it, because a file cannot
+    -- establish who did.
     MissionAttachedClient
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -229,7 +223,6 @@ parseMissionConsoleCommand mission line = case Text.words (Text.strip line) of
 data MissionCommandFile = MissionCommandFile
   { missionCommandFileId :: Text,
     missionCommandFileMission :: MissionId,
-    missionCommandFileSecret :: Maybe Text,
     missionCommandFilePayload :: MissionCommandPayload,
     missionCommandFileSubmittedAt :: UTCTime
   }
@@ -243,7 +236,10 @@ data MissionSubmittedCommand = MissionSubmittedCommand
     missionCommandAuthority :: MissionCommandAuthority,
     missionCommandPayload :: MissionCommandPayload,
     missionCommandSubmittedAt :: UTCTime,
-    missionCommandPath :: FilePath
+    -- | The file it arrived as, and 'Nothing' for one built in this process.
+    -- An in-process command has nothing to consume afterwards, which is the
+    -- same absence that makes it unforgeable.
+    missionCommandPath :: Maybe FilePath
   }
   deriving stock (Eq, Show)
 
@@ -280,46 +276,37 @@ openMissionControl store mission = case endpointPaths store mission of
       Left message -> pure (Left message)
       Right () -> do
         preparedRequests <- ensureMissionDirectory requests
-        case preparedRequests of
-          Left message -> pure (Left message)
-          Right () -> do
-            secret <- newControlSecret
-            pure
-              ( Right
-                  MissionControlEndpoint
-                    { missionControlMission = mission,
-                      missionControlDirectoryPath = directory,
-                      missionControlRequests = requests,
-                      missionControlSecret = Just secret
-                    }
-              )
+        pure
+          ( MissionControlEndpoint
+              { missionControlMission = mission,
+                missionControlDirectoryPath = directory,
+                missionControlRequests = requests
+              }
+              <$ preparedRequests
+          )
 
--- | Opens the endpoint as a client rather than as its owner.
+-- | One command built inside the controller's own process.
 --
--- Always without a secret, and that is the enforcement rather than a default:
--- there is no argument, environment variable, or file that would give one, so
--- an attached dashboard cannot become the runner's console by trying harder.
--- What it can do is everything requirement 4 asks of it — read the durable
--- record and submit ordinary durable operator commands.
-attachMissionControl :: MissionStore -> MissionId -> IO (Either Text MissionControlEndpoint)
-attachMissionControl store mission = case endpointPaths store mission of
-  Left message -> pure (Left message)
-  Right (directory, requests) ->
-    pure
-      ( Right
-          MissionControlEndpoint
-            { missionControlMission = mission,
-              missionControlDirectoryPath = directory,
-              missionControlRequests = requests,
-              missionControlSecret = Nothing
-            }
-      )
+-- The only way to produce a 'MissionRunnerAuthenticated' command, and it takes
+-- no secret because it takes no channel: a caller that can call this is
+-- already running inside the controller.
+runnerCommand :: Text -> MissionCommandPayload -> IO MissionSubmittedCommand
+runnerCommand commandId payload = do
+  now <- getCurrentTime
+  pure
+    MissionSubmittedCommand
+      { missionCommandId = commandId,
+        missionCommandAuthority = MissionRunnerAuthenticated,
+        missionCommandPayload = payload,
+        missionCommandSubmittedAt = now,
+        missionCommandPath = Nothing
+      }
 
 -- | Writes one command into the endpoint's request directory.
 --
--- The secret the endpoint holds travels with it, so an owner's submission is
--- authenticated and a client's is not, without either caller choosing which it
--- is.
+-- Always an ordinary operator command, whoever calls it. There is no
+-- authenticated spelling of this function, because a file is the one thing
+-- that cannot establish who wrote it.
 submitMissionCommand :: MissionControlEndpoint -> Text -> MissionCommandPayload -> IO (Either Text ())
 submitMissionCommand endpoint commandId payload = do
   now <- getCurrentTime
@@ -331,7 +318,6 @@ submitMissionCommand endpoint commandId payload = do
       MissionCommandFile
         { missionCommandFileId = commandId,
           missionCommandFileMission = endpoint.missionControlMission,
-          missionCommandFileSecret = endpoint.missionControlSecret,
           missionCommandFilePayload = payload,
           missionCommandFileSubmittedAt = now
         }
@@ -341,13 +327,11 @@ submitMissionCommand endpoint commandId payload = do
       ignoreFileOperation (setFileMode path 0o600)
       pure (Right ())
 
--- | Every command waiting at the endpoint, oldest submission first.
+-- | Every command waiting at the endpoint, oldest submission first, all of
+-- them unauthenticated.
 --
--- A file that will not decode, names another mission, or carries a secret this
--- run did not mint is not silently dropped. The first two are rejections with
--- a reason; the third is an ordinary attached-client command, because a wrong
--- secret and no secret say the same thing — this did not come from the console
--- connected to this runner.
+-- A file that will not decode or names another mission is not silently
+-- dropped: each is a rejection with a reason.
 readMissionCommands :: MissionControlEndpoint -> IO MissionCommandRead
 readMissionCommands endpoint = do
   entries <- listMissionEntries endpoint.missionControlRequests
@@ -381,14 +365,11 @@ readMissionCommands endpoint = do
               Right
                 MissionSubmittedCommand
                   { missionCommandId = file.missionCommandFileId,
-                    missionCommandAuthority = authorityOf file,
+                    missionCommandAuthority = MissionAttachedClient,
                     missionCommandPayload = file.missionCommandFilePayload,
                     missionCommandSubmittedAt = file.missionCommandFileSubmittedAt,
-                    missionCommandPath = path
+                    missionCommandPath = Just path
                   }
-    authorityOf file = case (endpoint.missionControlSecret, file.missionCommandFileSecret) of
-      (Just held, Just presented) | held == presented -> MissionRunnerAuthenticated
-      _ -> MissionAttachedClient
 
 -- | Removes a command's file once it has been answered durably.
 --
@@ -397,7 +378,8 @@ readMissionCommands endpoint = do
 -- is read again and recognized as already applied by its identity, rather than
 -- one whose answer nobody can find.
 consumeMissionCommand :: MissionSubmittedCommand -> IO ()
-consumeMissionCommand command = ignoreFileOperation (removeFile command.missionCommandPath)
+consumeMissionCommand command =
+  mapM_ (ignoreFileOperation . removeFile) command.missionCommandPath
 
 endpointPaths :: MissionStore -> MissionId -> Either Text (FilePath, FilePath)
 endpointPaths store mission =
@@ -412,15 +394,3 @@ commandFileName commandId = Text.unpack (Text.map safe commandId) <> ".json"
     safe character
       | character `elem` ("/\\\NUL." :: String) = '-'
       | otherwise = character
-
--- | The run's secret, minted in memory and never written down.
---
--- Drawn from the same place the mission lease draws its token: this process's
--- identity and the instant it was taken. It has to separate this run's console
--- from every other writer, and nothing more — it is not a credential anyone
--- can present, because there is nowhere to obtain it from.
-newControlSecret :: IO Text
-newControlSecret = do
-  processId <- getProcessID
-  now <- getCurrentTime
-  pure (Text.pack (show (toInteger processId)) <> "-" <> Text.pack (filter (`notElem` (" :-." :: String)) (show now)))

@@ -57,8 +57,10 @@ module Kanban.Action.Types
     -- * Preconditions
     TargetPrecondition (..),
     targetPreconditionFor,
+    targetPreconditionForItem,
     targetPreconditionHolds,
     targetPreconditionMessage,
+    targetPreconditionNumber,
 
     -- * Refusals
     checkTargetRepository,
@@ -114,18 +116,19 @@ import Kanban.ApprovalService
     approvalUnavailableMessage,
   )
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Data.List (sort)
 import Kanban.Domain
   ( BoardItem (..),
     CompletedHistory (..),
     Issue (..),
-    IssueState (..),
-    Label (..),
     PullRequest (..),
-    PullRequestState (..),
     RepoSnapshot (..),
     Repository,
+    TargetPrecondition (..),
     WorkflowConfig,
+    targetPreconditionForItem,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+    targetPreconditionNumber,
   )
 import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
@@ -363,86 +366,16 @@ resolvedTargetPullRequest target = case target.resolvedTargetItem of
   PullRequestItem pullRequest -> Just pullRequest
   IssueItem _ -> Nothing
 
--- | The exact live facts an effect was authorized against.
---
--- Carried on a request so the /owning action/ can enforce it, rather than only
--- the caller that planned the effect (issue #595, requirement 8). A caller
--- that reads a target, decides to act on it, and hands the decision to a
--- worker has left a window in which the target can move, and a worker that
--- mutates GitHub after it moved is the blind overwrite the requirement exists
--- to prevent. What closes it is this record travelling with the request and
--- being compared against the environment's own fresh read at the last point
--- before the spawn.
---
--- Every field, and the labels as a sorted set because GitHub's ordering is not
--- a fact about the item. Anything weaker would let an effect proceed against a
--- target that changed in a way the plan was never checked against.
-data TargetPrecondition = TargetPrecondition
-  { preconditionKind :: ActionTargetKind,
-    preconditionNumber :: Int,
-    preconditionUpdatedAt :: UTCTime,
-    -- | A pull request's head commit; 'Nothing' for an issue.
-    preconditionHead :: Maybe Text,
-    preconditionLabels :: [Text],
-    -- | @open@, @closed@, or @merged@.
-    preconditionState :: Text
-  }
-  deriving stock (Eq, Show)
-
 -- | The precondition a resolved target currently satisfies.
 --
--- Derived from the record the resolution already holds, so the caller that
--- plans an effect and the dispatch that enforces it read the same item the
--- same way rather than each extracting its own fields.
+-- The record itself is 'Kanban.Domain.TargetPrecondition', because the
+-- persistent worker's specification carries one too and neither layer may own
+-- a definition the other cannot see. This is only the projection from a
+-- resolution, so the caller that plans an effect and the dispatch that
+-- enforces it read the same item the same way rather than each extracting its
+-- own fields.
 targetPreconditionFor :: ResolvedTarget -> TargetPrecondition
-targetPreconditionFor resolved = case resolved.resolvedTargetItem of
-  IssueItem issue ->
-    TargetPrecondition
-      { preconditionKind = ActionTargetIssue,
-        preconditionNumber = issue.issueNumber,
-        preconditionUpdatedAt = issue.issueUpdatedAt,
-        preconditionHead = Nothing,
-        preconditionLabels = sort (map (.labelName) issue.issueLabels),
-        preconditionState = case issue.issueState of
-          IssueOpen -> "open"
-          IssueClosed -> "closed"
-      }
-  PullRequestItem pullRequest ->
-    TargetPrecondition
-      { preconditionKind = ActionTargetPullRequest,
-        preconditionNumber = pullRequest.pullRequestNumber,
-        preconditionUpdatedAt = pullRequest.pullRequestUpdatedAt,
-        preconditionHead = Just pullRequest.pullRequestHead,
-        preconditionLabels = sort (map (.labelName) pullRequest.pullRequestLabels),
-        preconditionState = case pullRequest.pullRequestState of
-          PullRequestOpen -> "open"
-          PullRequestClosed -> "closed"
-          PullRequestMerged -> "merged"
-      }
-
--- | Whether the recorded precondition still describes the live observation.
-targetPreconditionHolds :: TargetPrecondition -> TargetPrecondition -> Bool
-targetPreconditionHolds recorded observed = normalize recorded == normalize observed
-  where
-    normalize precondition = precondition {preconditionLabels = sort precondition.preconditionLabels}
-
--- | Which facts moved, for a refusal a person can act on.
-targetPreconditionMessage :: TargetPrecondition -> TargetPrecondition -> Text
-targetPreconditionMessage recorded observed =
-  "#"
-    <> showNumber recorded.preconditionNumber
-    <> " changed after this action was planned ("
-    <> Text.intercalate ", " differences
-    <> "); nothing was dispatched"
-  where
-    differences =
-      concat
-        [ ["state " <> recorded.preconditionState <> " → " <> observed.preconditionState | recorded.preconditionState /= observed.preconditionState],
-          ["it was updated" | recorded.preconditionUpdatedAt /= observed.preconditionUpdatedAt],
-          ["its head moved" | recorded.preconditionHead /= observed.preconditionHead],
-          ["its labels changed" | sort recorded.preconditionLabels /= sort observed.preconditionLabels],
-          ["it is a different item" | recorded.preconditionNumber /= observed.preconditionNumber || recorded.preconditionKind /= observed.preconditionKind]
-        ]
+targetPreconditionFor = targetPreconditionForItem . (.resolvedTargetItem)
 
 -- | What a request resolved to: one item, or the repository itself for the
 -- action that observes a queue rather than a card.

@@ -65,6 +65,7 @@ module Kanban.Worker
     IssueHostTuning (..),
     defaultIssueHostTuning,
     runIssueReviewHostWith,
+    preconditionStillHolds,
     WorkerSpec (..),
     WorkerDeadline (..),
     WorkerState (..),
@@ -129,7 +130,15 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Kanban.Domain (Repository, WorkflowConfig)
+import Kanban.Domain
+  ( Repository,
+    TargetPrecondition (..),
+    WorkflowConfig,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+  )
+import Kanban.GitHub.Guard (newGhFetchGuard, newGhRecordLock)
+import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Models (RecordedAssignment (..), recordedAssignmentCell)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process
@@ -254,8 +263,8 @@ import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle),
 -- roster to resolve for itself: the launch boundary is where a session's
 -- cell is decided once (see 'Kanban.UI.Util.launchAssignment'), and this is
 -- where that decision becomes durable.
-launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline = do
+launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline expected = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
@@ -272,12 +281,13 @@ launchSolveWorker assignment repository issueNumber workflow brand existingSessi
         workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
-        workerAssignment = Just assignment
+        workerAssignment = Just assignment,
+        workerExpectedTarget = expected
       }
 
 -- | The pull-request twin of 'launchSolveWorker', assignment and all.
-launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline = do
+launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline expected = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
@@ -294,7 +304,8 @@ launchPullRequestWorker assignment repository number origin action existingSessi
         workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
-        workerAssignment = Just assignment
+        workerAssignment = Just assignment,
+        workerExpectedTarget = expected
       }
 
 -- | The repository's live review host, if it has one.
@@ -387,7 +398,9 @@ ensureIssueReviewHost repository configPath workflowConfig deadline = do
               workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
               workerConfigPath = configPath,
               workerWorkflowConfig = workflowConfig,
-              workerAssignment = Nothing
+              workerAssignment = Nothing,
+              -- A host owns no item of its own; its children carry their own.
+              workerExpectedTarget = Nothing
             }
       pure $ case launched of
         Right descriptor -> Right descriptor.workerDescriptorSpec.workerId
@@ -406,8 +419,8 @@ ensureIssueReviewHost repository configPath workflowConfig deadline = do
 -- write fails, exactly as every other launch orders those two — a
 -- specification a host could adopt while no lease reserved its issue is how
 -- two children for one issue would come to exist.
-launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchIssueAction repository issueNumber stage origin host configPath workflowConfig deadline = do
+launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchIssueAction repository issueNumber stage origin host configPath workflowConfig deadline expected = do
   now <- getCurrentTime
   actionId <- newWorkerId "issue-action" issueNumber
   let spec =
@@ -429,7 +442,8 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
             -- its own reviewers and models and reports them back on
             -- 'WorkerCanonicalReviewFinished'; a revision runs on the host's
             -- client, whose cell 'startReviewClient' resolved.
-            workerAssignment = Nothing
+            workerAssignment = Nothing,
+            workerExpectedTarget = expected
           }
   descriptor <- descriptorForSpec spec
   directory <- workerDirectory repository
@@ -711,8 +725,47 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
 -- included: the brand each flow spawns comes from 'brandForProvider' on what
 -- was recorded rather than from the task's own routing, so a replayed
 -- assignment can never reach the other brand's executable.
+--
+-- The precondition check comes first, and this is the last instant it can
+-- (issue #595, requirement 8). Everything below starts an agent session, and
+-- what that session does to GitHub is its own; the launch that recorded this
+-- expectation happened in another process, possibly long ago, and a target
+-- that moved in between is a plan this worker must not carry out. Refusing
+-- here is not a failure of the work — nothing was attempted — so it reports
+-- the typed stale sentence and the mission replans from a fresh reading.
 runTaskWithAssignment :: WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-runTaskWithAssignment spec recorded aggregator rememberProvider emit = case spec.workerTask of
+runTaskWithAssignment spec recorded aggregator rememberProvider emit = do
+  held <- preconditionStillHolds spec
+  case held of
+    Just stale -> do
+      emit (WorkerDiagnostic stale)
+      emit (WorkerFinished (SolveFailed stale))
+    Nothing -> runCheckedTask spec recorded aggregator rememberProvider emit
+
+-- | The recorded expectation reread against live GitHub, or 'Nothing' when
+-- there is nothing to check or it still holds.
+--
+-- A read that /fails/ is deliberately not a refusal. This worker has been
+-- launched, its lease is held, and its turn is about to start; declining on an
+-- unreachable network would turn every outage into a wave of refused work,
+-- while proceeding leaves the packaged workflow's own gates — which reread
+-- what they mutate — as the check they have always been. Only a reading that
+-- succeeds and disagrees stops the turn.
+preconditionStillHolds :: WorkerSpec -> IO (Maybe Text)
+preconditionStillHolds spec = case spec.workerExpectedTarget of
+  Nothing -> pure Nothing
+  Just expected -> do
+    recordLock <- newGhRecordLock
+    guard <- newGhFetchGuard recordLock
+    observed <- observeTargetPrecondition guard spec.workerRepository expected.preconditionItem
+    pure $ case observed of
+      Left _ -> Nothing
+      Right live
+        | targetPreconditionHolds expected live -> Nothing
+        | otherwise -> Just (targetPreconditionMessage expected live)
+
+runCheckedTask :: WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+runCheckedTask spec recorded aggregator rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
     runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow brand spec.workerConfigPath spec.workerWorkflowConfig cell spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       aggregator

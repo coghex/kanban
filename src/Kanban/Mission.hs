@@ -174,7 +174,7 @@ module Kanban.Mission
     missionCommandRejectionMessage,
     MissionCommandRead (..),
     openMissionControl,
-    attachMissionControl,
+    runnerCommand,
     submitMissionCommand,
     readMissionCommands,
     consumeMissionCommand,
@@ -206,6 +206,8 @@ module Kanban.Mission
     settledMissionLifecycle,
     blockedMissionLifecycle,
     cancelledByDependency,
+    unresolvedDispatchOf,
+    dispatchedButUnregistered,
     missionSessionSubtree,
     stepHasUnsettledDescendants,
     MissionContinuation (..),
@@ -229,6 +231,7 @@ module Kanban.Mission
     missionTransitionMessage,
     MissionIteration (..),
     missionControllerIteration,
+    submitConsoleCommand,
 
     -- * The foreground runner
     MissionRunReport (..),

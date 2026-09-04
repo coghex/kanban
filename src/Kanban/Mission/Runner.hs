@@ -66,6 +66,7 @@ import Kanban.Action
     CatalogHistory (..),
     TargetCatalog (..),
     TargetPrecondition (..),
+    targetPreconditionNumber,
     actionHandleWorker,
     actionKindDecodeErrorMessage,
     actionRefusalMessage,
@@ -79,7 +80,8 @@ import Kanban.Action
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
 import Kanban.Domain
-  ( Issue (..),
+  ( ItemId (..),
+    Issue (..),
     Label (..),
     PullRequest (..),
     RepoSnapshot (..),
@@ -87,7 +89,7 @@ import Kanban.Domain
     WorkflowConfig (..),
   )
 import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, newGhFetchGuard, newGhRecordLock)
-import Kanban.Mission.Control (parseMissionConsoleCommand, submitMissionCommand)
+import Kanban.Mission.Control (parseMissionConsoleCommand)
 import Kanban.Mission.Controller
   ( MissionController (..),
     MissionDispatchAccepted (..),
@@ -99,6 +101,7 @@ import Kanban.Mission.Controller
     MissionTransition,
     missionControllerIteration,
     missionStartRefusalMessage,
+    submitConsoleCommand,
     missionTransitionMessage,
     startMissionController,
     stopMissionController,
@@ -693,9 +696,10 @@ drainMissionConsoleWith isConsole handle controller = do
       commandId <- newConsoleCommandId
       case parseMissionConsoleCommand controller.missionControllerMission typed of
         Left detail -> reportUnparsed commandId typed detail
-        Right payload -> do
-          submitted <- submitMissionCommand controller.missionControllerControl commandId payload
-          either (reportUnparsed commandId typed) pure submitted
+        -- Handed to the controller inside this process rather than written
+        -- anywhere. That is what makes it authenticated: there is no artefact
+        -- for another process to read, copy, or replay.
+        Right payload -> submitConsoleCommand controller commandId payload
     -- A line the console could not turn into a command still has to leave a
     -- trace: the operator typed it, and a silently dropped instruction is
     -- indistinguishable from one that was carried out.
@@ -744,10 +748,10 @@ targetRefFor target =
 missionVersionOf :: TargetPrecondition -> MissionTargetVersion
 missionVersionOf precondition =
   MissionTargetVersion
-    { missionVersionKind = case precondition.preconditionKind of
-        ActionTargetIssue -> MissionTargetIssue
-        ActionTargetPullRequest -> MissionTargetPullRequest,
-      missionVersionNumber = precondition.preconditionNumber,
+    { missionVersionKind = case precondition.preconditionItem of
+        IssueId _ -> MissionTargetIssue
+        PullRequestId _ -> MissionTargetPullRequest,
+      missionVersionNumber = targetPreconditionNumber precondition,
       missionVersionUpdatedAt = precondition.preconditionUpdatedAt,
       missionVersionHead = precondition.preconditionHead,
       missionVersionLabels = precondition.preconditionLabels,
@@ -757,10 +761,9 @@ missionVersionOf precondition =
 preconditionOf :: MissionTargetVersion -> TargetPrecondition
 preconditionOf version =
   TargetPrecondition
-    { preconditionKind = case version.missionVersionKind of
-        MissionTargetIssue -> ActionTargetIssue
-        MissionTargetPullRequest -> ActionTargetPullRequest,
-      preconditionNumber = version.missionVersionNumber,
+    { preconditionItem = case version.missionVersionKind of
+        MissionTargetIssue -> IssueId version.missionVersionNumber
+        MissionTargetPullRequest -> PullRequestId version.missionVersionNumber,
       preconditionUpdatedAt = version.missionVersionUpdatedAt,
       preconditionHead = version.missionVersionHead,
       preconditionLabels = version.missionVersionLabels,

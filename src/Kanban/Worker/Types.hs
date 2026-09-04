@@ -41,7 +41,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository, WorkflowConfig, defaultWorkflowConfig)
+import Kanban.Domain (Repository, TargetPrecondition, WorkflowConfig, defaultWorkflowConfig)
 import Kanban.Models (RecordedAssignment)
 import Kanban.Process (ManagedProcess, ProcessIdentity)
 import Kanban.Preflight (IssueOrigin)
@@ -246,16 +246,31 @@ data WorkerSpec = WorkerSpec
     -- existed: the supervisor refuses such a spec rather than resolving a
     -- cell of its own, and the launch boundary resolves once and records the
     -- result on that session's next resume.
-    workerAssignment :: Maybe RecordedAssignment
+    workerAssignment :: Maybe RecordedAssignment,
+    -- | The exact target state this launch was authorized against, when the
+    -- caller recorded one (issue #595, requirement 8).
+    --
+    -- Durable because the boundary it protects is not the launch. The launch
+    -- checked this and then wrote a specification a detached supervisor picks
+    -- up later, and the mutations the launch was for are made later still, by
+    -- an agent session that specification starts. Carrying the expectation
+    -- into the record is what lets the last instant Kanban controls — just
+    -- before that session begins — ask whether it still holds.
+    --
+    -- 'Nothing' for a caller with no such record, and for every specification
+    -- written before this field existed: a dashboard press acts on the item
+    -- the operator is looking at and has nothing older to be stale against.
+    workerExpectedTarget :: Maybe TargetPrecondition
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable spec file written before
 -- 'workerResumeProvenance'/'workerConfigPath'/'workerWorkflowConfig'/
--- 'workerAssignment' existed still decodes: legacy specs default to
--- 'ResumeAnswer'/'Nothing'/'defaultWorkflowConfig'/'Nothing', matching every
--- resume's framing prior to their introduction.
+-- 'workerAssignment'/'workerExpectedTarget' existed still decodes: legacy
+-- specs default to
+-- 'ResumeAnswer'/'Nothing'/'defaultWorkflowConfig'/'Nothing'/'Nothing',
+-- matching every resume's framing prior to their introduction.
 instance FromJSON WorkerSpec where
   parseJSON = withObject "WorkerSpec" $ \object ->
     WorkerSpec
@@ -272,6 +287,7 @@ instance FromJSON WorkerSpec where
       <*> object .:? "workerConfigPath" .!= Nothing
       <*> object .:? "workerWorkflowConfig" .!= defaultWorkflowConfig
       <*> object .:? "workerAssignment" .!= Nothing
+      <*> object .:? "workerExpectedTarget" .!= Nothing
 
 data WorkerEvent
   = WorkerProviderStarted Int
