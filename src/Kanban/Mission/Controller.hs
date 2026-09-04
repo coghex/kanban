@@ -57,10 +57,12 @@ module Kanban.Mission.Controller
     MissionIteration (..),
     missionControllerIteration,
     submitConsoleCommand,
+    childInvocationId,
   )
 where
 
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.List (find)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -234,7 +236,14 @@ data MissionDriver = MissionDriver
     -- no plan step of its own, and requirement 11's accounting is over that
     -- tree. 'Nothing' means it has not ended, which keeps its parent
     -- nonterminal — as does a reading that could not be taken at all.
-    missionDriverObserveSession :: MissionSessionId -> IO (Either Text (Maybe MissionTerminalObservation)),
+    --
+    -- The step travels with it because what a session /achieved/ is an
+    -- action-specific question, and a registered child has no step record for
+    -- the evidence pass to ask it through: the controller reconstructs the
+    -- child's action and target from the invocation that launched it, so the
+    -- same registry validation reaches a child as reaches a plan step.
+    -- 'Nothing' where nothing records what the session was doing at all.
+    missionDriverObserveSession :: MissionSessionId -> Maybe MissionPlanStep -> IO (Either Text (Maybe MissionTerminalObservation)),
     -- | The session an invocation actually launched, if one exists.
     --
     -- The other half of requirement 5's recoverability. An invocation is
@@ -732,7 +741,7 @@ resolveOpenTermination controller snapshot invocation root = do
     -- is the honest \"its record is gone and nothing says how it went\", which
     -- proves nothing about a signal.
     observe node = do
-      observed <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId
+      observed <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId Nothing
       pure $ case observed of
         Left failure -> Left failure
         Right Nothing -> Right False
@@ -791,21 +800,65 @@ advanceReconciled controller snapshot = do
 --
 -- One session per iteration, like every other transition here.
 observeOneSession :: MissionController -> MissionSnapshot -> IO (Maybe MissionIteration)
-observeOneSession controller snapshot = go unsettled
+observeOneSession controller snapshot = do
+  recorded <-
+    readMissionInvocations
+      controller.missionControllerMission
+      controller.missionControllerStore.missionStoreRepository
+      controller.missionControllerInvocations
+  case recorded of
+    Left detail -> pure (Just (MissionControllerFailed detail))
+    Right states -> go states unsettled
   where
     unsettled =
       [ node
       | node <- snapshot.missionSnapshotSessions,
         missionSessionDisposition node /= MissionSessionSettled
       ]
-    go [] = pure Nothing
-    go (node : rest) = do
-      reading <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId
+    go _ [] = pure Nothing
+    go states (node : rest) = do
+      reading <-
+        controller.missionControllerDriver.missionDriverObserveSession
+          node.missionSessionId
+          (stepBehind states node)
       case reading of
         Left detail -> pure (Just (MissionControllerFailed detail))
-        Right Nothing -> go rest
-        Right (Just observation) ->
-          Just <$> recordSessionObservation controller snapshot node observation
+        Right Nothing -> go states rest
+        Right (Just observation)
+          -- Already recorded, and unchanged. Writing it again would be a
+          -- transition every iteration for ever: an unverifiable session is
+          -- never settled, so it stays in the set this pass walks, and only
+          -- the /change/ is news.
+          | Just observation.missionObservationOutcome
+              == ((.missionObservationOutcome) <$> node.missionSessionObservation) ->
+              go states rest
+          | otherwise -> Just <$> recordSessionObservation controller snapshot node observation
+
+    -- What this session was doing, so its result can be judged the way a plan
+    -- step's is.
+    --
+    -- A plan step for a session the plan started, and for a registered child
+    -- the step its own launch invented — reconstructed from the invocation
+    -- that recorded it, which is the only place a child's action and target
+    -- were ever written down.
+    stepBehind states node = do
+      step <- node.missionSessionStep
+      case find ((== step) . (.missionPlanStepId)) controller.missionControllerSpecification.missionSpecificationPlan of
+        Just planned -> Just planned
+        Nothing -> case [ state.missionInvocationRecord
+                        | state <- states,
+                          state.missionInvocationRecord.missionInvocationStep == step
+                        ] of
+          (record : _) ->
+            Just
+              MissionPlanStep
+                { missionPlanStepId = step,
+                  missionPlanStepAction = record.missionInvocationAction,
+                  missionPlanStepSummary = "a registered child",
+                  missionPlanStepTarget = record.missionInvocationTarget,
+                  missionPlanStepDependsOn = []
+                }
+          [] -> Nothing
 
 -- | Writes one session's terminal observation into the snapshot.
 recordSessionObservation :: MissionController -> MissionSnapshot -> MissionSessionNode -> MissionTerminalObservation -> IO MissionIteration
@@ -1399,13 +1452,7 @@ registerChild controller snapshot command request
               )
           Nothing -> launchChild controller snapshot command request childInvocation
   where
-    childInvocation =
-      MissionInvocationId
-        ( "child-"
-            <> request.missionChildRequestParent.unMissionSessionId
-            <> "-"
-            <> request.missionChildRequestId
-        )
+    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
     -- Registered /and/ not settled. Registration alone would let a session
     -- that has already ended keep spawning children, which is the dead-parent
     -- forgery requirement 12 names; and an unverifiable session counts as
@@ -1426,6 +1473,27 @@ registerChild controller snapshot command request
       journalCommand controller command ("refused child request: " <> detail)
       consumeMissionCommand command
       pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+
+-- | The identity a child request is deduplicated by.
+--
+-- The pair, encoded so it can be taken apart again. Joining the two with a
+-- separator does not do that: both halves are free-form words from the console
+-- grammar, so parent @x-y@ asking for request @z@ and parent @x@ asking for
+-- request @y-z@ would mint the same identity — and the second, a perfectly
+-- valid request from a different session, would be answered with the first
+-- one's child instead of being launched. Length-prefixing the parent says
+-- exactly where it ends, which makes the encoding injective and still leaves
+-- the identity readable in the journal.
+childInvocationId :: MissionSessionId -> Text -> MissionInvocationId
+childInvocationId parent requestId =
+  MissionInvocationId
+    ( "child-"
+        <> Text.pack (show (Text.length parent.unMissionSessionId))
+        <> "-"
+        <> parent.unMissionSessionId
+        <> "-"
+        <> requestId
+    )
 
 -- | The launch itself, with the same journal-then-act ordering every other
 -- effect uses.
@@ -1511,6 +1579,28 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
           journalCommand controller command ("child request failed: " <> missionStepFailureMessage failure)
           consumeMissionCommand command
           pure (MissionAdvanced (MissionCommandRefused command.missionCommandId (missionStepFailureMessage failure)))
+        -- The same action that answers as it is asked, reached through a
+        -- child request instead of a plan step. Registering the invented
+        -- session a worker-owning launch produces would leave the parent
+        -- waiting on a worker no pass can find, and throw away the answer
+        -- that already exists.
+        Right acceptance
+          | Just conclusion <- acceptance.missionAcceptedOutcome -> do
+              _ <-
+                concludeMissionInvocation
+                  controller.missionControllerInvocations
+                  invocation
+                  (MissionInvocationCompleted (missionConclusionDetail conclusion))
+                  concluded
+              journalCommand controller command ("child request answered: " <> missionConclusionDetail conclusion)
+              consumeMissionCommand command
+              pure
+                ( MissionAdvanced
+                    ( MissionCommandApplied
+                        command.missionCommandId
+                        ("child request answered: " <> missionConclusionDetail conclusion)
+                    )
+                )
         Right acceptance -> do
           _ <-
             concludeMissionInvocation

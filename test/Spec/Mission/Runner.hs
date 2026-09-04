@@ -278,8 +278,11 @@ data Stage = Stage
     stageDispatchResult :: IORef (MissionDispatchRequest -> Either MissionStepFailure MissionDispatchAccepted),
     stageDispatches :: IORef [MissionDispatchRequest],
     stageTerminated :: IORef [[MissionSessionId]],
-    -- | The sessions the driver will report as ended.
+    -- | The sessions the driver will report an observation for.
     stageSessions :: IORef [MissionSessionId],
+    -- | The observation it reports for them. Settled by default; an example
+    -- that cares about an unverifiable reading chooses its own.
+    stageObservation :: IORef MissionTerminalObservation,
     -- | The worker each invocation will be found to have launched.
     stageAdoptions :: IORef [(MissionInvocationId, MissionSessionId)]
   }
@@ -293,6 +296,7 @@ newStage =
     <*> newIORef []
     <*> newIORef []
     <*> newIORef []
+    <*> newIORef endedObservation
     <*> newIORef []
 
 endedObservation :: MissionTerminalObservation
@@ -340,9 +344,10 @@ stagedDriver stage _ _ =
                       }
                 )
             ),
-        missionDriverObserveSession = \session -> do
+        missionDriverObserveSession = \session _ -> do
           settled <- readIORef stage.stageSessions
-          pure (Right (if session `elem` settled then Just endedObservation else Nothing)),
+          observation <- readIORef stage.stageObservation
+          pure (Right (if session `elem` settled then Just observation else Nothing)),
         missionDriverAdoptInvocation = \invocation -> do
           launched <- readIORef stage.stageAdoptions
           pure (Right (lookup invocation launched)),
@@ -402,11 +407,10 @@ stepLifecycle snapshot = (.missionStepRecordLifecycle) <$> missionStepRecordFor 
 theParent :: MissionSessionId
 theParent = MissionSessionId "solve-844-0001"
 
--- | The invocation identity 'launchChild' mints, spelled the way the
--- controller spells it so a fixture cannot drift from the thing it stands in
--- for.
-childInvocationId :: Text -> MissionInvocationId
-childInvocationId requestId = MissionInvocationId ("child-" <> theParent.unMissionSessionId <> "-" <> requestId)
+-- | The invocation identity 'launchChild' mints for this fixture's parent,
+-- taken from the controller's own minting so the two cannot drift apart.
+childInvocationFor :: Text -> MissionInvocationId
+childInvocationFor = childInvocationId theParent
 
 -- | The durable state a crash around a registered child's launch leaves: the
 -- opening record, its step invented from the request, and the lineage the
@@ -414,7 +418,7 @@ childInvocationId requestId = MissionInvocationId ("child-" <> theParent.unMissi
 openChildInvocation :: MissionStore -> Text -> IO ()
 openChildInvocation store requestId = writeInvocation store $
   MissionInvocation
-    { missionInvocationId = childInvocationId requestId,
+    { missionInvocationId = childInvocationFor requestId,
       missionInvocationMission = theMission,
       missionInvocationRepository = MissionRepository "coghex" "kanban",
       missionInvocationStep = MissionStepId ("child-" <> requestId),
@@ -1974,7 +1978,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   it "puts a launched child back under its parent after a crash before the write" $
     withRegisteredParent $ \store stage -> do
       openChildInvocation store "r-20"
-      concludeInvocation store (childInvocationId "r-20") (MissionInvocationDispatched "child-r-20-0001")
+      concludeInvocation store (childInvocationFor "r-20") (MissionInvocationDispatched "child-r-20-0001")
       iteration <- oneIteration store stage
       iteration
         `shouldBe` MissionAdvanced
@@ -1994,7 +1998,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   it "adopts the child an open invocation launched, and registers its lineage" $
     withRegisteredParent $ \store stage -> do
       openChildInvocation store "r-21"
-      writeIORef stage.stageAdoptions [(childInvocationId "r-21", MissionSessionId "child-r-21-0001")]
+      writeIORef stage.stageAdoptions [(childInvocationFor "r-21", MissionSessionId "child-r-21-0001")]
       iteration <- oneIteration store stage
       iteration
         `shouldBe` MissionAdvanced
@@ -2039,7 +2043,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
           MissionInvocationState
             { missionInvocationRecord =
                 MissionInvocation
-                  { missionInvocationId = childInvocationId "r-23",
+                  { missionInvocationId = childInvocationFor "r-23",
                     missionInvocationMission = theMission,
                     missionInvocationRepository = MissionRepository "coghex" "kanban",
                     missionInvocationStep = MissionStepId "child-r-23",
@@ -2141,7 +2145,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   it "reads a collected worker record as unknown rather than as a clean exit" $
     withRegisteredParent $ \store _ -> do
       driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
-      observed <- driver.missionDriverObserveSession (MissionSessionId "child-collected-0001")
+      observed <- driver.missionDriverObserveSession (MissionSessionId "child-collected-0001") Nothing
       case observed of
         Right (Just observation) -> do
           observation.missionObservationOutcome `shouldBe` MissionObservedUnknown
@@ -2680,6 +2684,154 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
       snapshot <- currentSnapshot store
       snapshot.missionSnapshotSessions `shouldBe` []
       outcomeTags store `shouldReturn` [Just "completed"]
+
+  -- A child request reaches the same registered actions a plan step does,
+  -- including the one that owns no worker. Recording an invented session for
+  -- it leaves the parent waiting on a worker no pass can find and throws the
+  -- answer away.
+  it "answers a child request whose action owns no worker, without registering one" $
+    withLiveParent $ \store stage controller -> do
+      writeIORef stage.stageDispatchResult $ \_ ->
+        Right
+          MissionDispatchAccepted
+            { missionAcceptedSession = MissionSessionId "observation",
+              missionAcceptedProviderSession = Nothing,
+              missionAcceptedWorker = "observation",
+              missionAcceptedDetail = "this action owns no worker",
+              missionAcceptedOutcome = Just (MissionWorkerSucceeded "the approval queue is idle")
+            }
+      submitConsoleCommand controller "c-queue" (childRequest "r-40" theMission theParent)
+      iteration <- missionControllerIteration controller
+      case iteration of
+        MissionAdvanced (MissionCommandApplied "c-queue" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "the approval queue is idle"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      snapshot <- currentSnapshot store
+      -- No child node, because there is no child: the parent has nothing to
+      -- wait for.
+      [node.missionSessionId | node <- snapshot.missionSnapshotSessions, node.missionSessionParent /= Nothing]
+        `shouldBe` []
+      outcomeTags store `shouldReturn` [Just "completed"]
+
+  -- The pair a child request is deduplicated by has to survive being written
+  -- down. Joining the two with a separator does not: both halves are
+  -- free-form words the console grammar accepts, so two different requests
+  -- from two different parents could mint one identity — and the second would
+  -- be answered with the first one's child instead of being launched.
+  it "tells two child requests apart when their parent and request ids overlap" $ do
+    childInvocationId (MissionSessionId "x-y") "z"
+      `shouldNotBe` childInvocationId (MissionSessionId "x") "y-z"
+    -- And the same pair still mints the same identity, which is what makes a
+    -- replay a replay.
+    childInvocationId (MissionSessionId "x-y") "z"
+      `shouldBe` childInvocationId (MissionSessionId "x-y") "z"
+
+  it "launches both of a colliding pair rather than replaying one for the other" $ do
+    let parents =
+          [ sessionNode "x-y" Nothing Nothing,
+            (sessionNode "x" Nothing Nothing) {missionSessionId = MissionSessionId "x"}
+          ]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] parents) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-a" (childRequest "z" theMission (MissionSessionId "x-y"))
+          _ <- missionControllerIteration controller
+          submitConsoleCommand controller "c-b" (childRequest "y-z" theMission (MissionSessionId "x"))
+          second <- missionControllerIteration controller
+          case second of
+            MissionAdvanced (MissionCommandApplied "c-b" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "registered child"
+            other -> expectationFailure ("the second request was not launched: " <> show other)
+          stopMissionController controller
+      length <$> readIORef stage.stageDispatches `shouldReturn` 2
+
+  -- A registered child is an action too. Its clean exit says its process
+  -- ended, not that it did what it was asked, and a mission that recorded the
+  -- one as the other would put an unearned result in its own account of
+  -- itself — and settle the parent over it.
+  it "judges a registered child's end through the registry, not its exit code" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        stageWorker (workerFixtureSpec boardRepository (WorkerId "child-r-50-0001") 844)
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
+          observed <-
+            driver.missionDriverObserveSession
+              (MissionSessionId "child-r-50-0001")
+              (Just childPlanStep)
+          case observed of
+            Right (Just observation) -> do
+              observation.missionObservationOutcome `shouldBe` MissionObservedUnknown
+              -- And for the registry's reason, not for want of a step: this
+              -- child was identified, its action was run, and what it
+              -- achieved is what could not be established.
+              fmap Text.unpack observation.missionObservationDetail
+                `shouldSatisfy` maybe False (isInfixOf "recorded no attribution")
+              -- Which keeps the parent waiting rather than settling over it.
+              missionSessionDisposition (sessionNode "child-r-50-0001" (Just theParent) (Just observation))
+                `shouldBe` MissionSessionUnverifiable
+            other -> expectationFailure ("a child's clean exit was judged " <> show (fmap (fmap (.missionObservationOutcome)) other))
+
+  -- And a session nothing can say anything about is unknown rather than
+  -- settled, for the same reason.
+  it "reads a session it cannot identify as unknown rather than as an exit" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        stageWorker (workerFixtureSpec boardRepository (WorkerId "child-r-51-0001") 844)
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith []) $ do
+          observed <- driver.missionDriverObserveSession (MissionSessionId "child-r-51-0001") Nothing
+          case observed of
+            Right (Just observation) -> do
+              observation.missionObservationOutcome `shouldBe` MissionObservedUnknown
+              fmap Text.unpack observation.missionObservationDetail
+                `shouldSatisfy` maybe False (isInfixOf "nothing records what this session was doing")
+            other -> expectationFailure ("an unidentifiable session was judged " <> show (fmap (fmap (.missionObservationOutcome)) other))
+
+  -- The pass that records these must not write the same answer for ever. An
+  -- unverifiable session is never settled, so it stays in the set the pass
+  -- walks, and only a change is news.
+  it "records an unverifiable session once, not on every pass" $ do
+    let collected =
+          MissionTerminalObservation
+            { missionObservationAt = fixedTime,
+              missionObservationOutcome = MissionObservedUnknown,
+              missionObservationDetail = Just "its worker record has been collected; how it ended is unrecorded"
+            }
+        node = sessionNode "solve-844-0001" Nothing (Just collected)
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] [node]) $ \store stage -> do
+      -- The driver keeps saying the same thing, because nothing has changed.
+      writeIORef stage.stageSessions [theParent]
+      writeIORef stage.stageObservation collected
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionSessionEnded session _) ->
+              expectationFailure ("the same observation was recorded again for " <> show session)
+            _ -> pure ()
+          -- And a reading that /has/ changed is still news.
+          writeIORef stage.stageObservation endedObservation
+          upgraded <- missionControllerIteration controller
+          case upgraded of
+            MissionAdvanced (MissionSessionEnded session _) -> session `shouldBe` theParent
+            other -> expectationFailure ("a changed observation was not recorded: " <> show other)
+          stopMissionController controller
+
+-- | The step a registered child's launch invents for it.
+childPlanStep :: MissionPlanStep
+childPlanStep =
+  MissionPlanStep
+    { missionPlanStepId = MissionStepId "child-r-50",
+      missionPlanStepAction = "solve_issue",
+      missionPlanStepSummary = "a registered child",
+      missionPlanStepTarget = Just theTarget,
+      missionPlanStepDependsOn = []
+    }
 
 -- | A fake @gh@ answering the board read with these issue nodes.
 ghBoardWith :: [String] -> [ByteString.ByteString]

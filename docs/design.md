@@ -3447,7 +3447,14 @@ Defaults:
   a run whose record cannot supply what that judgement needs is an unknown
   outcome rather than a success. A registered action that owns no worker is
   answered as it is dispatched, in the same iteration, because there is no
-  durable child for a later pass to observe. And a target that reaches a
+  durable child for a later pass to observe — whether a plan step or a
+  registered child asked for it. A child's own end is judged the same way its
+  parent's is, through the action its launch recorded, so a child that exited
+  cleanly having achieved nothing keeps its parent waiting rather than settling
+  it. And the identity a child request is deduplicated by encodes the parent
+  and the request so the pair can be recovered from it, because two different
+  requests that flattened to one identity would have the second answered with
+  the first one's child. And a target that reaches a
   terminal state between the controller's reread and the registry's own
   resolution is reported as the stale plan it is rather than as a target that
   could not be resolved.

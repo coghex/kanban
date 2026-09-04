@@ -236,6 +236,7 @@ module Kanban.Mission
     MissionIteration (..),
     missionControllerIteration,
     submitConsoleCommand,
+    childInvocationId,
 
     -- * The foreground runner
     MissionRunReport (..),

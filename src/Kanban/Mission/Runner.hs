@@ -654,7 +654,7 @@ liveMissionDriver options config repository store _ =
     -- collected is gone; a worker still running is not; and a worker whose
     -- state will not decode is neither, which keeps the node unsettled and the
     -- parent nonterminal.
-    observeSession session = do
+    observeSession session step = do
       workers <- discoverWorkerHistory repository
       case find ((== session.unMissionSessionId) . workerIdentity) workers of
         -- Collected, and that is all it says. A worker's terminal artifacts
@@ -679,24 +679,58 @@ liveMissionDriver options config repository store _ =
             )
         Just descriptor -> do
           state <- readWorkerState descriptor
-          now <- getCurrentTime
-          pure $ case state of
-            Left _ -> Right Nothing
+          case state of
+            Left _ -> pure (Right Nothing)
             Right recorded -> case recorded.workerStateStatus of
-              WorkerStarting -> Right Nothing
-              WorkerRunning -> Right Nothing
-              WorkerOrphaned _ -> Right Nothing
-              WorkerTerminal outcome ->
-                Right
-                  ( Just
-                      MissionTerminalObservation
-                        { missionObservationAt = now,
-                          missionObservationOutcome = case outcome of
-                            SolveCompleted -> MissionObservedExit 0
-                            _ -> MissionObservedExit 1,
-                          missionObservationDetail = Just (terminalDetail outcome)
-                        }
-                  )
+              WorkerStarting -> pure (Right Nothing)
+              WorkerRunning -> pure (Right Nothing)
+              WorkerOrphaned _ -> pure (Right Nothing)
+              -- Ended, and what it ended /having achieved/ is the registry's
+              -- to say — for a registered child exactly as for a plan step. A
+              -- child solve that opened no pull request and a child review
+              -- that published no verdict both exit cleanly, and recording
+              -- either as a clean exit would put a result in this mission's
+              -- account of itself that nothing ever established.
+              WorkerTerminal outcome -> observedEnd step descriptor outcome
+
+    observedEnd step descriptor outcome = do
+      judged <- judgedEnd step descriptor outcome
+      now <- getCurrentTime
+      pure
+        ( Right
+            ( Just
+                MissionTerminalObservation
+                  { missionObservationAt = now,
+                    missionObservationOutcome = fst judged,
+                    missionObservationDetail = Just (snd judged)
+                  }
+            )
+        )
+
+    judgedEnd step descriptor outcome = case outcome of
+      -- The two the registry passes through untouched: a provider that asked
+      -- a question or failed has already said what happened.
+      SolveNeedsInput detail -> pure (MissionObservedExit 1, terminalDetail (SolveNeedsInput detail))
+      SolveFailed detail -> pure (MissionObservedExit 1, terminalDetail (SolveFailed detail))
+      SolveCompleted -> case step of
+        -- Nothing records what this session was for, so nothing can say what
+        -- it achieved. Unknown keeps its parent waiting, which is the
+        -- fail-closed answer requirement 11 asks for.
+        Nothing -> pure (MissionObservedUnknown, "nothing records what this session was doing")
+        Just planned -> case decodeWorkflowActionKind planned.missionPlanStepAction of
+          Left decodeError -> pure (MissionObservedUnknown, actionKindDecodeErrorMessage decodeError)
+          Right kind -> do
+            board <- readBoard
+            case board of
+              Left failure -> pure (MissionObservedUnknown, missionStepFailureText failure)
+              Right snapshot -> endOf <$> judgeCompleted planned snapshot kind descriptor
+
+    endOf conclusion = case conclusion of
+      Nothing -> (MissionObservedUnknown, "its result could not be established")
+      Just (MissionWorkerSucceeded detail) -> (MissionObservedExit 0, detail)
+      Just (MissionWorkerNeedsInput detail) -> (MissionObservedExit 1, detail)
+      Just (MissionWorkerFailed (MissionFailureOutcomeUnknown detail)) -> (MissionObservedUnknown, detail)
+      Just (MissionWorkerFailed failure) -> (MissionObservedExit 1, missionStepFailureText failure)
 
     terminalDetail outcome = case outcome of
       SolveCompleted -> "it completed"

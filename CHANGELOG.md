@@ -61,7 +61,10 @@ created above it.
   runner, so a clean exit that produced no attributable pull request and an
   issue action that published no verdict are not reported as work done; a
   registered action that owns no worker is answered in the iteration that
-  dispatched it; and a target that reached a terminal state between the
+  dispatched it, whether a plan step or a registered child asked for it; a
+  child's own end is judged through the action its launch recorded rather than
+  by its exit code; child requests are deduplicated by an identity that keeps
+  the parent and the request distinguishable; and a target that reached a terminal state between the
   controller's reread and the registry's resolution is a stale plan rather than
   an unresolvable target. The run ends when the
   mission is terminal, paused, or blocked, and reports the transitions it
