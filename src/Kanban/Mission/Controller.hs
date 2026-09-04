@@ -58,6 +58,7 @@ module Kanban.Mission.Controller
     missionControllerIteration,
     submitConsoleCommand,
     childInvocationId,
+    childStepId,
   )
 where
 
@@ -133,6 +134,7 @@ import Kanban.Mission.Reconcile
     nextDispatchableStep,
     settledMissionLifecycle,
     stepHasUnsettledDescendants,
+    stepUnverifiableDescendant,
     unresolvedDispatchOf,
     unresolvedTerminationOf,
   )
@@ -955,12 +957,30 @@ reconcileOneStep controller snapshot = go candidates
                   Just
                     <$> applyAttachment controller snapshot step.missionPlanStepId reading
             MissionWorkLanded detail
-              | stepHasUnsettledDescendants snapshot step.missionPlanStepId ->
-                  -- Requirement 11: an owning action stays nonterminal while a
-                  -- registered child is still live or unverifiable. Settling it
-                  -- here would orphan that child out of the mission's account
-                  -- of itself.
-                  go rest
+              -- Requirement 11: an owning action stays nonterminal while a
+              -- registered child is still live or unverifiable. Settling it
+              -- here would orphan that child out of the mission's account of
+              -- itself.
+              --
+              -- Which of the two it is decides whether this is waiting or
+              -- being stuck. A live child is work in progress and its parent
+              -- waits, bounded by that child's own deadline; a child nothing
+              -- can prove is gone is a wait that no evidence will ever end, so
+              -- the step reaches the lifecycle that says as much and the run
+              -- stops for direction instead of polling for ever.
+              | Just unverifiable <- stepUnverifiableDescendant snapshot step.missionPlanStepId ->
+                  Just
+                    <$> applyStepOutcome
+                      controller
+                      snapshot
+                      gatheredEvidence
+                      step.missionPlanStepId
+                      MissionStepOutcomeUnknown
+                      ( "its result landed, and its registered child "
+                          <> unverifiable.unMissionSessionId
+                          <> " cannot be shown to have ended"
+                      )
+              | stepHasUnsettledDescendants snapshot step.missionPlanStepId -> go rest
               | otherwise ->
                   Just
                     <$> applyStepOutcome controller snapshot gatheredEvidence step.missionPlanStepId MissionStepSucceeded detail
@@ -1474,19 +1494,25 @@ registerChild controller snapshot command request
       consumeMissionCommand command
       pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
 
--- | The identity a child request is deduplicated by.
+-- | The step a registered child's launch invents for it, named by the pair
+-- that asked for it.
 --
 -- The pair, encoded so it can be taken apart again. Joining the two with a
 -- separator does not do that: both halves are free-form words from the console
 -- grammar, so parent @x-y@ asking for request @z@ and parent @x@ asking for
--- request @y-z@ would mint the same identity — and the second, a perfectly
--- valid request from a different session, would be answered with the first
--- one's child instead of being launched. Length-prefixing the parent says
+-- request @y-z@ would flatten to one name. Length-prefixing the parent says
 -- exactly where it ends, which makes the encoding injective and still leaves
--- the identity readable in the journal.
-childInvocationId :: MissionSessionId -> Text -> MissionInvocationId
-childInvocationId parent requestId =
-  MissionInvocationId
+-- the name readable in the journal.
+--
+-- The request identity alone is not enough, and neither half of that is
+-- theoretical: two live parents may each validly ask for request @r-1@. A step
+-- named for the request alone would give both children one name, and the pass
+-- that later asks what a session was doing — which finds the invocation by
+-- step — would judge the second child against the first one's action and
+-- target.
+childStepId :: MissionSessionId -> Text -> MissionStepId
+childStepId parent requestId =
+  MissionStepId
     ( "child-"
         <> Text.pack (show (Text.length parent.unMissionSessionId))
         <> "-"
@@ -1494,6 +1520,11 @@ childInvocationId parent requestId =
         <> "-"
         <> requestId
     )
+
+-- | The identity a child request is deduplicated by: its step's name, which
+-- already encodes exactly the pair the deduplication is over.
+childInvocationId :: MissionSessionId -> Text -> MissionInvocationId
+childInvocationId parent requestId = MissionInvocationId (childStepId parent requestId).unMissionStepId
 
 -- | The launch itself, with the same journal-then-act ordering every other
 -- effect uses.
@@ -1507,7 +1538,7 @@ launchChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -
 launchChild controller snapshot command request invocation = do
   let step =
         MissionPlanStep
-          { missionPlanStepId = MissionStepId ("child-" <> request.missionChildRequestId),
+          { missionPlanStepId = childStepId request.missionChildRequestParent request.missionChildRequestId,
             missionPlanStepAction = request.missionChildRequestAction,
             missionPlanStepSummary = "a registered child of " <> request.missionChildRequestParent.unMissionSessionId,
             missionPlanStepTarget = request.missionChildRequestTarget,

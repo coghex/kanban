@@ -63,8 +63,12 @@ created above it.
   registered action that owns no worker is answered in the iteration that
   dispatched it, whether a plan step or a registered child asked for it; a
   child's own end is judged through the action its launch recorded rather than
-  by its exit code; child requests are deduplicated by an identity that keeps
-  the parent and the request distinguishable; and a target that reached a terminal state between the
+  by its exit code; a child's step and its
+  deduplication identity both keep the parent and the request
+  distinguishable, so two parents asking for the same request get their own
+  children; a child's precondition refusals are typed rather than recorded as
+  a bare failure; a step whose registered child cannot be shown to have ended
+  stops for direction instead of waiting for evidence that is never coming; and a target that reached a terminal state between the
   controller's reread and the registry's resolution is a stale plan rather than
   an unresolvable target. The run ends when the
   mission is terminal, paused, or blocked, and reports the transitions it

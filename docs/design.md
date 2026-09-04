@@ -3451,10 +3451,16 @@ Defaults:
   registered child asked for it. A child's own end is judged the same way its
   parent's is, through the action its launch recorded, so a child that exited
   cleanly having achieved nothing keeps its parent waiting rather than settling
-  it. And the identity a child request is deduplicated by encodes the parent
-  and the request so the pair can be recovered from it, because two different
-  requests that flattened to one identity would have the second answered with
-  the first one's child. And a target that reaches a
+  it. Both the step a child's launch invents and the identity that
+  request is deduplicated by encode the parent and the request so the pair can
+  be recovered from them: two live parents may each validly ask for the same
+  request, and a name that flattened them would answer the second with the
+  first one's child and judge it against the first one's action. A child's
+  refusals are typed like any other — a target that moved ends the child having
+  mutated nothing, and one that could not be read leaves it unverifiable — and
+  a step whose registered child cannot be shown to have ended reaches
+  `outcome_unknown` rather than waiting on evidence that is never coming, which
+  is what keeps a foreground run from waiting for ever on it. And a target that reaches a
   terminal state between the controller's reread and the registry's own
   resolution is reported as the stale plan it is rather than as a target that
   could not be resolved.

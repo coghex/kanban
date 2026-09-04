@@ -214,6 +214,7 @@ module Kanban.Mission
     dispatchedButUnregistered,
     missionSessionSubtree,
     stepHasUnsettledDescendants,
+    stepUnverifiableDescendant,
     MissionContinuation (..),
     missionContinuation,
     missionRecoveryBrief,
@@ -237,6 +238,7 @@ module Kanban.Mission
     missionControllerIteration,
     submitConsoleCommand,
     childInvocationId,
+    childStepId,
 
     -- * The foreground runner
     MissionRunReport (..),

@@ -72,6 +72,7 @@ import Kanban.Config
 import Kanban.Domain (Issue (..), IssueState (..), NativeSubIssues (..), Repository (..), defaultWorkflowConfig)
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
+import Kanban.Process (ProcessIdentity (..))
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
@@ -241,20 +242,48 @@ settledObservation =
 
 -- | A session recorded as owning a process and never observed to end, which is
 -- 'MissionSessionLive' to 'missionSessionDisposition'.
+--
+-- The recorded ownership is what makes it live rather than merely
+-- unaccounted-for, and the two are not interchangeable: a live child is work in
+-- progress its parent waits for, and one carrying an /unknown/ observation is a
+-- child the evidence pass asked about and could not answer for. See
+-- 'unverifiableChild'.
 liveChild :: Text -> MissionSessionId -> MissionSessionNode
 liveChild identity parent =
   (sessionNode identity (Just parent) Nothing)
     { missionSessionOwnership =
         MissionProcessOwnership
-          { missionProcessIdentity = Nothing,
+          { missionProcessIdentity = Just (childProcessIdentity identity),
             missionProcessGroup = Nothing
-          },
-      missionSessionObservation =
+          }
+    }
+
+-- | The session the staged driver produces for a child request, derived the
+-- way 'acceptedDispatch' derives it: from the step the launch invents.
+childSessionFor :: MissionSessionId -> Text -> MissionSessionId
+childSessionFor parent requestId =
+  MissionSessionId ((childStepId parent requestId).unMissionStepId <> "-0001")
+
+childProcessIdentity :: Text -> ProcessIdentity
+childProcessIdentity identity =
+  ProcessIdentity
+    { processIdentityPid = 4242,
+      processIdentityParentPid = 1,
+      processIdentityGroupPid = 4242,
+      processIdentityStartedAt = "0",
+      processIdentityCommand = identity
+    }
+
+-- | A child the evidence pass looked at and could not establish the end of.
+unverifiableChild :: Text -> MissionSessionId -> MissionSessionNode
+unverifiableChild identity parent =
+  (sessionNode identity (Just parent) Nothing)
+    { missionSessionObservation =
         Just
           MissionTerminalObservation
             { missionObservationAt = fixedTime,
               missionObservationOutcome = MissionObservedUnknown,
-              missionObservationDetail = Just "still going"
+              missionObservationDetail = Just "its worker record has been collected"
             }
     }
 
@@ -1528,7 +1557,7 @@ childRequestSpec = describe "registered child requests" $ do
         | node <- snapshot.missionSnapshotSessions,
           node.missionSessionParent /= Nothing
         ]
-        `shouldBe` [(MissionSessionId "child-r-11-0001", Just (MissionSessionId "solve-844-0001"))]
+        `shouldBe` [(childSessionFor theParent "r-11", Just theParent)]
 
   it "rejects a request naming another mission" $
     withLiveParent $ \_ stage controller -> do
@@ -2821,6 +2850,131 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
             MissionAdvanced (MissionSessionEnded session _) -> session `shouldBe` theParent
             other -> expectationFailure ("a changed observation was not recorded: " <> show other)
           stopMissionController controller
+
+  -- Two live parents may each validly ask for request @r-1@. Their invocation
+  -- identities differ, but a step named for the request alone would give both
+  -- children one name — and the pass that later asks what a session was doing
+  -- finds the invocation /by step/, so the second child would be judged
+  -- against the first one's action and target.
+  it "names a child's step by the pair that asked for it, not the request alone" $ do
+    childStepId (MissionSessionId "parent-a") "r-1"
+      `shouldNotBe` childStepId (MissionSessionId "parent-b") "r-1"
+    childStepId (MissionSessionId "x-y") "z" `shouldNotBe` childStepId (MissionSessionId "x") "y-z"
+    childStepId (MissionSessionId "parent-a") "r-1" `shouldBe` childStepId (MissionSessionId "parent-a") "r-1"
+
+  it "gives two parents asking the same request id their own steps and sessions" $ do
+    let parents =
+          [ sessionNode "parent-a" Nothing Nothing,
+            (sessionNode "parent-b" Nothing Nothing) {missionSessionId = MissionSessionId "parent-b"}
+          ]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] parents) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-a" (childRequest "r-1" theMission (MissionSessionId "parent-a"))
+          _ <- missionControllerIteration controller
+          submitConsoleCommand controller "c-b" (childRequest "r-1" theMission (MissionSessionId "parent-b"))
+          _ <- missionControllerIteration controller
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      -- Two children, each under its own parent and each with a step of its
+      -- own, so neither is judged against the other's action.
+      [ (node.missionSessionId, node.missionSessionParent, node.missionSessionStep)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [ ( childSessionFor (MissionSessionId "parent-a") "r-1",
+                       Just (MissionSessionId "parent-a"),
+                       Just (childStepId (MissionSessionId "parent-a") "r-1")
+                     ),
+                     ( childSessionFor (MissionSessionId "parent-b") "r-1",
+                       Just (MissionSessionId "parent-b"),
+                       Just (childStepId (MissionSessionId "parent-b") "r-1")
+                     )
+                   ]
+
+  -- A child's failure is typed before it is recorded, exactly as a plan step's
+  -- is. The worker's own two precondition refusals are the ones that must not
+  -- collapse: neither mutated anything, and they call for different repairs.
+  it "types a child's precondition refusals rather than recording a bare failure" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith []) $ do
+          -- Unreadable: nothing was established, so the child is unverifiable
+          -- and its parent keeps waiting.
+          unreadable <- refusedChildEnd driver (workerUnverifiedTargetReason <> ": gh: could not connect")
+          fst unreadable `shouldBe` MissionObservedUnknown
+          Text.unpack (snd unreadable) `shouldSatisfy` isInfixOf "could not be reread"
+          -- Moved: the turn is over and mutated nothing, so the session ended
+          -- and the message says the plan is out of date.
+          moved <- refusedChildEnd driver (workerStaleTargetReason <> ": #844 changed")
+          fst moved `shouldBe` MissionObservedExit 1
+          Text.unpack (snd moved) `shouldSatisfy` isInfixOf "stale version"
+          -- And an ordinary failure is still an ordinary failure.
+          plain <- refusedChildEnd driver "the provider exited 1"
+          fst plain `shouldBe` MissionObservedExit 1
+
+  -- The other half of that pair: an unverifiable child has to reach a state,
+  -- not hold its parent open for ever. A foreground runner that waits on
+  -- evidence which is never coming is a process that never ends.
+  it "stops a step for direction when its child cannot be shown to have ended" $ do
+    let sessions =
+          [ sessionNode "solve-844-0001" Nothing settledObservation,
+            unverifiableChild "child-1" theParent
+          ]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence {missionEvidenceSatisfied = Just "PR #900 already links #844"}
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+          step `shouldBe` theStep
+          Text.unpack detail `shouldSatisfy` isInfixOf "child-1"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      -- Which is a lifecycle the run stops on rather than polls in.
+      snapshot <- currentSnapshot store
+      blockedMissionLifecycle snapshot `shouldSatisfy` maybe False ((== MissionWaitingInput) . fst)
+
+  -- And a child that is genuinely running still holds its parent open, which
+  -- is the wait requirement 11 asks for.
+  it "keeps waiting on a child that is running rather than unaccounted for" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing settledObservation, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence {missionEvidenceSatisfied = Just "PR #900 already links #844"}
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAwaiting _ -> pure ()
+        other -> expectationFailure ("the parent did not wait on a live child: " <> show other)
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepRunning
+
+-- | The end the live driver judges for a child whose worker refused its turn
+-- with this sentence.
+refusedChildEnd :: MissionDriver -> Text -> IO (MissionObservedOutcome, Text)
+refusedChildEnd driver detail = do
+  let identifier = WorkerId ("child-" <> Text.filter (\c -> c /= ' ' && c /= ':') (Text.take 12 detail))
+  stageRefusedWorker identifier detail
+  observed <- driver.missionDriverObserveSession (MissionSessionId identifier.unWorkerId) (Just childPlanStep)
+  case observed of
+    Right (Just observation) ->
+      pure (observation.missionObservationOutcome, maybe "" id observation.missionObservationDetail)
+    other -> fail ("the refused child was not judged: " <> show (fmap (fmap (.missionObservationOutcome)) other))
+
+-- | A worker that settled with a refusal, put where discovery finds it.
+stageRefusedWorker :: WorkerId -> Text -> IO ()
+stageRefusedWorker identifier detail = do
+  let staged = workerFixtureSpec boardRepository identifier 844
+  descriptor <- descriptorForSpec staged
+  directory <- workerDirectory staged.workerRepository
+  createPrivateDirectory XdgCache directory
+  writeState
+    descriptor
+    ((runningWorkerState identifier 1 Nothing) {workerStateStatus = WorkerTerminal (SolveFailed detail)})
+  written <- writePrivateJson descriptor.workerDescriptorSpecPath staged
+  written `shouldBe` Right ()
 
 -- | The step a registered child's launch invents for it.
 childPlanStep :: MissionPlanStep

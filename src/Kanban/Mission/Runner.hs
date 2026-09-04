@@ -127,6 +127,7 @@ import Kanban.Mission.Reconcile
     missionFailureFromOutcome,
     missionFailureFromProviderError,
     missionFailureFromRefusal,
+    missionStepFailureMessage,
     missionHaltMessage,
   )
 import Kanban.Mission.Store (listMissions, recordMissionEvent)
@@ -708,10 +709,25 @@ liveMissionDriver options config repository store _ =
         )
 
     judgedEnd step descriptor outcome = case outcome of
-      -- The two the registry passes through untouched: a provider that asked
-      -- a question or failed has already said what happened.
+      -- A question is a question whoever asked it.
       SolveNeedsInput detail -> pure (MissionObservedExit 1, terminalDetail (SolveNeedsInput detail))
-      SolveFailed detail -> pure (MissionObservedExit 1, terminalDetail (SolveFailed detail))
+      -- A failure is typed before it is recorded, exactly as a plan step's is.
+      -- The two that matter are the worker's own precondition refusals: a
+      -- child that refused its turn mutated nothing, so recording it as a
+      -- session that simply failed would lose the one fact that decides what
+      -- happens next.
+      SolveFailed detail ->
+        pure
+          ( endOf
+              ( Just
+                  ( MissionWorkerFailed
+                      ( fromMaybe
+                          (MissionFailureGeneric detail)
+                          (missionFailureFromOutcome (settledWorkerFailure detail))
+                      )
+                  )
+              )
+          )
       SolveCompleted -> case step of
         -- Nothing records what this session was for, so nothing can say what
         -- it achieved. Unknown keeps its parent waiting, which is the
@@ -722,15 +738,28 @@ liveMissionDriver options config repository store _ =
           Right kind -> do
             board <- readBoard
             case board of
-              Left failure -> pure (MissionObservedUnknown, missionStepFailureText failure)
+              Left failure -> pure (MissionObservedUnknown, missionStepFailureMessage failure)
               Right snapshot -> endOf <$> judgeCompleted planned snapshot kind descriptor
 
+    -- How a judged conclusion is recorded on the session.
+    --
+    -- The unknown outcome is the one that must not become an exit code. A
+    -- child whose target could not be read established nothing, so its session
+    -- is unverifiable rather than ended — which keeps its parent nonterminal
+    -- until something says otherwise, and is the \"waited on\" repair the
+    -- worker's own refusal names.
+    --
+    -- A stale precondition is the other half of that pair and takes the other
+    -- answer: the child demonstrably ended, and it ended having mutated
+    -- nothing. Holding its parent open over it would be waiting for a turn
+    -- that is already over; the typed message says the plan is out of date, and
+    -- a parent that still wants the work asks for it again.
     endOf conclusion = case conclusion of
       Nothing -> (MissionObservedUnknown, "its result could not be established")
       Just (MissionWorkerSucceeded detail) -> (MissionObservedExit 0, detail)
       Just (MissionWorkerNeedsInput detail) -> (MissionObservedExit 1, detail)
       Just (MissionWorkerFailed (MissionFailureOutcomeUnknown detail)) -> (MissionObservedUnknown, detail)
-      Just (MissionWorkerFailed failure) -> (MissionObservedExit 1, missionStepFailureText failure)
+      Just (MissionWorkerFailed failure) -> (MissionObservedExit 1, missionStepFailureMessage failure)
 
     terminalDetail outcome = case outcome of
       SolveCompleted -> "it completed"

@@ -67,6 +67,7 @@ module Kanban.Mission.Reconcile
     -- * The registered session tree
     missionSessionSubtree,
     stepHasUnsettledDescendants,
+    stepUnverifiableDescendant,
 
     -- * Continuation
     MissionContinuation (..),
@@ -99,7 +100,9 @@ import Kanban.Mission.Invocation
 import Kanban.Mission.Types
   ( MissionLifecycle (..),
     MissionPlanStep (..),
+    MissionObservedOutcome (..),
     MissionSessionDisposition (..),
+    MissionTerminalObservation (..),
     MissionSessionId (..),
     MissionSessionNode (..),
     MissionSnapshot (..),
@@ -732,12 +735,43 @@ missionSessionSubtree snapshot root = go [root] []
 -- a deadlock rather than a safeguard. What must outlive the parent's
 -- conclusion is a child, and a child is exactly what this counts.
 stepHasUnsettledDescendants :: MissionSnapshot -> MissionStepId -> Bool
-stepHasUnsettledDescendants snapshot step =
-  any unsettled (concatMap descendants roots)
+stepHasUnsettledDescendants snapshot step = any unsettled (stepDescendants snapshot step)
+  where
+    unsettled node = missionSessionDisposition node /= MissionSessionSettled
+
+-- | A registered child this step's own evidence pass /looked at/ and could not
+-- establish the end of.
+--
+-- The difference between this and 'stepHasUnsettledDescendants' is the
+-- difference between waiting and being stuck, and it is the recorded
+-- observation that tells them apart. A child with no observation yet has
+-- simply not been seen to end: it may be running, its parent waits for it, and
+-- that wait is bounded by the child's own recorded deadline. A child carrying
+-- an observation whose outcome is 'MissionObservedUnknown' is one the pass
+-- asked about and could not answer for — its record was collected, or its
+-- action could not be judged — and no further evidence is coming. A parent
+-- left waiting on that waits for ever, which in a foreground runner is not a
+-- safeguard but a process that never ends.
+--
+-- Naming it is what lets the step reach @outcome_unknown@ instead, which is
+-- the lifecycle requirement 7 gives to exactly this: something happened,
+-- nothing can say what, and only direction or fresh evidence resolves it.
+stepUnverifiableDescendant :: MissionSnapshot -> MissionStepId -> Maybe MissionSessionId
+stepUnverifiableDescendant snapshot step =
+  case [ node.missionSessionId
+       | node <- stepDescendants snapshot step,
+         Just observation <- [node.missionSessionObservation],
+         observation.missionObservationOutcome == MissionObservedUnknown
+       ] of
+    (found : _) -> Just found
+    [] -> Nothing
+
+-- | Every registered descendant of a step, its own root sessions excluded.
+stepDescendants :: MissionSnapshot -> MissionStepId -> [MissionSessionNode]
+stepDescendants snapshot step = concatMap descendants roots
   where
     roots = [node.missionSessionId | node <- snapshot.missionSnapshotSessions, node.missionSessionStep == Just step]
     descendants root = drop 1 (missionSessionSubtree snapshot root)
-    unsettled node = missionSessionDisposition node /= MissionSessionSettled
 
 -- ---------------------------------------------------------------------------
 -- Continuation
