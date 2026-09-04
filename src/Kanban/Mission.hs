@@ -157,6 +157,7 @@ module Kanban.Mission
     missionInvocationFor,
     unresolvedMissionInvocations,
     newMissionInvocationId,
+    missionInvocationSequence,
     recordMissionInvocation,
     concludeMissionInvocation,
     readMissionInvocations,

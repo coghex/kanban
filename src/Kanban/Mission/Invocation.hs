@@ -50,6 +50,7 @@ module Kanban.Mission.Invocation
     missionInvocationFor,
     unresolvedMissionInvocations,
     newMissionInvocationId,
+    missionInvocationSequence,
     recordMissionInvocation,
     concludeMissionInvocation,
     readMissionInvocations,
@@ -279,6 +280,15 @@ unresolvedMissionInvocations = filter (not . missionInvocationResolved)
 
 -- | A new identity: this process, this instant, and a counter the caller
 -- supplies, so two invocations minted in one clock tick still differ.
+--
+-- The counter has to come from something that /moves/, and the only thing that
+-- reliably does is the file itself: a caller that passed the plan's size, say,
+-- would pass the same number on every retry of a step, leaving the identity
+-- resting on the process id and the clock alone — and two dispatches inside
+-- one tick, or a reused process id under a clock that was adjusted backwards,
+-- would then mint one identity for two effects. 'missionInvocationSequence'
+-- reads that moving number off the durable record, which is exactly where the
+-- previous mint wrote its own.
 newMissionInvocationId :: MissionStepId -> Int -> IO MissionInvocationId
 newMissionInvocationId step sequenceNumber = do
   processId <- getProcessID
@@ -296,6 +306,17 @@ newMissionInvocationId step sequenceNumber = do
     )
   where
     formatInstant = filter (`notElem` (" :-." :: String)) . show
+
+-- | The next counter for an identity minted against this record.
+--
+-- The number of invocations the file already holds, which advances by one with
+-- every opening record written — so a mint that happens after another mint's
+-- record has reached the disk cannot collide with it however fast the two
+-- happen or whatever the clock does in between. Durable rather than
+-- in-memory, because a restarted controller has to keep counting from where
+-- the last one stopped rather than from zero.
+missionInvocationSequence :: [MissionInvocationState] -> Int
+missionInvocationSequence = length
 
 -- | Appends the opening record and waits for it to reach the disk.
 --
@@ -376,7 +397,19 @@ readMissionInvocations mission repository path = do
         Nothing -> Right (states, order)
         Just (Left message) -> Left message
         Just (Right (MissionInvocationOpened invocation))
-          | Map.member invocation.missionInvocationId states -> Right (states, order)
+          -- Two openings under one identity is not a record this reader may
+          -- interpret. Keeping the first and dropping the second would merge
+          -- two external effects into one and hand the second one's closure to
+          -- the first — the exact loss of evidence the file exists to prevent
+          -- — so it is refused, loudly, rather than silently collapsed.
+          | Map.member invocation.missionInvocationId states ->
+              Left
+                ( "two invocations in "
+                    <> Text.pack path
+                    <> " were opened under one identity ("
+                    <> invocation.missionInvocationId.unMissionInvocationId
+                    <> "); their effects cannot be told apart"
+                )
           | otherwise ->
               Right
                 ( Map.insert

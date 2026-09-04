@@ -98,6 +98,7 @@ import Kanban.Mission.Invocation
     concludeMissionInvocation,
     missionInvocationFor,
     missionInvocationResolved,
+    missionInvocationSequence,
     missionVersionHolds,
     newMissionInvocationId,
     readMissionInvocations,
@@ -1039,10 +1040,22 @@ reconcileOneStep controller snapshot = go candidates
 dispatchStep :: MissionController -> MissionSnapshot -> MissionPlanStep -> IO MissionIteration
 dispatchStep controller snapshot step = do
   planned <- observePlannedVersion controller step
-  case planned of
-    Left detail -> pure (MissionControllerFailed detail)
-    Right plannedVersion -> do
-      invocation <- newMissionInvocationId step.missionPlanStepId (length snapshot.missionSnapshotSteps)
+  recorded <-
+    readMissionInvocations
+      controller.missionControllerMission
+      controller.missionControllerStore.missionStoreRepository
+      controller.missionControllerInvocations
+  case (planned, recorded) of
+    (Left detail, _) -> pure (MissionControllerFailed detail)
+    (_, Left detail) -> pure (MissionControllerFailed detail)
+    (Right plannedVersion, Right states) -> do
+      -- Counted off the durable record rather than off anything this snapshot
+      -- happens to hold. The plan's size does not move between one dispatch of
+      -- a step and the next, so an identity resting on it rests on the process
+      -- id and the clock alone — and two dispatches inside one tick would mint
+      -- one identity for two effects, which the journal then reads as a single
+      -- one.
+      invocation <- newMissionInvocationId step.missionPlanStepId (missionInvocationSequence states)
       now <- getCurrentTime
       journaled <-
         recordMissionInvocation

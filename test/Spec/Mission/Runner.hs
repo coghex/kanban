@@ -31,7 +31,7 @@ import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (intercalate, isInfixOf)
+import Data.List (intercalate, isInfixOf, nub)
 import Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -2950,6 +2950,77 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
         other -> expectationFailure ("the parent did not wait on a live child: " <> show other)
       snapshot <- currentSnapshot store
       stepLifecycle snapshot `shouldBe` Just MissionStepRunning
+
+  -- The identity a launch is recovered by has to be unique to that launch.
+  -- Two dispatches of one step inside a single clock tick are the case: an
+  -- identity resting on the process id and the clock alone would be the same
+  -- for both, and the journal would then read one effect where there were two.
+  it "mints a fresh identity for every launch, however fast they follow" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      -- Two dispatches of the same step, the second after the first was
+      -- reconciled back to pending by a stale target.
+      first <- oneIteration store stage
+      case first of
+        MissionAdvanced (MissionStepDispatched _ _ _) -> pure ()
+        other -> expectationFailure ("the first dispatch did not happen: " <> show other)
+      writeIORef stage.stageEvidence $ \evidence ->
+        evidence
+          { missionEvidenceWorker =
+              Just
+                MissionWorkerReading
+                  { missionWorkerSession = theParent,
+                    missionWorkerLive = False,
+                    missionWorkerCompatible = True,
+                    missionWorkerTerminal = Just (MissionWorkerFailed (MissionFailureStaleVersion "#844 changed")),
+                    missionWorkerProviderSession = Nothing
+                  }
+          }
+      _ <- oneIteration store stage
+      writeIORef stage.stageEvidence id
+      second <- oneIteration store stage
+      case second of
+        MissionAdvanced (MissionStepDispatched _ _ _) -> pure ()
+        other -> expectationFailure ("the second dispatch did not happen: " <> show other)
+      recorded <- currentInvocations store
+      let identities = map ((.missionInvocationId) . (.missionInvocationRecord)) recorded
+      length identities `shouldBe` 2
+      -- Distinct, and therefore both readable: the file keeps two effects.
+      length (nub identities) `shouldBe` 2
+      -- And distinct in the counter rather than only in the instant, which is
+      -- what makes them distinct when the instant is the same. A counter taken
+      -- from anything the snapshot holds repeats across retries of one step;
+      -- this one is read off the record, so the second launch counts one
+      -- higher than the first.
+      map counterOf identities `shouldBe` ["0", "1"]
+
+  -- And the counter comes off the record rather than off anything a snapshot
+  -- happens to hold, so it advances with each launch instead of repeating.
+  it "counts a launch's sequence off the durable record" $ do
+    missionInvocationSequence [] `shouldBe` 0
+    missionInvocationSequence [openInvocationState] `shouldBe` 1
+    missionInvocationSequence [openInvocationState, openInvocationState] `shouldBe` 2
+
+  -- A file that did collapse two effects into one identity is one no reader
+  -- may interpret: keeping the first and dropping the second would hand the
+  -- second one's closure to the first.
+  it "refuses a journal that opened two invocations under one identity" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
+      openInvocation store
+      openInvocation store
+      case missionInvocationPath store.missionStoreDirectory theMission of
+        Left message -> expectationFailure (Text.unpack message)
+        Right path -> do
+          reread <- readMissionInvocations theMission store.missionStoreRepository path
+          case reread of
+            Right states -> expectationFailure ("two openings were collapsed into " <> show (length states))
+            Left detail -> Text.unpack detail `shouldSatisfy` isInfixOf "under one identity"
+
+-- | The counter an invocation identity ends with, which is the part a mint
+-- taken from a moving number contributes.
+counterOf :: MissionInvocationId -> Text
+counterOf identity = case reverse (Text.splitOn "-" identity.unMissionInvocationId) of
+  (final : _) -> final
+  [] -> ""
 
 -- | The end the live driver judges for a child whose worker refused its turn
 -- with this sentence.
