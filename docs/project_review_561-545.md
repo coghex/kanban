@@ -37,7 +37,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Public support and release gates assign managed-service readiness to `--doctor` — [#618]
-- [ ] PRR-2. The release rehearsal can select a different workflow dispatch
+- [x] PRR-2. The release rehearsal can select a different workflow dispatch — [#619]
 - [ ] PRR-3. The systemd controller reader silently misparses valid command quoting
 
 ## 1. Optional-component readiness
@@ -134,7 +134,7 @@ do not make doctor a service-status probe.
 
 ## 2. Rehearsal-run identity
 
-### PRR-2. The release rehearsal can select a different workflow dispatch
+### [#619] PRR-2. The release rehearsal can select a different workflow dispatch
 
 > **Captured note:** Bind the rehearsal evidence to the workflow run created by
 > the immediately preceding dispatch, rather than treating the repository's
