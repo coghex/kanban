@@ -646,12 +646,31 @@ class ReviewLoopTests(unittest.TestCase):
         # carrying it would report a standalone route for a round that is
         # issue-gated. Asserted in both directions: the flag is refused in
         # prose and absent from every fence.
+        #
+        # `--override-issue-gate` is the one flag the dry run may carry, and it
+        # is the same hazard from the other side: passed to one of the two and
+        # not the other, the dry run answers a question the round it was
+        # checking is not asking. So the prose must require both, and the flag
+        # must stay OUT of the fence -- the fence is the unconditional command,
+        # and an override belongs there only on a turn the user asked for it.
         for relative_path in RENDERED_ASSETS:
             text = read(relative_path)
+            flattened = flat(text)
             with self.subTest(asset=relative_path):
-                self.assertIn("Add no other flag: `--allow-no-issue`", flat(text))
+                self.assertIn(
+                    "Add no other flag on your own initiative: `--allow-no-issue`",
+                    flattened,
+                )
+                self.assertIn(
+                    "add `--override-issue-gate` and `--override-reason "
+                    '"<the reason they gave>"` to **both** the dry run and the '
+                    "real round",
+                    flattened,
+                )
+                self.assertIn("only when the user asked for it in this turn", flattened)
                 for fence in bash_fences(text):
                     self.assertNotIn("--allow-no-issue", fence)
+                    self.assertNotIn("--override-issue-gate", fence)
 
     def test_the_coordinator_accepts_every_flag_the_dry_run_passes(self):
         # "Nothing it does not accept", measured against the shipped program's

@@ -142,9 +142,21 @@ python3 "$COORDINATOR" \
 
 Use `--rereview` in place of `--review` from round 2 onward, matching the
 workflow that round runs, and pass `--repo "$REPO"` so the coordinator resolves
-the same repository step 1 announced. Add no other flag: `--allow-no-issue`
-would report a standalone route for a pull request the real round gates on its
-linked issue.
+the same repository step 1 announced. Add no other flag on your own initiative:
+`--allow-no-issue` would report a standalone route for a pull request the real
+round gates on its linked issue.
+
+The single exception is `--override-issue-gate`, and only when the user asked
+for it in this turn. A `"status": "blocked"` dry run means the linked issue does
+not carry a current canonical opposite-agent approval, and clearing that is the
+issue's own review workflow's job, not this run's — stop and report it. If the
+user then directs this run to proceed anyway, add `--override-issue-gate` and
+`--override-reason "<the reason they gave>"` to **both** the dry run and the
+real round, so the two ask the same question; passing it to one and not the
+other is how a dry run reports a route the round it was checking cannot take.
+Either flag without the other returns `"status": "override_refused"` and
+publishes nothing. Never compose the reason yourself, and never carry an
+override into a later invocation the user did not ask for it in.
 
 The dry run must report `"route": "claude"`. The published result must then
 report `"status": "reviewed"`, and the `pr-review:v2` marker the coordinator
