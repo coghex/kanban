@@ -36,13 +36,13 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
+- [x] PRR-1. Public support and release gates assign managed-service readiness to `--doctor` — [#618]
 - [ ] PRR-2. The release rehearsal can select a different workflow dispatch
 - [ ] PRR-3. The systemd controller reader silently misparses valid command quoting
 
 ## 1. Optional-component readiness
 
-### PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
+### [#618] PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
 
 > **Captured note:** Keep `kanban --doctor` scoped to the AI actions it actually
 > checks, require the PR drainer and issue approval service to be verified with
