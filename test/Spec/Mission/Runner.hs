@@ -414,6 +414,20 @@ withMission snapshot action = withTemporaryCacheRoot $ \root ->
         stage <- newStage
         action store stage
 
+-- | Iterations until one satisfies the predicate, or the bound is reached.
+--
+-- The session pass records one observation per iteration by design, so a
+-- termination that has to read three of them takes three passes before the
+-- record it is waiting on can be closed. Bounded so a test that never reaches
+-- its answer fails rather than spins.
+iterateUntil :: MissionController -> (MissionIteration -> Bool) -> IO MissionIteration
+iterateUntil controller reached = go (12 :: Int) []
+  where
+    go 0 seen = fail ("no iteration satisfied the predicate: " <> show (reverse seen))
+    go remaining seen = do
+      iteration <- missionControllerIteration controller
+      if reached iteration then pure iteration else go (remaining - 1) (iteration : seen)
+
 -- | One controller iteration against a staged driver.
 oneIteration :: MissionStore -> Stage -> IO MissionIteration
 oneIteration store stage = do
@@ -1428,7 +1442,20 @@ commandSpec = describe "the runner-owned control channel" $ do
         Right controller -> do
           submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           iteration <- missionControllerIteration controller
-          iteration `shouldBe` MissionAdvanced (MissionSubtreeTerminated root 3)
+          -- Signalling is not ending: this pass reports what it asked for.
+          case iteration of
+            MissionAdvanced (MissionCommandApplied "c-end" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "its end is not yet established"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          -- And once the sessions are observed to have ended, the pass that
+          -- reads them is what says the subtree is terminated.
+          writeIORef
+            stage.stageSessions
+            [root, MissionSessionId "child-1", MissionSessionId "grandchild-1"]
+          -- The session pass records one observation per iteration, so the
+          -- record it is waiting on closes once all three have been read.
+          verified <- iterateUntil controller (isSubtreeTerminated root)
+          verified `shouldBe` MissionAdvanced (MissionSubtreeTerminated root 3)
           stopMissionController controller
       terminated <- readIORef stage.stageTerminated
       terminated
@@ -1453,7 +1480,10 @@ commandSpec = describe "the runner-owned control channel" $ do
         Right controller -> do
           submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           first <- missionControllerIteration controller
-          first `shouldBe` MissionAdvanced (MissionSubtreeTerminated root 2)
+          case first of
+            MissionAdvanced (MissionCommandApplied "c-end" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "signalled the subtree"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
           submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           second <- missionControllerIteration controller
           case second of
@@ -2139,8 +2169,24 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   it "halts for direction on an open termination the sessions cannot settle" $ do
     let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
     withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      -- Looked at, and unanswerable — which is a different thing from not
+      -- having finished yet, and the only one that stops the mission.
+      writeIORef stage.stageSessions [theParent, MissionSessionId "child-1"]
+      writeIORef
+        stage.stageObservation
+        MissionTerminalObservation
+          { missionObservationAt = fixedTime,
+            missionObservationOutcome = MissionObservedUnknown,
+            missionObservationDetail = Just "its worker record has been collected"
+          }
       openTerminationInvocation store "c-end"
-      iteration <- oneIteration store stage
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      iteration <- case started of
+        Left refusal -> fail ("the controller refused to start: " <> Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          reached <- iterateUntil controller isWaitingInput
+          stopMissionController controller
+          pure reached
       case iteration of
         MissionAdvanced (MissionLifecycleSet MissionWaitingInput detail) ->
           Text.unpack detail `shouldSatisfy` isInfixOf "whether the signal was delivered is unknown"
@@ -2207,7 +2253,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionCommandApplied "c-end" detail) ->
-              Text.unpack detail `shouldSatisfy` isInfixOf "not wholly reached"
+              Text.unpack detail `shouldSatisfy` isInfixOf "its end is not yet established"
             MissionAdvanced (MissionSubtreeTerminated _ _) ->
               expectationFailure "a partial termination was reported as a whole one"
             other -> expectationFailure ("unexpected iteration: " <> show other)
@@ -2226,6 +2272,29 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       terminated <-
         driver.missionDriverTerminate [theParent, MissionSessionId "child-collected-0001"]
       terminated `shouldBe` Right [MissionSessionId "child-collected-0001"]
+
+  -- The case the whole three-way answer exists for. `terminateWorker` asks a
+  -- worker to stop and returns: an ordinary one may be pending termination for
+  -- a while yet, and an issue action's child is a queued command its host has
+  -- still to act on. A session that was reached and has not ended is work in
+  -- progress, so the run waits for it — and must not report the subtree ended,
+  -- nor halt the mission for a shutdown that is proceeding normally.
+  it "waits on a signalled session that has not finished ending" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      -- Nothing has ended yet: every observation comes back "not terminal".
+      writeIORef stage.stageSessions []
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAwaiting detail ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "has not finished ending"
+        other -> expectationFailure ("a shutdown in progress was not waited on: " <> show other)
+      -- The record stays open, so nothing has been claimed about it either
+      -- way, and the mission has not been stopped.
+      outcomeTags store `shouldReturn` [Nothing]
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
 
   it "recognizes an open termination and nothing else as one" $ do
     let terminationState effect outcome =
@@ -3123,6 +3192,16 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
       -- it, rather than as work the mission believes is under way.
       snapshot <- currentSnapshot store
       stepLifecycle snapshot `shouldSatisfy` (/= Just MissionStepRunning)
+
+isSubtreeTerminated :: MissionSessionId -> MissionIteration -> Bool
+isSubtreeTerminated root iteration = case iteration of
+  MissionAdvanced (MissionSubtreeTerminated ended _) -> ended == root
+  _ -> False
+
+isWaitingInput :: MissionIteration -> Bool
+isWaitingInput iteration = case iteration of
+  MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> True
+  _ -> False
 
 -- | Makes the invocation journal unappendable, the way a read-only state
 -- directory does, and gives back what is needed to undo it.

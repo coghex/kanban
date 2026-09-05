@@ -3474,10 +3474,13 @@ Defaults:
   record of their own have nowhere else to carry it, and an authenticated
   override releases such a record as well as an open one, so a mission is never
   stuck on a launch it has already given up on. Every other blocked stop is a
-  mission doing what it was asked and reports none. A termination that could
-  not reach every registered session leaves its record open rather than
-  claiming one: the next pass observes the sessions themselves and closes it
-  only if they have all ended. And a conclusion that
+  mission doing what it was asked and reports none. A termination leaves its record open when it is
+  signalled, whatever it reached, because signalling is not ending: an ordinary
+  worker may be pending termination for a while yet, and an issue action's
+  child is a queued command its host has still to act on. The pass that reads
+  the sessions is what closes it — completed once every registered descendant
+  has ended, waiting while any is still ending, and unknown, with the mission
+  halting for direction, if one cannot be shown to have ended at all. And a conclusion that
   cannot be written stops the run rather than being discarded: a step recorded
   as running beside a launch the file still calls open is one no later pass
   revisits, so the mission would go on to complete over a record that never

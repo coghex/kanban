@@ -689,17 +689,32 @@ resolveOpenInvocation controller snapshot dispatch = do
         <> invocation.unMissionInvocationId
         <> " was journaled and no worker records it; whether its effect happened is unknown"
 
--- | What to make of a subtree termination this store never saw the end of.
+-- | What to make of a subtree termination whose record is still open.
 --
--- The signal may already have been delivered, so the one answer that is never
--- available is \"do it again\". What is available is the sessions themselves:
--- if every registered session under the recorded root can be observed to have
--- ended, the termination demonstrably did what it was for and the record is
--- closed as completed. Anything less — one still running, one whose worker
--- record has been collected, one whose state will not decode — settles
--- nothing, so the record is closed as unknown and the mission halts for
--- authenticated direction rather than carrying an effect nobody can account
--- for into the passes below.
+-- Every termination passes through here, not only one a crash interrupted,
+-- because signalling is not ending. @terminateWorker@ asks a worker to stop
+-- and returns; an ordinary one may be pending termination for a while yet, and
+-- an issue action's child is only a queued command its host has still to act
+-- on. A controller that closed the record when the signal was sent would be
+-- recording, durably and as fact, that a subtree had ended at the moment it
+-- was asked to.
+--
+-- So the sessions themselves are what closes it, and there are three answers
+-- rather than two:
+--
+--   [every one ended] the termination demonstrably did what it was for, and
+--     the record says so.
+--   [one has not ended yet] a signalled worker that is still shutting down is
+--     work in progress; this waits for it, exactly as it waits for any other
+--     live registered work, bounded by that worker's own recorded deadline.
+--   [one cannot be established] its record has been collected, or its
+--     observation came back unknown. No further evidence is coming, so the
+--     record is closed as unknown and the mission halts for authenticated
+--     direction rather than carrying an effect nobody can account for.
+--
+-- The middle answer is the one this needs to have. Without it a normal
+-- termination would halt the mission a moment after the signal, every time,
+-- for the crime of not having finished yet.
 --
 -- A subtree with nothing in it closes the record too, and that is not the
 -- vacuous case it looks like: nothing ever removes a node from the session
@@ -711,8 +726,8 @@ resolveOpenTermination controller snapshot invocation root = do
   now <- getCurrentTime
   case sequence observations of
     Left unreadable -> pure (MissionControllerFailed unreadable)
-    Right settled
-      | all id settled ->
+    Right observed
+      | all (== SubtreeMemberEnded) observed ->
           closing
             controller
             invocation
@@ -720,10 +735,18 @@ resolveOpenTermination controller snapshot invocation root = do
             now
             -- Reported as the termination it is rather than as a repair: the
             -- subtree is ended, and this iteration is what established it.
-            (pure (MissionAdvanced (MissionSubtreeTerminated root (length settled))))
-      | otherwise ->
+            (pure (MissionAdvanced (MissionSubtreeTerminated root (length observed))))
+      | SubtreeMemberUnverifiable `elem` observed ->
           closing controller invocation (MissionInvocationUnknown detail) now $
             applyMissionLifecycle controller snapshot MissionWaitingInput detail
+      | otherwise ->
+          pure
+            ( MissionAwaiting
+                ( "the subtree under "
+                    <> root.unMissionSessionId
+                    <> " was signalled and has not finished ending"
+                )
+            )
   where
     detail =
       "termination "
@@ -731,18 +754,33 @@ resolveOpenTermination controller snapshot invocation root = do
         <> " was journaled and the subtree under "
         <> root.unMissionSessionId
         <> " cannot be shown to have ended; whether the signal was delivered is unknown"
-    -- Ended, and shown to have ended. An observation of 'MissionObservedUnknown'
-    -- is the honest \"its record is gone and nothing says how it went\", which
-    -- proves nothing about a signal.
+    -- Where one member of the subtree has got to.
+    --
+    -- The distinction the three answers above are made of: a session with no
+    -- terminal observation yet has not ended and may still be ending, while
+    -- one whose observation came back 'MissionObservedUnknown' is the honest
+    -- \"its record is gone and nothing says how it went\" — which proves
+    -- nothing about a signal and never will.
     observe node = do
       observed <- controller.missionControllerDriver.missionDriverObserveSession node.missionSessionId Nothing
       pure $ case observed of
         Left failure -> Left failure
-        Right Nothing -> Right False
+        Right Nothing -> Right SubtreeMemberPending
         Right (Just observation) -> Right (case observation.missionObservationOutcome of
-          MissionObservedExit _ -> True
-          MissionObservedSignalled _ -> True
-          MissionObservedUnknown -> False)
+          MissionObservedExit _ -> SubtreeMemberEnded
+          MissionObservedSignalled _ -> SubtreeMemberEnded
+          MissionObservedUnknown -> SubtreeMemberUnverifiable)
+
+-- | Where one member of a signalled subtree has got to.
+--
+-- Three rather than two, because \"has not ended\" and \"cannot be shown to
+-- have ended\" call for opposite answers: the first is waited for and the
+-- second stops the mission.
+data SubtreeMember
+  = SubtreeMemberEnded
+  | SubtreeMemberPending
+  | SubtreeMemberUnverifiable
+  deriving stock (Eq, Show)
 
 -- | Adopts a worker an invocation records but the snapshot never registered.
 --
@@ -1439,21 +1477,18 @@ performTermination controller snapshot command session reason = do
           _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationRefused detail) concluded
           consumeMissionCommand command
           pure (MissionControllerFailed detail)
-        -- Every registered session signalled, so the record may say so.
-        Right [] -> do
-          _ <-
-            concludeMissionInvocation
-              controller.missionControllerInvocations
-              invocation
-              (MissionInvocationCompleted ("ended " <> Text.pack (show (length identities)) <> " session(s)"))
-              concluded
-          consumeMissionCommand command
-          pure (MissionAdvanced (MissionSubtreeTerminated session (length identities)))
-        -- Some member of the subtree was never reached. The record stays open
-        -- rather than claiming a termination that did not happen to all of
-        -- it: the next iteration's own reconciliation observes the sessions
-        -- and closes it as completed if they have all ended after all, and as
-        -- unknown — with the mission halting for direction — if they have not.
+        -- Signalled, which is not the same as ended. @terminateWorker@ asks a
+        -- worker to stop and returns; an ordinary one may be pending
+        -- termination for a while yet, and an issue action's child is a
+        -- queued command its host has still to act on. Closing the record
+        -- here would put in the durable journal, as fact, that a subtree
+        -- ended at the moment it was asked to.
+        --
+        -- So the record stays open whatever the driver reached, and
+        -- 'resolveOpenTermination' — which the very next iteration runs, and
+        -- which reads the sessions themselves — is what closes it: completed
+        -- once they have all ended, waiting while any is still ending, and
+        -- unknown if one cannot be shown to have ended at all.
         Right unreached -> do
           journalCommand
             controller
@@ -1462,16 +1497,18 @@ performTermination controller snapshot command session reason = do
                 <> Text.pack (show (length identities - length unreached))
                 <> " of "
                 <> Text.pack (show (length identities))
-                <> " registered session(s); "
-                <> Text.intercalate ", " (map (.unMissionSessionId) unreached)
-                <> " could not be reached"
+                <> " registered session(s)"
+                <> ( if null unreached
+                       then ""
+                       else "; " <> Text.intercalate ", " (map (.unMissionSessionId) unreached) <> " could not be reached"
+                   )
             )
           consumeMissionCommand command
           pure
             ( MissionAdvanced
                 ( MissionCommandApplied
                     command.missionCommandId
-                    ("the subtree under " <> session.unMissionSessionId <> " was not wholly reached")
+                    ("signalled the subtree under " <> session.unMissionSessionId <> "; its end is not yet established")
                 )
             )
 
