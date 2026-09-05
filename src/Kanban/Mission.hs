@@ -250,6 +250,7 @@ module Kanban.Mission
     runMissionWith,
     liveMissionDriver,
     decidingWorkerReading,
+    workerHasNotFinished,
     MissionConsole (..),
     terminalMissionConsole,
     drainMissionConsoleWith,

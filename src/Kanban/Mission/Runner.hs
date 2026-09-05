@@ -43,6 +43,7 @@ module Kanban.Mission.Runner
     runMissionWith,
     liveMissionDriver,
     decidingWorkerReading,
+    workerHasNotFinished,
     drainMissionConsoleWith,
     missionVersionOf,
     preconditionOf,
@@ -629,7 +630,7 @@ liveMissionDriver options config repository store _ =
               Just
                 MissionWorkerReading
                   { missionWorkerSession = session,
-                    missionWorkerLive = recorded.workerStateStatus `elem` [WorkerStarting, WorkerRunning],
+                    missionWorkerLive = workerHasNotFinished recorded.workerStateStatus,
                     -- Ownership and intent both proven: this mission's record
                     -- names it, it belongs to this repository, and its durable
                     -- task is this step's target.
@@ -843,7 +844,7 @@ liveMissionDriver options config repository store _ =
       pure $ case state of
         Left _ -> Nothing
         Right recorded
-          | recorded.workerStateStatus `elem` [WorkerStarting, WorkerRunning] -> Just (workerIdentity descriptor)
+          | workerHasNotFinished recorded.workerStateStatus -> Just (workerIdentity descriptor)
           | otherwise -> Nothing
 
     -- The item a worker's durable task names, which is what decides whether it
@@ -1144,6 +1145,26 @@ targetRefFor target =
         MissionTargetPullRequest -> ActionTargetPullRequest
     )
     target.missionTargetNumber
+
+-- | Whether a worker's recorded status says it is still going.
+--
+-- One predicate, because three passes ask it and an answer that differed
+-- between them would be a mission contradicting itself about the same worker:
+-- the step's own evidence, the conflicting-work scan, and — through
+-- 'observeSession' — the accounting of a registered subtree.
+--
+-- @orphaned@ is the arm worth naming. It does not mean the worker is gone; it
+-- means the supervisor has committed the turn and is still resolving processes
+-- it recorded, which the action registry reports as running for exactly that
+-- reason. Reading it as neither live nor terminal is how a perfectly healthy
+-- step became an unknown outcome: no live worker, no recorded result, and
+-- nothing to wait for.
+workerHasNotFinished :: WorkerStatus -> Bool
+workerHasNotFinished status = case status of
+  WorkerStarting -> True
+  WorkerRunning -> True
+  WorkerOrphaned _ -> True
+  WorkerTerminal _ -> False
 
 -- | Which of a step's registered sessions answers for it.
 --

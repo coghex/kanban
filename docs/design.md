@@ -3480,7 +3480,11 @@ Defaults:
   child is a queued command its host has still to act on. The pass that reads
   the sessions is what closes it — completed once every registered descendant
   has ended, waiting while any is still ending, and unknown, with the mission
-  halting for direction, if one cannot be shown to have ended at all. A worker
+  halting for direction, if one cannot be shown to have ended at all. A worker whose supervisor has committed its turn and is
+  still resolving the processes it recorded is going, not gone, and every pass
+  that asks whether a worker has finished asks it the one way, so the step's
+  evidence, the conflicting-work scan, and a subtree's accounting cannot
+  disagree about the same worker. A worker
   whose state will not decode is that last case rather than the middle one:
   nothing was read, so it was neither shown to be going nor shown to have
   stopped, and the same unreadable state is what stopped the signal reaching

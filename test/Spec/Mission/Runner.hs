@@ -2371,6 +2371,38 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
           stopMissionController controller
       outcomeTags store `shouldReturn` [Just "outcome_unknown"]
 
+  -- @orphaned@ does not mean the worker is gone: the supervisor has committed
+  -- the turn and is still resolving processes it recorded, which the action
+  -- registry reports as running for exactly that reason. Reading it as neither
+  -- live nor terminal turned a perfectly healthy step into an unknown outcome
+  -- — no live worker, no recorded result, nothing to wait for.
+  it "reads a registered orphaned worker as still going, not as absent work" $ do
+    workerHasNotFinished WorkerStarting `shouldBe` True
+    workerHasNotFinished WorkerRunning `shouldBe` True
+    workerHasNotFinished (WorkerOrphaned SolveCompleted) `shouldBe` True
+    workerHasNotFinished (WorkerTerminal SolveCompleted) `shouldBe` False
+
+  it "keeps a step running while its registered worker resolves orphaned processes" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        stageOrphanedWorker (WorkerId "solve-844-0001")
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
+          gathered <- driver.missionDriverStepEvidence thePlanStep (stepRecord MissionStepRunning [theParent])
+          case gathered of
+            Left detail -> expectationFailure (Text.unpack detail)
+            Right evidence -> case evidence.missionEvidenceWorker of
+              Just reading -> do
+                -- Live, so the step waits on it rather than reaching for a
+                -- result nobody has produced.
+                reading.missionWorkerLive `shouldBe` True
+                reading.missionWorkerTerminal `shouldBe` Nothing
+                classifyMissionWork evidence `shouldSatisfy` isAttachable
+              Nothing -> expectationFailure "the orphaned worker was not read at all"
+        -- And its session is not reported as ended either.
+        observed <- driver.missionDriverObserveSession theParent (Just thePlanStep)
+        observed `shouldBe` Right Nothing
+
   it "recognizes an open termination and nothing else as one" $ do
     let terminationState effect outcome =
           MissionInvocationState
@@ -3277,6 +3309,23 @@ isWaitingInput :: MissionIteration -> Bool
 isWaitingInput iteration = case iteration of
   MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> True
   _ -> False
+
+isAttachable :: MissionExternalWork -> Bool
+isAttachable work = case work of
+  MissionWorkAttachable _ -> True
+  _ -> False
+
+-- | A worker the supervisor has committed and is still resolving the recorded
+-- processes of.
+stageOrphanedWorker :: WorkerId -> IO ()
+stageOrphanedWorker identifier = do
+  let staged = workerFixtureSpec boardRepository identifier 844
+  descriptor <- descriptorForSpec staged
+  directory <- workerDirectory staged.workerRepository
+  createPrivateDirectory XdgCache directory
+  writeState descriptor ((runningWorkerState identifier 1 Nothing) {workerStateStatus = WorkerOrphaned SolveCompleted})
+  written <- writePrivateJson descriptor.workerDescriptorSpecPath staged
+  written `shouldBe` Right ()
 
 -- | A worker whose specification discovery finds and whose state will not
 -- decode, which is what a truncated or half-written state file looks like.
