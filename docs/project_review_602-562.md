@@ -27,13 +27,13 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Mission store paths do not uniquely identify repositories
+- [x] PRR-1. Mission store paths do not uniquely identify repositories — [#615]
 - [ ] PRR-2. `$fix` accepts approval that belongs to an older head
 - [ ] PRR-3. Session-cycle diagnostics include acyclic ancestors
 
 ## 1. Durable mission repository isolation
 
-### PRR-1. Mission store paths do not uniquely identify repositories
+### [#615] PRR-1. Mission store paths do not uniquely identify repositories
 
 > **Captured note:** Give every GitHub repository a collision-free durable
 > mission-store root so one repository can never read, block, or overwrite
