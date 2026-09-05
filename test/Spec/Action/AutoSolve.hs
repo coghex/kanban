@@ -42,7 +42,7 @@ import Kanban.UI.AutoSolve
   )
 import Kanban.UI.Types (AutoSolveProgress (..), AutoSolveStage (..), SolvePhase (..))
 import Kanban.Worker
-  ( PullRequestWorkerTask (..),
+  ( WorkerDeadline (..), PullRequestWorkerTask (..),
     SolveWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -175,7 +175,9 @@ descriptorCarrying repository name task parent createdAt =
         workerMaxRuntimeSeconds = 600,
         workerConfigPath = Nothing,
         workerWorkflowConfig = defaultWorkflowConfig,
-        workerAssignment = Nothing
+        workerAssignment = Nothing,
+        workerExpectedTarget = Nothing,
+        workerInvocation = Nothing
       }
 
 -- | Write a worker's durable specification and state, as a launch and its
@@ -324,7 +326,8 @@ environmentFor repository =
             catalogPullRequests = [],
             catalogHistory = CatalogHistoryLoaded (CompletedHistory [] [] epoch)
           },
-      actionNow = epoch
+      actionNow = epoch,
+      actionWorkerDeadline = WorkerDeadline 600
     }
 
 targetUnderLoop :: ResolvedTarget

@@ -46,6 +46,8 @@ module Kanban.Action.Dispatch
 
     -- * Terminal validation
     validateWorkerOutcome,
+    observableActionHandle,
+    workerRecordedAttribution,
     attributedSolvePullRequest,
     validatedPullRequestVerdict,
   )
@@ -216,6 +218,16 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
   -- crosses, and the repository it crosses into is this environment's.
   ActionTargetItem resolved
     | Left refusal <- checkedAgainst environment plan -> pure (Left refusal)
+    -- Requirement 8's boundary, and it is here rather than at the caller
+    -- because here is the last instruction before the spawn. The resolution
+    -- this dispatch is about to act on comes from /this/ environment's read,
+    -- so comparing the caller's recorded expectation against it is a fresh
+    -- reread of the live target — and a mismatch dispatches nothing at all
+    -- rather than handing a worker a plan the target has already outgrown.
+    | Just recorded <- request.requestExpectedTarget,
+      let observed = targetPreconditionFor resolved,
+      not (targetPreconditionHolds recorded observed) ->
+        pure (Left (ActionTargetStale plan.planKind recorded observed))
     | otherwise -> do
         capability <- actionCapabilityIO environment.actionRepository environment.actionRoster request.requestRecordedAssignment plan.planRoute
         case capability of
@@ -316,7 +328,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
     launchIssueActionFor resolved origin = case issueStageFor environment.actionWorkflowConfig plan.planKind resolved of
       Left refusal -> pure (Left refusal)
       Right stage -> do
-        host <- ensureIssueReviewHost environment.actionRepository environment.actionConfigPath environment.actionWorkflowConfig
+        host <- ensureIssueReviewHost environment.actionRepository environment.actionConfigPath environment.actionWorkflowConfig environment.actionWorkerDeadline
         case host of
           Left message -> pure (Left (ActionDispatchFailed plan.planKind message))
           Right owner -> do
@@ -329,6 +341,9 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
                 owner
                 environment.actionConfigPath
                 environment.actionWorkflowConfig
+                environment.actionWorkerDeadline
+                request.requestExpectedTarget
+                request.requestInvocation
             case launched of
               Right descriptor -> pure (Right (IssueActionHandle plan.planKind resolved stage descriptor))
               Left (WorkerLaunchFailed detail) -> pure (Left (ActionDispatchFailed plan.planKind detail))
@@ -378,14 +393,7 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
 
     -- The attribution a joined run started with. 'Nothing' when its worker
     -- recorded none, which is a run this caller must not speak for.
-    recordedAttribution _ descriptor = fromParent <$> descriptor.workerDescriptorSpec.workerParent
-      where
-        fromParent parent =
-          ActionAttribution
-            { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
-              attributionStartedAt = parent.workerParentStartedAt,
-              attributionSolverBrand = parent.workerParentSolverBrand
-            }
+    recordedAttribution _ descriptor = workerRecordedAttribution descriptor
 
     workerHandle resolved held descriptor =
       pure (Right (WorkerActionHandle plan.planKind resolved descriptor held))
@@ -438,6 +446,9 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         parent
         environment.actionConfigPath
         environment.actionWorkflowConfig
+        environment.actionWorkerDeadline
+        request.requestExpectedTarget
+        request.requestInvocation
 
     launchPullRequest :: ResolvedTarget -> PullRequestOrigin -> PullRequestAction -> RecordedAssignment -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
     launchPullRequest resolved origin action cell =
@@ -454,6 +465,9 @@ dispatchProviderTurn environment request plan = case plan.planTarget of
         request.requestParent
         environment.actionConfigPath
         environment.actionWorkflowConfig
+        environment.actionWorkerDeadline
+        request.requestExpectedTarget
+        request.requestInvocation
 
 issueActionNeedsNoCell :: Text
 issueActionNeedsNoCell = "an issue action replays no model cell"
@@ -515,6 +529,53 @@ runAutoSolveAction = runAutoSolveActionWith liveAutoSolveTurns
 -- ---------------------------------------------------------------------------
 -- Observation
 -- ---------------------------------------------------------------------------
+
+-- | The baseline a worker's own record says its run began from.
+--
+-- 'Nothing' where the worker recorded none, and that absence is load-bearing
+-- rather than a default: a solve's result is judged against the pull requests
+-- that existed when /it/ started, so supplying the asking caller's baseline
+-- instead would credit that run with a pull request it did not open, or refuse
+-- it one it did.
+workerRecordedAttribution :: WorkerDescriptor -> Maybe ActionAttribution
+workerRecordedAttribution descriptor = fromParent <$> descriptor.workerDescriptorSpec.workerParent
+  where
+    fromParent parent =
+      ActionAttribution
+        { attributionKnownPullRequests = parent.workerParentKnownPullRequests,
+          attributionStartedAt = parent.workerParentStartedAt,
+          attributionSolverBrand = parent.workerParentSolverBrand
+        }
+
+-- | The handle a worker this process did not launch can be observed through.
+--
+-- Rebuilt from that worker's own durable specification and nothing else, which
+-- is what makes it usable by a caller that has only /found/ the worker — a
+-- headless runner reattaching after a restart, say. Both facts an observation
+-- needs beyond the descriptor were written down when the worker was created:
+-- the baseline a solve's pull request is attributed against, and the stage an
+-- issue action's published evidence is read for.
+--
+-- Existing because the alternative is a second opinion. A caller that read the
+-- worker's state itself and called a clean exit a success would be skipping
+-- 'validateWorkerOutcome' entirely — reporting a solve that opened no pull
+-- request, or an issue action that published no verdict, as though it had
+-- done what it was asked. What that caller wants is this handle and
+-- 'observeAction'.
+--
+-- 'Nothing' for a worker whose record cannot supply what its handle needs: a
+-- provider turn with no recorded attribution, and the repository review host,
+-- which owns no action of its own. An autosolve handle is never rebuilt here
+-- either — its cursor is a live loop position rather than a durable fact, and
+-- 'Kanban.Action.AutoSolve.beginAutoSolveAction' is the one place it is made.
+observableActionHandle :: WorkflowActionKind -> ResolvedTarget -> WorkerDescriptor -> Maybe ActionHandle
+observableActionHandle kind resolved descriptor = case descriptor.workerDescriptorSpec.workerTask of
+  IssueActionWorkerTaskKind task -> Just (IssueActionHandle kind resolved task.issueActionStage descriptor)
+  SolveWorkerTaskKind _ -> provider
+  PullRequestWorkerTaskKind _ -> provider
+  IssueHostWorkerTaskKind _ -> Nothing
+  where
+    provider = WorkerActionHandle kind resolved descriptor <$> workerRecordedAttribution descriptor
 
 -- | Observe one dispatched action.
 --
@@ -586,7 +647,7 @@ observeAutoSolveTurn _ resolved descriptor = do
       WorkerRunning -> ActionRunning state.workerStateLastActivity
       WorkerOrphaned _ -> ActionRunning "resolving orphaned provider processes"
       WorkerTerminal (SolveNeedsInput detail) -> ActionSettled (ActionNeedsInput detail)
-      WorkerTerminal (SolveFailed detail) -> ActionSettled (ActionFailed detail)
+      WorkerTerminal (SolveFailed detail) -> ActionSettled (settledWorkerFailure detail)
       WorkerTerminal SolveCompleted ->
         ActionRunning
           ( "the current provider turn for autosolve #"
@@ -634,7 +695,7 @@ observeIssueActionHandle resolved descriptor = do
       WorkerRunning -> pure (ActionRunning state.workerStateLastActivity)
       WorkerOrphaned _ -> pure (ActionRunning "resolving orphaned provider processes")
       WorkerTerminal (SolveNeedsInput detail) -> pure (ActionSettled (ActionNeedsInput detail))
-      WorkerTerminal (SolveFailed detail) -> pure (ActionSettled (ActionFailed detail))
+      WorkerTerminal (SolveFailed detail) -> pure (ActionSettled (settledWorkerFailure detail))
       WorkerTerminal SolveCompleted ->
         ActionSettled . publishedIssueReview resolved . map (.workerEnvelopeEvent)
           <$> readWorkerJournal descriptor
@@ -675,7 +736,7 @@ publishedIssueReview resolved events = case mapMaybe published (reverse events) 
 validateWorkerOutcome :: ActionEnvironment -> WorkflowActionKind -> ResolvedTarget -> ActionAttribution -> SolveOutcome -> ActionOutcome
 validateWorkerOutcome environment kind resolved attribution outcome = case outcome of
   SolveNeedsInput detail -> ActionNeedsInput detail
-  SolveFailed detail -> ActionFailed detail
+  SolveFailed detail -> settledWorkerFailure detail
   SolveCompleted -> case kind of
     SolveIssue -> attributedSolvePullRequest environment resolved attribution
     -- Deliberately not the opened pull request. An autosolve action concludes

@@ -772,7 +772,9 @@ testWorkerDescriptor task =
             workerMaxRuntimeSeconds = 60,
             workerConfigPath = Nothing,
             workerWorkflowConfig = defaultWorkflowConfig,
-            workerAssignment = Nothing
+            workerAssignment = Nothing,
+            workerExpectedTarget = Nothing,
+            workerInvocation = Nothing
           },
       workerDescriptorSpecPath = "/tmp/worker-1.spec.json",
       workerDescriptorRosterPath = "/tmp/worker-1.roster.toml",

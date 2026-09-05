@@ -70,12 +70,13 @@ import Kanban.Action
     settledTargetRefusal,
   )
 import Kanban.CLI (Options (..))
-import Kanban.Config (ResolvedConfig (..))
+import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
 import Kanban.Domain
 import Kanban.Filter
 import Kanban.UI.Search (SearchAnchor, openSearch, seatColumnOn, selectedAnchorIn)
 import Kanban.UI.Types
 import Kanban.UI.Util (allColumns, noticeCleared, showText)
+import Kanban.Worker (WorkerDeadline (..))
 
 -- | Recompute what the criteria admit from the datasets currently held.
 refreshVisibleBoard :: AppState -> AppState
@@ -145,7 +146,8 @@ dashboardActionEnvironment state =
       actionConfigPath = state.appOptions.optionConfig,
       actionRoster = state.appModelRoster,
       actionCatalog = dashboardCatalog state,
-      actionNow = state.appNow
+      actionNow = state.appNow,
+      actionWorkerDeadline = WorkerDeadline state.appConfig.resolvedTimeouts.timeoutsWorkerDeadlineSeconds
     }
 
 -- | Why a mutating action must decline this item, or 'Nothing' when it may

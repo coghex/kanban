@@ -3929,6 +3929,58 @@ def haskell_code_lines(relative_path):
     )
 
 
+# Every assignment of a worker specification's runtime bound, wherever it is
+# written. Issue #595 requirement 15 replaced a hard-coded constant at every
+# production launch site with one resolved configuration value, and the whole
+# point of that change is that no launch path can quietly go back to reading a
+# constant of its own.
+WORKER_DEADLINE_ASSIGNMENT_RE = re.compile(
+    r"workerMaxRuntimeSeconds\s*=\s*(?P<value>[^,\n]+)"
+)
+
+# What a production launch site is allowed to assign: the resolved bound the
+# launch was handed. `Kanban.Worker.WorkerDeadline` is a newtype precisely so
+# this is one spelling rather than a family of integer expressions.
+WORKER_DEADLINE_RESOLVED_VALUE = "deadline.workerDeadlineSeconds"
+
+# The one module allowed to name the default and the maximum, because it is
+# where configuration resolves them. Anything else naming either is a second
+# resolution point, which is the drift this asserts against.
+WORKER_DEADLINE_CONSTANT_FILE = "src/Kanban/Config.hs"
+
+WORKER_DEADLINE_CONSTANTS = (
+    "defaultWorkerDeadlineSeconds",
+    "maximumWorkerDeadlineSeconds",
+)
+
+# A test fixture builds a specification directly and must stay free to choose
+# its own bound (issue #595's review is explicit about this). These are the
+# fixtures that do, named so the freedom is asserted rather than assumed: a
+# refactor that routed them through the production launch path would make the
+# deadline examples untestable, and this notices.
+WORKER_DEADLINE_FIXTURE_FILE = "test/Spec/Support/Process.hs"
+
+
+def worker_deadline_assignments(relative_path):
+    """Every `workerMaxRuntimeSeconds = ...` value in one tracked file."""
+    content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    return [
+        match.group("value").strip()
+        for match in WORKER_DEADLINE_ASSIGNMENT_RE.finditer(content)
+    ]
+
+
+def worker_deadline_source_files():
+    """Every module under src/ that assigns a worker's runtime bound."""
+    found = {}
+    for path in sorted((REPO_ROOT / "src").rglob("*.hs")):
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        values = worker_deadline_assignments(relative)
+        if values:
+            found[relative] = values
+    return found
+
+
 class ProviderAdapterBoundaryTests(unittest.TestCase):
     def test_provider_adapter_owns_every_provider_process(self):
         # Issue #522 requirements 4, 5, 6, and 8.
@@ -4357,6 +4409,132 @@ def strip_docstrings(tree):
             else:
                 del body[0]
     return tree
+
+
+class WorkerDeadlineBoundaryTests(unittest.TestCase):
+    """Issue #595 requirement 15: one resolved bound, every production launch.
+
+    The bound an action worker runs under used to be a constant read at each
+    of the launch sites that wrote a specification. It is now a configuration
+    value resolved once and handed to every launch, and these assertions are
+    what keep it that way: a new launch path that reached for a constant of its
+    own would be a worker nobody's configuration reaches, and it would look
+    exactly like every other launch until someone changed the setting and
+    watched one of them ignore it.
+    """
+
+    def test_every_production_launch_records_the_resolved_bound(self):
+        assignments = worker_deadline_source_files()
+        # The negative control. A detector that recovered nothing would satisfy
+        # every assertion below by iterating an empty set, and would go on
+        # reporting no erosion for the same reason an empty loop does.
+        self.assertIn(
+            "src/Kanban/Worker.hs",
+            assignments,
+            "no production launch site assigns workerMaxRuntimeSeconds any "
+            "more; this detector is asserting nothing",
+        )
+        for relative_path, values in sorted(assignments.items()):
+            for value in values:
+                with self.subTest(module=relative_path, value=value):
+                    self.assertEqual(
+                        value,
+                        WORKER_DEADLINE_RESOLVED_VALUE,
+                        f"{relative_path} assigns a worker deadline of "
+                        f"{value!r}; every production launch path must record "
+                        f"the resolved {WORKER_DEADLINE_RESOLVED_VALUE} it was "
+                        "handed (issue #595 requirement 15)",
+                    )
+
+    def test_only_configuration_names_the_default_and_the_maximum(self):
+        for constant in WORKER_DEADLINE_CONSTANTS:
+            naming = set()
+            for path in sorted((REPO_ROOT / "src").rglob("*.hs")):
+                relative = path.relative_to(REPO_ROOT).as_posix()
+                if constant in path.read_text(encoding="utf-8"):
+                    naming.add(relative)
+            with self.subTest(constant=constant):
+                self.assertEqual(
+                    naming,
+                    {WORKER_DEADLINE_CONSTANT_FILE},
+                    f"{constant} is named outside "
+                    f"{WORKER_DEADLINE_CONSTANT_FILE}; the default and the "
+                    "documented maximum have one resolution point, and a "
+                    "second one is how a launch stops honouring the setting",
+                )
+
+    def test_a_fixture_stays_free_to_choose_its_own_bound(self):
+        # The other side of the rule, and the reason the scan above is rooted
+        # at src/ rather than at the whole tree: a deadline example has to be
+        # able to construct a specification that fires in seconds.
+        values = worker_deadline_assignments(WORKER_DEADLINE_FIXTURE_FILE)
+        self.assertTrue(
+            values,
+            f"{WORKER_DEADLINE_FIXTURE_FILE} no longer builds a worker "
+            "specification with a bound of its own; the deadline examples "
+            "have nothing left to stage a firing time with",
+        )
+        self.assertNotIn(
+            WORKER_DEADLINE_RESOLVED_VALUE,
+            values,
+            f"{WORKER_DEADLINE_FIXTURE_FILE} now reads a launch's resolved "
+            "bound; a fixture that cannot choose its own value cannot stage a "
+            "deadline that fires inside a test",
+        )
+
+
+
+class MissionRunnerAuthorityTests(unittest.TestCase):
+    """Issue #595 requirement 18: the runner broadens nothing.
+
+    A mission controller dispatches through the workflow action registry and
+    holds no authority of its own. The registry already refuses to merge, to
+    apply a verdict label, and to promote an indeterminate result, and the
+    point of these assertions is that the mission layer cannot quietly acquire
+    any of those by reaching past it -- which would look like an ordinary new
+    helper right up until a mission merged something.
+    """
+
+    def test_the_mission_layer_names_no_merge_or_label_authority(self):
+        forbidden = {
+            "mergePullRequest": "merging is the PR drainer's, and only the drainer's",
+            "drain_prs.py": "invoking the drainer is a deliberate manual step",
+            "--add-label": "a verdict label is the canonical review's to apply",
+            "--remove-label": "a verdict label is the canonical review's to remove",
+            "approve_issues.py": "the canonical issue gate is reached through the registry",
+        }
+        modules = sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs"))
+        # The negative control: a glob that matched nothing would pass every
+        # assertion below by iterating an empty list.
+        self.assertTrue(modules, "no mission modules were found to scan")
+        for path in modules:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            content = path.read_text(encoding="utf-8")
+            for needle, reason in sorted(forbidden.items()):
+                with self.subTest(module=relative, needle=needle):
+                    self.assertNotIn(
+                        needle,
+                        content,
+                        f"{relative} names {needle!r}; {reason} (issue #595 "
+                        "requirement 18)",
+                    )
+
+    def test_the_controller_reaches_the_outside_only_through_its_driver(self):
+        # Every process this codebase starts goes through System.Process. A
+        # mission module importing it would be a spawn the action registry's
+        # launch boundary never saw.
+        for path in sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs")):
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            content = path.read_text(encoding="utf-8")
+            with self.subTest(module=relative):
+                self.assertEqual(
+                    haskell_import_names(content, "System.Process"),
+                    set(),
+                    f"{relative} imports System.Process; a mission's work is "
+                    "started through the workflow action registry, which is "
+                    "where the spawn boundary and its readiness gate live",
+                )
+
 
 
 if __name__ == "__main__":

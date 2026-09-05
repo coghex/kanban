@@ -93,6 +93,14 @@ module Kanban.Action
     resolvedTargetPullRequest,
     ActionTarget (..),
 
+    -- * Preconditions
+    TargetPrecondition (..),
+    targetPreconditionFor,
+    targetPreconditionForItem,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+    targetPreconditionNumber,
+
     -- * Refusals
     StructuralRefusal (..),
     structuralRefusalMessage,
@@ -110,6 +118,7 @@ module Kanban.Action
     ActionOutcome (..),
     actionOutcomeSucceeded,
     actionOutcomeMessage,
+    settledWorkerFailure,
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,
@@ -162,6 +171,8 @@ module Kanban.Action
     observeAutoSolveTurn,
     approvalQueueObservation,
     validateWorkerOutcome,
+    observableActionHandle,
+    workerRecordedAttribution,
     attributedSolvePullRequest,
     validatedPullRequestVerdict,
 

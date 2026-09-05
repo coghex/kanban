@@ -44,6 +44,8 @@ module Kanban.Mission.Types
     missionEventSchemaVersion,
     missionSealSchemaVersion,
     missionLeaseSchemaVersion,
+    missionInvocationSchemaVersion,
+    missionCommandSchemaVersion,
 
     -- * The immutable specification
     MissionSpecification (..),
@@ -177,12 +179,14 @@ instance FromJSON payload => FromJSON (MissionEnvelope payload) where
     withObject "MissionEnvelope" $ \fields ->
       MissionEnvelope <$> fields .: "schemaVersion" <*> fields .: "payload"
 
-missionSpecificationSchemaVersion, missionSnapshotSchemaVersion, missionEventSchemaVersion, missionSealSchemaVersion, missionLeaseSchemaVersion :: Int
+missionSpecificationSchemaVersion, missionSnapshotSchemaVersion, missionEventSchemaVersion, missionSealSchemaVersion, missionLeaseSchemaVersion, missionInvocationSchemaVersion, missionCommandSchemaVersion :: Int
 missionSpecificationSchemaVersion = 1
 missionSnapshotSchemaVersion = 1
 missionEventSchemaVersion = 1
 missionSealSchemaVersion = 1
 missionLeaseSchemaVersion = 1
+missionInvocationSchemaVersion = 1
+missionCommandSchemaVersion = 1
 
 -- | What a mission was asked to do, fixed at creation.
 --

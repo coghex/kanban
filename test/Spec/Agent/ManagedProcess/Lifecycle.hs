@@ -228,7 +228,9 @@ examples = do
                 -- this build's default cell, and deliberately the provider
                 -- this task does /not/ route to today, so a decoder that
                 -- dropped either could not pass.
-                workerAssignment = Just (RecordedAssignment ClaudeProvider "claude-recorded" "xhigh" "Recorded Claude")
+                workerAssignment = Just (RecordedAssignment ClaudeProvider "claude-recorded" "xhigh" "Recorded Claude"),
+                workerExpectedTarget = Nothing,
+                workerInvocation = Nothing
               }
       eitherDecode (encode spec) `shouldBe` Right spec
       -- Every PR action a key can spawn has to survive the durable spec, or
@@ -499,7 +501,9 @@ examples = do
                   workerMaxRuntimeSeconds = 60,
                   workerConfigPath = Nothing,
                   workerWorkflowConfig = defaultWorkflowConfig,
-                  workerAssignment = Just workerFixtureAssignment
+                  workerAssignment = Just workerFixtureAssignment,
+                  workerExpectedTarget = Nothing,
+                  workerInvocation = Nothing
                 }
             workerRoot = temporaryRoot </> "kanban" </> "workers" </> "coghex-kanban"
             specPath = workerRoot </> "solve-782-fixture.spec.json"

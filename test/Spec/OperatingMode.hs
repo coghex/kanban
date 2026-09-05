@@ -412,7 +412,19 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False, False]
+
+  -- The mission runner is the one mode that reaches providers and still
+  -- answers 'False', and the reason is requirements 6 and 7: reattaching to a
+  -- live worker, resolving an unknown outcome, and ending a subtree all need
+  -- no provider, and refusing the mode outright would let an unusable
+  -- @models.toml@ block the recovery of a mission already under way. A
+  -- transition that would launch a provider-backed worker fails at that
+  -- launch instead, in the roster's own words.
+  it "lets the mission runner start on a roster that loads nothing" $ do
+    launchModeNeedsProvider (MissionMode "mission-0001") `shouldBe` False
+    launchModeRefusal (MissionMode "mission-0001") (Right noAgentRoster) `shouldBe` Nothing
+    launchModeRefusal (MissionMode "mission-0001") (Left unusableRoster) `shouldBe` Nothing
 
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
@@ -460,6 +472,7 @@ everyMode =
       testOptions {optionDoctor = True},
       testOptions {optionUsage = True},
       testOptions {optionPing = ["codex"]},
+      testOptions {optionMission = Just "mission-0001"},
       testOptions
     ]
 

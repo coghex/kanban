@@ -54,6 +54,14 @@ module Kanban.Action.Types
     resolvedTargetPullRequest,
     ActionTarget (..),
 
+    -- * Preconditions
+    TargetPrecondition (..),
+    targetPreconditionFor,
+    targetPreconditionForItem,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+    targetPreconditionNumber,
+
     -- * Refusals
     checkTargetRepository,
     StructuralRefusal (..),
@@ -86,6 +94,7 @@ module Kanban.Action.Types
     ActionOutcome (..),
     actionOutcomeSucceeded,
     actionOutcomeMessage,
+    settledWorkerFailure,
     ActionObservation (..),
     ApprovalQueueObservation (..),
     approvalQueueObservationMessage,
@@ -114,13 +123,18 @@ import Kanban.Domain
     PullRequest (..),
     RepoSnapshot (..),
     Repository,
+    TargetPrecondition (..),
     WorkflowConfig,
+    targetPreconditionForItem,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+    targetPreconditionNumber,
   )
 import Kanban.Models (ModelRoster, RecordedAssignment, RosterLoadError)
 import Kanban.PullRequestFlow (PullRequestVerdict (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (ResumeProvenance (..), SolverBrand)
-import Kanban.Worker (WorkerDescriptor, WorkerParent)
+import Kanban.Worker (WorkerDeadline, WorkerDescriptor, WorkerParent, workerDeadlineReason, workerStaleTargetReason, workerUnverifiedTargetReason)
 import Kanban.Workflow (readOnlyHistoryNotice)
 
 -- ---------------------------------------------------------------------------
@@ -352,6 +366,17 @@ resolvedTargetPullRequest target = case target.resolvedTargetItem of
   PullRequestItem pullRequest -> Just pullRequest
   IssueItem _ -> Nothing
 
+-- | The precondition a resolved target currently satisfies.
+--
+-- The record itself is 'Kanban.Domain.TargetPrecondition', because the
+-- persistent worker's specification carries one too and neither layer may own
+-- a definition the other cannot see. This is only the projection from a
+-- resolution, so the caller that plans an effect and the dispatch that
+-- enforces it read the same item the same way rather than each extracting its
+-- own fields.
+targetPreconditionFor :: ResolvedTarget -> TargetPrecondition
+targetPreconditionFor = targetPreconditionForItem . (.resolvedTargetItem)
+
 -- | What a request resolved to: one item, or the repository itself for the
 -- action that observes a queue rather than a card.
 data ActionTarget
@@ -417,6 +442,12 @@ data ActionRefusal
     ActionTurnAlreadyRunning WorkflowActionKind Text
   | -- | The owning authority refused or could not be started.
     ActionDispatchFailed WorkflowActionKind Text
+  | -- | The request carried an expected target version and the live target no
+    -- longer matches it. Recorded first, observed second. Nothing was
+    -- dispatched, which is the whole point: a caller that planned against the
+    -- first reading gets to replan rather than have its plan carried out
+    -- against the second (issue #595, requirement 8).
+    ActionTargetStale WorkflowActionKind TargetPrecondition TargetPrecondition
   deriving stock (Eq, Show)
 
 actionRefusalMessage :: ActionRefusal -> Text
@@ -449,6 +480,7 @@ actionRefusalMessage refusal = case refusal of
   ActionRoutingUnavailable _ detail -> detail
   ActionTurnAlreadyRunning _ detail -> detail
   ActionDispatchFailed _ detail -> detail
+  ActionTargetStale _ recorded observed -> targetPreconditionMessage recorded observed
   where
     article ActionTargetIssue = "an issue"
     article ActionTargetPullRequest = "a pull request"
@@ -557,6 +589,25 @@ data ActionOutcome
     ActionPullRequestVerdict Int PullRequestVerdict
   | ActionNeedsInput Text
   | ActionStopped Text
+  | -- | The launch's recorded finite bound elapsed and the watchdog ended the
+    -- turn (issue #595, requirement 16).
+    --
+    -- Its own constructor rather than an 'ActionFailed' carrying a
+    -- recognizable sentence, because a controller has to /decide/ differently
+    -- about it: a deadline says the work was still going when its budget ran
+    -- out, which is neither a refused authority, an absent executable, an
+    -- exhausted provider quota, a moved precondition, nor an outcome nobody
+    -- observed. Collapsing it into the generic failure is what made a mission
+    -- unable to tell "give it longer" from "this cannot work".
+    ActionDeadlineExceeded Text
+  | -- | The launch's recorded target moved before the work could start, and
+    -- the worker refused its own turn rather than act on a plan the target had
+    -- already outgrown (issue #595, requirement 8).
+    --
+    -- Its own constructor for the same reason the deadline has one: nothing
+    -- was mutated and nothing failed, so a controller has to be able to tell
+    -- it from work that went wrong and replan instead of concluding.
+    ActionTargetMoved Text
   | ActionFailed Text
   | -- | An issue action ran to completion and its owning authority
     -- published what that authority publishes: for a canonical initial
@@ -591,6 +642,8 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionPullRequestVerdict _ verdict -> verdict /= PullRequestVerdictPending
   ActionNeedsInput _ -> False
   ActionStopped _ -> False
+  ActionDeadlineExceeded _ -> False
+  ActionTargetMoved _ -> False
   ActionFailed _ -> False
   -- A published verdict is a completed review whichever way it went, exactly
   -- as a changes-requested pull-request verdict is. What is /not/ success is
@@ -612,6 +665,8 @@ actionOutcomeMessage outcome = case outcome of
   ActionPullRequestVerdict number verdict -> "PR #" <> showNumber number <> " " <> verdictWord verdict
   ActionNeedsInput detail -> "needs input: " <> detail
   ActionStopped detail -> "stopped: " <> detail
+  ActionDeadlineExceeded detail -> "deadline: " <> detail
+  ActionTargetMoved detail -> "stale target: " <> detail
   ActionFailed detail -> "failed: " <> detail
   ActionIssueReviewed number stage approved ->
     "issue #" <> showNumber number <> " " <> issueStageWord stage <> " " <> issueVerdictWord stage approved
@@ -630,6 +685,28 @@ actionOutcomeMessage outcome = case outcome of
     verdictWord PullRequestVerdictApproved = "is approved"
     verdictWord PullRequestVerdictChangesRequested = "has requested changes"
     verdictWord PullRequestVerdictPending = "has no verdict yet"
+
+-- | A settled worker's failure detail, typed.
+--
+-- One reading, in one place, so the three observation paths that meet a
+-- terminal @SolveFailed@ cannot disagree about whether it was a deadline. The
+-- sentence compared against is 'Kanban.Worker.workerDeadlineReason' itself —
+-- the same constant the watchdog writes — rather than a phrase spelled again
+-- here, which is what keeps the two from drifting apart silently.
+settledWorkerFailure :: Text -> ActionOutcome
+settledWorkerFailure detail
+  | detail == workerDeadlineReason = ActionDeadlineExceeded detail
+  | workerStaleTargetReason `Text.isPrefixOf` detail = ActionTargetMoved detail
+  -- A turn refused because the recorded target could not be reread at all.
+  -- Nothing was mutated and nothing was learned, so this is the absence of a
+  -- conclusion rather than one: 'ActionStopped' is the outcome that carries
+  -- that, and a mission reads it as an unknown outcome to be resolved by fresh
+  -- evidence or direction. Calling it a failure would turn one unreachable
+  -- network into a permanently failed step, which is precisely the collapse
+  -- 'Kanban.Worker.workerUnverifiedTargetReason' exists to keep apart from a
+  -- target that demonstrably moved.
+  | workerUnverifiedTargetReason `Text.isPrefixOf` detail = ActionStopped detail
+  | otherwise = ActionFailed detail
 
 -- | What one observation of a dispatched action found.
 data ActionObservation
@@ -726,7 +803,18 @@ data ActionEnvironment = ActionEnvironment
     actionConfigPath :: Maybe FilePath,
     actionRoster :: Either RosterLoadError ModelRoster,
     actionCatalog :: TargetCatalog,
-    actionNow :: UTCTime
+    actionNow :: UTCTime,
+    -- | The resolved finite bound every worker this environment launches
+    -- records in its own specification (issue #595, requirement 15).
+    --
+    -- Resolved by the caller from configuration and carried here rather than
+    -- read at each launch, for the same reason the catalog is: the registry is
+    -- the one plain-IO boundary a dashboard and a headless mission runner both
+    -- launch through, so a bound resolved once per environment is a bound both
+    -- of them provably applied. Recovery never consults it — a worker already
+    -- under way is bounded by the value its own 'WorkerSpec' recorded, whatever
+    -- the configuration says now.
+    actionWorkerDeadline :: WorkerDeadline
   }
 
 -- | One request. 'actionRequest' builds the ordinary shape; the resume fields
@@ -748,7 +836,20 @@ data ActionRequest = ActionRequest
     requestExistingLogPath :: Maybe FilePath,
     requestResumeProvenance :: ResumeProvenance,
     requestUserMessage :: Text,
-    requestParent :: Maybe WorkerParent
+    requestParent :: Maybe WorkerParent,
+    -- | The exact target state this request was planned against, when the
+    -- caller recorded one. Verified against the environment's own read
+    -- immediately before the launch, and 'Nothing' for a caller with no such
+    -- record — a dashboard press acts on the item the operator is looking at
+    -- and has nothing older to be stale against.
+    requestExpectedTarget :: Maybe TargetPrecondition,
+    -- | The caller's own identifier for this effect, recorded in the
+    -- specification the launch writes (issue #595, requirement 5).
+    --
+    -- Opaque here: the registry never reads it, and carries it only so a
+    -- caller that journals an effect before dispatching can find the worker
+    -- that effect became if it crashes in between.
+    requestInvocation :: Maybe Text
   }
 
 actionRequest :: WorkflowActionKind -> Text -> ActionTargetRef -> ActionRequest
@@ -763,7 +864,9 @@ actionRequest kind repository target =
       requestExistingLogPath = Nothing,
       requestResumeProvenance = ResumeAnswer,
       requestUserMessage = "",
-      requestParent = Nothing
+      requestParent = Nothing,
+      requestExpectedTarget = Nothing,
+      requestInvocation = Nothing
     }
 
 -- | Refuse a target that belongs to a repository other than the one the

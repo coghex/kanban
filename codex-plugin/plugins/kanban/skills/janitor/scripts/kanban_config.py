@@ -414,6 +414,14 @@ class LimitsConfig:
     excerpt_lines: int = 3
 
 
+# Kanban.Config.defaultWorkerDeadlineSeconds and
+# Kanban.Config.maximumWorkerDeadlineSeconds. The four hours every action
+# worker was bounded at before the bound became configurable, and the one
+# documented ceiling the key is validated against.
+DEFAULT_WORKER_DEADLINE_SECONDS = 4 * 60 * 60
+MAXIMUM_WORKER_DEADLINE_SECONDS = 7 * 24 * 60 * 60
+
+
 @dataclass(frozen=True)
 class TimeoutsConfig:
     github_seconds: int = 30
@@ -424,6 +432,12 @@ class TimeoutsConfig:
     # number (docs/design.md section 14).
     ping_codex_seconds: int = 120
     ping_claude_seconds: int = 120
+    # Kanban.Config.timeoutsWorkerDeadlineSeconds: the bound one action
+    # worker's launch records in its own durable specification, rather than a
+    # bound on a request this process makes. Carried here so the shared schema
+    # stays one schema -- a documented key must not warn as unknown -- but no
+    # Python worker reads it.
+    worker_deadline_seconds: int = DEFAULT_WORKER_DEADLINE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -473,6 +487,7 @@ class TimeoutsOverride:
     claude_seconds: int | None = None
     ping_codex_seconds: int | None = None
     ping_claude_seconds: int | None = None
+    worker_deadline_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -785,6 +800,19 @@ def _pop_positive_timeout_seconds(table: dict, key: str, path: str) -> int | Non
     return value
 
 
+def _pop_worker_deadline_seconds(table: dict, key: str, path: str) -> int | None:
+    # Kanban.Config.parseWorkerDeadlineSeconds. Bounded by the documented
+    # ceiling rather than by the microsecond conversion the four provider
+    # timeouts share: this value is never converted to microseconds, and a
+    # bound no watchdog would reach is not a bound.
+    value = _pop_positive_int(table, key, path)
+    if value is not None and value > MAXIMUM_WORKER_DEADLINE_SECONDS:
+        raise KanbanConfigError(
+            f"{_join(path, key)} must not exceed {MAXIMUM_WORKER_DEADLINE_SECONDS} seconds"
+        )
+    return value
+
+
 def _pop_enum(table: dict, key: str, path: str, choices: set[str]) -> str | None:
     if key not in table:
         return None
@@ -872,6 +900,7 @@ def _parse_timeouts_override(value: dict, path: str, warnings: list[str]) -> Tim
     claude_seconds = _pop_positive_timeout_seconds(table, "claude_seconds", path)
     ping_codex_seconds = _pop_positive_timeout_seconds(table, "ping_codex_seconds", path)
     ping_claude_seconds = _pop_positive_timeout_seconds(table, "ping_claude_seconds", path)
+    worker_deadline_seconds = _pop_worker_deadline_seconds(table, "worker_deadline_seconds", path)
     _collect_unknown(table, path, warnings)
     return TimeoutsOverride(
         github_seconds=github_seconds,
@@ -879,6 +908,7 @@ def _parse_timeouts_override(value: dict, path: str, warnings: list[str]) -> Tim
         claude_seconds=claude_seconds,
         ping_codex_seconds=ping_codex_seconds,
         ping_claude_seconds=ping_claude_seconds,
+        worker_deadline_seconds=worker_deadline_seconds,
     )
 
 

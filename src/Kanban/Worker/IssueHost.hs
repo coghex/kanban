@@ -129,6 +129,7 @@ import Kanban.Worker.Discovery (discoverWorkerHistory)
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
+import Kanban.Worker.Precondition (preconditionStillHolds)
 import Kanban.Worker.Types
   ( IssueActionWorkerTask (..),
     WorkerDescriptor (..),
@@ -370,6 +371,14 @@ data IssueReviewHost = IssueReviewHost
     -- where requirement 7 puts it. Production is
     -- 'Kanban.Review.runCanonicalIssueReview' and nothing else.
     hostRunCanonical :: ReviewStage -> Int -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult),
+    -- | Whether an adopted child's recorded precondition still holds, and the
+    -- refusal when it does not (issue #595, requirement 8).
+    --
+    -- Injected for the reason every other outward call here is: production
+    -- reads live GitHub, and a fixture must be able to stage a target that
+    -- moved without one. Production is
+    -- 'Kanban.Worker.preconditionStillHolds' and nothing else.
+    hostCheckPrecondition :: WorkerSpec -> IO (Maybe Text),
     -- | The supervisor's own provider registration, which records a process's
     -- identity, adds it to this worker's census, and makes it reachable by
     -- termination and recovery.
@@ -395,7 +404,8 @@ data IssueReviewHost = IssueReviewHost
 -- reported to every child waiting on it and ends the host, because a host
 -- with no client can serve nobody.
 runIssueReviewHost :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-runIssueReviewHost hostSpec = runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider runCanonicalStage hostSpec
+runIssueReviewHost hostSpec =
+  runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider runCanonicalStage preconditionStillHolds hostSpec
   where
     startEmbeddedProvider spec register sink = do
       rosterResult <- loadModelRoster
@@ -416,11 +426,12 @@ runIssueReviewHostWith ::
   IssueHostTuning ->
   (WorkerSpec -> (Maybe Int -> ManagedProcess -> IO ()) -> (ReviewEvent -> IO ()) -> IO (Either Text IssueHostProvider)) ->
   (ReviewStage -> Int -> (ManagedProcess -> IO ()) -> IO (Either Text CanonicalIssueReviewResult)) ->
+  (WorkerSpec -> IO (Maybe Text)) ->
   WorkerSpec ->
   (ManagedProcess -> IO ()) ->
   (WorkerEvent -> IO ()) ->
   IO ()
-runIssueReviewHostWith tuning startProvider runCanonical spec rememberProvider emit = do
+runIssueReviewHostWith tuning startProvider runCanonical checkPrecondition spec rememberProvider emit = do
   descriptor <- descriptorForSpec spec
   rosterResult <- loadModelRoster
   controller <- discoverApprovalController spec.workerRepository
@@ -444,6 +455,7 @@ runIssueReviewHostWith tuning startProvider runCanonical spec rememberProvider e
             hostProvider = providerCell,
             hostStartProvider = startProvider,
             hostRunCanonical = runCanonical,
+            hostCheckPrecondition = checkPrecondition,
             hostRememberProvider = rememberProvider,
             hostRegisteredProcesses = registered,
             hostApprovalController = controller,
@@ -900,10 +912,28 @@ runChildStage host child = do
     Left failure -> settleChild host child (SolveFailed (Text.pack (show failure)))
     Right () -> pure ()
 
+-- | Starts one adopted child's stage, once its recorded precondition has been
+-- rechecked.
+--
+-- The check is here rather than at the launch because here is the boundary
+-- that matters. A child action is durable: the registry checked its target,
+-- wrote the specification, and left; this host adopts it on a later poll and
+-- runs @approve_issues.py@ or an interactive revision, both of which mutate
+-- the very issue that was checked. Requirement 8 asks for a fresh observation
+-- immediately before every GitHub mutation, and the launch's was neither.
+--
+-- A child whose target moved, or whose target cannot be read at all, is
+-- settled with the typed refusal and mutates nothing. Neither is a failure of
+-- the review: nothing was attempted, and the mission that dispatched it
+-- replans from a fresh reading or waits, according to which refusal it was.
 dispatchChildStage :: IssueReviewHost -> HostChild -> IO ()
-dispatchChildStage host child = case child.hostChildTask.issueActionStage of
-  IssueRevision -> runRevisionChild host child
-  stage -> runCanonicalChild host child stage
+dispatchChildStage host child = do
+  refused <- host.hostCheckPrecondition child.hostChildDescriptor.workerDescriptorSpec
+  case refused of
+    Just detail -> settleChild host child (SolveFailed detail)
+    Nothing -> case child.hostChildTask.issueActionStage of
+      IssueRevision -> runRevisionChild host child
+      stage -> runCanonicalChild host child stage
 
 -- | A canonical initial review or rereview.
 --

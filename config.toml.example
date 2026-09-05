@@ -73,12 +73,25 @@ excerpt_lines = 3
 # ping_* keys bound the single model request `kanban --ping codex` and
 # `kanban --ping claude` submit, which is a much longer operation, so they
 # are separate keys with their own 120-second defaults.
+#
+# worker_deadline_seconds is the odd one in this table: it does not bound a
+# request Kanban makes, it is the deadline every action worker records in its
+# own durable specification at launch -- solve, pull-request, issue-host,
+# issue-action, and every registry-dispatched worker alike. Omit it and it
+# stays the 14400 seconds (four hours) it has always been. It is a positive
+# whole number of seconds up to a maximum of 604800 (seven days); zero, a
+# negative value, and anything above that maximum all fail startup naming the
+# full key path, because a bound no watchdog would ever reach is not a bound.
+# Editing it changes only workers launched afterwards: a worker already
+# running is bounded by the value its own specification recorded, so recovery
+# and reattachment never re-resolve it.
 [timeouts]
 github_seconds = 30
 codex_seconds = 10
 claude_seconds = 45
 ping_codex_seconds = 120
 ping_claude_seconds = 120
+worker_deadline_seconds = 14400
 
 # Omit `command` to use the built-in provider. When present it is a non-empty
 # argv array whose first element is a non-empty executable path/name,
@@ -168,6 +181,7 @@ ping_claude_seconds = 120
 # claude_seconds = 45
 # ping_codex_seconds = 120
 # ping_claude_seconds = 120
+# worker_deadline_seconds = 14400
 
 # Kanban's own repository, and the one live table in this file. The entries
 # below are exactly the `coordination` rows of docs/agent-workflow-contract.md

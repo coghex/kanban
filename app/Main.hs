@@ -7,6 +7,7 @@ import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsPro
 import Kanban.Config (RawConfig (..), cacheEnabled, configuredRepositoryPaths, loadRawConfig, repositoryIdentity, resolveConfig, resolveConfigPathOption, resolveGlobalConfig)
 import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
+import Kanban.Mission (missionRunReportLines, missionRunSucceeded, runMissionMode)
 import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
 import Kanban.Ping (PingMode (..), pingBrandRefusal, pingRepositoryIdentity, pingResolvedConfig, resolvePingBrand, runPingMode)
 import Kanban.Preflight (doctorLines, doctorReady, gatherPreflightEnvironment)
@@ -155,6 +156,39 @@ main = do
     -- mode ran. It is written out rather than folded into the dashboard case
     -- so that a ping can never fall through and open a board.
     PingQueryMode -> pure ()
+    -- Configuration and a repository, and no board. The mission runner
+    -- resolves the same identity the dashboard does -- a mission store is
+    -- repository-qualified, and a mission belonging to another repository is
+    -- refused rather than adopted -- but it takes no board lease, because it
+    -- draws no board and writes no durable `gh` record to serialise against
+    -- (§15). It advances exactly the mission it was named until that mission
+    -- is terminal, paused, or blocked, and then exits.
+    MissionMode mission -> do
+      absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
+      let options = parsedOptions {optionConfig = absoluteConfigPath}
+      configResult <- loadRawConfig options.optionConfig
+      case configResult of
+        Left message -> do
+          hPutStrLn stderr ("kanban: " <> Text.unpack message)
+          exitFailure
+        Right (rawConfig, warnings) -> do
+          mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
+          repositoryResult <- resolveRepository rawConfig.rawRemoteName options.optionPath options.optionRepo
+          case repositoryResult of
+            Left message -> do
+              hPutStrLn stderr ("kanban: " <> Text.unpack message)
+              exitFailure
+            Right repository -> do
+              let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
+                  resolvedConfig = resolveConfig ownerName rawConfig
+              outcome <- runMissionMode options resolvedConfig repository (Text.pack mission)
+              case outcome of
+                Left message -> do
+                  hPutStrLn stderr ("kanban: " <> Text.unpack message)
+                  exitFailure
+                Right report -> do
+                  mapM_ TextIO.putStrLn (missionRunReportLines report)
+                  unless (missionRunSucceeded report) exitFailure
     DashboardMode -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

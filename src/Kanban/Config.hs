@@ -13,6 +13,8 @@ module Kanban.Config
     ResolvedConfig (..),
     defaultLimitsConfig,
     defaultTimeoutsConfig,
+    defaultWorkerDeadlineSeconds,
+    maximumWorkerDeadlineSeconds,
     defaultUsageConfig,
     defaultRawConfig,
     emptyWorkflowOverride,
@@ -95,18 +97,28 @@ defaultLimitsConfig =
     { limitsExcerptLines = 3
     }
 
--- | Provider timeouts, in whole seconds.
+-- | Bounds in whole seconds: the four provider timeouts, and the deadline one
+-- action worker's launch records.
 --
 -- The ping fields are separate from 'timeoutsCodexSeconds' and
 -- 'timeoutsClaudeSeconds' on purpose: those two bound an account-status read,
 -- which is a different and much shorter operation than the model round trip a
 -- deliberate ping submits (§14).
+--
+-- 'timeoutsWorkerDeadlineSeconds' is the odd one, and it is here because it is
+-- the same kind of value read from the same table rather than because it
+-- bounds a provider call. The four above bound one request this process makes
+-- and are consulted at the moment it is made; this one is resolved once at a
+-- launch and becomes durable in that worker's own 'Kanban.Worker.WorkerSpec',
+-- so a later run reads the bound the launch recorded and never this setting
+-- (issue #595, requirement 15).
 data TimeoutsConfig = TimeoutsConfig
   { timeoutsGithubSeconds :: Int,
     timeoutsCodexSeconds :: Int,
     timeoutsClaudeSeconds :: Int,
     timeoutsPingCodexSeconds :: Int,
-    timeoutsPingClaudeSeconds :: Int
+    timeoutsPingClaudeSeconds :: Int,
+    timeoutsWorkerDeadlineSeconds :: Int
   }
   deriving stock (Eq, Show)
 
@@ -117,8 +129,28 @@ defaultTimeoutsConfig =
       timeoutsCodexSeconds = 10,
       timeoutsClaudeSeconds = 45,
       timeoutsPingCodexSeconds = 120,
-      timeoutsPingClaudeSeconds = 120
+      timeoutsPingClaudeSeconds = 120,
+      timeoutsWorkerDeadlineSeconds = defaultWorkerDeadlineSeconds
     }
+
+-- | The four hours every action worker was bounded at before the bound became
+-- configurable, and still the value an omitted @worker_deadline_seconds@
+-- resolves to.
+defaultWorkerDeadlineSeconds :: Int
+defaultWorkerDeadlineSeconds = 4 * 60 * 60
+
+-- | The one documented ceiling @worker_deadline_seconds@ is validated
+-- against: seven days.
+--
+-- Named once rather than bounded per call site, because
+-- 'Kanban.Worker.WorkerSpec' records the resolved value as an unconditional
+-- finite 'Int' and every launch path must therefore be able to point at the
+-- same maximum. A finite ceiling is also what makes "resolved to a finite
+-- number of seconds" provable rather than merely usual: without one, a
+-- configuration file could name a bound no watchdog would ever reach, which
+-- is a permanently resident worker written as a number (§3).
+maximumWorkerDeadlineSeconds :: Int
+maximumWorkerDeadlineSeconds = 7 * 24 * 60 * 60
 
 -- | An external usage-provider command: executable followed by literal
 -- arguments, launched directly without a shell. Parsed and validated now;
@@ -215,7 +247,8 @@ data TimeoutsOverride = TimeoutsOverride
     overrideCodexSeconds :: Maybe Int,
     overrideClaudeSeconds :: Maybe Int,
     overridePingCodexSeconds :: Maybe Int,
-    overridePingClaudeSeconds :: Maybe Int
+    overridePingClaudeSeconds :: Maybe Int,
+    overrideWorkerDeadlineSeconds :: Maybe Int
   }
   deriving stock (Eq, Show)
 
@@ -226,7 +259,8 @@ emptyTimeoutsOverride =
       overrideCodexSeconds = Nothing,
       overrideClaudeSeconds = Nothing,
       overridePingCodexSeconds = Nothing,
-      overridePingClaudeSeconds = Nothing
+      overridePingClaudeSeconds = Nothing,
+      overrideWorkerDeadlineSeconds = Nothing
     }
 
 -- | A single '[repositories."owner/name"]' table. Only workflow, limits, and
@@ -396,7 +430,8 @@ applyTimeoutsOverride base override =
       timeoutsCodexSeconds = fromMaybe base.timeoutsCodexSeconds override.overrideCodexSeconds,
       timeoutsClaudeSeconds = fromMaybe base.timeoutsClaudeSeconds override.overrideClaudeSeconds,
       timeoutsPingCodexSeconds = fromMaybe base.timeoutsPingCodexSeconds override.overridePingCodexSeconds,
-      timeoutsPingClaudeSeconds = fromMaybe base.timeoutsPingClaudeSeconds override.overridePingClaudeSeconds
+      timeoutsPingClaudeSeconds = fromMaybe base.timeoutsPingClaudeSeconds override.overridePingClaudeSeconds,
+      timeoutsWorkerDeadlineSeconds = fromMaybe base.timeoutsWorkerDeadlineSeconds override.overrideWorkerDeadlineSeconds
     }
 
 --------------------------------------------------------------------------------
@@ -548,13 +583,15 @@ timeoutsOverrideParser = do
   claudeSecondsValue <- optKeyOf "claude_seconds" parsePositiveTimeoutSeconds
   pingCodexSecondsValue <- optKeyOf "ping_codex_seconds" parsePositiveTimeoutSeconds
   pingClaudeSecondsValue <- optKeyOf "ping_claude_seconds" parsePositiveTimeoutSeconds
+  workerDeadlineSecondsValue <- optKeyOf "worker_deadline_seconds" parseWorkerDeadlineSeconds
   pure
     TimeoutsOverride
       { overrideGithubSeconds = githubSecondsValue,
         overrideCodexSeconds = codexSecondsValue,
         overrideClaudeSeconds = claudeSecondsValue,
         overridePingCodexSeconds = pingCodexSecondsValue,
-        overridePingClaudeSeconds = pingClaudeSecondsValue
+        overridePingClaudeSeconds = pingClaudeSecondsValue,
+        overrideWorkerDeadlineSeconds = workerDeadlineSecondsValue
       }
 
 usageConfigParser :: ParseTable Position UsageConfig
@@ -718,6 +755,24 @@ parsePositiveTimeoutSeconds value = do
     else pure number
   where
     microsecondsPerSecond = 1000000 :: Int
+
+-- | The bound one action worker's launch records, in whole seconds.
+--
+-- Validated against 'maximumWorkerDeadlineSeconds' rather than against the
+-- microsecond conversion the provider timeouts are bounded by: this value is
+-- never converted to microseconds, and a bound a watchdog would take years to
+-- reach is not a bound. Zero and negative values are rejected by
+-- 'parsePositiveBoundedInt' before the ceiling is asked about, so each of the
+-- three ways of being invalid names itself.
+parseWorkerDeadlineSeconds :: Value' l -> Matcher l Int
+parseWorkerDeadlineSeconds value = do
+  number <- parsePositiveBoundedInt value
+  if number > maximumWorkerDeadlineSeconds
+    then
+      failAt
+        (valueAnn value)
+        ("must not exceed " <> show maximumWorkerDeadlineSeconds <> " seconds")
+    else pure number
 
 -- | The estimated percentage one solve round consumes: a whole percentage of
 -- a window, so anything outside 1 through 100 is a configuration error rather

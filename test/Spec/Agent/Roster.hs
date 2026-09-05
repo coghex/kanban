@@ -111,6 +111,7 @@ import Kanban.Worker
     WorkerSpec (..),
     WorkerTask (..),
     descriptorForSpec,
+    WorkerDeadline (..),
     launchPullRequestWorker,
     launchSolveWorker,
     runWorker,
@@ -271,10 +272,10 @@ spec = do
           -- The launch is reached only on the 'Right', which is the shape
           -- both EventM arms have; on the 'Left' nothing downstream runs.
           mapM_
-            (\assignment -> void (launchSolveWorker assignment repository 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig))
+            (\assignment -> void (launchSolveWorker assignment repository 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing))
             solveDecision
           mapM_
-            (\assignment -> void (launchPullRequestWorker assignment repository 42 PullRequestCodex PullRequestReview Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig))
+            (\assignment -> void (launchPullRequestWorker assignment repository 42 PullRequestCodex PullRequestReview Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing))
             reviewDecision
           -- No lease, no spec, no directory entry: the refusal lands before
           -- any durable trace of a worker exists.
@@ -301,8 +302,8 @@ spec = do
               solveCellUnderTest = cellOf (solveAssignment rerosteredDefaults CodexSolver)
               reviewCellUnderTest = cellOf (pullRequestAssignment rerosteredDefaults PullRequestCodex PullRequestReview)
           createDirectory repositoryRoot
-          void (launchSolveWorker solveCellUnderTest repository 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig)
-          void (launchPullRequestWorker reviewCellUnderTest repository 42 PullRequestCodex PullRequestReview Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig)
+          void (launchSolveWorker solveCellUnderTest repository 844 SolveOnly CodexSolver Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing)
+          void (launchPullRequestWorker reviewCellUnderTest repository 42 PullRequestCodex PullRequestReview Nothing Nothing ResumeAnswer "" Nothing Nothing defaultWorkflowConfig (WorkerDeadline 600) Nothing Nothing)
           directory <- workerDirectory repository
           contents <- listDirectory directory
           -- The retired artifact: no launch writes one of these any more.

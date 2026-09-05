@@ -15,6 +15,75 @@ created above it.
 
 ### Unreleased
 
+- `kanban --mission <id>` advances exactly one mission in the foreground and
+  then exits. It operates only on the mission it was named — a missing,
+  malformed, unknown, or repository-mismatched identifier is reported as
+  itself and never resolves to a different mission — and it selects nothing:
+  repository-wide mission selection and unattended scheduling remain
+  unimplemented. The mode is chosen after every observational mode and before
+  the dashboard, so an invocation that also names `--doctor`, `--usage`, or a
+  well-formed `--ping` runs that mode and starts nothing, while a malformed
+  `--ping` still refuses ahead of both. It takes no board lease, so it runs
+  beside an open dashboard; what it takes is that mission's own advancement
+  lease, which refuses a second runner cleanly while leaving an attached
+  dashboard free to read the record and submit ordinary operator commands.
+  Every external effect is journaled and flushed before it is attempted and
+  the target is reread immediately before it, so a crash leaves an outcome
+  nobody observed rather than an effect nobody recorded, and a target that
+  moved in between is a typed stale-version result with nothing mutated — a
+  result the owning action enforces too, since the recorded version travels
+  with the request and is compared against the registry's own read at the last
+  instruction before it starts anything, and again inside the worker it
+  launched — and inside the repository review host before it starts a
+  canonical review or a revision — just before the agent session that will
+  mutate the target begins. A target that moved, or that cannot be read at
+  all, stops the turn without mutating anything; the first is replanned and
+  the second is an unknown outcome the mission waits on rather than a step
+  that failed. The two effects with no step record of their own are recovered
+  from the same journal: a registered child's launch records the parent it was
+  asked for by, so a crash before the session write puts the child back under
+  that parent, and an open subtree termination is closed only when every
+  registered session under it can be observed to have ended — anything less
+  halts the mission for direction instead of signalling twice. A collected
+  worker record reads as an unknown ending rather than a clean one, so a
+  parent never settles over a child whose outcome is no longer there to read.
+  The run's own
+  terminal is its authenticated console: a line typed there is handed to the
+  controller inside the process, never written down, and can pause or resume
+  the mission, resolve an unknown outcome, end a registered subtree, or
+  register a child against a named item, while a redirected standard input is
+  never read and a command that arrives as a file carries no override authority
+  at all. A run that blocks stays at that terminal and asks what to do rather
+  than exiting past the only person who can answer; end of input, or the word
+  for it, ends it. Resolving an unknown outcome releases the launch record as
+  well as the step, so the recovery pass does not undo the answer. What a
+  finished worker achieved is decided by the action registry rather than by the
+  runner, so a clean exit that produced no attributable pull request and an
+  issue action that published no verdict are not reported as work done; a
+  registered action that owns no worker is answered in the iteration that
+  dispatched it, whether a plan step or a registered child asked for it; a
+  child's own end is judged through the action its launch recorded rather than
+  by its exit code; a child's step and its
+  deduplication identity both keep the parent and the request
+  distinguishable, so two parents asking for the same request get their own
+  children; a child's precondition refusals are typed rather than recorded as
+  a bare failure; a step whose registered child cannot be shown to have ended
+  stops for direction instead of waiting for evidence that is never coming; and a target that reached a terminal state between the
+  controller's reread and the registry's resolution is a stale plan rather than
+  an unresolvable target. The run ends when the
+  mission is terminal, paused, or blocked, and reports the transitions it
+  made. It never merges a pull request, applies a verdict label, or reports an
+  indeterminate result as a success — and never reads a target's absence from
+  the open board as one.
+- A new `[timeouts]` key, `worker_deadline_seconds`, sets the deadline every
+  action worker records at launch — solve, pull-request, issue-host,
+  issue-action, and every registry-dispatched worker alike. Omitting it keeps
+  the four hours (14400 seconds) that were previously fixed in the code. The
+  accepted range is 1 through 604800 seconds (seven days); zero, a negative
+  value, and anything above that maximum fail startup naming the full key
+  path. Editing it affects only workers launched afterwards: one already
+  running keeps the bound its own durable specification recorded.
+
 - A report or design document processed before it has ever been on the
   publication branch now takes its first disposition instead of stranding the
   run. `publish_coordination_doc.py --check-pending` reports the document's

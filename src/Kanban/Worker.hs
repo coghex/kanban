@@ -65,7 +65,12 @@ module Kanban.Worker
     IssueHostTuning (..),
     defaultIssueHostTuning,
     runIssueReviewHostWith,
+    preconditionStillHolds,
+    workerStaleTargetReason,
+    workerUnverifiedTargetReason,
+    workerPreconditionRefusal,
     WorkerSpec (..),
+    WorkerDeadline (..),
     WorkerState (..),
     WorkerStatus (..),
     SupervisorCells (..),
@@ -83,8 +88,11 @@ module Kanban.Worker
     collectWorkerCacheWith,
     consumeJournalLines,
     readWorkerJournal,
-    -- | Exported so the suite can address a hand-built spec's durable files.
+    -- | Exported so the suite can address a hand-built spec's durable files,
+    -- and write them the way a launch does.
     descriptorForSpec,
+    writePrivateJson,
+    writeState,
     discoverWorkers,
     discoverWorkerHistory,
     launchPullRequestWorker,
@@ -128,7 +136,13 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Cache (normalizedRepositoryIdentity)
-import Kanban.Domain (Repository, WorkflowConfig)
+import Kanban.Domain (Repository, TargetPrecondition, WorkflowConfig)
+import Kanban.Worker.Precondition
+  ( preconditionStillHolds,
+    workerPreconditionRefusal,
+    workerStaleTargetReason,
+    workerUnverifiedTargetReason,
+  )
 import Kanban.Models (RecordedAssignment (..), recordedAssignmentCell)
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process
@@ -231,6 +245,7 @@ import Kanban.Worker.Types
     SolveWorkerTask (..),
     issueActionTask,
     issueHostTask,
+    WorkerDeadline (..),
     WorkerDescriptor (..),
     WorkerEnvelope (..),
     WorkerEvent (..),
@@ -252,8 +267,8 @@ import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle),
 -- roster to resolve for itself: the launch boundary is where a session's
 -- cell is decided once (see 'Kanban.UI.Util.launchAssignment'), and this is
 -- where that decision becomes durable.
-launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+launchSolveWorker :: RecordedAssignment -> Repository -> Int -> SolveWorkflow -> SolverBrand -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> Maybe Text -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchSolveWorker assignment repository issueNumber workflow brand existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline expected invocation = do
   now <- getCurrentTime
   workerId <- newWorkerId "solve" issueNumber
   launchWorker
@@ -267,15 +282,17 @@ launchSolveWorker assignment repository issueNumber workflow brand existingSessi
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
-        workerAssignment = Just assignment
+        workerAssignment = Just assignment,
+        workerExpectedTarget = expected,
+        workerInvocation = invocation
       }
 
 -- | The pull-request twin of 'launchSolveWorker', assignment and all.
-launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig = do
+launchPullRequestWorker :: RecordedAssignment -> Repository -> Int -> PullRequestOrigin -> PullRequestAction -> Maybe Text -> Maybe FilePath -> ResumeProvenance -> Text -> Maybe WorkerParent -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> Maybe Text -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchPullRequestWorker assignment repository number origin action existingSession existingLogPath provenance userMessage parent configPath workflowConfig deadline expected invocation = do
   now <- getCurrentTime
   workerId <- newWorkerId "pr" number
   launchWorker
@@ -289,10 +306,12 @@ launchPullRequestWorker assignment repository number origin action existingSessi
         workerUserMessage = userMessage,
         workerParent = parent,
         workerCreatedAt = now,
-        workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+        workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
         workerConfigPath = configPath,
         workerWorkflowConfig = workflowConfig,
-        workerAssignment = Just assignment
+        workerAssignment = Just assignment,
+        workerExpectedTarget = expected,
+        workerInvocation = invocation
       }
 
 -- | The repository's live review host, if it has one.
@@ -356,8 +375,8 @@ liveIssueReviewHost repository = do
 -- join the solve and pull-request launches make when they lose an item's
 -- lease. Only a loss whose winner cannot be named is a refusal, because then
 -- a host is running and this caller does not know which.
-ensureIssueReviewHost :: Repository -> Maybe FilePath -> WorkflowConfig -> IO (Either Text WorkerId)
-ensureIssueReviewHost repository configPath workflowConfig = do
+ensureIssueReviewHost :: Repository -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either Text WorkerId)
+ensureIssueReviewHost repository configPath workflowConfig deadline = do
   existing <- liveIssueReviewHost repository
   case existing of
     Just descriptor -> pure (Right descriptor.workerDescriptorSpec.workerId)
@@ -378,11 +397,17 @@ ensureIssueReviewHost repository configPath workflowConfig = do
               workerCreatedAt = now,
               -- Carried because every specification has one; never read,
               -- because 'boundedByDeadline' exempts a host from the watchdog
-              -- and its children are bounded individually.
-              workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+              -- and its children are bounded individually. It is still the
+              -- resolved value rather than a constant, so nothing in a
+              -- specification this release writes disagrees with the
+              -- configuration the launch was made under.
+              workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
               workerConfigPath = configPath,
               workerWorkflowConfig = workflowConfig,
-              workerAssignment = Nothing
+              workerAssignment = Nothing,
+              -- A host owns no item of its own; its children carry their own.
+              workerExpectedTarget = Nothing,
+              workerInvocation = Nothing
             }
       pure $ case launched of
         Right descriptor -> Right descriptor.workerDescriptorSpec.workerId
@@ -401,8 +426,8 @@ ensureIssueReviewHost repository configPath workflowConfig = do
 -- write fails, exactly as every other launch orders those two — a
 -- specification a host could adopt while no lease reserved its issue is how
 -- two children for one issue would come to exist.
-launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
-launchIssueAction repository issueNumber stage origin host configPath workflowConfig = do
+launchIssueAction :: Repository -> Int -> ReviewStage -> IssueOrigin -> WorkerId -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> Maybe TargetPrecondition -> Maybe Text -> IO (Either WorkerLaunchRefusal WorkerDescriptor)
+launchIssueAction repository issueNumber stage origin host configPath workflowConfig deadline expected invocation = do
   now <- getCurrentTime
   actionId <- newWorkerId "issue-action" issueNumber
   let spec =
@@ -416,7 +441,7 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
             workerUserMessage = "",
             workerParent = Nothing,
             workerCreatedAt = now,
-            workerMaxRuntimeSeconds = defaultWorkerMaxRuntimeSeconds,
+            workerMaxRuntimeSeconds = deadline.workerDeadlineSeconds,
             workerConfigPath = configPath,
             workerWorkflowConfig = workflowConfig,
             -- An action starts no provider turn of its own to replay a cell
@@ -424,7 +449,9 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
             -- its own reviewers and models and reports them back on
             -- 'WorkerCanonicalReviewFinished'; a revision runs on the host's
             -- client, whose cell 'startReviewClient' resolved.
-            workerAssignment = Nothing
+            workerAssignment = Nothing,
+            workerExpectedTarget = expected,
+            workerInvocation = invocation
           }
   descriptor <- descriptorForSpec spec
   directory <- workerDirectory repository
@@ -440,7 +467,7 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
       case written of
         Left message -> releaseWorkerLease descriptor >> pure (Left (WorkerLaunchFailed message))
         Right () -> do
-          confirmed <- confirmIssueActionAdopted repository descriptor configPath workflowConfig
+          confirmed <- confirmIssueActionAdopted repository descriptor configPath workflowConfig deadline
           case confirmed of
             Right () -> pure (Right descriptor)
             -- Nothing took the child on, and the wait above has already tried
@@ -478,12 +505,12 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
 -- a host is ensured regardless, so a child is never left with nobody asked.
 --
 -- Fast in the ordinary case: adoption lands within one host poll.
-confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> IO (Either Text ())
-confirmIssueActionAdopted repository descriptor configPath workflowConfig =
+confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either Text ())
+confirmIssueActionAdopted repository descriptor configPath workflowConfig deadline =
   confirmIssueActionAdoptedWith
     issueActionAdoptionAttempts
     issueActionAdoptionPollMicros
-    (ensureIssueReviewHost repository configPath workflowConfig)
+    (ensureIssueReviewHost repository configPath workflowConfig deadline)
     repository
     descriptor
 
@@ -706,8 +733,25 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
 -- included: the brand each flow spawns comes from 'brandForProvider' on what
 -- was recorded rather than from the task's own routing, so a replayed
 -- assignment can never reach the other brand's executable.
+--
+-- The precondition check comes first, and this is the last instant it can
+-- (issue #595, requirement 8). Everything below starts an agent session, and
+-- what that session does to GitHub is its own; the launch that recorded this
+-- expectation happened in another process, possibly long ago, and a target
+-- that moved in between is a plan this worker must not carry out. Refusing
+-- here is not a failure of the work — nothing was attempted — so it reports
+-- the typed stale sentence and the mission replans from a fresh reading.
 runTaskWithAssignment :: WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-runTaskWithAssignment spec recorded aggregator rememberProvider emit = case spec.workerTask of
+runTaskWithAssignment spec recorded aggregator rememberProvider emit = do
+  held <- preconditionStillHolds spec
+  case held of
+    Just stale -> do
+      emit (WorkerDiagnostic stale)
+      emit (WorkerFinished (SolveFailed stale))
+    Nothing -> runCheckedTask spec recorded aggregator rememberProvider emit
+
+runCheckedTask :: WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+runCheckedTask spec recorded aggregator rememberProvider emit = case spec.workerTask of
   SolveWorkerTaskKind task ->
     runSolve spec.workerRepository task.solveWorkerIssueNumber task.solveWorkerWorkflow brand spec.workerConfigPath spec.workerWorkflowConfig cell spec.workerExistingSession spec.workerExistingLogPath spec.workerResumeProvenance spec.workerUserMessage
       aggregator
@@ -1749,9 +1793,6 @@ terminalActivity (SolveFailed _) = "failed"
 
 showProcessCount :: [value] -> Text
 showProcessCount values = Text.pack (show (length values))
-
-defaultWorkerMaxRuntimeSeconds :: Int
-defaultWorkerMaxRuntimeSeconds = 4 * 60 * 60
 
 workerHeartbeatIntervalMicros :: Int
 workerHeartbeatIntervalMicros = 5 * 1000 * 1000

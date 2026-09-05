@@ -511,7 +511,9 @@ repairWorkerDescriptor task =
             -- A worker whose spec predates the recorded field: what the
             -- reattach reads, and what its first resume then resolves once
             -- and records.
-            workerAssignment = Nothing
+            workerAssignment = Nothing,
+            workerExpectedTarget = Nothing,
+            workerInvocation = Nothing
           },
       workerDescriptorSpecPath = "/tmp/pr-900-repair.spec.json",
       workerDescriptorRosterPath = "/tmp/pr-900-repair.roster.toml",

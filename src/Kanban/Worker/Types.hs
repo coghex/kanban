@@ -25,6 +25,7 @@ module Kanban.Worker.Types
     issueHostTask,
     WorkerParent (..),
     WorkerSpec (..),
+    WorkerDeadline (..),
     WorkerEvent (..),
     WorkerStatus (..),
     WorkerState (..),
@@ -40,7 +41,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
-import Kanban.Domain (Repository, WorkflowConfig, defaultWorkflowConfig)
+import Kanban.Domain (Repository, TargetPrecondition, WorkflowConfig, defaultWorkflowConfig)
 import Kanban.Models (RecordedAssignment)
 import Kanban.Process (ManagedProcess, ProcessIdentity)
 import Kanban.Preflight (IssueOrigin)
@@ -53,6 +54,19 @@ import Kanban.Review
     ReviewThreadId,
   )
 import Kanban.Solve (AgentEvent, ResumeProvenance (..), SolveOutcome, SolveWorkflow, SolverBrand)
+
+-- | The finite bound a launch resolves and records in the specification it
+-- writes.
+--
+-- A newtype rather than a bare 'Int' because every launch below already takes
+-- an issue or pull-request number, and two positional integers whose meanings
+-- are "which item" and "how many seconds" is exactly the pair a caller can
+-- transpose without the compiler noticing. What lands in
+-- 'workerMaxRuntimeSeconds' stays an unconditional finite 'Int': the bound is
+-- resolved before a specification is written and is never absent, optional, or
+-- unbounded there (issue #595, requirement 15).
+newtype WorkerDeadline = WorkerDeadline {workerDeadlineSeconds :: Int}
+  deriving stock (Eq, Ord, Show)
 
 newtype WorkerId = WorkerId {unWorkerId :: Text}
   deriving stock (Eq, Ord, Show, Generic)
@@ -232,16 +246,45 @@ data WorkerSpec = WorkerSpec
     -- existed: the supervisor refuses such a spec rather than resolving a
     -- cell of its own, and the launch boundary resolves once and records the
     -- result on that session's next resume.
-    workerAssignment :: Maybe RecordedAssignment
+    workerAssignment :: Maybe RecordedAssignment,
+    -- | The exact target state this launch was authorized against, when the
+    -- caller recorded one (issue #595, requirement 8).
+    --
+    -- Durable because the boundary it protects is not the launch. The launch
+    -- checked this and then wrote a specification a detached supervisor picks
+    -- up later, and the mutations the launch was for are made later still, by
+    -- an agent session that specification starts. Carrying the expectation
+    -- into the record is what lets the last instant Kanban controls — just
+    -- before that session begins — ask whether it still holds.
+    --
+    -- 'Nothing' for a caller with no such record, and for every specification
+    -- written before this field existed: a dashboard press acts on the item
+    -- the operator is looking at and has nothing older to be stale against.
+    workerExpectedTarget :: Maybe TargetPrecondition,
+    -- | The caller's own identifier for the effect this launch is (issue
+    -- #595, requirement 5).
+    --
+    -- Written into the specification at the moment the worker is created,
+    -- which is what makes the association recoverable. A controller journals
+    -- an invocation, dispatches, and only then records which worker it got;
+    -- a crash in that window leaves an invocation naming no worker and a
+    -- worker nobody claims. With this the two find each other again — the
+    -- recovery pass looks for the worker whose specification names the
+    -- invocation it is holding — instead of the mission reading its own
+    -- worker as somebody else's.
+    --
+    -- Opaque to the worker layer, which never interprets it.
+    workerInvocation :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
 -- | Manual instance so a durable spec file written before
 -- 'workerResumeProvenance'/'workerConfigPath'/'workerWorkflowConfig'/
--- 'workerAssignment' existed still decodes: legacy specs default to
--- 'ResumeAnswer'/'Nothing'/'defaultWorkflowConfig'/'Nothing', matching every
--- resume's framing prior to their introduction.
+-- 'workerAssignment'/'workerExpectedTarget' existed still decodes: legacy
+-- specs default to
+-- 'ResumeAnswer'/'Nothing'/'defaultWorkflowConfig'/'Nothing'/'Nothing',
+-- matching every resume's framing prior to their introduction.
 instance FromJSON WorkerSpec where
   parseJSON = withObject "WorkerSpec" $ \object ->
     WorkerSpec
@@ -258,6 +301,8 @@ instance FromJSON WorkerSpec where
       <*> object .:? "workerConfigPath" .!= Nothing
       <*> object .:? "workerWorkflowConfig" .!= defaultWorkflowConfig
       <*> object .:? "workerAssignment" .!= Nothing
+      <*> object .:? "workerExpectedTarget" .!= Nothing
+      <*> object .:? "workerInvocation" .!= Nothing
 
 data WorkerEvent
   = WorkerProviderStarted Int

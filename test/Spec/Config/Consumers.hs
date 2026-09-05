@@ -23,9 +23,9 @@ spec = do
 
   describe "configured provider timeouts and excerpt height reaching their runtime consumers" $ do
     it "converts the configured Codex timeout from seconds to microseconds" $
-      codexRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9 11 13}) `shouldBe` 7000000
+      codexRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9 11 13 14400}) `shouldBe` 7000000
     it "converts the configured Claude timeout from seconds to microseconds" $
-      claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9 11 13}) `shouldBe` 9000000
+      claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9 11 13 14400}) `shouldBe` 9000000
     it "passes the configured excerpt line count through to the card-rendering limit" $ do
       cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 3}) `shouldBe` 3
       cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 9}) `shouldBe` 9

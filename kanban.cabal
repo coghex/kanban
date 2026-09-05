@@ -180,13 +180,19 @@ library kanban-internal
     Kanban.GitHub.Guard
     Kanban.GitHub.History
     Kanban.GitHub.Message
+    Kanban.GitHub.Precondition
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
+    Kanban.Mission.Control
+    Kanban.Mission.Controller
     Kanban.Mission.Digest
+    Kanban.Mission.Invocation
     Kanban.Mission.Journal
     Kanban.Mission.Lease
     Kanban.Mission.Paths
+    Kanban.Mission.Reconcile
+    Kanban.Mission.Runner
     Kanban.Mission.Session
     Kanban.Mission.Store
     Kanban.Mission.Types
@@ -213,6 +219,7 @@ library kanban-internal
     Kanban.Worker.IssueHost
     Kanban.Worker.Monitor
     Kanban.Worker.Paths
+    Kanban.Worker.Precondition
     Kanban.Worker.Termination
     Kanban.Worker.Types
   build-depends:
@@ -290,6 +297,7 @@ test-suite kanban-test
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
     Spec.Mission
+    Spec.Mission.Runner
     Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity

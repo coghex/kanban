@@ -1237,6 +1237,35 @@ lifecycleSpec = describe "one running host" $ do
       calls <- providerCalls host
       filter (== StartProvider) calls `shouldBe` []
 
+  -- Issue #595 requirement 8. A child action is durable: the registry checked
+  -- its target, wrote the specification, and left; this host adopts it later
+  -- and runs a gate that mutates that very issue. The recheck belongs here,
+  -- at the boundary, and a target that moved settles the child without the
+  -- stage running at all.
+  it "refuses a child whose recorded target moved before the host adopted it" $
+    withRunningHostNoProvider $ \host -> do
+      modifyMVar_ host.hostPrecondition (pure . const (pure (Just "the recorded target moved before this turn began: #594 changed")))
+      child <- publishChild host "action-1" 594 InitialReview
+      state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      state.workerStateStatus
+        `shouldBe` WorkerTerminal (SolveFailed "the recorded target moved before this turn began: #594 changed")
+      -- Nothing was attempted: the gate never ran, so nothing it mutates was
+      -- touched.
+      calls <- providerCalls host
+      filter isCanonicalCall calls `shouldBe` []
+      filter (== StartProvider) calls `shouldBe` []
+
+  -- The same boundary for a revision, which is the other thing a host starts.
+  it "refuses a revision child on the same recheck" $
+    withRunningHostNoProvider $ \host -> do
+      modifyMVar_ host.hostPrecondition (pure . const (pure (Just "the recorded target moved before this turn began: #594 changed")))
+      child <- publishChild host "action-1" 594 IssueRevision
+      state <- awaitState child (\recorded -> terminalState recorded.workerStateStatus)
+      state.workerStateStatus
+        `shouldBe` WorkerTerminal (SolveFailed "the recorded target moved before this turn began: #594 changed")
+      calls <- providerCalls host
+      filter (== StartProvider) calls `shouldBe` []
+
   -- And a revision on the same host does start one, so the laziness is real
   -- rather than the client never being needed.
   it "starts the client only when a revision needs one" $
@@ -2174,7 +2203,11 @@ data HostUnderTest = HostUnderTest
     hostRecords :: WorkerDescriptor,
     -- | The host's own journal, where anything that outlived a child's
     -- terminal envelope is recorded.
-    hostEmitted :: MVar [WorkerEvent]
+    hostEmitted :: MVar [WorkerEvent],
+    -- | What the host's recorded-precondition recheck answers, for a test to
+    -- replace. 'Nothing' is production's answer for a child that recorded no
+    -- expectation, which is every child this fixture builds.
+    hostPrecondition :: MVar (IO (Maybe Text))
   }
 
 -- | Runs a real host against a provider this test controls, hands the body a
@@ -2228,10 +2261,15 @@ withRunningHostUsing overrideProvider body =
       threadProcesses <- newMVar []
       sinkCell <- newEmptyMVar
       emitted <- newMVar []
+      -- No child this fixture builds records an expectation, so production's
+      -- check would read nothing; answering 'Nothing' keeps that true without
+      -- a network, and a test that wants the refusal replaces it.
+      preconditionGate <- newMVar (pure Nothing)
       let hostSpecification =
             (specFor hostIdUnderTest (IssueHostWorkerTaskKind (IssueHostWorkerTask "coghex/kanban")))
               {workerRepository = repository}
           record call = modifyMVar_ calls (pure . (<> [call]))
+          checkPrecondition _ = join (readMVar preconditionGate)
           -- The client's own registration, which a real one calls as it
           -- creates each connection. Recorded here so a test can assert the
           -- host registers a connection before its first poll rather than
@@ -2275,6 +2313,10 @@ withRunningHostUsing overrideProvider body =
           (IssueHostTuning 20000 1 (join (readMVar handoffBarrier)) (join (readMVar attachBarrier)))
           startProvider
           runCanonical
+          -- Every child in this fixture records no expectation, so the check
+          -- has nothing to verify and never reads GitHub. The examples that
+          -- exercise a recorded one stage the answer themselves.
+          checkPrecondition
           hostSpecification
           -- The supervisor's own provider registration, recorded so a test can
           -- assert the host registers its client's processes rather than
@@ -2297,7 +2339,8 @@ withRunningHostUsing overrideProvider body =
             hostBeginGate = beginGate,
             hostThreadProcesses = threadProcesses,
             hostRecords = hostDescriptor,
-            hostEmitted = emitted
+            hostEmitted = emitted,
+            hostPrecondition = preconditionGate
           }
       -- The host exits when it holds no live child, so a body that left one
       -- running would wait forever. Ending them is done the way anything ends
@@ -2776,7 +2819,9 @@ specFor identifier task =
       workerMaxRuntimeSeconds = 600,
       workerConfigPath = Nothing,
       workerWorkflowConfig = defaultWorkflowConfig,
-      workerAssignment = Nothing
+      workerAssignment = Nothing,
+      workerExpectedTarget = Nothing,
+      workerInvocation = Nothing
     }
 
 fixtureTime :: UTCTime

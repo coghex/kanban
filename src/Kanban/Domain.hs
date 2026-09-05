@@ -20,6 +20,11 @@ module Kanban.Domain
     IssueState (..),
     ItemId (..),
     Label (..),
+    TargetPrecondition (..),
+    targetPreconditionForItem,
+    targetPreconditionHolds,
+    targetPreconditionMessage,
+    targetPreconditionNumber,
     MergeState (..),
     NativeSubIssues (..),
     PullRequest (..),
@@ -57,7 +62,9 @@ import Data.Aeson (FromJSON (..), FromJSONKey, ToJSON, ToJSONKey, withObject, (.
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.List (sort)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 
@@ -279,6 +286,83 @@ data PullRequest = PullRequest
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | The exact live facts an effect was authorized against.
+--
+-- Here rather than beside the action registry because two layers have to agree
+-- on it: the registry, which compares it at the launch boundary, and the
+-- persistent worker, whose durable specification carries it to the boundary
+-- the launch cannot reach — the instant before an agent session starts making
+-- the mutations the launch was for (issue #595, requirement 8).
+--
+-- Every field, and the labels as a sorted set because GitHub's ordering is not
+-- a fact about the item. Anything weaker would let an effect proceed against a
+-- target that changed in a way the plan was never checked against.
+data TargetPrecondition = TargetPrecondition
+  { preconditionItem :: ItemId,
+    preconditionUpdatedAt :: UTCTime,
+    -- | A pull request's head commit; 'Nothing' for an issue.
+    preconditionHead :: Maybe Text,
+    preconditionLabels :: [Text],
+    -- | @open@, @closed@, or @merged@.
+    preconditionState :: Text
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | The precondition an item currently satisfies.
+targetPreconditionForItem :: BoardItem -> TargetPrecondition
+targetPreconditionForItem item = case item of
+  IssueItem issue ->
+    TargetPrecondition
+      { preconditionItem = IssueId issue.issueNumber,
+        preconditionUpdatedAt = issue.issueUpdatedAt,
+        preconditionHead = Nothing,
+        preconditionLabels = sort (map (.labelName) issue.issueLabels),
+        preconditionState = case issue.issueState of
+          IssueOpen -> "open"
+          IssueClosed -> "closed"
+      }
+  PullRequestItem pullRequest ->
+    TargetPrecondition
+      { preconditionItem = PullRequestId pullRequest.pullRequestNumber,
+        preconditionUpdatedAt = pullRequest.pullRequestUpdatedAt,
+        preconditionHead = Just pullRequest.pullRequestHead,
+        preconditionLabels = sort (map (.labelName) pullRequest.pullRequestLabels),
+        preconditionState = case pullRequest.pullRequestState of
+          PullRequestOpen -> "open"
+          PullRequestClosed -> "closed"
+          PullRequestMerged -> "merged"
+      }
+
+targetPreconditionNumber :: TargetPrecondition -> Int
+targetPreconditionNumber precondition = case precondition.preconditionItem of
+  IssueId number -> number
+  PullRequestId number -> number
+
+-- | Whether the recorded precondition still describes the live observation.
+targetPreconditionHolds :: TargetPrecondition -> TargetPrecondition -> Bool
+targetPreconditionHolds recorded observed = normalize recorded == normalize observed
+  where
+    normalize precondition = precondition {preconditionLabels = sort precondition.preconditionLabels}
+
+-- | Which facts moved, for a refusal a person can act on.
+targetPreconditionMessage :: TargetPrecondition -> TargetPrecondition -> Text
+targetPreconditionMessage recorded observed =
+  "#"
+    <> Text.pack (show (targetPreconditionNumber recorded))
+    <> " changed after this action was planned ("
+    <> Text.intercalate ", " differences
+    <> "); nothing was dispatched"
+  where
+    differences =
+      concat
+        [ ["state " <> recorded.preconditionState <> " → " <> observed.preconditionState | recorded.preconditionState /= observed.preconditionState],
+          ["it was updated" | recorded.preconditionUpdatedAt /= observed.preconditionUpdatedAt],
+          ["its head moved" | recorded.preconditionHead /= observed.preconditionHead],
+          ["its labels changed" | sort recorded.preconditionLabels /= sort observed.preconditionLabels],
+          ["it is a different item" | recorded.preconditionItem /= observed.preconditionItem]
+        ]
 
 data ItemId = IssueId Int | PullRequestId Int
   deriving stock (Eq, Ord, Show, Generic)
