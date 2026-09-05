@@ -695,7 +695,28 @@ liveMissionDriver options config repository store _ =
         Just descriptor -> do
           state <- readWorkerState descriptor
           case state of
-            Left _ -> pure (Right Nothing)
+            -- Its record is there and will not decode. That is not "still
+            -- running": nothing was read, so this session was neither shown to
+            -- be going nor shown to have stopped, and a caller that took it
+            -- for the former would wait on it for ever — a signalled subtree
+            -- most of all, since the same unreadable state is what stopped
+            -- @terminateWorker@ doing anything to it in the first place.
+            --
+            -- 'Nothing' is reserved for a state that /was/ read and says the
+            -- session has not finished. Everything else is unknown, which is
+            -- waited on by nobody and resolved by direction.
+            Left detail -> do
+              now <- getCurrentTime
+              pure
+                ( Right
+                    ( Just
+                        MissionTerminalObservation
+                          { missionObservationAt = now,
+                            missionObservationOutcome = MissionObservedUnknown,
+                            missionObservationDetail = Just ("its worker state could not be read: " <> detail)
+                          }
+                    )
+                )
             Right recorded -> case recorded.workerStateStatus of
               WorkerStarting -> pure (Right Nothing)
               WorkerRunning -> pure (Right Nothing)

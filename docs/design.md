@@ -3480,7 +3480,15 @@ Defaults:
   child is a queued command its host has still to act on. The pass that reads
   the sessions is what closes it — completed once every registered descendant
   has ended, waiting while any is still ending, and unknown, with the mission
-  halting for direction, if one cannot be shown to have ended at all. And a conclusion that
+  halting for direction, if one cannot be shown to have ended at all. A worker
+  whose state will not decode is that last case rather than the middle one:
+  nothing was read, so it was neither shown to be going nor shown to have
+  stopped, and the same unreadable state is what stopped the signal reaching
+  it. A registered child's parent is held to the same standard from the other
+  side — a request is launched only under a parent whose own state was read
+  and says it has not finished, because a session this mission registered
+  carries no process ownership and would otherwise read as merely
+  unverifiable for its whole life. And a conclusion that
   cannot be written stops the run rather than being discarded: a step recorded
   as running beside a launch the file still calls open is one no later pass
   revisits, so the mission would go on to complete over a record that never

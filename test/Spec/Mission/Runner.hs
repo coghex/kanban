@@ -1599,6 +1599,35 @@ childRequestSpec = describe "registered child requests" $ do
         ]
         `shouldBe` [(childSessionFor theParent "r-11", Just theParent)]
 
+  -- Requirement 12 wants a currently live parent, and the snapshot cannot
+  -- supply that: a session this mission registered carries no recorded process
+  -- ownership, so it reads as unverifiable from birth. "Not settled" would let
+  -- a parent whose record has been collected authorize new external work.
+  it "refuses a child whose parent cannot be shown to be live" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      -- The parent's own record is gone, which is the collected case.
+      writeIORef stage.stageSessions [theParent]
+      writeIORef
+        stage.stageObservation
+        MissionTerminalObservation
+          { missionObservationAt = fixedTime,
+            missionObservationOutcome = MissionObservedUnknown,
+            missionObservationDetail = Just "its worker record has been collected"
+          }
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-ghost" (childRequest "r-70" theMission theParent)
+          iteration <- missionControllerIteration controller
+          case iteration of
+            MissionAdvanced (MissionCommandRefused "c-ghost" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "not currently live"
+            other -> expectationFailure ("an unverifiable parent authorized a child: " <> show other)
+          stopMissionController controller
+      readIORef stage.stageDispatches `shouldReturn` []
+
   it "rejects a request naming another mission" $
     withLiveParent $ \_ stage controller -> do
       submitConsoleCommand controller "c-cross" (childRequest "r-2" (MissionId "mission-0002") (MissionSessionId "solve-844-0001"))
@@ -1623,7 +1652,7 @@ childRequestSpec = describe "registered child requests" $ do
           iteration <- missionControllerIteration controller
           case iteration of
             MissionAdvanced (MissionCommandRefused "c-settled" detail) ->
-              Text.unpack detail `shouldSatisfy` isInfixOf "not a live registered session"
+              Text.unpack detail `shouldSatisfy` isInfixOf "has already settled"
             other -> expectationFailure ("unexpected iteration: " <> show other)
           stopMissionController controller
       readIORef stage.stageDispatches `shouldReturn` []
@@ -1634,7 +1663,7 @@ childRequestSpec = describe "registered child requests" $ do
       iteration <- missionControllerIteration controller
       case iteration of
         MissionAdvanced (MissionCommandRefused "c-dead" detail) ->
-          Text.unpack detail `shouldSatisfy` isInfixOf "not a live registered session"
+          Text.unpack detail `shouldSatisfy` isInfixOf "not a registered session"
         other -> expectationFailure ("unexpected iteration: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
 
@@ -2295,6 +2324,52 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       outcomeTags store `shouldReturn` [Nothing]
       snapshot <- currentSnapshot store
       snapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
+
+  -- An unreadable worker state is not a shutdown in progress. Nothing was
+  -- read, so the session was neither shown to be going nor shown to have
+  -- stopped — and the same unreadable state is what stopped `terminateWorker`
+  -- doing anything to it, so waiting would be waiting for ever.
+  it "reads an unreadable worker state as unknown rather than as still ending" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
+        stageUnreadableWorker (WorkerId "solve-844-0001")
+        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        withFakeGh root (ghBoardWith []) $ do
+          observed <- driver.missionDriverObserveSession theParent Nothing
+          case observed of
+            Right (Just observation) -> do
+              observation.missionObservationOutcome `shouldBe` MissionObservedUnknown
+              fmap Text.unpack observation.missionObservationDetail
+                `shouldSatisfy` maybe False (isInfixOf "could not be read")
+            other ->
+              expectationFailure
+                ("an unreadable state was judged " <> show (fmap (fmap (.missionObservationOutcome)) other))
+
+  -- And the termination that follows one halts for direction rather than
+  -- waiting on it.
+  it "stops an open termination whose member's state cannot be read" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      writeIORef stage.stageSessions [theParent, MissionSessionId "child-1"]
+      writeIORef
+        stage.stageObservation
+        MissionTerminalObservation
+          { missionObservationAt = fixedTime,
+            missionObservationOutcome = MissionObservedUnknown,
+            missionObservationDetail = Just "its worker state could not be read: no such file"
+          }
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          reached <- iterateUntil controller isWaitingInput
+          case reached of
+            MissionAdvanced (MissionLifecycleSet MissionWaitingInput detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "whether the signal was delivered is unknown"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
 
   it "recognizes an open termination and nothing else as one" $ do
     let terminationState effect outcome =
@@ -3202,6 +3277,19 @@ isWaitingInput :: MissionIteration -> Bool
 isWaitingInput iteration = case iteration of
   MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> True
   _ -> False
+
+-- | A worker whose specification discovery finds and whose state will not
+-- decode, which is what a truncated or half-written state file looks like.
+stageUnreadableWorker :: WorkerId -> IO ()
+stageUnreadableWorker identifier = do
+  let staged = workerFixtureSpec boardRepository identifier 844
+  descriptor <- descriptorForSpec staged
+  directory <- workerDirectory staged.workerRepository
+  createPrivateDirectory XdgCache directory
+  writeState descriptor (completedState identifier)
+  written <- writePrivateJson descriptor.workerDescriptorSpecPath staged
+  written `shouldBe` Right ()
+  ByteString.writeFile descriptor.workerDescriptorStatePath "{not json"
 
 -- | Makes the invocation journal unappendable, the way a read-only state
 -- directory does, and gives back what is needed to undo it.

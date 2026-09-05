@@ -1531,13 +1531,71 @@ registerChild controller snapshot command request
             <> " rather than "
             <> controller.missionControllerMission.unMissionId
         )
-  | not parentIsLive =
+  | not parentIsRegistered =
       refuseChild
         ( "its parent session "
             <> request.missionChildRequestParent.unMissionSessionId
-            <> " is not a live registered session of this mission"
+            <> " is not a registered session of this mission"
+        )
+  -- The durable record's own answer, asked before the live one and never
+  -- overridden by it. A session this mission has observed to end is finished
+  -- whatever a worker state read a moment ago appears to say; the live check
+  -- below adds evidence, it does not get to withdraw this.
+  | parentHasSettled =
+      refuseChild
+        ( "its parent session "
+            <> request.missionChildRequestParent.unMissionSessionId
+            <> " has already settled"
         )
   | otherwise = do
+      -- Asked of the parent itself, now, rather than read off the snapshot.
+      --
+      -- Requirement 12 wants a /currently live/ parent, and the snapshot
+      -- cannot supply that: a session this mission registered carries no
+      -- recorded process ownership, so it reads as unverifiable from birth to
+      -- settlement, and "not settled" would let a parent whose record has
+      -- been collected, or whose state will not decode, authorize new external
+      -- work. Nothing proves such a parent is gone — and nothing proves it is
+      -- there either, which is what the requirement asks for.
+      --
+      -- 'Nothing' from this reading is the positive answer: its worker state
+      -- was read and says it has not finished. Every other answer is a parent
+      -- this request may not be launched under.
+      alive <- controller.missionControllerDriver.missionDriverObserveSession request.missionChildRequestParent Nothing
+      case alive of
+        Left detail -> pure (MissionControllerFailed detail)
+        Right (Just observation) ->
+          refuseChild
+            ( "its parent session "
+                <> request.missionChildRequestParent.unMissionSessionId
+                <> " is not currently live: "
+                <> maybe "it has ended" id observation.missionObservationDetail
+            )
+        Right Nothing -> registerChildUnderLiveParent controller snapshot command request childInvocation
+  where
+    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
+    -- This mission's own tree, and nothing wider: a session another mission
+    -- registered is not one this request may name.
+    parentIsRegistered = any ((== request.missionChildRequestParent) . (.missionSessionId)) registered
+    parentHasSettled =
+      any
+        ( \node ->
+            node.missionSessionId == request.missionChildRequestParent
+              && missionSessionDisposition node == MissionSessionSettled
+        )
+        registered
+    registered = concatMap (missionSessionSubtree snapshot) roots
+    roots = map (.missionSessionId) [node | node <- snapshot.missionSnapshotSessions, node.missionSessionParent == Nothing]
+    refuseChild detail = do
+      journalCommand controller command ("refused child request: " <> detail)
+      consumeMissionCommand command
+      pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+
+-- | The request identity's own check, once the parent has been shown to be
+-- live: a replay returns the child it already produced rather than launching a
+-- second one.
+registerChildUnderLiveParent :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
+registerChildUnderLiveParent controller snapshot command request childInvocation = do
       recorded <-
         readMissionInvocations
           controller.missionControllerMission
@@ -1565,27 +1623,10 @@ registerChild controller snapshot command request
               )
           Nothing -> launchChild controller snapshot command request childInvocation
   where
-    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
-    -- Registered /and/ not settled. Registration alone would let a session
-    -- that has already ended keep spawning children, which is the dead-parent
-    -- forgery requirement 12 names; and an unverifiable session counts as
-    -- surviving, because nothing proves it is gone.
-    parentIsLive =
-      any
-        ( \node ->
-            node.missionSessionId == request.missionChildRequestParent
-              && missionSessionDisposition node /= MissionSessionSettled
-        )
-        (concatMap (missionSessionSubtree snapshot) roots)
-    roots = map (.missionSessionId) [node | node <- snapshot.missionSnapshotSessions, node.missionSessionParent == Nothing]
     renderExisting existing = case existing.missionInvocationOutcome of
       Just (MissionInvocationDispatched worker) -> "child " <> worker
       Just outcome -> Text.pack (show outcome)
       Nothing -> "an invocation whose outcome is not yet recorded"
-    refuseChild detail = do
-      journalCommand controller command ("refused child request: " <> detail)
-      consumeMissionCommand command
-      pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
 
 -- | The step a registered child's launch invents for it, named by the pair
 -- that asked for it.
