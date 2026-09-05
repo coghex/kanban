@@ -232,8 +232,8 @@ spec = describe "the settings overlay's model roster" $ do
   describe "cycling a value" $ do
     it "wraps through the provider's declared model order in both directions" $ do
       cycledModel (SettingsCycleModel 1) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-opus-5"
-      cycledModel (SettingsCycleModel (-1)) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5"
-      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-5.6-sol"
+      cycledModel (SettingsCycleModel (-1)) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5-1"
+      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-6-astra"
       cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-5.4"
 
     it "wraps through the declared effort vocabulary in both directions" $ do
