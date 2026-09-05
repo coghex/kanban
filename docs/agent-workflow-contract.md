@@ -211,6 +211,26 @@ arithmetic, which §2.3 owns.
   verdict label or changes draft state directly.
 - **Failure semantics:** the same missing-executable and
   `KANBAN_NEEDS_INPUT` handoff pattern as solve.
+- **Issue-gate override:** the coordinator refuses to review a pull request
+  whose linked issue lacks a current canonical approval, and clearing that is
+  the issue's own review workflow's job. `--override-issue-gate`, paired with a
+  mandatory `--override-reason <text>`, proceeds anyway. It is a **human**
+  decision in the same sense `finalize` is (§2.10): the user asks for it in
+  that turn, and no agent may reach for it on its own initiative, to get past a
+  gate it disagrees with, or with a reason it composed rather than one the user
+  gave. Either flag without the other is refused as `override_refused` before
+  anything is read, spawned, or published, so an override is never half in
+  force. It relaxes exactly one clause — that every linked issue is approved —
+  and leaves the other three ways the gate refuses standing: an external or
+  unparseable link, a pull request with no linked issue at all (which is
+  `--allow-no-issue`'s question, not this one), and a check set that does not
+  line up with the links. What it does not change is the review: the route,
+  the reviewer's independence, the verdict, the labels, and the `pr-review:v2`
+  marker are all exactly what an ordinary round produces, so an overridden
+  approval merges through the drainer's ordinary queue rather than acquiring a
+  second, quieter merge path. The record of the bypass is therefore prose
+  rather than a marker field — the reviewer is told in its prompt, and the
+  published comment carries the operator's reason above the verdict.
 - **Required authority:** GitHub write on the PR (labels, comments, draft
   readiness, pushes). No action in this surface ever merges a PR.
 - **Durable state:** session log; the isolated worktree `pr-revise` works in,

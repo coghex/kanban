@@ -488,6 +488,53 @@ def route_reviewers(
 NO_AGENT_STATUS = "no_agent_mode"
 
 
+def override_refusal(
+    number: int, override_issue_gate: bool, override_reason: str | None
+) -> tuple[int, dict[str, Any]] | None:
+    """Refuse a malformed issue-gate override before anything at all happens.
+
+    The two halves are refused together and in both directions, because each
+    one alone is a way of believing an override is in force when it is not.
+    A flag with no stated reason would bypass a canonical approval leaving
+    nothing on the pull request to say who decided or why -- the record is the
+    point, so it is required rather than encouraged. A reason with no flag is
+    the more dangerous of the two: the caller plainly meant to override, and
+    silently running an ordinary gated review would hand them a refusal they
+    would read as the gate's verdict rather than as their own typo.
+
+    `None` when there is nothing to refuse, so the ordinary path is unchanged.
+    """
+    reason = (override_reason or "").strip()
+    if override_issue_gate and reason:
+        return None
+    if not override_issue_gate and not reason:
+        return None
+    if not override_issue_gate:
+        problem = (
+            "--override-reason was given without --override-issue-gate, so no override "
+            "was in force and this review would have been gated normally"
+        )
+        remedy = (
+            "Pass --override-issue-gate as well if a human really did authorize "
+            "bypassing the linked issue's canonical approval, or drop --override-reason."
+        )
+    else:
+        problem = (
+            "--override-issue-gate requires --override-reason <text> recording the human "
+            "decision it stands on"
+        )
+        remedy = (
+            "Pass --override-reason with the reason the operator gave; it is published "
+            "on the pull request beside the verdict so the bypass is not silent."
+        )
+    return 1, {
+        "pr": number,
+        "status": "override_refused",
+        "route": "",
+        "error": f"{problem}. {remedy} Nothing was published and no label changed.",
+    }
+
+
 def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
     """Refuse the whole workflow because no provider is loaded.
 
@@ -693,10 +740,20 @@ def gate_key(
     invalid: list[str],
     *,
     allow_no_issue: bool = False,
+    override_issue_gate: bool = False,
 ) -> str:
     values: list[Any] = [repo.lower(), numbers, sorted(invalid)]
     if allow_no_issue:
         values.append("allow-no-issue")
+    if override_issue_gate:
+        # The override widens what this gate accepts, so it belongs in the
+        # key: a --publish-verdict replaying a key obtained under an override
+        # must not be able to land against an ordinary gated run, or the other
+        # way round. The stated reason is deliberately NOT part of it. The key
+        # identifies the gate's SCOPE -- which repository, which issues, which
+        # relaxations -- and a human retyping their sentence differently
+        # between the two halves of one review has not changed that scope.
+        values.append("override-issue-gate")
     payload = json.dumps(values, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -707,11 +764,19 @@ def gate_marker(
     invalid: list[str],
     *,
     allow_no_issue: bool = False,
+    override_issue_gate: bool = False,
 ) -> str:
     issue_text = ",".join(map(str, numbers)) if numbers else "none"
+    key = gate_key(
+        repo,
+        numbers,
+        invalid,
+        allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
+    )
     return (
         "<!-- pr-review-gate:v1 status=ISSUE_NOT_APPROVED "
-        f"key={gate_key(repo, numbers, invalid, allow_no_issue=allow_no_issue)} "
+        f"key={key} "
         f"issues={issue_text} -->"
     )
 
@@ -722,13 +787,25 @@ def gate_approved(
     checks: list[dict[str, Any]],
     *,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
 ) -> bool:
+    """Whether the linked-issue gate lets this review proceed.
+
+    `override_issue_gate` relaxes exactly one clause -- that every linked
+    issue carries a current canonical approval -- and nothing else. The other
+    three still hold under it, deliberately, because each is a different
+    defect a human saying "review it anyway" has not spoken to: a pull request
+    with no linked issue at all is what `allow_no_issue` is for, an
+    unparseable or cross-repository link is a scope error rather than a
+    pending approval, and a check list that does not line up with the issue
+    list is this coordinator failing to read its own state.
+    """
     has_allowed_scope = bool(numbers) or allow_no_issue
     return (
         has_allowed_scope
         and len(checks) == len(numbers)
         and not invalid
-        and all(item["approved"] for item in checks)
+        and (override_issue_gate or all(item["approved"] for item in checks))
     )
 
 
@@ -738,18 +815,44 @@ def gate_status(
     repo: str,
     *,
     allow_no_issue: bool = False,
+    override_issue_gate: bool = False,
+    override_reason: str | None = None,
     config_path: str | None = None,
 ) -> dict[str, Any]:
     numbers, invalid = linked_issue_numbers(pr, repo)
     checks = [check_issue(root, repo, number, config_path) for number in numbers]
-    approved = gate_approved(numbers, invalid, checks, allow_no_issue=allow_no_issue)
+    approved = gate_approved(
+        numbers,
+        invalid,
+        checks,
+        allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
+    )
+    # What the override actually carried, rather than that one was passed:
+    # an override on an already-approved gate changed nothing, and a report
+    # that could not tell the two apart would make every later reader treat a
+    # no-op flag as a bypassed approval.
+    overridden = [
+        item["issue"]
+        for item in checks
+        if override_issue_gate and not item["approved"]
+    ]
     return {
         "approved": approved,
         "allow_no_issue": allow_no_issue,
+        "override_issue_gate": override_issue_gate,
+        "override_reason": override_reason,
+        "overridden_issues": overridden,
         "issues": numbers,
         "invalid_links": invalid,
         "checks": checks,
-        "key": gate_key(repo, numbers, invalid, allow_no_issue=allow_no_issue),
+        "key": gate_key(
+            repo,
+            numbers,
+            invalid,
+            allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate,
+        ),
     }
 
 
@@ -791,17 +894,25 @@ def publish_gate_comment(
     gate: dict[str, Any],
     *,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
     config_path: str | None = None,
 ) -> tuple[str, str]:
+    # Still reachable under an override: the override relaxes the approval
+    # clause alone, so an invalid link or an unscoped pull request blocks here
+    # exactly as before and must recompute the same key it was gated on.
     marker = gate_marker(
         repo,
         gate["issues"],
         gate["invalid_links"],
         allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
     )
     body = f"{GATE_TEXT}\n\n{marker}\n"
     refreshed = pr_view(root, repo, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    refreshed_gate = gate_status(
+        root, refreshed, repo, allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate, config_path=config_path,
+    )
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
     login = viewer_login(root)
@@ -809,7 +920,10 @@ def publish_gate_comment(
     if existing:
         return "existing", existing
     refreshed = pr_view(root, repo, pr["number"])
-    refreshed_gate = gate_status(root, refreshed, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    refreshed_gate = gate_status(
+        root, refreshed, repo, allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate, config_path=config_path,
+    )
     if refreshed_gate["key"] != gate["key"] or refreshed_gate["approved"]:
         raise WorkflowError("issue gate changed before publication; rerun the review")
     url = post_comment(root, repo, pr["number"], body)
@@ -825,18 +939,35 @@ def issue_context(root: Path, repo: str, number: int) -> dict[str, Any]:
     return {"issue": issue, "comments": comments}
 
 
-def collect_context(root: Path, repo: str, pr: dict[str, Any], issue_numbers: list[int]) -> dict[str, Any]:
+def collect_context(
+    root: Path,
+    repo: str,
+    pr: dict[str, Any],
+    issue_numbers: list[int],
+    *,
+    gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     diff = run(["gh", "pr", "diff", str(pr["number"]), "-R", repo], cwd=root).stdout
     review_comments = paginated_api(root, f"repos/{repo}/pulls/{pr['number']}/comments?per_page=100")
     ordinary_comments = pr_comments(root, repo, pr["number"])
     issues = [issue_context(root, repo, number) for number in issue_numbers]
-    return {
+    context = {
         "pull_request": pr,
         "linked_issues": issues,
         "prior_pr_comments": ordinary_comments,
         "inline_review_comments": review_comments,
         "diff": diff,
     }
+    # Only when an approval was actually bypassed. A reviewer told the issue
+    # specification is unsettled reads it differently, and a payload that
+    # announced an override on every ordinary round would train that reading
+    # onto reviews where it is false.
+    if gate and gate.get("overridden_issues"):
+        context["issue_gate_override"] = {
+            "issues": gate["overridden_issues"],
+            "reason": gate["override_reason"],
+        }
+    return context
 
 
 def resolve_fetch_source(root: Path, remote_name: str, repo: str) -> str:
@@ -913,9 +1044,31 @@ def extract_source(root: Path, repo: str, number: int, head: str, destination: P
     make_tree_read_only(destination)
 
 
+def issue_gate_override_notice(context: dict[str, Any]) -> str:
+    """The paragraph a reviewer needs when a human bypassed the issue gate.
+
+    Empty for every ordinary round, so the prompt a normally-gated review
+    builds is byte-identical to the one it built before this flag existed.
+    """
+    override = context.get("issue_gate_override")
+    if not override:
+        return ""
+    issues = ", ".join(f"#{number}" for number in override["issues"])
+    return (
+        "\n\nISSUE-GATE OVERRIDE: a human directed this review to proceed even though "
+        f"the linked issue specification ({issues}) does not carry a current canonical "
+        f"opposite-agent approval. The reason they gave: {override['reason']!r}. Read "
+        "linked_issues as the author's stated intent rather than as a settled contract, "
+        "and say so in your summary if this pull request's correctness depends on a part "
+        "of that specification which is still unreviewed. Nothing else about your review "
+        "changes: judge the code on its merits, and do not treat the override as either "
+        "an argument for or against approving."
+    )
+
+
 def review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bool) -> str:
     mode = "rereview" if rereview else "review"
-    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}.
+    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}.{issue_gate_override_notice(context)}
 
 The current working directory is a read-only extraction of the exact PR head. Inspect relevant source and tests there. The JSON payload is authoritative for any linked approved issue specifications, the full patch, commits, prior reviews/comments, and CI. When linked_issues is empty, evaluate the PR directly from its title, body, patch, repository context, and tests. For a rereview, explicitly verify prior blocking concerns as well as finding regressions or new blockers.
 
@@ -936,7 +1089,7 @@ def self_review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bo
     # the PR head and it must fetch that itself if it needs more than the
     # diff already in REVIEW_PAYLOAD.
     mode = "rereview" if rereview else "review"
-    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}. You are that canonical reviewer already — Kanban selected and spawned you for this exact role, so this is your own review, not something to delegate to a nested subprocess call.
+    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}.{issue_gate_override_notice(context)} You are that canonical reviewer already — Kanban selected and spawned you for this exact role, so this is your own review, not something to delegate to a nested subprocess call.
 
 The JSON payload is authoritative for any linked approved issue specifications, the full patch (`diff`), commits, prior reviews/comments, and CI. Review from the diff directly; if you need broader repository context than the patch shows, fetch the PR head read-only (e.g. `git fetch --no-tags origin pull/{number}/head` then inspect files with `git show FETCH_HEAD:<path>`) without checking it out over your own working directory or branch. When linked_issues is empty, evaluate the PR directly from its title, body, patch, repository context, and tests. For a rereview, explicitly verify prior blocking concerns as well as finding regressions or new blockers.
 
@@ -1129,9 +1282,36 @@ def review_marker(reviewers: list[Reviewer], head: str, verdict: str) -> str:
     )
 
 
-def render_review(results: list[dict[str, Any]], reviewers: list[Reviewer], head: str) -> tuple[str, str]:
+def override_notice_lines(gate: dict[str, Any]) -> list[str]:
+    """The banner an overridden review carries on the pull request itself.
+
+    Prose rather than a marker field: the `pr-review:v2` marker keeps the
+    exact four-field shape `tools/drain_prs.py` matches, deliberately, so an
+    overridden approval merges through the ordinary queue like any other. The
+    record of the override therefore has to be something a person reads, and
+    it is placed above the verdict where nobody scrolls past it.
+    """
+    if not gate.get("overridden_issues"):
+        return []
+    issues = ", ".join(f"#{number}" for number in gate["overridden_issues"])
+    return [
+        "> **Issue gate overridden by human request.** No current canonical "
+        f"opposite-agent approval for {issues}; this review was run anyway at the "
+        "operator's direction.",
+        ">",
+        f"> Reason given: {gate['override_reason']}",
+        "",
+    ]
+
+
+def render_review(
+    results: list[dict[str, Any]],
+    reviewers: list[Reviewer],
+    head: str,
+    gate: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     verdict = aggregate_verdict(results)
-    lines = [verdict, ""]
+    lines = override_notice_lines(gate or {}) + [verdict, ""]
     for result in results:
         lines.extend([f"### {result['display_name']}", "", result["summary"], ""])
         for concern in result["blocking_concerns"]:
@@ -1157,12 +1337,16 @@ def require_current_review_state(
     expected_gate_key: str,
     *,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
     config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
     if pr["headRefOid"] != expected_head:
         raise WorkflowError("PR head changed; no current-head verdict may be labeled")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    gate = gate_status(
+        root, pr, repo, allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate, config_path=config_path,
+    )
     if gate["key"] != expected_gate_key:
         raise WorkflowError("linked issues changed; no verdict was published")
     if not gate["approved"]:
@@ -1235,6 +1419,7 @@ def verify_publication(
     changes_requested_label: str,
     *,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
     config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
@@ -1245,7 +1430,10 @@ def verify_publication(
     verdict_labels = [item for item in labels if item in {approval_label, changes_requested_label}]
     if verdict_labels != [expected]:
         raise WorkflowError(f"publication label verification failed: {verdict_labels}")
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    gate = gate_status(
+        root, pr, repo, allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate, config_path=config_path,
+    )
     if gate["key"] != gate_key_value or not gate["approved"]:
         raise WorkflowError("publication issue-gate verification failed")
     login = viewer_login(root)
@@ -1305,9 +1493,22 @@ def publish_results(
     so it is never rolled back. Shared by workflow()'s own nested-reviewer
     path and publish_verdict()'s self-reviewed path, so both go through
     identical race handling."""
+    # Absent is False: a gate dict that does not carry the policy has not
+    # authorized a bypass, and defaulting the other way would let a
+    # malformed value grant one. A gate that WAS overridden and lost the
+    # field fails closed and loudly instead -- the re-checks below then
+    # recompute an unapproved gate and refuse to publish.
+    override_issue_gate = bool(gate.get("override_issue_gate"))
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, repo, number)
-    refreshed_gate = gate_status(root, refreshed_pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    refreshed_gate = gate_status(
+        root,
+        refreshed_pr,
+        repo,
+        allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
+        config_path=config_path,
+    )
     if refreshed_pr["headRefOid"] != pr["headRefOid"]:
         raise WorkflowError("PR head changed during review; no verdict was published")
     if refreshed_gate["key"] != gate["key"]:
@@ -1319,6 +1520,7 @@ def publish_results(
             refreshed_pr,
             refreshed_gate,
             allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate,
             config_path=config_path,
         )
         return 2, {
@@ -1329,7 +1531,7 @@ def publish_results(
             "comment_url": url,
         }
 
-    verdict, body = render_review(results, reviewers, pr["headRefOid"])
+    verdict, body = render_review(results, reviewers, pr["headRefOid"], gate)
     require_current_review_state(
         root,
         repo,
@@ -1337,6 +1539,7 @@ def publish_results(
         pr["headRefOid"],
         gate["key"],
         allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
@@ -1348,6 +1551,7 @@ def publish_results(
             pr["headRefOid"],
             gate["key"],
             allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate,
             config_path=config_path,
         )
         set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
@@ -1362,6 +1566,7 @@ def publish_results(
             approval_label,
             changes_requested_label,
             allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate,
             config_path=config_path,
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
@@ -1377,6 +1582,7 @@ def publish_results(
                 approval_label,
                 changes_requested_label,
                 allow_no_issue=allow_no_issue,
+                override_issue_gate=override_issue_gate,
                 config_path=config_path,
             )
             if not verified["ready_for_review"]:
@@ -1425,12 +1631,21 @@ def workflow(
     rereview: bool,
     dry_run: bool,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
+    override_reason: str | None = None,
     self_review: bool = False,
     self_review_as: str | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    # The mode question first, ahead of every GitHub read: an installation that
+    # Argument misuse first, ahead of even the mode question: it needs no
+    # roster, no network and no repository to decide, so refusing it here is
+    # the cheapest possible "nothing happened" and cannot be reordered behind
+    # something that reads GitHub.
+    refusal = override_refusal(number, override_issue_gate, override_reason)
+    if refusal is not None:
+        return refusal
+    # The mode question next, ahead of every GitHub read: an installation that
     # loads no provider cannot review this pull request whatever it says, and
     # refusing here is what makes "publishes nothing, changes no label"
     # structural rather than a promise about later branches.
@@ -1439,7 +1654,15 @@ def workflow(
         return no_agent_refusal(number)
     repo = resolve_repository(root, config_path, explicit_repo)
     pr = pr_view(root, repo, number)
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    gate = gate_status(
+        root,
+        pr,
+        repo,
+        allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
+        override_reason=override_reason,
+        config_path=config_path,
+    )
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
     base = {
@@ -1515,6 +1738,7 @@ def workflow(
             pr,
             gate,
             allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate,
             config_path=config_path,
         )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
@@ -1523,7 +1747,7 @@ def workflow(
     if dry_run:
         return 0, {**base, "status": "ready", "comment_status": "dry-run"}
 
-    context = collect_context(root, repo, pr, gate["issues"])
+    context = collect_context(root, repo, pr, gate["issues"], gate=gate)
 
     if self_review and len(reviewers) == 1:
         # Known-origin $pr-review/$pr-rereview: the calling agent IS the
@@ -1574,6 +1798,8 @@ def publish_verdict(
     result_path: Path,
     *,
     allow_no_issue: bool,
+    override_issue_gate: bool = False,
+    override_reason: str | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -1584,6 +1810,9 @@ def publish_verdict(
     whatever the caller provides, it is the same safe-publish machinery
     the nested-reviewer path uses, just fed an externally-supplied result
     instead of one from a spawned subprocess."""
+    refusal = override_refusal(number, override_issue_gate, override_reason)
+    if refusal is not None:
+        return refusal
     mode, loaded = operating_mode()
     if mode == kanban_models().NO_AGENT_MODE:
         return no_agent_refusal(number)
@@ -1594,7 +1823,15 @@ def publish_verdict(
             "PR head changed since the self-review context was generated; "
             "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
         )
-    gate = gate_status(root, pr, repo, allow_no_issue=allow_no_issue, config_path=config_path)
+    gate = gate_status(
+        root,
+        pr,
+        repo,
+        allow_no_issue=allow_no_issue,
+        override_issue_gate=override_issue_gate,
+        override_reason=override_reason,
+        config_path=config_path,
+    )
     if gate["key"] != expected_gate_key:
         raise WorkflowError(
             "linked issues changed since the self-review context was generated; "
@@ -1618,7 +1855,8 @@ def publish_verdict(
     }
     if not gate["approved"]:
         status, url = publish_gate_comment(
-            root, repo, pr, gate, allow_no_issue=allow_no_issue, config_path=config_path,
+            root, repo, pr, gate, allow_no_issue=allow_no_issue,
+            override_issue_gate=override_issue_gate, config_path=config_path,
         )
         return 2, {**base, "status": "blocked", "comment_status": status, "comment_url": url}
     result_data = load_json(Path(result_path).read_text(encoding="utf-8"), "self-review result file")
@@ -1668,6 +1906,46 @@ def self_test() -> None:
     owned = [{"user": {"login": "owner"}, "body": gate_body, "html_url": "url"}]
     assert has_owned_gate_comment(owned, "OWNER", gate_body) == "url"
     assert has_owned_gate_comment(owned, "owner", f"Different text\n\n{marker}") is None
+    # The override relaxes the approval clause and only that clause. Each of
+    # the other three is asserted to survive it, because each is a different
+    # defect a human saying "review it anyway" has not spoken to.
+    unapproved = [{"issue": 7, "approved": False}]
+    assert not gate_approved([7], [], unapproved, allow_no_issue=False)
+    assert gate_approved([7], [], unapproved, allow_no_issue=False, override_issue_gate=True)
+    assert not gate_approved(
+        [7], ["external#1"], unapproved, allow_no_issue=False, override_issue_gate=True
+    )
+    assert not gate_approved([], [], [], allow_no_issue=False, override_issue_gate=True)
+    assert not gate_approved([7], [], [], allow_no_issue=False, override_issue_gate=True)
+    # An override widens the gate, so it is part of the key a --publish-verdict
+    # replays; the stated reason deliberately is not.
+    assert gate_key("o/r", [7], []) != gate_key("o/r", [7], [], override_issue_gate=True)
+    assert gate_key("o/r", [7], [], override_issue_gate=True) == gate_key(
+        "o/r", [7], [], override_issue_gate=True
+    )
+    # Both halves of the override are required, in both directions, and each
+    # refusal names which half was missing.
+    assert override_refusal(1, False, None) is None
+    assert override_refusal(1, False, "   ") is None
+    flagged = override_refusal(1, True, "  ")
+    assert flagged is not None and flagged[0] == 1
+    assert flagged[1]["status"] == "override_refused"
+    assert "--override-reason" in flagged[1]["error"]
+    reasoned = override_refusal(1, False, "owner said so")
+    assert reasoned is not None and reasoned[1]["status"] == "override_refused"
+    assert "--override-issue-gate" in reasoned[1]["error"]
+    assert override_refusal(1, True, "owner said so") is None
+    # An override that bypassed nothing announces nothing: no banner in the
+    # published comment, no notice in the reviewer's prompt.
+    assert override_notice_lines({"overridden_issues": [], "override_reason": "x"}) == []
+    assert issue_gate_override_notice({}) == ""
+    banner = override_notice_lines({"overridden_issues": [7], "override_reason": "owner said so"})
+    assert any("#7" in line for line in banner)
+    assert any("owner said so" in line for line in banner)
+    notice = issue_gate_override_notice(
+        {"issue_gate_override": {"issues": [7], "reason": "owner said so"}}
+    )
+    assert "#7" in notice and "owner said so" in notice
     assert not gate_approved([], [], [], allow_no_issue=False)
     assert gate_approved([], [], [], allow_no_issue=True)
     assert not gate_approved([], ["external#1"], [], allow_no_issue=True)
@@ -1732,6 +2010,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow a PR with no linked issue; linked issues still require canonical approval",
     )
+    parser.add_argument(
+        "--override-issue-gate",
+        action="store_true",
+        help=(
+            "Review a PR whose linked issue lacks canonical approval, on a human's explicit "
+            "instruction. Requires --override-reason, which is published on the PR beside the "
+            "verdict. Never pass this on an agent's own initiative: it bypasses the "
+            "cross-agent readiness gate, and only the person asking for the review may decide "
+            "to. Relaxes that one clause and nothing else."
+        ),
+    )
+    parser.add_argument(
+        "--override-reason",
+        metavar="TEXT",
+        help=(
+            "The human decision --override-issue-gate stands on. Required by it, refused "
+            "without it, and reproduced verbatim in the published review comment so the "
+            "bypass is never silent."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print structured output")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks")
     parser.add_argument(
@@ -1778,6 +2076,8 @@ def main() -> None:
                 args.gate_key,
                 args.result,
                 allow_no_issue=args.allow_no_issue,
+                override_issue_gate=args.override_issue_gate,
+                override_reason=args.override_reason,
                 config_path=args.config,
                 explicit_repo=args.repo,
             )
@@ -1788,6 +2088,8 @@ def main() -> None:
                 rereview=args.rereview is not None,
                 dry_run=args.dry_run,
                 allow_no_issue=args.allow_no_issue,
+                override_issue_gate=args.override_issue_gate,
+                override_reason=args.override_reason,
                 self_review=args.self_review,
                 self_review_as=args.self_review_as,
                 config_path=args.config,
