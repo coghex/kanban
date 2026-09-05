@@ -38,7 +38,7 @@ concrete precondition
 
 - [x] PRR-1. Public support and release gates assign managed-service readiness to `--doctor` — [#618]
 - [x] PRR-2. The release rehearsal can select a different workflow dispatch — [#619]
-- [ ] PRR-3. The systemd controller reader silently misparses valid command quoting
+- [x] PRR-3. The systemd controller reader silently misparses valid command quoting — [#621]
 
 ## 1. Optional-component readiness
 
@@ -211,7 +211,7 @@ not assert that the dispatch and selected run are the same event.
 
 ## 3. systemd command-word parsing
 
-### PRR-3. The systemd controller reader silently misparses valid command quoting
+### [#621] PRR-3. The systemd controller reader silently misparses valid command quoting
 
 > **Captured note:** Decode the systemd unit's command words under systemd's
 > actual quoting rules—or fail closed on syntax Kanban cannot decode—so status,
