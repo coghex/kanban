@@ -28,7 +28,7 @@ concrete precondition
 ## Status
 
 - [x] PRR-1. Mission store paths do not uniquely identify repositories — [#615]
-- [ ] PRR-2. `$fix` accepts approval that belongs to an older head
+- [x] PRR-2. `$fix` accepts approval that belongs to an older head — [#616]
 - [ ] PRR-3. Session-cycle diagnostics include acyclic ancestors
 
 ## 1. Durable mission repository isolation
@@ -107,7 +107,7 @@ the collision defeats that safety property and can lose durable state.
 
 ## 2. Approved-fix authority
 
-### PRR-2. `$fix` accepts approval that belongs to an older head
+### [#616] PRR-2. `$fix` accepts approval that belongs to an older head
 
 > **Captured note:** Do not let `$fix` modify or push a pull request unless its
 > current head is the exact head the accepted review approved.
