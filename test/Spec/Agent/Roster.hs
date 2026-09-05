@@ -570,6 +570,20 @@ spec = do
       assignmentFor rerosteredDefaults IssueReviewRole CodexProvider
         `shouldNotBe` assignmentFor defaultRoster IssueReviewRole CodexProvider
 
+    -- Requirement 7 of #614. The case above resolves its expectation from the
+    -- same roster the payload came from, so it passes on any pair of values.
+    -- The compiled default is therefore pinned separately, and on the payload
+    -- the app-server actually receives rather than on the cell.
+    it "carries the compiled issue_review codex assignment into those payloads" $
+      withRecordingReviewClientUsing defaultRoster $ \client wire _ -> do
+        connection <- soleReviewConnection client
+        fmap (() <$) (beginIssueReview client 844) `shouldReturn` Right ()
+        (_, threadParams) <- nextClientRequest wire
+        encodedValue threadParams `shouldMention` "\"model\":\"gpt-6-astra\""
+        sendReviewMessage client (threadOn connection "thread-1") Nothing "carry on" `shouldReturn` Right ()
+        (_, turnParams) <- nextClientRequest wire
+        encodedValue turnParams `shouldMention` "\"effort\":\"high\""
+
     -- The cell a client resolves is its own backend's, and this fixture's
     -- backend is the app-server's, so a Claude-only roster cannot reach it
     -- at all. The Claude backend's own refusal on a Codex-only roster is
@@ -591,6 +605,17 @@ spec = do
         recorded `shouldBe` authenticatedClaudeArguments cell
         recorded `shouldContain` ["--model", Data.Text.unpack cell.assignmentModel]
         recorded `shouldContain` ["--effort", Data.Text.unpack cell.assignmentEffort]
+
+    -- The same split as the review payload above: that case reads its
+    -- expectation off the roster it spawned from, so the compiled default the
+    -- tool really runs on is pinned here.
+    it "carries the compiled issue_revise claude assignment into that argv" $
+      withFakeClaudeCliUsing defaultRoster recordArgumentsScript fastBounds $ \markerPath client -> do
+        answered <- runBoundedClaudeCall boundedCallMicros client "review this"
+        answered `shouldSatisfy` either (const False) (const True)
+        recorded <- lines <$> readFile markerPath
+        recorded `shouldContain` ["--model", "claude-fable-5-1"]
+        recorded `shouldContain` ["--effort", "high"]
 
     it "refuses without spawning anything when the roster loads no claude provider" $
       withFakeClaudeCliUsing codexOnlyRoster recordArgumentsScript fastBounds $ \markerPath client -> do
@@ -862,7 +887,7 @@ spec = do
         `shouldBe` "codex · GPT-5.6-Terra xhigh"
       withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
         claudeTranscriptStart (claudeStartDisplay client)
-          `shouldBe` "\n[sonnet] Starting authenticated Sonnet 5 high…\n"
+          `shouldBe` "\n[sonnet] Starting authenticated Fable 5.1 high…\n"
       -- The PR-revision label is the correction: the flow has always spawned
       -- pr_revise, while the label read solve.claude and said "Sonnet 5 high".
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRevision ClaudeSolver defaults
@@ -872,9 +897,9 @@ spec = do
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high".
       reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
-        `shouldMention` "authored by you as gpt-5.4 high; Claude-origin amendment content is authored by Claude Sonnet 5 high; unmarked issues default to you as gpt-5.4 high."
+        `shouldMention` "authored by you as GPT-6-Astra high; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra high."
       encodedValue (claudeTool defaultRoster)
-        `shouldMention` "Run the authenticated Claude Sonnet 5 high specification-revision agent"
+        `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 
 
 -- | The display the event 'Kanban.Review.claudeStartedEvent' raises carries,
