@@ -29,7 +29,7 @@ concrete precondition
 
 - [x] PRR-1. Mission store paths do not uniquely identify repositories — [#615]
 - [x] PRR-2. `$fix` accepts approval that belongs to an older head — [#616]
-- [ ] PRR-3. Session-cycle diagnostics include acyclic ancestors
+- [x] PRR-3. Session-cycle diagnostics include acyclic ancestors — [#617]
 
 ## 1. Durable mission repository isolation
 
@@ -178,7 +178,7 @@ protection settings; the default label path alone establishes the defect.
 
 ## 3. Mission session-tree diagnostics
 
-### PRR-3. Session-cycle diagnostics include acyclic ancestors
+### [#617] PRR-3. Session-cycle diagnostics include acyclic ancestors
 
 > **Captured note:** Report only the sessions that actually form a mission
 > lineage cycle, independent of which input session validation visits first.
