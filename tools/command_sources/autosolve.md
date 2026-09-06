@@ -14,7 +14,7 @@ at approval; never merge or finalize.
 sub-steps of this workflow. Each was written to be invoked directly, so each
 states its own terminal stop condition and its own assumptions about who is
 running it. Where one of those conflicts with a step below, **this document
-wins** — the two overrides that matter are called out in steps 2 and 4.
+wins** — the three overrides that matter are called out in steps 2, 3, and 5.
 
 ## 1. Resolve the repository, then the issue
 
@@ -36,7 +36,7 @@ If the invocation already supplied an identity — Kanban's prompt passes
 `--repo <owner>/<name>` — that identity is the target and this resolution does
 not run. Either way it is resolved once, and every step below uses that one
 value, including the one handed to {{cmd:solve}} and the coordinator invocation
-in step 4.
+in step 5.
 
 **Announce, then act:** name the resolved `$REPO` and the issue number before
 the first step below. Reporting what was resolved is what catches a wrong
@@ -68,10 +68,11 @@ Run {{cmd:solve}} for `$ISSUE` in `$REPO`.
 
 **Its stop condition ends that workflow, not this run.** {{cmd:solve}} closes
 with a `## Stop Condition` section telling you to end with exactly
-`PR #<number> - <summary>`; that line is the handoff into step 3, not a final
+`PR #<number> - <summary>`; that line is the handoff into step 4, not a final
 answer. Never emit it as this run's last output — the closing lines at the end
 of this document are the only permitted endings, and every one of them reports
-on a review that step 4 already attempted.
+on a review that step 5 already attempted, or on the direct-land disposition
+step 3 covers.
 
 What does stay in force is every prohibition in that same section: as the
 solver you must not review, label, merge, or finalize the pull request.
@@ -83,14 +84,77 @@ enter or affect the effective spec. Never bypass its shared
 through another GitHub surface. Repository roles, issue authorship, and
 lookalike login names do not expand this allowlist.
 
-Stop if {{cmd:solve}} asks a question or fails before opening a pull request.
+Before treating a stop as final, check step 3: a stop caused by the effective
+spec routing this issue away from a pull request has its own disposition
+there. Any other stop before opening a pull request — a question, a missing
+asset, an unresolved open decision — ends this run; report it.
 
-## 3. Record the pull request and its worktree
+## 3. Documentation-only issues without a pull-request lane
+
+**Override, not a stop.** Some issues' effective spec states that the change
+must land through the target repository's own direct-publication tooling — a
+documentation worktree and a landing script such as `tools/docs_land.sh` —
+rather than through a pull request. {{cmd:solve}}'s own contract only knows
+how to open a pull request, so left alone it treats that instruction as a
+conflict and releases the claim without implementing anything. This step
+overrides that stop for exactly this situation, in favor of a judgment call
+between two dispositions.
+
+Recognize this situation only when both hold: the effective spec — the issue
+body or a trusted comment, never this session's own speculation — states the
+change is documentation-only and names the repository's direct-publication
+path instead of a pull request, and the target repository's own required
+reading (its `CLAUDE.md`/`AGENTS.md`) confirms that lane exists. Absent
+either, this is not this situation; the stop in step 2 stands.
+
+Choose the disposition on the merits of the specific change, not the label on
+the issue:
+
+- **Worthy of review** — an open decision, ambiguity, or reviewer
+  disagreement remains in the effective spec; the fix reaches more than the
+  file or files the issue names; a listed acceptance check cannot be run and
+  confirmed before landing; or this session is not fully confident the
+  correction is right. Override the "not through a pull request" instruction
+  instead of honoring it: continue {{cmd:solve}} exactly as it runs for any
+  other issue — implement in the issue's own worktree, open the pull request
+  with `Closes #<issue>` — and resume at step 4.
+- **Simple** — the effective spec leaves no open decision (a trusted review
+  verdict saying so is the strongest evidence), the fix is self-contained to
+  the file or files the issue names, and every acceptance check the issue
+  lists can be run and confirmed to pass before landing. Do not open a pull
+  request.
+
+  Reclaim the issue first — {{cmd:solve}} already released it at the stop:
+
+  ```bash
+  gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
+  ```
+
+  Implement the fix in the repository's own documentation worktree, run every
+  acceptance check the issue lists and confirm each one passes, then land it
+  with {{cmd:push-docs}}. Naming this issue's exact paths and content here is
+  this run's own user-directed request to publish them — the standing
+  authorization {{cmd:push-docs}} requires — so its default caution against
+  unprompted publication does not apply to this one landing. Do not fold in
+  any other pending document while doing this.
+
+  Close the issue only after {{cmd:push-docs}} reports the landing verified
+  with no refusal and no warning, quoting the landing commit and confirming
+  each acceptance check by name:
+
+  ```bash
+  gh issue close -R "$REPO" "$ISSUE" --reason completed --comment "<landing commit and confirmed acceptance checks>"
+  ```
+
+  This disposition ends the run: there is no pull request for steps 4 through
+  6 to record or review. Skip straight to the fourth closing line in step 7.
+
+## 4. Record the pull request and its worktree
 
 Record the pull request number and the absolute issue worktree {{cmd:solve}}
 selected. A worktree it created lives at
 `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/issue-<n>-<slug>`; a
-recovered legacy worktree keeps its existing path. Every fix in step 5 is made
+recovered legacy worktree keeps its existing path. Every fix in step 6 is made
 in that worktree and nowhere else.
 
 Then verify the origin marker the review routing depends on:
@@ -113,7 +177,7 @@ both brands instead; stop and report it rather than reviewing anything
 yourself.
 <!-- /brand -->
 
-## 4. The review loop
+## 5. The review loop
 
 For rounds 1 through 5, use {{cmd:pr-review}} in round 1 and
 {{cmd:pr-rereview}} after each pushed fix.
@@ -206,7 +270,7 @@ it first, in which case nothing was published and no label changed, so rerun
 with both `--self-review` and `--self-review-as` dropped.
 <!-- /brand -->
 
-## 5. Read the verdict after every round
+## 6. Read the verdict after every round
 
 Query the pull request after every round. A label on its own is not the
 verdict: the head-bound marker the coordinator publishes beside it is, and a
@@ -219,7 +283,7 @@ gh pr view "$PR" -R "$REPO" --json headRefOid,labels,comments
 - `reviewed:approve`, with a marker naming the current head: stop
   successfully.
 - `reviewed:changes`: read the current output or comment, fix every blocking
-  concern minimally in the issue worktree from step 3, then run only the tests,
+  concern minimally in the issue worktree from step 4, then run only the tests,
   probes, and audits relevant to the changed paths and the review concern. Do
   not run a whole suite or a local CI mirror unless the user explicitly
   requests it. Commit, push, and rereview; never push with a failing selected
@@ -239,7 +303,7 @@ this `pr-origin:codex` pull request is the publication failure that last
 bullet names, however green the label sitting beside it looks.
 <!-- /brand -->
 
-## 6. Where this run stops
+## 7. Where this run stops
 
 Stop and ask if feedback is unclear, contradictory, or needs a product
 decision. Stop after five rounds.
@@ -255,4 +319,5 @@ End with exactly one of:
 PR #<pr> approved after <k> inline review round(s) — run {{cmd:finalize}} when ready.
 PR #<pr> still reviewed:changes after 5 rounds — needs your input.
 PR #<pr> review publication failed in round <k> — needs your input.
+Issue #<issue> landed directly as <commit> — documentation-only, no pull request needed.
 ```
