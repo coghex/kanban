@@ -61,7 +61,28 @@ reconciled by consuming shared lines in lockstep and the recorded units in
 order, ending both files and the record together? A change landed identically
 in both copies adds shared lines, which the walk consumes in lockstep, so it
 cannot change the answer whatever it adds. A change landed in one copy only
-leaves a line the walk can neither pair nor account for, so it fails.
+that adds, drops, or edits a line leaves text the walk can neither pair nor
+account for, so it fails. A change that only MOVES an existing line is a
+separate question, and the paragraphs below are about that one.
+
+Order alone was not enough (issue #627). A unit whose Codex side is empty
+matches the zero-length slice at any cursor, so nothing stopped its Claude-only
+lines from sitting anywhere between the neighbouring recorded units: swapping
+`result_models(results),` past `pr["headRefOid"],` in the Claude copy alone
+passed this gate, and it passes a list where `verify_publication` expects a head
+SHA. Each unit therefore also records the shared lines it sat between, and the
+walk requires the unit to follow the first and precede the second.
+
+Those two anchors are order constraints, not adjacency ones, which is what keeps
+them from re-creating the false failures above: lines landed identically in both
+copies may appear between a unit and either anchor, however many, and an anchor
+a shared edit rewrote or deleted outright is dropped rather than enforced. That
+tolerance has a price the selected policy of issue #627 accepts. Where a shared
+line repeats, one identical insertion can produce a pair that a one-sided move
+could also have produced, and both must pass, because this gate is handed two
+final sources and a record -- never the edit history that produced them. So a
+unit that stays between *some* pair of its recorded neighbours is accepted; what
+is rejected is a unit that has moved out from between them.
 
 Blank lines are dropped before the walk. They carry no behavior, and their
 grouping is the one thing the superseded renderings churned on; every other
@@ -75,6 +96,7 @@ from __future__ import annotations
 import difflib
 import unittest
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COORDINATOR = (
@@ -92,26 +114,34 @@ CODEX_COORDINATOR = (
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
-# Claude-only (`+`) lines grouped into units by a bare `@@`. Line numbers are
-# not recorded: they would churn on every shared edit that lands correctly in
-# both copies, which is exactly the change this gate must stay quiet about.
-# What remains -- the differing lines, their order, and the unit boundaries
-# between them -- is the divergence itself, and it is complete: a difference
-# anywhere else in either file is a line the reconciliation walk cannot
-# account for.
+# Claude-only (`+`) lines grouped into units by a bare `@@`, each unit wrapped
+# in the shared lines it sits between, written as ` `-prefixed context. Line
+# numbers are not recorded: they would churn on every shared edit that lands
+# correctly in both copies, which is exactly the change this gate must stay
+# quiet about. What remains -- the differing lines, their order, the unit
+# boundaries between them, and the neighbours each unit must stay between -- is
+# the divergence itself, and it is complete: a difference anywhere else in
+# either file is a line the reconciliation walk cannot account for.
+#
+# A context line is a position anchor and nothing more. It is a line the two
+# copies SHARE, it is never counted as part of the divergence, and
+# `belongs_to_the_pinning_exception` deliberately does not read it -- otherwise
+# an unrelated difference could be recorded here under a neighbour that happens
+# to say "model".
 #
 # Issue #624 regenerated this constant mechanically, from the same two tracked
 # files it already described, when the comparison moved off rendered diff text
-# onto the reconciliation walk. Nothing was blessed and nothing was added: the
-# 122 lines recorded below are the previous constant's 127 with its 5 blank
-# entries dropped -- the same lines, in the same order, re-cut into the unit
-# boundaries the walk reads instead of the hunk boundaries a diff rendered.
+# onto the reconciliation walk. Issue #627 regenerated it mechanically a second
+# time, from that same unchanged tracked pair, to add the context lines above.
+# Nothing was blessed and nothing was added either time: the 122 `-`/`+` lines
+# recorded below are the ones the first constant already carried, in the same
+# order, and every ` ` line beside them is a line both copies already share.
 #
 # Update this ONLY together with docs/agent-workflow-contract.md §2.2 and
 # claude-plugin/README.md, which is what makes it a record of a reviewed
 # exception rather than a snapshot of whatever the two files happen to be.
-DOCUMENTED_DIVERGENCE = '''\
-@@
+DOCUMENTED_DIVERGENCE = r'''@@
+ UNVERIFIED_MODEL_TOKEN = "unspecified"
 +# Canonical nested-reviewer model/effort (issue #77 round-2 review). Unlike
 +# the self-reviewed known-origin case, invoke_codex/invoke_claude below
 +# fully construct the subprocess they spawn, so — for this plugin's
@@ -131,7 +161,9 @@ DOCUMENTED_DIVERGENCE = '''\
 +CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 +CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 +CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
+ _KANBAN_MODELS_MODULE = None
 @@
+     return module
 +def nested_review_assignment(provider: str):
 +    """The `roles.pr_review.<provider>` cell this coordinator spawns on.
 +    The four constants above are what the reader falls back to when the host
@@ -157,12 +189,18 @@ DOCUMENTED_DIVERGENCE = '''\
 +        )
 +    except models.KanbanModelsError as error:
 +        raise WorkflowError(f"{error}; no nested review was performed") from error
+ MAX_REVIEW_SUMMARY_CHARS = 4000
 @@
+ """
 -def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
 +def validate_review(value: Any, reviewer: Reviewer, model: str = UNVERIFIED_MODEL_TOKEN) -> dict[str, Any]:
+     if not isinstance(value, dict):
 @@
+         "blocking_concerns": concerns,
 +        "model": model,
+     }
 @@
+         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
 -        # No -m/-c model_reasoning_effort/-s/--dangerously-bypass-approvals-and-sandbox:
 -        # this coordinator does not pin model, reasoning effort, sandbox, or
 -        # approval policy for the reviewer it spawns, and cannot verify
@@ -176,19 +214,27 @@ DOCUMENTED_DIVERGENCE = '''\
 +        # -s/--dangerously-bypass-approvals-and-sandbox: sandbox/approval
 +        # policy is still left to this installation's own default. `codex
 +        # exec` without -s/-a runs a read-only inspection task to
+         # completion under its own non-interactive defaults.
 @@
+         # completion under its own non-interactive defaults.
 +        model_assignment = nested_review_assignment("codex")
+         run(
 @@
+                 str(cwd),
 +                "--model",
 +                model_assignment.model,
 +                "--config",
 +                f'model_reasoning_effort="{model_assignment.effort}"',
+                 "--output-schema",
 @@
+             raise WorkflowError(f"{reviewer.display_name} did not return structured JSON") from exc
 -    return validate_review(value, reviewer)
 +    return validate_review(
 +        value, reviewer, f"{model_assignment.model}@{model_assignment.effort}"
 +    )
+ def parse_claude_output(stdout: str) -> Any:
 @@
+ def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
 -    # No --model/--effort/--permission-mode/--tools: this coordinator does
 -    # not pin model, reasoning effort, or permission policy for the
 -    # reviewer it spawns. The published comment/marker therefore claims
@@ -204,48 +250,74 @@ DOCUMENTED_DIVERGENCE = '''\
 +    # `claude -p` without --permission-mode runs a read-only inspection
 +    # task to completion under its own non-interactive defaults.
 +    model_assignment = nested_review_assignment("claude")
+     proc = run(
 @@
+             "-p",
 +            "--model",
 +            model_assignment.model,
 +            "--effort",
 +            model_assignment.effort,
+             "--no-session-persistence",
 @@
+     )
 -    return validate_review(parse_claude_output(proc.stdout), reviewer)
 +    return validate_review(
 +        parse_claude_output(proc.stdout),
 +        reviewer,
 +        f"{model_assignment.model}@{model_assignment.effort}",
 +    )
+ def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
 @@
+     return "CHANGES_REQUESTED" if any(item["verdict"] == "CHANGES_REQUESTED" for item in results) else "APPROVE"
 -def review_marker(reviewers: list[Reviewer], head: str, verdict: str) -> str:
 +def review_marker(reviewers: list[Reviewer], models: list[str], head: str, verdict: str) -> str:
+     reviewer_keys = ",".join(item.key for item in reviewers)
 @@
+     reviewer_keys = ",".join(item.key for item in reviewers)
 -    models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
 +    models_field = ",".join(models)
+     return (
 @@
+     return (
 -        f"<!-- pr-review:v2 reviewers={reviewer_keys} models={models} "
 +        f"<!-- pr-review:v2 reviewers={reviewer_keys} models={models_field} "
+         f"head={head} verdict={verdict} -->"
 @@
+     )
 +def result_models(results: list[dict[str, Any]]) -> list[str]:
 +    return [result.get("model", UNVERIFIED_MODEL_TOKEN) for result in results]
+ def override_notice_lines(gate: dict[str, Any]) -> list[str]:
 @@
+             lines.append("")
 -    lines.append(review_marker(reviewers, head, verdict))
 +    lines.append(review_marker(reviewers, result_models(results), head, verdict))
+     body = "\n".join(lines).rstrip() + "\n"
 @@
+     reviewers: list[Reviewer],
 +    models: list[str],
+     head: str,
 @@
+     marker, url = latest
 -    expected_models = ",".join(UNVERIFIED_MODEL_TOKEN for _ in reviewers)
 +    expected_models = ",".join(models)
+     expected_reviewers = ",".join(item.key for item in reviewers)
 @@
+             reviewers,
 +            result_models(results),
+             pr["headRefOid"],
 @@
+                 reviewers,
 +                result_models(results),
+                 pr["headRefOid"],
 @@
+     )
 -    review = review_marker([CODEX_REVIEWER, CLAUDE_REVIEWER], "a" * 40, "APPROVE")
 +    review = review_marker(
 +        [CODEX_REVIEWER, CLAUDE_REVIEWER], [UNVERIFIED_MODEL_TOKEN, UNVERIFIED_MODEL_TOKEN], "a" * 40, "APPROVE"
 +    )
+     match = REVIEW_MARKER_RE.fullmatch(review)
 @@
+     assert match.group("models") == f"{UNVERIFIED_MODEL_TOKEN},{UNVERIFIED_MODEL_TOKEN}"
 +    assert result_models([{"model": "x@y"}, {"verdict": "APPROVE"}]) == ["x@y", UNVERIFIED_MODEL_TOKEN]
 +    pinned = review_marker(
 +        [CODEX_REVIEWER],
@@ -254,7 +326,8 @@ DOCUMENTED_DIVERGENCE = '''\
 +        "CHANGES_REQUESTED",
 +    )
 +    pinned_match = REVIEW_MARKER_RE.fullmatch(pinned)
-+    assert pinned_match and pinned_match.group("models") == "gpt-5.6-terra@xhigh"'''
++    assert pinned_match and pinned_match.group("models") == "gpt-5.6-terra@xhigh"
+     print("self-test passed")'''
 
 # The vocabulary §2.2's exception is written in. Used only as a backstop on
 # DOCUMENTED_DIVERGENCE itself: regenerating that constant to bless a fresh
@@ -273,9 +346,10 @@ DIVERGENCE_GUIDANCE = (
     "change reached only one copy, land it in the other. If it is already in "
     "BOTH copies identically, this is a real remaining difference rather than "
     "an alignment artifact -- no alignment is inferred (issue #624), so the "
-    "report below names the exact line that could not be accounted for. Only "
-    "a reviewed change to the pinning exception itself may update "
-    "DOCUMENTED_DIVERGENCE."
+    "report below names the exact line that could not be accounted for. If "
+    "the lines themselves are right, check whether a recorded unit has moved "
+    "out from between the shared lines recorded around it. Only a reviewed "
+    "change to the pinning exception itself may update DOCUMENTED_DIVERGENCE."
 )
 
 
@@ -288,25 +362,61 @@ def significant_lines(source: str) -> list[tuple[int, str]]:
     ]
 
 
-def documented_units(record: str) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
-    """A DOCUMENTED_DIVERGENCE record as ordered (Codex-only, Claude-only) runs."""
-    units: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+class DivergentUnit(NamedTuple):
+    """One recorded difference, and the shared lines it sits between.
+
+    `after` and `before` are lines both copies carry. They pin the unit's
+    position without pinning its neighbours: the walk requires the unit to be
+    applied after `after` has been consumed and before the last `before` in the
+    file is passed, so shared lines may be inserted between a unit and either
+    anchor. Either may be None for a unit at the very start or end.
+    """
+
+    after: str | None
+    codex: tuple[str, ...]
+    claude: tuple[str, ...]
+    before: str | None
+
+
+def documented_units(record: str) -> list[DivergentUnit]:
+    """A DOCUMENTED_DIVERGENCE record as ordered, position-anchored units."""
+    units: list[DivergentUnit] = []
+    after: str | None = None
+    before: str | None = None
     codex_side: list[str] = []
     claude_side: list[str] = []
     for line in record.splitlines() + ["@@"]:
         if line == "@@":
             if codex_side or claude_side:
-                units.append((tuple(codex_side), tuple(claude_side)))
+                units.append(
+                    DivergentUnit(after, tuple(codex_side), tuple(claude_side), before)
+                )
+            elif after is not None or before is not None:
+                raise ValueError("divergence record unit has context but no difference")
+            after = before = None
             codex_side = []
             claude_side = []
-        elif line.startswith(("-", "+")):
+        elif line.startswith((" ", "-", "+")):
             if not line[1:].strip():
                 # The walk drops blank lines from both sources, so a blank
                 # recorded line could never be matched by anything and would
                 # make the record permanently unsatisfiable.
                 raise ValueError(f"blank divergence record line: {line!r}")
-            side = codex_side if line.startswith("-") else claude_side
-            side.append(line[1:])
+            if line.startswith(" "):
+                # Context before the difference anchors it from the left, after
+                # it from the right; a second on either side is unreadable.
+                if codex_side or claude_side:
+                    if before is not None:
+                        raise ValueError(f"second trailing context line: {line!r}")
+                    before = line[1:]
+                else:
+                    if after is not None:
+                        raise ValueError(f"second leading context line: {line!r}")
+                    after = line[1:]
+            elif line.startswith("-"):
+                codex_side.append(line[1:])
+            else:
+                claude_side.append(line[1:])
         else:
             raise ValueError(f"undecidable divergence record line: {line!r}")
     return units
@@ -315,18 +425,44 @@ def documented_units(record: str) -> list[tuple[tuple[str, ...], tuple[str, ...]
 DOCUMENTED_UNITS = documented_units(DOCUMENTED_DIVERGENCE)
 
 
-def rendered_unit(unit: tuple[tuple[str, ...], tuple[str, ...]]) -> str:
+def rendered_unit(unit: DivergentUnit) -> str:
     """One divergent unit back in the DOCUMENTED_DIVERGENCE spelling."""
-    codex_side, claude_side = unit
-    return "\n".join(
-        [f"-{line}" for line in codex_side] + [f"+{line}" for line in claude_side]
-    )
+    lines = [] if unit.after is None else [f" {unit.after}"]
+    lines.extend(f"-{line}" for line in unit.codex)
+    lines.extend(f"+{line}" for line in unit.claude)
+    if unit.before is not None:
+        lines.append(f" {unit.before}")
+    return "\n".join(lines)
 
 
-def belongs_to_the_pinning_exception(
-    unit: tuple[tuple[str, ...], tuple[str, ...]],
-) -> bool:
-    return any(word in rendered_unit(unit).lower() for word in PINNING_VOCABULARY)
+def divergent_lines(unit: DivergentUnit) -> str:
+    """Only the lines the two copies differ on -- never a context anchor.
+
+    The backstop below reads this rather than the rendered unit: an anchor is a
+    line both copies share, so letting one carry the pinning vocabulary would
+    let an unrelated difference be recorded beside a neighbour saying "model".
+    """
+    return "\n".join(unit.codex + unit.claude)
+
+
+def belongs_to_the_pinning_exception(unit: DivergentUnit) -> bool:
+    return any(word in divergent_lines(unit).lower() for word in PINNING_VOCABULARY)
+
+
+def mirror_units(units: list[DivergentUnit]) -> list[DivergentUnit]:
+    """The record as it reads with the two sources handed over swapped.
+
+    A unit's anchors are lines the two copies SHARE, so they survive the swap
+    untouched; only the two divergent sides trade places. This is the route
+    issue #627 requires for the Codex-side regressions: every unit in the
+    tracked record that has `-` lines also has `+` lines, and a two-sided unit
+    is already held in place by the lockstep walk, so mirroring the real pair
+    is the only way to put a floating unit on the Codex side of the comparator.
+    """
+    return [
+        DivergentUnit(unit.after, unit.claude, unit.codex, unit.before)
+        for unit in units
+    ]
 
 
 def _at(lines: list[tuple[int, str]], position: int) -> str:
@@ -336,61 +472,92 @@ def _at(lines: list[tuple[int, str]], position: int) -> str:
     return f"line {number}: {text.strip()!r}"
 
 
+def _follows_its_anchor(unit: DivergentUnit, present: dict[str, int], seen: bool) -> bool:
+    """Has the unit's left anchor been consumed since the previous unit?
+
+    An anchor a shared edit rewrote or deleted from both copies is gone from
+    the sources, and is dropped rather than enforced: that edit is legitimate,
+    and issue #627's selected policy is that shared-edit acceptance wins.
+    """
+    return unit.after is None or unit.after not in present or seen
+
+
+def _precedes_its_anchor(unit: DivergentUnit, present: dict[str, int], index: int) -> bool:
+    """Is the unit's right anchor still ahead of it?
+
+    `present` holds each line's LAST position, so this asks whether some
+    occurrence of the anchor remains after the unit -- not whether the anchor
+    sits immediately next to it. That is what lets any amount of identically
+    landed content separate the two.
+    """
+    if unit.before is None or unit.before not in present:
+        return True
+    return present[unit.before] >= index + len(unit.codex)
+
+
 def divergence_report(
     codex_source: str,
     claude_source: str,
-    units: list[tuple[tuple[str, ...], tuple[str, ...]]] | None = None,
+    units: list[DivergentUnit] | None = None,
 ) -> str | None:
     """None when the two sources differ in exactly `units`, else why they do not.
 
     No alignment is inferred. The walk consumes lines the two files share in
     lockstep and the recorded units in order, and reconciles them only if it
-    can end both files and the record together. A line added identically to
-    both copies is therefore a shared line wherever it lands, and cannot move
-    the answer; a line added to one copy only can be neither paired nor
-    accounted for, and fails.
+    can end both files and the record together with every unit still between
+    the shared lines recorded around it. A line added identically to both
+    copies is therefore a shared line wherever it lands, and cannot move the
+    answer; text added, dropped, or edited in one copy only can be neither
+    paired nor accounted for; and a recorded unit moved out from between its
+    anchors fails too, up to the repeated-line limit the module docstring
+    describes.
     """
     units = DOCUMENTED_UNITS if units is None else units
     codex = significant_lines(codex_source)
     claude = significant_lines(claude_source)
     codex_text = [text for _, text in codex]
     claude_text = [text for _, text in claude]
+    present = {text: index for index, text in enumerate(codex_text)}
 
     # Consuming the first `k` units shifts the Claude cursor off the Codex one
-    # by a fixed amount, so a walk state is just (Codex index, units consumed).
+    # by a fixed amount, so a walk state is (Codex index, units consumed) plus
+    # whether the pending unit's left anchor has been passed.
     offsets = [0]
-    for codex_side, claude_side in units:
-        offsets.append(offsets[-1] + len(claude_side) - len(codex_side))
+    for unit in units:
+        offsets.append(offsets[-1] + len(unit.claude) - len(unit.codex))
     ends_together = len(claude_text) == len(codex_text) + offsets[-1]
     goal = (len(codex_text), len(units))
 
     reached = (0, 0)
-    seen: set[tuple[int, int]] = set()
-    pending = [(0, 0)]
+    seen: set[tuple[int, int, bool]] = set()
+    pending = [(0, 0, False)]
     while pending:
         state = pending.pop()
         if state in seen:
             continue
         seen.add(state)
-        if ends_together and state == goal:
+        index, consumed, anchored = state
+        if ends_together and (index, consumed) == goal:
             return None
-        reached = max(reached, state)
-        index, consumed = state
+        reached = max(reached, (index, consumed))
         cursor = index + offsets[consumed]
+        unit = units[consumed] if consumed < len(units) else None
         if (
             index < len(codex_text)
             and 0 <= cursor < len(claude_text)
             and codex_text[index] == claude_text[cursor]
         ):
-            pending.append((index + 1, consumed))
-        if consumed < len(units):
-            codex_side, claude_side = units[consumed]
-            if (
-                cursor >= 0
-                and tuple(codex_text[index : index + len(codex_side)]) == codex_side
-                and tuple(claude_text[cursor : cursor + len(claude_side)]) == claude_side
-            ):
-                pending.append((index + len(codex_side), consumed + 1))
+            passed = anchored or (unit is not None and unit.after == codex_text[index])
+            pending.append((index + 1, consumed, passed))
+        if (
+            unit is not None
+            and _follows_its_anchor(unit, present, anchored)
+            and _precedes_its_anchor(unit, present, index)
+            and cursor >= 0
+            and tuple(codex_text[index : index + len(unit.codex)]) == unit.codex
+            and tuple(claude_text[cursor : cursor + len(unit.claude)]) == unit.claude
+        ):
+            pending.append((index + len(unit.codex), consumed + 1, False))
 
     index, consumed = reached
     cursor = index + offsets[consumed]
@@ -401,10 +568,14 @@ def divergence_report(
         f"  claude-plugin copy, {_at(claude, cursor)}",
     ]
     if consumed < len(units):
+        unit = units[consumed]
         report.append("The next recorded divergent unit, which did not apply there:")
-        report.extend(
-            f"  {line}" for line in rendered_unit(units[consumed]).splitlines()
-        )
+        report.extend(f"  {line}" for line in rendered_unit(unit).splitlines())
+        if not _precedes_its_anchor(unit, present, index):
+            report.append(
+                f"Its {unit.before.strip()!r} anchor is behind it: the unit has "
+                "moved past the shared line it was recorded before."
+            )
     else:
         report.append("Every recorded divergent unit was already accounted for.")
     return "\n".join(report)
@@ -485,6 +656,44 @@ SHARED_EDITS = (
 )
 
 
+# The post-draft `verify_publication` call the issue #627 regressions move a
+# recorded unit around. Each of these lines occurs exactly once at sixteen-space
+# indentation in the Claude copy, and `result_models(results),` is the argument
+# the Claude copy alone passes -- the recorded unit whose Codex side is empty.
+CALL_INDENT = " " * 16
+CALL_NUMBER = f"{CALL_INDENT}number,\n"
+CALL_REVIEWERS = f"{CALL_INDENT}reviewers,\n"
+CALL_MODELS = f"{CALL_INDENT}result_models(results),\n"
+CALL_HEAD = f'{CALL_INDENT}pr["headRefOid"],\n'
+CALL_VERDICT = f"{CALL_INDENT}verdict,\n"
+
+# (description, fragment as tracked, the same lines with the model argument
+# moved). Each is one-sided by construction: the Codex copy passes no model
+# argument at all, so only the Claude copy carries these fragments.
+UNIT_MOVES = (
+    (
+        "later across one shared line",
+        CALL_MODELS + CALL_HEAD,
+        CALL_HEAD + CALL_MODELS,
+    ),
+    (
+        "later across two shared lines",
+        CALL_MODELS + CALL_HEAD + CALL_VERDICT,
+        CALL_HEAD + CALL_VERDICT + CALL_MODELS,
+    ),
+    (
+        "earlier across one shared line",
+        CALL_REVIEWERS + CALL_MODELS,
+        CALL_MODELS + CALL_REVIEWERS,
+    ),
+    (
+        "earlier across two shared lines",
+        CALL_NUMBER + CALL_REVIEWERS + CALL_MODELS,
+        CALL_MODELS + CALL_NUMBER + CALL_REVIEWERS,
+    ),
+)
+
+
 class CoordinatorBoundedDivergenceTests(unittest.TestCase):
     """The two coordinators differ only where §2.2 says they may."""
 
@@ -519,6 +728,18 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
         )
         self.assertEqual(len(unrelated), 1)
         self.assertFalse(belongs_to_the_pinning_exception(unrelated[0]))
+
+    def test_a_context_anchor_cannot_carry_the_pinning_vocabulary(self):
+        # A context line is a line both copies share, so it says nothing about
+        # what diverges. Reading one would let an unrelated difference be
+        # recorded here under a neighbour that happens to mention a model.
+        smuggled = documented_units(
+            "@@\n CODEX_NESTED_REVIEW_MODEL = \"gpt-5.6-terra\"\n"
+            "-REVIEW_TIMEOUT_SECONDS = 7200\n+REVIEW_TIMEOUT_SECONDS = 60"
+        )
+        self.assertEqual(len(smuggled), 1)
+        self.assertIn("model", rendered_unit(smuggled[0]).lower())
+        self.assertFalse(belongs_to_the_pinning_exception(smuggled[0]))
 
     def test_the_number_kind_guard_reached_both_copies(self):
         # The specific one-sided fix that motivated this gate (issue #236).
@@ -595,7 +816,10 @@ class SharedEditStabilityTests(unittest.TestCase):
         # renderings' `-`/`+` pair, because which occurrence of that line the
         # matcher anchors on changes. The walk pairs the appended lines and
         # applies the recorded unit where it stands.
-        units = [(("x = 0",), ("y = 0",))]
+        # No anchors: this pair has no shared line to record one from, which
+        # is also the shape `_follows_its_anchor` and `_precedes_its_anchor`
+        # treat as unconstrained.
+        units = [DivergentUnit(None, ("x = 0",), ("y = 0",), None)]
         for suffix in ("", "x = 0\n"):
             with self.subTest(appended=suffix):
                 self.assertIsNone(
@@ -776,6 +1000,216 @@ class PlantedDivergenceTests(unittest.TestCase):
                 'CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-terra"\n',
             ),
             "reordering two lines inside a recorded divergent unit was not caught",
+        )
+
+
+class UnitPositionTests(unittest.TestCase):
+    """A recorded unit may not leave the shared lines recorded around it.
+
+    Issue #627: order alone was not enough. A unit whose Codex side is empty
+    matches the zero-length slice at any cursor, so the Claude-only
+    `result_models(results),` argument could sit anywhere between its
+    neighbouring recorded units and still reconcile -- including on the far
+    side of `pr["headRefOid"],`, which hands `verify_publication` a list where
+    it expects a head SHA. Every case below changes ONE source.
+    """
+
+    def setUp(self):
+        self.codex_source = CODEX_COORDINATOR.read_text(encoding="utf-8")
+        self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
+        # Both orientations of the untouched pair must reconcile, or every case
+        # below passes vacuously.
+        self.assertIsNone(divergence_report(self.codex_source, self.claude_source))
+        self.assertIsNone(
+            divergence_report(
+                self.claude_source, self.codex_source, mirror_units(DOCUMENTED_UNITS)
+            )
+        )
+
+    def move(self, fragment: str, moved: str) -> str:
+        """The Claude copy with one recorded unit moved and nothing else.
+
+        The multiset assertion is what makes this a pure reposition: a fixture
+        that also added, dropped, or edited a line would exercise the ordinary
+        content comparison instead of the positional constraint under test.
+        """
+        self.assertEqual(
+            self.claude_source.count(fragment), 1, f"stale fixture: {fragment!r}"
+        )
+        source = self.claude_source.replace(fragment, moved, 1)
+        self.assertNotEqual(source, self.claude_source, "the fixture changed nothing")
+        self.assertEqual(
+            sorted(source.splitlines()),
+            sorted(self.claude_source.splitlines()),
+            "the fixture did more than move a line",
+        )
+        return source
+
+    def assert_codex_untouched(self):
+        self.assertEqual(
+            self.codex_source, CODEX_COORDINATOR.read_text(encoding="utf-8")
+        )
+
+    def test_the_reported_argument_swap_is_caught(self):
+        # The exact swap issue #627 reports, in the post-draft call.
+        swapped = self.move(CALL_MODELS + CALL_HEAD, CALL_HEAD + CALL_MODELS)
+        self.assert_codex_untouched()
+        self.assertIsNotNone(
+            divergence_report(self.codex_source, swapped),
+            "swapping the model and head arguments in only the Claude copy was "
+            "not caught",
+        )
+
+    def test_the_reported_swap_escapes_a_record_without_position_anchors(self):
+        # The comparator as issue #624 left it, reproduced by dropping the
+        # anchors this change adds. It accepts the swap, which is the defect.
+        # Without this control the regression above could pass under a
+        # mechanism that never had teeth for it.
+        unanchored = [
+            DivergentUnit(None, unit.codex, unit.claude, None)
+            for unit in DOCUMENTED_UNITS
+        ]
+        self.assertIsNone(
+            divergence_report(self.codex_source, self.claude_source, unanchored)
+        )
+        swapped = self.move(CALL_MODELS + CALL_HEAD, CALL_HEAD + CALL_MODELS)
+        self.assertIsNone(
+            divergence_report(self.codex_source, swapped, unanchored),
+            "the unanchored record no longer reproduces issue #627, so the "
+            "regression above asserts nothing",
+        )
+
+    def test_a_one_sided_move_is_caught_on_either_comparator_side(self):
+        # Side x direction x distance. The Codex side goes through the mirror
+        # route of `mirror_units`, since the tracked record has no unit whose
+        # Claude side is empty to float there otherwise.
+        for description, fragment, moved_fragment in UNIT_MOVES:
+            moved = self.move(fragment, moved_fragment)
+            self.assert_codex_untouched()
+            for side in ("claude", "codex"):
+                with self.subTest(move=description, side=side):
+                    if side == "claude":
+                        report = divergence_report(self.codex_source, moved)
+                    else:
+                        report = divergence_report(
+                            moved, self.codex_source, mirror_units(DOCUMENTED_UNITS)
+                        )
+                    self.assertIsNotNone(
+                        report,
+                        f"moving the model argument {description}, with the "
+                        f"unit on the {side} side, was not caught",
+                    )
+
+    def test_identical_content_around_a_one_sided_unit_stays_green(self):
+        # Requirement 2: the anchors are order constraints, not adjacency ones,
+        # so identically landed lines may separate a unit from either of them.
+        # The unit surrounded here is one-sided, so the constraint is really
+        # exercised; a two-sided unit is already held in place by the walk.
+        filler = f"{CALL_INDENT}# noted\n"
+        cases = {
+            "immediately before the unit": (
+                (CALL_HEAD, filler + CALL_HEAD),
+                (CALL_MODELS, filler + CALL_MODELS),
+            ),
+            "immediately after the unit": (
+                (CALL_HEAD, filler + CALL_HEAD),
+                (CALL_HEAD, filler + CALL_HEAD),
+            ),
+            "on both sides of the unit": (
+                (CALL_HEAD, filler + filler + CALL_HEAD),
+                (CALL_MODELS + CALL_HEAD, filler + CALL_MODELS + filler + CALL_HEAD),
+            ),
+        }
+        for description, (codex_edit, claude_edit) in cases.items():
+            with self.subTest(inserted=description):
+                codex_source = self.plant(self.codex_source, *codex_edit)
+                claude_source = self.plant(self.claude_source, *claude_edit)
+                self.assertIn(filler, codex_source)
+                self.assertIn(filler, claude_source)
+                self.assertIsNone(
+                    divergence_report(codex_source, claude_source),
+                    f"landing content {description} in BOTH copies was reported "
+                    "as divergence",
+                )
+
+    def plant(self, source: str, original: str, replacement: str) -> str:
+        self.assertEqual(source.count(original), 1, f"stale fixture: {original!r}")
+        planted = source.replace(original, replacement, 1)
+        self.assertNotEqual(planted, source, "the fixture inserted nothing")
+        return planted
+
+    def test_both_repeated_line_pairs_of_the_selected_policy_pass(self):
+        """Issue #627's A/B table, built from the tracked call.
+
+        Writing R, M, H and V for the reviewers, model, head and verdict
+        arguments, the tracked fragments are Codex `R H V` and Claude `R M H V`.
+        Inserting H identically before V gives pair A; inserting H identically
+        after R gives pair B. Both come from one identical shared insertion, so
+        both must pass -- even though A becomes B by moving only Claude's M
+        across one H. The gate is handed final sources and a record, never the
+        history that produced them, so that movement is an accepted limit.
+        """
+        pair_a = (
+            self.plant(self.codex_source, CALL_HEAD + CALL_VERDICT, CALL_HEAD + CALL_HEAD + CALL_VERDICT),
+            self.plant(self.claude_source, CALL_MODELS + CALL_HEAD + CALL_VERDICT, CALL_MODELS + CALL_HEAD + CALL_HEAD + CALL_VERDICT),
+        )
+        pair_b = (
+            self.plant(self.codex_source, CALL_REVIEWERS + CALL_HEAD, CALL_REVIEWERS + CALL_HEAD + CALL_HEAD),
+            self.plant(self.claude_source, CALL_REVIEWERS + CALL_MODELS, CALL_REVIEWERS + CALL_HEAD + CALL_MODELS),
+        )
+        self.assertEqual(
+            pair_a[0], pair_b[0], "A and B must reach the same Codex source"
+        )
+        self.assertNotEqual(
+            pair_a[1], pair_b[1], "A and B must differ only in the Claude source"
+        )
+        self.assertEqual(
+            sorted(pair_a[1].splitlines()),
+            sorted(pair_b[1].splitlines()),
+            "A becomes B by moving the model argument, not by editing one",
+        )
+        for name, (codex_source, claude_source) in (("A", pair_a), ("B", pair_b)):
+            with self.subTest(pair=name):
+                self.assertIsNone(divergence_report(codex_source, claude_source))
+                self.assertIsNone(
+                    divergence_report(
+                        claude_source, codex_source, mirror_units(DOCUMENTED_UNITS)
+                    ),
+                    f"pair {name} was reported as divergence on the mirrored side",
+                )
+
+    def test_a_shared_rewrite_of_both_neighbours_stays_green(self):
+        # An anchor a shared edit rewrote away is dropped rather than enforced,
+        # so this needs no record change: turning it into a failure would
+        # re-create exactly the issue #624 false failure whose advice --
+        # land it in the other copy -- the author had already followed.
+        renamed = {
+            CALL_REVIEWERS: f"{CALL_INDENT}reviewer_set,\n",
+            CALL_HEAD: f"{CALL_INDENT}head_sha,\n",
+        }
+        codex_source, claude_source = self.codex_source, self.claude_source
+        for original, replacement in renamed.items():
+            codex_source = self.plant(codex_source, original, replacement)
+            claude_source = self.plant(claude_source, original, replacement)
+        self.assertIsNone(
+            divergence_report(codex_source, claude_source),
+            "rewriting a recorded unit's neighbouring lines in BOTH copies was "
+            "reported as divergence",
+        )
+
+    def test_a_context_anchor_keeps_its_source_backslashes(self):
+        # DOCUMENTED_DIVERGENCE is a raw string because a context line is
+        # ordinary source, and this one carries `\n` inside a string literal.
+        # An ordinary triple-quoted constant turns that into a real newline,
+        # splitting the record line in two -- which `documented_units` refuses,
+        # but only because it checks every line's prefix.
+        anchor = '    body = "\\n".join(lines).rstrip() + "\\n"'
+        self.assertIn(anchor, self.codex_source.splitlines())
+        self.assertIn(anchor, self.claude_source.splitlines())
+        self.assertIn(
+            anchor,
+            [unit.after for unit in DOCUMENTED_UNITS]
+            + [unit.before for unit in DOCUMENTED_UNITS],
         )
 
 
