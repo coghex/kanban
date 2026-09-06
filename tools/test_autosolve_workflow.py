@@ -578,19 +578,42 @@ class DocsOnlyLaneTests(unittest.TestCase):
                 )
 
     def test_both_renderings_authorize_the_push_docs_override(self):
-        # push-docs's own contract refuses unprompted publication; this
-        # workflow's invocation of it here is the standing authorization it
-        # asks for, and both renderings must say so rather than silently
-        # relying on it.
+        # push-docs's own contract refuses unprompted publication and demands
+        # a current user-directed request, not an inference from the issue's
+        # wording. The grounding is this command's own advertised
+        # description, per the second-round review, not an ad hoc claim
+        # invented mid-document.
         for relative_path, brand in BRAND_OF.items():
             squashed = flat(neutralize(read(relative_path), brand))
             with self.subTest(asset=relative_path):
                 self.assertIn(
-                    "this run's own user-directed request to publish them — "
-                    "the standing authorization {{cmd:push-docs}} requires — "
-                    "so its default caution against unprompted publication "
-                    "does not apply to this one landing",
+                    "Invoking {{cmd:autosolve}} for this issue is the "
+                    "user-directed publication request {{cmd:push-docs}} "
+                    "requires: this command's own description names direct "
+                    "documentation landing as one of its outcomes",
                     squashed,
+                )
+                self.assertIn(
+                    "never a request this session inferred on its own from "
+                    "the issue's wording", squashed
+                )
+                self.assertIn(
+                    "That authorization reaches only the file or files this "
+                    "issue's trusted spec names", squashed
+                )
+
+    def test_both_renderings_describe_the_direct_land_outcome_up_front(self):
+        # The grounding above only holds if the command's own description --
+        # what a user actually reads before invoking it -- names this
+        # outcome; otherwise "this command's own description" would be
+        # pointing at nothing.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "or, for a documentation-only issue whose own spec calls "
+                    "for direct publication instead of a pull request, land "
+                    "it and close the issue directly", squashed
                 )
 
     def test_the_disposition_ends_the_run_without_the_pull_request_steps(self):

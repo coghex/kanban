@@ -1,6 +1,6 @@
 ---
 name: autosolve
-description: Run {{cmd:solve}} for one GitHub issue, then drive an opposite-brand review loop of up to five rounds until the pull request is approved. Stops at `reviewed:approve` and never merges, labels, or finalizes. Use only when the user invokes {{cmd:autosolve}} or explicitly asks for this autonomous workflow.
+description: Run {{cmd:solve}} for one GitHub issue, then drive an opposite-brand review loop of up to five rounds until the pull request is approved — or, for a documentation-only issue whose own spec calls for direct publication instead of a pull request, land it and close the issue directly. Stops at `reviewed:approve` and never merges, labels, or finalizes. Use only when the user invokes {{cmd:autosolve}} or explicitly asks for this autonomous workflow.
 argument-hint: "[issue number]"
 ---
 
@@ -154,11 +154,15 @@ the issue:
 
   Implement the fix in the repository's own documentation worktree, run every
   acceptance check the issue lists and confirm each one passes, then land it
-  with {{cmd:push-docs}}. Naming this issue's exact paths and content here is
-  this run's own user-directed request to publish them — the standing
-  authorization {{cmd:push-docs}} requires — so its default caution against
-  unprompted publication does not apply to this one landing. Do not fold in
-  any other pending document while doing this.
+  with {{cmd:push-docs}}. Invoking {{cmd:autosolve}} for this issue is the
+  user-directed publication request {{cmd:push-docs}} requires: this
+  command's own description names direct documentation landing as one of
+  its outcomes, so choosing to run it for this issue is choosing to
+  authorize exactly that outcome — never a request this session inferred on
+  its own from the issue's wording. That authorization reaches only the
+  file or files this issue's trusted spec names; {{cmd:push-docs}}'s default
+  caution against a broader or unprompted landing still applies to every
+  other document, so do not fold any of them in while doing this.
 
   Close the issue only after {{cmd:push-docs}} reports the landing verified
   with no refusal and no warning, quoting the landing commit and confirming
