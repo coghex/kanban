@@ -289,9 +289,9 @@ runs) checks that:
 from [claude-plugin/](../claude-plugin/README.md)'s copy: the two are compared
 line for line, and only the nested-reviewer model-pinning exception of
 [docs/agent-workflow-contract.md §2.2](../docs/agent-workflow-contract.md) is
-permitted. Nothing is excluded — not a function, not a comment block — so a fix
-landing in one copy only fails there, which is how the issue-vs-pull-request
-number guard went eight days Codex-side only.
+permitted. Nothing but blank lines is excluded — not a function, not a comment
+block — so a fix landing in one copy only fails there, which is how the
+issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_trusted_issue_spec.py` pins `$solve`'s bundled trusted-comment
 helper against its Claude counterpart — the two copies must stay byte-identical
