@@ -1002,7 +1002,7 @@ class PortableBackendTests(unittest.TestCase):
             (REPO_ROOT / "models.toml.example").read_text(encoding="utf-8")
         )
         self.assertEqual(
-            roster["roles"]["issue_gate"]["claude"]["model"], "claude-opus-5"
+            roster["roles"]["issue_gate"]["claude"]["model"], "claude-fable-5-1"
         )
 
 

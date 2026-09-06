@@ -156,7 +156,7 @@ spec = do
                        "--allowedTools",
                        "mcp__kanban__kanban_prompt_user,mcp__kanban__kanban_github_issue",
                        "--model",
-                       "claude-opus-5",
+                       "claude-fable-5-1",
                        "--effort",
                        "xhigh"
                      ]
