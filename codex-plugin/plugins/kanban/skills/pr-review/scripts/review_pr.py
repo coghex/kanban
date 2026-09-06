@@ -1338,6 +1338,7 @@ def require_current_review_state(
     *,
     allow_no_issue: bool,
     override_issue_gate: bool = False,
+    expected_overridden: list[int] | None = None,
     config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
@@ -1351,6 +1352,8 @@ def require_current_review_state(
         raise WorkflowError("linked issues changed; no verdict was published")
     if not gate["approved"]:
         raise WorkflowError("issue approval became stale; no current verdict may be labeled")
+    if expected_overridden is not None and gate["overridden_issues"] != expected_overridden:
+        raise WorkflowError("issue approval changed under the override; nothing labeled")
     return gate
 
 
@@ -1499,6 +1502,8 @@ def publish_results(
     # field fails closed and loudly instead -- the re-checks below then
     # recompute an unapproved gate and refuse to publish.
     override_issue_gate = bool(gate.get("override_issue_gate"))
+    # The bypass the reviewer was told about; every re-read below is held to it.
+    reviewed_bypass = list(gate.get("overridden_issues") or [])
     approval_label, changes_requested_label = resolve_workflow_labels(config_path, repo)
     refreshed_pr = pr_view(root, repo, number)
     refreshed_gate = gate_status(
@@ -1531,6 +1536,11 @@ def publish_results(
             "comment_url": url,
         }
 
+    if list(refreshed_gate.get("overridden_issues") or []) != reviewed_bypass:
+        raise WorkflowError(
+            "issue approval changed during review; the override now bypasses a "
+            "different set than the reviewer was told about. Nothing was published."
+        )
     verdict, body = render_review(results, reviewers, pr["headRefOid"], gate)
     require_current_review_state(
         root,
@@ -1540,6 +1550,7 @@ def publish_results(
         gate["key"],
         allow_no_issue=allow_no_issue,
         override_issue_gate=override_issue_gate,
+        expected_overridden=reviewed_bypass,
         config_path=config_path,
     )
     post_comment(root, repo, number, body)
@@ -1552,6 +1563,7 @@ def publish_results(
             gate["key"],
             allow_no_issue=allow_no_issue,
             override_issue_gate=override_issue_gate,
+            expected_overridden=reviewed_bypass,
             config_path=config_path,
         )
         set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
@@ -1768,6 +1780,7 @@ def workflow(
             "reviewer_key": reviewer.key,
             "expected_head": pr["headRefOid"],
             "gate_key": gate["key"],
+            "overridden_issues": gate.get("overridden_issues") or [],
             "instructions": self_review_prompt(context, reviewer, rereview, number),
         }
 

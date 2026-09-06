@@ -723,5 +723,103 @@ class IssueGateOverrideTests(unittest.TestCase):
                 self.assertIn("linked issues changed", str(raised.exception))
 
 
+    # ------- 7. an approval that moves after the reviewer was briefed
+
+    def test_an_approval_lost_during_review_is_refused_not_absorbed(self):
+        """The override must not convert a refusal into a silent bypass.
+
+        Neither `approved` nor the gate key can catch this on its own. The key
+        covers the gate's SCOPE -- repository, links, relaxations -- not
+        approval state, so it is unchanged. And `approved` stays True precisely
+        because the override is doing its job. So an issue that was approved
+        when the context was collected (empty `overridden_issues`: no banner,
+        no notice in the reviewer's prompt, nothing in the result) and is
+        unapproved by the time the reviewers finish would be absorbed with no
+        record anywhere -- while the identical transition WITHOUT the override
+        blocks publication outright. The bypass the reviewer was briefed on is
+        therefore bound to the context and re-checked before anything is
+        written.
+        """
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = {**self.pr(), "labels": [{"name": "reviewed:approve"}]}
+                # The gate as it stood when the reviewer was briefed: approved,
+                # so the override bypassed nothing and said nothing.
+                briefed = self.gate(
+                    approved=True,
+                    override_issue_gate=True,
+                    override_reason=REASON,
+                    overridden_issues=[],
+                    issues=[614],
+                    key=module.gate_key(
+                        "coghex/kanban", [614], [], override_issue_gate=True
+                    ),
+                )
+                posted: list[str] = []
+                with ExitStack() as stack:
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "resolve_workflow_labels",
+                            return_value=("reviewed:approve", "reviewed:changes"),
+                        )
+                    )
+                    stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "linked_issue_numbers", return_value=([614], [])
+                        )
+                    )
+                    # The transition: approved when briefed, not any more.
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "check_issue",
+                            return_value={"issue": 614, "approved": False},
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "post_comment", side_effect=lambda *a: posted.append(a)
+                        )
+                    )
+                    gate_comment = stack.enter_context(
+                        mock.patch.object(module, "publish_gate_comment")
+                    )
+                    gate_comment.return_value = ("posted", "https://example.test/gate")
+                    label = stack.enter_context(
+                        mock.patch.object(module, "set_verdict_label")
+                    )
+
+                    with self.assertRaises(module.WorkflowError) as raised:
+                        module.publish_results(
+                            Path("/fake-repo"),
+                            "coghex/kanban",
+                            89,
+                            pr,
+                            briefed,
+                            [module.CODEX_REVIEWER],
+                            self.results(module),
+                            {"pr": 89},
+                            allow_no_issue=False,
+                        )
+
+                self.assertIn("issue approval changed during review", str(raised.exception))
+                # Refused before anything was written, not cleaned up after.
+                self.assertEqual(posted, [])
+                self.assertFalse(label.called)
+                self.assertFalse(gate_comment.called)
+
+    def test_the_self_review_handoff_reports_the_bypass_it_briefed_on(self):
+        # The self-reviewed path's own binding: the caller is handed the set so
+        # its later --publish-verdict can be held to the same question, exactly
+        # as --expected-head holds the other mutable half.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                _, context = self.self_review_context(module, override=True)
+                self.assertEqual(context["status"], "awaiting_self_review")
+                self.assertEqual(context["overridden_issues"], [614])
+
+
 if __name__ == "__main__":
     unittest.main()
