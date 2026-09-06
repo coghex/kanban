@@ -333,7 +333,15 @@ arithmetic, which §2.3 owns.
     names in published comments are deliberately *not* roster-derived: they
     are a reviewer persona this backend parses back out of historical markers,
     and they keep their own `APPROVE_ISSUES_CODEX_DISPLAY_NAME` /
-    `APPROVE_ISSUES_CLAUDE_DISPLAY_NAME` overrides.
+    `APPROVE_ISSUES_CLAUDE_DISPLAY_NAME` overrides. Precisely because a
+    persona can therefore name something other than what ran, the review
+    prompt and the published comment's header state the resolved model and
+    effort *beside* the persona rather than through it. The persona list the
+    backend parses historical summaries with only ever grows: a retired name
+    stays readable, because a review predating the marker's `verdicts=` field
+    has nothing else to recover a per-reviewer verdict — and therefore a
+    rereview route — from. That is the opposite of the `models=` field's rule
+    stated next, where a *replaced* assignment must go stale.
     The resolved assignment is what a published marker's `models=` field
     records and what §2.3.1's reconciliation accepts as current, so changing
     either half of it retires standing approvals and forces rereview.

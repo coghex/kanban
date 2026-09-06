@@ -940,13 +940,19 @@ the packaged issue-review and solve workflows resolve identically. Interactive r
 Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.
-   Claude-origin issues route to GPT-5.6-Sol xhigh, Codex-origin issues route
-   to Claude Opus 5 xhigh, and unmarked issues require both. GPT-5.6-Terra and
-   Claude Fable 5 remain accepted legacy models (`tools/approve_issues.py`) so
-   historical review markers keep validating after either default changes.
+   Claude-origin issues route to GPT-6-Astra xhigh, Codex-origin issues route
+   to Claude Fable 5.1 xhigh, and unmarked issues require both. GPT-5.6-Terra
+   and Claude Fable 5 remain accepted legacy models (`tools/approve_issues.py`)
+   so historical review markers keep validating after either default changes.
+   A *replaced* default is deliberately not among them: an approval recorded
+   under one goes stale and is rereviewed, which is the whole point of moving
+   the assignment. The retired reviewer personas — GPT-5.6-Sol, Claude Opus 5,
+   GPT-5.6-Terra, Claude Fable 5 — stay readable in the other direction, since
+   a historical review that predates the marker's `verdicts=` field has only
+   its human-readable summary to recover a per-reviewer verdict from.
 2. `reviewed:changes` switches back to the author brand for revision:
-   GPT-5.4 high for Codex-origin issues and Claude Sonnet 5 high for
-   Claude-origin issues. Unmarked issues default to GPT-5.4 high. The
+   GPT-6-Astra high for Codex-origin issues and Claude Fable 5.1 high for
+   Claude-origin issues. Unmarked issues default to GPT-6-Astra high. The
    agent writes one canonical specification
    amendment as an issue comment, then replaces `reviewed:changes` with
    `reviewed:revised` without approving.
@@ -971,11 +977,11 @@ Kanban also registers `kanban_run_claude`, on the threads that have a separate
 Claude revision agent to reach through it — which is a Codex coordinator on an
 install that loads Claude as well. A Claude coordinator revises inline and is
 served no such tool, and a Codex-only install loads no agent for it to reach,
-so both are told about neither. Sonnet-authored revision stages use it instead
+so both are told about neither. Claude-authored revision stages use it instead
 of launching `claude` through a Codex command: the latter runs inside Codex's
 sandbox and cannot reliably reach the macOS keychain-backed Claude login. The
 client tool starts the official CLI directly from Kanban on the roster's
-`issue_revise.claude` cell — `claude-sonnet-5` at `high` by
+`issue_revise.claude` cell — `claude-fable-5-1` at `high` by
 compiled default — under `--permission-mode plan --safe-mode`, refusing to
 spawn at all when the roster loads no Claude provider. It streams a standalone
 prompt over stdin, and returns its output to the coordinator. It has a

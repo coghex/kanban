@@ -126,7 +126,7 @@ python3 "$BACKEND" \
   --json
 ```
 
-The backend detects the changed fingerprint and reads the individual verdicts from the latest changes-requested review. GPT dissent routes to Claude Opus 5 xhigh; Claude dissent routes to GPT-5.6-Sol xhigh; dissent from both routes to GPT-5.6-Sol xhigh. Reviewer selection is the backend's: do not pin a reviewer model, reasoning effort, or display name for this run. It posts the versioned rereview and switches the verdict label.
+The backend detects the changed fingerprint and reads the individual verdicts from the latest changes-requested review. GPT dissent routes to Claude Fable 5.1 xhigh; Claude dissent routes to GPT-6-Astra xhigh; dissent from both routes to GPT-6-Astra xhigh. Reviewer selection is the backend's: do not pin a reviewer model, reasoning effort, or display name for this run. It posts the versioned rereview and switches the verdict label.
 
 - If the queue lock is held, report its structured owner exactly: background daemon, or another single-issue review with issue number and PID. Do not start a concurrent reviewer. Use `--check <issue>` only to report current gate state.
 - If the result is `CHANGES_REQUESTED`, inspect the new canonical comment and return to step 2. Do not rerun unchanged text; the backend refuses an unchanged spec fingerprint.

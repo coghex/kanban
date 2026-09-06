@@ -48,10 +48,10 @@ spec = do
       defaultRoster.rosterAgents `shouldBe` [CodexProvider, ClaudeProvider]
       Map.lookup CodexProvider defaultRoster.rosterProviders
         `shouldBe` Just
-          (ProviderCatalog ["gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol"] ["minimal", "low", "medium", "high", "xhigh"])
+          (ProviderCatalog ["gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"] ["minimal", "low", "medium", "high", "xhigh"])
       Map.lookup ClaudeProvider defaultRoster.rosterProviders
         `shouldBe` Just
-          (ProviderCatalog ["claude-sonnet-5", "claude-opus-5", "claude-fable-5"] ["low", "medium", "high", "xhigh"])
+          (ProviderCatalog ["claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"] ["low", "medium", "high", "xhigh"])
 
     -- Each cell asserted on its own rather than only through the
     -- defaults-equal-example invariant, so a mistake made identically in
@@ -66,11 +66,11 @@ spec = do
               (PrReviewRole, ClaudeProvider, Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
               (PrReviseRole, CodexProvider, Assignment "gpt-5.4" "high" "gpt-5.4 high"),
               (PrReviseRole, ClaudeProvider, Assignment "claude-sonnet-5" "xhigh" "Sonnet 5 xhigh"),
-              (IssueReviewRole, CodexProvider, Assignment "gpt-5.4" "high" "gpt-5.4 high"),
-              (IssueReviewRole, ClaudeProvider, Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
-              (IssueReviseRole, ClaudeProvider, Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
-              (IssueGateRole, CodexProvider, Assignment "gpt-5.6-sol" "xhigh" "GPT-5.6-Sol xhigh"),
-              (IssueGateRole, ClaudeProvider, Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
+              (IssueReviewRole, CodexProvider, Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
+              (IssueReviewRole, ClaudeProvider, Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
+              (IssueReviseRole, ClaudeProvider, Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
+              (IssueGateRole, CodexProvider, Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
+              (IssueGateRole, ClaudeProvider, Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
               (DrainRereviewRole, CodexProvider, Assignment "gpt-5.6-terra" "medium" "GPT-5.6-Terra medium"),
               (DrainRereviewRole, ClaudeProvider, Assignment "claude-opus-5" "medium" "Opus 5 medium")
             ]

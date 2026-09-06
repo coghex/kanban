@@ -30,10 +30,10 @@
 ║┃                          ┃┃  ╰─────────────────────────────────┃ pr_review      claude  claude-opus-5 · xhigh            default  ┃                      ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃                                    ┃ pr_revise      codex   gpt-5.4 · high                   default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
 ║┃                          ┃┃  ╭─────────────────────────────────┃ pr_revise      claude  claude-sonnet-5 · xhigh          default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_review   codex   gpt-5.4 · high                   default  ┃                      ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract                        ┃ issue_review   claude  claude-opus-5 · xhigh            default  ┃                      ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture                   ┃ issue_revise   claude  claude-sonnet-5 · high           default  ┃                      ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ issue_gate     codex   gpt-5.6-sol · xhigh              default  ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_review   codex   gpt-6-astra · high               default  ┃                      ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ contract                        ┃ issue_review   claude  claude-fable-5-1 · xhigh         default  ┃                      ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │  architecture                   ┃ issue_revise   claude  claude-fable-5-1 · high          default  ┃                      ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ issue_gate     codex   gpt-6-astra · xhigh              default  ┃                      ┃  │ truncated payload.                 │ ┃║
 ║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Document root owners, snapshot  ┃                                                                  ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
 ║┃ ┃ approve_issues.py ┃    ┃┃  │ barriers, and the versioned     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
 ║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║

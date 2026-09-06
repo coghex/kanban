@@ -72,10 +72,12 @@ rerosteredDefaults =
 --
 -- 'rerosteredDefaults' cannot do this job: it rotates model and effort and
 -- leaves @display@ alone, and the compiled defaults deliberately share
--- displays across cells -- @solve.codex@, @pr_revise.codex@ and
--- @issue_review.codex@ are all @gpt-5.4 high@, and @solve.claude@ and
--- @issue_revise.claude@ are both @Sonnet 5 high@ -- so a surface reading the
--- wrong one of those pairs would pass against defaults.
+-- displays across cells -- @solve.codex@ and @pr_revise.codex@ are both
+-- @gpt-5.4 high@, and @issue_review.claude@ and @issue_gate.claude@ are both
+-- @Fable 5.1 xhigh@ -- so a surface reading the wrong one of those pairs
+-- would pass against defaults. Which cells collide moves with the roster;
+-- that some do is what this fixture exists for, so it never reads a display
+-- off 'defaultRoster' to build one.
 --
 -- Only the display moves: the models and efforts stay the compiled ones, so
 -- this remains a roster 'Kanban.Models.decodeRoster' accepts and nothing here

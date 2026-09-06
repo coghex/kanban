@@ -248,11 +248,16 @@ DEFAULT_ROSTER = ModelRoster(
     agents=("codex", "claude"),
     providers={
         "codex": ProviderCatalog(
-            models=("gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol"),
+            models=("gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
             efforts=("minimal", "low", "medium", "high", "xhigh"),
         ),
         "claude": ProviderCatalog(
-            models=("claude-sonnet-5", "claude-opus-5", "claude-fable-5"),
+            models=(
+                "claude-sonnet-5",
+                "claude-opus-5",
+                "claude-fable-5",
+                "claude-fable-5-1",
+            ),
             efforts=("low", "medium", "high", "xhigh"),
         ),
     },
@@ -265,11 +270,19 @@ DEFAULT_ROSTER = ModelRoster(
         ("pr_review", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
         ("pr_revise", "codex"): Assignment("gpt-5.4", "high", "gpt-5.4 high"),
         ("pr_revise", "claude"): Assignment("claude-sonnet-5", "xhigh", "Sonnet 5 xhigh"),
-        ("issue_review", "codex"): Assignment("gpt-5.4", "high", "gpt-5.4 high"),
-        ("issue_review", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
-        ("issue_revise", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
-        ("issue_gate", "codex"): Assignment("gpt-5.6-sol", "xhigh", "GPT-5.6-Sol xhigh"),
-        ("issue_gate", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("issue_review", "codex"): Assignment("gpt-6-astra", "high", "GPT-6-Astra high"),
+        ("issue_review", "claude"): Assignment(
+            "claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"
+        ),
+        ("issue_revise", "claude"): Assignment(
+            "claude-fable-5-1", "high", "Fable 5.1 high"
+        ),
+        ("issue_gate", "codex"): Assignment(
+            "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
+        ),
+        ("issue_gate", "claude"): Assignment(
+            "claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"
+        ),
         ("drain_rereview", "codex"): Assignment(
             "gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"
         ),

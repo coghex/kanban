@@ -75,8 +75,8 @@ class CompiledDefaultsTests(unittest.TestCase):
         # Requirement 16: with no roster file present, every argv these scripts
         # build is byte-identical to what the retired literals produced.
         for cell, expected in (
-            (("issue_gate", "codex"), ("gpt-5.6-sol", "xhigh")),
-            (("issue_gate", "claude"), ("claude-opus-5", "xhigh")),
+            (("issue_gate", "codex"), ("gpt-6-astra", "xhigh")),
+            (("issue_gate", "claude"), ("claude-fable-5-1", "xhigh")),
             (("drain_rereview", "codex"), ("gpt-5.6-terra", "medium")),
             (("pr_review", "codex"), ("gpt-5.6-terra", "xhigh")),
             (("pr_review", "claude"), ("claude-opus-5", "xhigh")),
@@ -84,6 +84,89 @@ class CompiledDefaultsTests(unittest.TestCase):
             with self.subTest(cell=cell):
                 assignment = kanban_models.DEFAULT_ROSTER.assignment_for(*cell)
                 self.assertEqual((assignment.model, assignment.effort), expected)
+
+
+class IssueAssignmentUpgradeTests(unittest.TestCase):
+    """Issue #614: the five issue cells moved and the other eight did not.
+
+    Enumerated in two halves rather than as one table, and checked to cover the
+    roster exactly, so neither half can quietly stop asserting: a role added
+    without a decision about which half it belongs to fails the completeness
+    case below rather than slipping past a rule that matches everything.
+
+    `CompiledDefaultsTests` holds these same values against the tracked
+    example, and `Spec.Config.Models` holds them from the Haskell side. This is
+    the third, independent statement of them -- a mistake made identically in
+    the compiled roster and the example still fails here.
+    """
+
+    UPGRADED_ISSUE_CELLS = {
+        ("issue_review", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
+        ("issue_review", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
+        ("issue_revise", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
+        ("issue_gate", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
+        ("issue_gate", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
+    }
+
+    # Requirement 4: model, effort AND display, so a relabelling is a failure
+    # too. The PR, solve and drainer lanes are untouched by this change.
+    PRESERVED_CELLS = {
+        ("solve", "codex"): ("gpt-5.4", "high", "gpt-5.4 high"),
+        ("solve", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("pr_review", "codex"): ("gpt-5.6-terra", "xhigh", "GPT-5.6-Terra xhigh"),
+        ("pr_review", "claude"): ("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("pr_revise", "codex"): ("gpt-5.4", "high", "gpt-5.4 high"),
+        ("pr_revise", "claude"): ("claude-sonnet-5", "xhigh", "Sonnet 5 xhigh"),
+        ("drain_rereview", "codex"): ("gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"),
+        ("drain_rereview", "claude"): ("claude-opus-5", "medium", "Opus 5 medium"),
+    }
+
+    def assert_cells(self, expectations):
+        for cell, expected in expectations.items():
+            with self.subTest(cell=cell):
+                assignment = kanban_models.DEFAULT_ROSTER.assignment_for(*cell)
+                self.assertEqual(
+                    (assignment.model, assignment.effort, assignment.display), expected
+                )
+
+    def test_the_five_issue_cells_carry_the_upgraded_assignments(self):
+        self.assert_cells(self.UPGRADED_ISSUE_CELLS)
+
+    def test_the_eight_non_issue_cells_are_untouched(self):
+        self.assert_cells(self.PRESERVED_CELLS)
+
+    def test_the_two_halves_cover_the_roster_exactly_and_do_not_overlap(self):
+        self.assertEqual(
+            set(self.UPGRADED_ISSUE_CELLS) & set(self.PRESERVED_CELLS), set()
+        )
+        self.assertEqual(
+            set(self.UPGRADED_ISSUE_CELLS) | set(self.PRESERVED_CELLS),
+            set(kanban_models.DEFAULT_ROSTER.assignments),
+        )
+
+    def test_the_new_models_are_selectable_and_the_replaced_ones_remain(self):
+        # Requirement 3: the catalogs gained the upgraded models without losing
+        # a selectable one, which is what lets an operator pin a replaced
+        # assignment back and keep its standing issue approvals with it.
+        codex = kanban_models.DEFAULT_ROSTER.providers["codex"].models
+        claude = kanban_models.DEFAULT_ROSTER.providers["claude"].models
+        self.assertEqual(
+            codex, ("gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
+        )
+        self.assertEqual(
+            claude,
+            ("claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
+        )
+        # The efforts this change does not touch, beside them, because a
+        # catalog edit is one edit and the vocabularies live in the same table.
+        self.assertEqual(
+            kanban_models.DEFAULT_ROSTER.providers["codex"].efforts,
+            ("minimal", "low", "medium", "high", "xhigh"),
+        )
+        self.assertEqual(
+            kanban_models.DEFAULT_ROSTER.providers["claude"].efforts,
+            ("low", "medium", "high", "xhigh"),
+        )
 
 
 class RosterPathTests(unittest.TestCase):
@@ -113,7 +196,10 @@ class RosterPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             roster_file(
                 Path(tmp),
-                EXAMPLE.replace('model = "gpt-5.6-sol"', 'model = "gpt-5.5"'),
+                EXAMPLE.replace(
+                    '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"',
+                    '[roles.issue_gate.codex]\nmodel = "gpt-5.5"',
+                ),
             )
             with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
                 assignment = kanban_models.resolve_assignment("issue_gate", "codex")
@@ -463,7 +549,8 @@ class DefectVocabularyTests(unittest.TestCase):
         # it have no catalog to validate against.
         text = EXAMPLE.replace(
             '[providers.claude]\nmodels = ["claude-sonnet-5", "claude-opus-5", '
-            '"claude-fable-5"]\nefforts = ["low", "medium", "high", "xhigh"]\n',
+            '"claude-fable-5", "claude-fable-5-1"]\n'
+            'efforts = ["low", "medium", "high", "xhigh"]\n',
             "",
             1,
         )
@@ -514,8 +601,8 @@ class DefectVocabularyTests(unittest.TestCase):
 
     def test_a_missing_assignment_for_a_loaded_applicable_cell(self):
         text = EXAMPLE.replace(
-            '[roles.issue_gate.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"\n'
-            'display = "GPT-5.6-Sol xhigh"\n',
+            '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "xhigh"\n'
+            'display = "GPT-6-Astra xhigh"\n',
             "",
             1,
         )
