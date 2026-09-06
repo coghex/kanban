@@ -27,13 +27,13 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Mission store paths do not uniquely identify repositories
-- [ ] PRR-2. `$fix` accepts approval that belongs to an older head
-- [ ] PRR-3. Session-cycle diagnostics include acyclic ancestors
+- [x] PRR-1. Mission store paths do not uniquely identify repositories — [#615]
+- [x] PRR-2. `$fix` accepts approval that belongs to an older head — [#616]
+- [x] PRR-3. Session-cycle diagnostics include acyclic ancestors — [#617]
 
 ## 1. Durable mission repository isolation
 
-### PRR-1. Mission store paths do not uniquely identify repositories
+### [#615] PRR-1. Mission store paths do not uniquely identify repositories
 
 > **Captured note:** Give every GitHub repository a collision-free durable
 > mission-store root so one repository can never read, block, or overwrite
@@ -107,7 +107,7 @@ the collision defeats that safety property and can lose durable state.
 
 ## 2. Approved-fix authority
 
-### PRR-2. `$fix` accepts approval that belongs to an older head
+### [#616] PRR-2. `$fix` accepts approval that belongs to an older head
 
 > **Captured note:** Do not let `$fix` modify or push a pull request unless its
 > current head is the exact head the accepted review approved.
@@ -178,7 +178,7 @@ protection settings; the default label path alone establishes the defect.
 
 ## 3. Mission session-tree diagnostics
 
-### PRR-3. Session-cycle diagnostics include acyclic ancestors
+### [#617] PRR-3. Session-cycle diagnostics include acyclic ancestors
 
 > **Captured note:** Report only the sessions that actually form a mission
 > lineage cycle, independent of which input session validation visits first.

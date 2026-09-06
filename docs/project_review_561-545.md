@@ -36,13 +36,13 @@ concrete precondition
 
 ## Status
 
-- [ ] PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
-- [ ] PRR-2. The release rehearsal can select a different workflow dispatch
-- [ ] PRR-3. The systemd controller reader silently misparses valid command quoting
+- [x] PRR-1. Public support and release gates assign managed-service readiness to `--doctor` — [#618]
+- [x] PRR-2. The release rehearsal can select a different workflow dispatch — [#619]
+- [x] PRR-3. The systemd controller reader silently misparses valid command quoting — [#621]
 
 ## 1. Optional-component readiness
 
-### PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
+### [#618] PRR-1. Public support and release gates assign managed-service readiness to `--doctor`
 
 > **Captured note:** Keep `kanban --doctor` scoped to the AI actions it actually
 > checks, require the PR drainer and issue approval service to be verified with
@@ -134,7 +134,7 @@ do not make doctor a service-status probe.
 
 ## 2. Rehearsal-run identity
 
-### PRR-2. The release rehearsal can select a different workflow dispatch
+### [#619] PRR-2. The release rehearsal can select a different workflow dispatch
 
 > **Captured note:** Bind the rehearsal evidence to the workflow run created by
 > the immediately preceding dispatch, rather than treating the repository's
@@ -211,7 +211,7 @@ not assert that the dispatch and selected run are the same event.
 
 ## 3. systemd command-word parsing
 
-### PRR-3. The systemd controller reader silently misparses valid command quoting
+### [#621] PRR-3. The systemd controller reader silently misparses valid command quoting
 
 > **Captured note:** Decode the systemd unit's command words under systemd's
 > actual quoting rules—or fail closed on syntax Kanban cannot decode—so status,
