@@ -835,7 +835,12 @@ class ConfiguredWorkflowLabelTests(unittest.TestCase):
                 config_path="/tmp/custom-config.toml",
             )
         gate_status_mock.assert_called_once_with(
-            Path("/fake-repo"), pr, "coghex/kanban", allow_no_issue=False, config_path="/tmp/custom-config.toml",
+            Path("/fake-repo"),
+            pr,
+            "coghex/kanban",
+            allow_no_issue=False,
+            override_issue_gate=False,
+            config_path="/tmp/custom-config.toml",
         )
 
     def test_resolve_remote_name_defaults_and_reads_a_configured_global_value(self):

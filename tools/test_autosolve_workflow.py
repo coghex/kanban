@@ -101,6 +101,9 @@ REPOSITORY_RESOLUTION = 'gh repo view --json nameWithOwner --jq .nameWithOwner'
 REPOSITORY_SCOPED_CALLS = (
     'gh pr view "$PR" -R "$REPO" --json body',
     'gh pr view "$PR" -R "$REPO" --json headRefOid,labels,comments',
+    'gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me',
+    'gh issue close -R "$REPO" "$ISSUE" --reason completed --comment '
+    '"<landing commit and confirmed acceptance checks>"',
 )
 
 # The lines that legitimately differ between the two renderings: the argument
@@ -322,7 +325,7 @@ class RegistrationTests(unittest.TestCase):
         # and no unresolved directive.
         self.assertEqual(
             REFERENCED_WORKFLOWS,
-            {"solve", "pr-review", "pr-rereview", "finalize", "autosolve"},
+            {"solve", "pr-review", "pr-rereview", "finalize", "autosolve", "push-docs"},
         )
         for relative_path, brand in BRAND_OF.items():
             text = read(relative_path)
@@ -532,6 +535,214 @@ class DelegationOverrideTests(unittest.TestCase):
                 self.assertIn("PR #<number> - <one-sentence summary>", squashed)
 
 
+class DocsOnlyLaneTests(unittest.TestCase):
+    """Step 3: the judgment call between opening a pull request anyway and
+    landing a documentation-only issue directly through {{cmd:push-docs}},
+    for an issue whose effective spec routes it away from a pull request.
+
+    A third override alongside the two `DelegationOverrideTests` and
+    `SelfReviewFlagTests` already pin, which is why the intro sentence names
+    three rather than two.
+    """
+
+    def test_both_renderings_state_the_override_and_its_recognition(self):
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn("**Override, not a stop.**", squashed)
+                self.assertIn(
+                    "left alone it treats that instruction as a conflict and "
+                    "releases the claim without implementing anything",
+                    squashed,
+                )
+                self.assertIn(
+                    "the target repository's own required reading (its "
+                    "`CLAUDE.md`/`AGENTS.md`) confirms that lane exists",
+                    squashed,
+                )
+
+    def test_both_renderings_state_both_dispositions(self):
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn("**Worthy of review**", squashed)
+                self.assertIn(
+                    "Override the \"not through a pull request\" instruction "
+                    "instead of honoring it: continue {{cmd:solve}} exactly as "
+                    "it runs for any other issue",
+                    squashed,
+                )
+                self.assertIn("**Simple**", squashed)
+                self.assertIn(
+                    "land it with {{cmd:push-docs}}", squashed
+                )
+
+    def test_both_renderings_authorize_the_push_docs_override(self):
+        # push-docs's own contract refuses unprompted publication and demands
+        # a current user-directed request, not an inference from the issue's
+        # wording. The grounding is this command's own advertised
+        # description, per the second-round review, not an ad hoc claim
+        # invented mid-document.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "Invoking {{cmd:autosolve}} for this issue is the "
+                    "user-directed publication request {{cmd:push-docs}} "
+                    "requires: this command's own description names direct "
+                    "documentation landing as one of its outcomes",
+                    squashed,
+                )
+                self.assertIn(
+                    "never a request this session inferred on its own from "
+                    "the issue's wording", squashed
+                )
+                self.assertIn(
+                    "That authorization reaches only the file or files this "
+                    "issue's trusted spec names", squashed
+                )
+
+    def test_both_renderings_describe_the_direct_land_outcome_up_front(self):
+        # The grounding above only holds if the command's own description --
+        # what a user actually reads before invoking it -- names this
+        # outcome; otherwise "this command's own description" would be
+        # pointing at nothing.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "or, for a documentation-only issue whose own spec calls "
+                    "for direct publication instead of a pull request, land "
+                    "it and close the issue directly", squashed
+                )
+
+    def test_the_disposition_ends_the_run_without_the_pull_request_steps(self):
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "This disposition ends the run: there is no pull request "
+                    "for steps 4 through 6 to record or review", squashed
+                )
+                self.assertIn(
+                    "Skip straight to the fourth closing line in step 7", squashed
+                )
+
+    def test_the_override_is_counted_in_the_intro(self):
+        for relative_path in RENDERED_ASSETS:
+            squashed = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "the three overrides that matter are called out in "
+                    "steps 2, 3, and 5", squashed
+                )
+
+    def test_the_recognition_clause_detects_a_planted_removal(self):
+        # Non-vacuity: removing the recognition sentence must break the
+        # presence check above, not leave it vacuously true.
+        clause = (
+            "the target repository's own required reading (its "
+            "`CLAUDE.md`/`AGENTS.md`) confirms that lane exists"
+        )
+        mutated = flat(read(CLAUDE_ASSET)).replace(clause, "")
+        self.assertNotIn(clause, mutated)
+
+    def test_both_renderings_capture_the_selected_issue_when_empty(self):
+        # PR #623 review: an empty `$ISSUE` (solve picks the oldest eligible
+        # issue itself) left step 3's `"$ISSUE"` mutations targeting nothing.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "If `$ISSUE` was empty, capture the number "
+                    "{{cmd:solve}} selects and claims as `$ISSUE` now",
+                    squashed,
+                )
+
+    def test_the_reclaim_precedes_and_covers_both_dispositions(self):
+        # PR #623 review: only the Simple disposition reclaimed the issue,
+        # so Worthy-of-review resumed implementation while it stayed
+        # unassigned. The reclaim is now shared and stated before either
+        # bullet, and the ordering is asserted, not just presence.
+        for relative_path, brand in BRAND_OF.items():
+            text = neutralize(read(relative_path), brand)
+            squashed = flat(text)
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "Before choosing a disposition, reclaim the issue — "
+                    "{{cmd:solve}} already released it at the stop", squashed
+                )
+                self.assertIn(
+                    "repeat the collision check {{cmd:solve}}'s own "
+                    "\"Select And Claim\" step performs", squashed
+                )
+                self.assertLess(
+                    text.index("Before choosing a disposition, reclaim the issue"),
+                    text.index("**Worthy of review**"),
+                    "the reclaim must happen before either bullet, not inside one",
+                )
+
+    def test_both_renderings_gate_simple_on_the_checkout_matching_repo(self):
+        # PR #623 review: push-docs always lands on this checkout's own
+        # origin/master, which is not `$REPO` when solve is pointed at an
+        # upstream from a fork checkout. Direct landing must refuse that
+        # case instead of publishing to the wrong repository and then
+        # closing the issue in `$REPO` as if it had been updated.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "`{{cmd:push-docs}}`'s landing helper always publishes to "
+                    "this checkout's own `origin/master`, never to a `$REPO` "
+                    "a fork checkout only reaches by the pull request path's "
+                    "owner-qualified head", squashed
+                )
+                self.assertIn(
+                    "this checkout's own repository does not match `$REPO`",
+                    squashed,
+                )
+                self.assertIn(
+                    "this checkout's own repository matches `$REPO`", squashed
+                )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "gh repo view --json nameWithOwner --jq .nameWithOwner",
+                    read(relative_path),
+                )
+
+    def test_an_open_decision_is_never_grounds_for_either_disposition(self):
+        # PR #623 review: the Worthy-of-review bullet used to list an open
+        # decision or ambiguity as a reason to continue implementing and
+        # open a pull request, which contradicts solve's own mandatory
+        # stop-on-open-decision contract restated in step 2. An unresolved
+        # spec must still stop, never be routed to either disposition here.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "it is never a way to implement a guess", squashed
+                )
+                self.assertIn(
+                    "An unresolved open decision, ambiguity, or reviewer "
+                    "disagreement in the effective spec is not grounds for "
+                    "either disposition below", squashed
+                )
+
+    def test_the_worthy_of_review_bullet_no_longer_lists_open_decisions(self):
+        # The control for the test above: the specific contradictory phrase
+        # the review flagged must be gone from the Worthy-of-review bullet,
+        # not just superseded by an easily-satisfied addition elsewhere.
+        for relative_path in RENDERED_ASSETS:
+            squashed = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(
+                    "an open decision, ambiguity, or reviewer disagreement "
+                    "remains in the effective spec; the fix reaches",
+                    squashed,
+                )
+
+
 class SelfReviewFlagTests(unittest.TestCase):
     """Requirements 2 and 4: the `--self-review` override, in substance, in
     both brands -- and the flag genuinely absent from what an agent runs."""
@@ -646,12 +857,31 @@ class ReviewLoopTests(unittest.TestCase):
         # carrying it would report a standalone route for a round that is
         # issue-gated. Asserted in both directions: the flag is refused in
         # prose and absent from every fence.
+        #
+        # `--override-issue-gate` is the one flag the dry run may carry, and it
+        # is the same hazard from the other side: passed to one of the two and
+        # not the other, the dry run answers a question the round it was
+        # checking is not asking. So the prose must require both, and the flag
+        # must stay OUT of the fence -- the fence is the unconditional command,
+        # and an override belongs there only on a turn the user asked for it.
         for relative_path in RENDERED_ASSETS:
             text = read(relative_path)
+            flattened = flat(text)
             with self.subTest(asset=relative_path):
-                self.assertIn("Add no other flag: `--allow-no-issue`", flat(text))
+                self.assertIn(
+                    "Add no other flag on your own initiative: `--allow-no-issue`",
+                    flattened,
+                )
+                self.assertIn(
+                    "add `--override-issue-gate` and `--override-reason "
+                    '"<the reason they gave>"` to **both** the dry run and the '
+                    "real round",
+                    flattened,
+                )
+                self.assertIn("only when the user asked for it in this turn", flattened)
                 for fence in bash_fences(text):
                     self.assertNotIn("--allow-no-issue", fence)
+                    self.assertNotIn("--override-issue-gate", fence)
 
     def test_the_coordinator_accepts_every_flag_the_dry_run_passes(self):
         # "Nothing it does not accept", measured against the shipped program's
@@ -698,7 +928,7 @@ class TerminalBehaviorTests(unittest.TestCase):
                 self.assertIn("the merge is a deliberate manual step", squashed)
                 self.assertIn("Stop at approval; never merge or finalize.", squashed)
 
-    def test_the_closing_lines_are_the_three_the_workflow_declares(self):
+    def test_the_closing_lines_are_the_four_the_workflow_declares(self):
         for relative_path, brand in BRAND_OF.items():
             squashed = flat(neutralize(read(relative_path), brand))
             with self.subTest(asset=relative_path):
@@ -710,6 +940,8 @@ class TerminalBehaviorTests(unittest.TestCase):
                     "input.",
                     "PR #<pr> review publication failed in round <k> — needs your "
                     "input.",
+                    "Issue #<issue> landed directly as <commit> — documentation-only, "
+                    "no pull request needed.",
                 ):
                     self.assertIn(line, squashed)
 
@@ -739,7 +971,10 @@ class TerminalBehaviorTests(unittest.TestCase):
 
 class MutationTests(unittest.TestCase):
     """This session authored the pull request under review, so every call it
-    makes against that pull request is a read."""
+    makes against that pull request is a read. Step 3's docs-only direct-land
+    disposition is the one deliberate exception, and it is bounded to the
+    ISSUE rather than the pull request: reclaiming it after {{cmd:solve}}
+    released it, and closing it once the landing is verified."""
 
     MUTATING_SUBCOMMANDS = (
         "edit",
@@ -751,10 +986,21 @@ class MutationTests(unittest.TestCase):
         "ready",
     )
 
-    def test_every_gh_call_either_rendering_makes_is_a_read(self):
+    # Requirement (this change): the exact two issue mutations step 3
+    # performs, and no more. Listed rather than merely permitted, so a third
+    # issue mutation added later must be justified here too.
+    ISSUE_MUTATIONS = (
+        'gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me',
+        'gh issue close -R "$REPO" "$ISSUE" --reason completed --comment '
+        '"<landing commit and confirmed acceptance checks>"',
+    )
+
+    def test_every_pr_call_either_rendering_makes_is_a_read(self):
         for relative_path in RENDERED_ASSETS:
-            calls = gh_invocations(read(relative_path))
-            self.assertTrue(calls, f"{relative_path} spells no gh call at all")
+            calls = [
+                call for call in gh_invocations(read(relative_path)) if call.split()[1] == "pr"
+            ]
+            self.assertTrue(calls, f"{relative_path} spells no gh pr call at all")
             for call in calls:
                 verb = call.split()
                 with self.subTest(asset=relative_path, call=call):
@@ -765,9 +1011,24 @@ class MutationTests(unittest.TestCase):
         offenders = [
             call
             for call in gh_invocations(planted)
-            if call.split()[2] in self.MUTATING_SUBCOMMANDS
+            if call.split()[1] == "pr" and call.split()[2] in self.MUTATING_SUBCOMMANDS
         ]
         self.assertEqual(len(offenders), 1, offenders)
+
+    def test_the_only_issue_mutations_are_the_docs_lane_assign_and_close(self):
+        for relative_path in RENDERED_ASSETS:
+            calls = [
+                call
+                for call in gh_invocations(read(relative_path))
+                if call.split()[1] == "issue"
+            ]
+            with self.subTest(asset=relative_path):
+                self.assertEqual(sorted(calls), sorted(self.ISSUE_MUTATIONS))
+
+    def test_the_issue_mutation_rule_detects_a_planted_extra(self):
+        planted = read(CLAUDE_ASSET) + '\n`gh issue edit -R "$REPO" "$ISSUE" --add-label x`\n'
+        calls = [call for call in gh_invocations(planted) if call.split()[1] == "issue"]
+        self.assertNotEqual(sorted(calls), sorted(self.ISSUE_MUTATIONS))
 
 
 class RepositoryScopeTests(unittest.TestCase):
@@ -789,8 +1050,13 @@ class RepositoryScopeTests(unittest.TestCase):
                     sorted(call for call in calls if REPOSITORY_SCOPE in call),
                     sorted(REPOSITORY_SCOPED_CALLS),
                 )
+                # Twice, not once: step 1 resolves `$REPO` when no identity
+                # was supplied, and step 3 reuses the identical primitive to
+                # check whether this checkout's own remote still matches it
+                # before landing a document directly -- a second, distinct
+                # use of the same read rather than a second resolution.
                 self.assertEqual(
-                    len([call for call in calls if REPOSITORY_RESOLUTION in call]), 1
+                    len([call for call in calls if REPOSITORY_RESOLUTION in call]), 2
                 )
 
     def test_the_scope_rule_detects_a_planted_unscoped_call(self):
