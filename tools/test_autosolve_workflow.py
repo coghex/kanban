@@ -624,6 +624,101 @@ class DocsOnlyLaneTests(unittest.TestCase):
         mutated = flat(read(CLAUDE_ASSET)).replace(clause, "")
         self.assertNotIn(clause, mutated)
 
+    def test_both_renderings_capture_the_selected_issue_when_empty(self):
+        # PR #623 review: an empty `$ISSUE` (solve picks the oldest eligible
+        # issue itself) left step 3's `"$ISSUE"` mutations targeting nothing.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "If `$ISSUE` was empty, capture the number "
+                    "{{cmd:solve}} selects and claims as `$ISSUE` now",
+                    squashed,
+                )
+
+    def test_the_reclaim_precedes_and_covers_both_dispositions(self):
+        # PR #623 review: only the Simple disposition reclaimed the issue,
+        # so Worthy-of-review resumed implementation while it stayed
+        # unassigned. The reclaim is now shared and stated before either
+        # bullet, and the ordering is asserted, not just presence.
+        for relative_path, brand in BRAND_OF.items():
+            text = neutralize(read(relative_path), brand)
+            squashed = flat(text)
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "Before choosing a disposition, reclaim the issue — "
+                    "{{cmd:solve}} already released it at the stop", squashed
+                )
+                self.assertIn(
+                    "repeat the collision check {{cmd:solve}}'s own "
+                    "\"Select And Claim\" step performs", squashed
+                )
+                self.assertLess(
+                    text.index("Before choosing a disposition, reclaim the issue"),
+                    text.index("**Worthy of review**"),
+                    "the reclaim must happen before either bullet, not inside one",
+                )
+
+    def test_both_renderings_gate_simple_on_the_checkout_matching_repo(self):
+        # PR #623 review: push-docs always lands on this checkout's own
+        # origin/master, which is not `$REPO` when solve is pointed at an
+        # upstream from a fork checkout. Direct landing must refuse that
+        # case instead of publishing to the wrong repository and then
+        # closing the issue in `$REPO` as if it had been updated.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "`{{cmd:push-docs}}`'s landing helper always publishes to "
+                    "this checkout's own `origin/master`, never to a `$REPO` "
+                    "a fork checkout only reaches by the pull request path's "
+                    "owner-qualified head", squashed
+                )
+                self.assertIn(
+                    "this checkout's own repository does not match `$REPO`",
+                    squashed,
+                )
+                self.assertIn(
+                    "this checkout's own repository matches `$REPO`", squashed
+                )
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "gh repo view --json nameWithOwner --jq .nameWithOwner",
+                    read(relative_path),
+                )
+
+    def test_an_open_decision_is_never_grounds_for_either_disposition(self):
+        # PR #623 review: the Worthy-of-review bullet used to list an open
+        # decision or ambiguity as a reason to continue implementing and
+        # open a pull request, which contradicts solve's own mandatory
+        # stop-on-open-decision contract restated in step 2. An unresolved
+        # spec must still stop, never be routed to either disposition here.
+        for relative_path, brand in BRAND_OF.items():
+            squashed = flat(neutralize(read(relative_path), brand))
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "it is never a way to implement a guess", squashed
+                )
+                self.assertIn(
+                    "An unresolved open decision, ambiguity, or reviewer "
+                    "disagreement in the effective spec is not grounds for "
+                    "either disposition below", squashed
+                )
+
+    def test_the_worthy_of_review_bullet_no_longer_lists_open_decisions(self):
+        # The control for the test above: the specific contradictory phrase
+        # the review flagged must be gone from the Worthy-of-review bullet,
+        # not just superseded by an easily-satisfied addition elsewhere.
+        for relative_path in RENDERED_ASSETS:
+            squashed = flat(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(
+                    "an open decision, ambiguity, or reviewer disagreement "
+                    "remains in the effective spec; the fix reaches",
+                    squashed,
+                )
+
 
 class SelfReviewFlagTests(unittest.TestCase):
     """Requirements 2 and 4: the `--self-review` override, in substance, in
@@ -913,8 +1008,13 @@ class RepositoryScopeTests(unittest.TestCase):
                     sorted(call for call in calls if REPOSITORY_SCOPE in call),
                     sorted(REPOSITORY_SCOPED_CALLS),
                 )
+                # Twice, not once: step 1 resolves `$REPO` when no identity
+                # was supplied, and step 3 reuses the identical primitive to
+                # check whether this checkout's own remote still matches it
+                # before landing a document directly -- a second, distinct
+                # use of the same read rather than a second resolution.
                 self.assertEqual(
-                    len([call for call in calls if REPOSITORY_RESOLUTION in call]), 1
+                    len([call for call in calls if REPOSITORY_RESOLUTION in call]), 2
                 )
 
     def test_the_scope_rule_detects_a_planted_unscoped_call(self):

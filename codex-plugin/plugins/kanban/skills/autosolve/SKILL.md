@@ -55,7 +55,10 @@ oldest approved, unassigned implementation issue itself.
 
 ## 2. Complete the solve
 
-Run $solve for `$ISSUE` in `$REPO`.
+Run $solve for `$ISSUE` in `$REPO`. If `$ISSUE` was empty, capture the
+number $solve selects and claims as `$ISSUE` now: step 3's issue
+mutations assume it is populated, and there is no other point in this
+document where that number is recorded.
 
 **Its stop condition ends that workflow, not this run.** $solve closes
 with a `## Stop Condition` section telling you to end with exactly
@@ -98,28 +101,47 @@ path instead of a pull request, and the target repository's own required
 reading (its `CLAUDE.md`/`AGENTS.md`) confirms that lane exists. Absent
 either, this is not this situation; the stop in step 2 stands.
 
+This step routes a spec that is otherwise complete; it is never a way to
+implement a guess. An unresolved open decision, ambiguity, or reviewer
+disagreement in the effective spec is not grounds for either disposition
+below — the stop in step 2 stands exactly as it would for any other issue.
+
+Before choosing a disposition, reclaim the issue — $solve already
+released it at the stop — then immediately repeat the collision check
+$solve's own "Select And Claim" step performs right after claiming (no
+open pull request already closes this issue, no other worktree already
+claims it), since it may have sat unassigned and unwatched since the stop:
+
+```bash
+gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
+```
+
+Then check whether this checkout can reach `$REPO` directly at all.
+`$push-docs`'s landing helper always publishes to this checkout's own
+`origin/master`, never to a `$REPO` a fork checkout only reaches by the pull
+request path's owner-qualified head, so a mismatch here rules out landing
+directly from here regardless of how simple the change otherwise looks:
+
+```bash
+gh repo view --json nameWithOwner --jq .nameWithOwner
+```
+
 Choose the disposition on the merits of the specific change, not the label on
 the issue:
 
-- **Worthy of review** — an open decision, ambiguity, or reviewer
-  disagreement remains in the effective spec; the fix reaches more than the
-  file or files the issue names; a listed acceptance check cannot be run and
-  confirmed before landing; or this session is not fully confident the
-  correction is right. Override the "not through a pull request" instruction
-  instead of honoring it: continue $solve exactly as it runs for any
-  other issue — implement in the issue's own worktree, open the pull request
-  with `Closes #<issue>` — and resume at step 4.
-- **Simple** — the effective spec leaves no open decision (a trusted review
-  verdict saying so is the strongest evidence), the fix is self-contained to
-  the file or files the issue names, and every acceptance check the issue
-  lists can be run and confirmed to pass before landing. Do not open a pull
-  request.
-
-  Reclaim the issue first — $solve already released it at the stop:
-
-  ```bash
-  gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
-  ```
+- **Worthy of review** — this checkout's own repository does not match
+  `$REPO`; the fix reaches more than the file or files the issue names; a
+  listed acceptance check cannot be run and confirmed before landing; or this
+  session is not fully confident the correction is right. Override the "not
+  through a pull request" instruction instead of honoring it: continue
+  $solve exactly as it runs for any other issue — implement in the
+  issue's own worktree, open the pull request with `Closes #<issue>` — and
+  resume at step 4.
+- **Simple** — this checkout's own repository matches `$REPO`, the effective
+  spec leaves no open decision (a trusted review verdict saying so is the
+  strongest evidence), the fix is self-contained to the file or files the
+  issue names, and every acceptance check the issue lists can be run and
+  confirmed to pass before landing. Do not open a pull request.
 
   Implement the fix in the repository's own documentation worktree, run every
   acceptance check the issue lists and confirm each one passes, then land it
