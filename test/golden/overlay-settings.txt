@@ -24,16 +24,16 @@
 ║┃                          ┃┃  │ overlay                         ┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
 ║┃                          ┃┃  │  reviewed:approve   bug   ui    ┃ Agent models                                                     ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ Operating mode: dual · set by agents in models.toml              ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas currently allo┃ solve          codex   gpt-5.4 · high                   default  ┃────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃  │ Empty modal areas currently allo┃ solve          codex   gpt-5.6-terra · high             default  ┃────────────────────╯ ┃                                         ┃║
 ║┃                          ┃┃  │ pointer events to reach lower   ┃ solve          claude  claude-sonnet-5 · high           default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is visible when a…  ┃ pr_review      codex   gpt-5.6-terra · xhigh            default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  │ pages. This is visible when a…  ┃ pr_review      codex   gpt-5.6-sol · xhigh              default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃  ╰─────────────────────────────────┃ pr_review      claude  claude-opus-5 · xhigh            default  ┃                      ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃                                    ┃ pr_revise      codex   gpt-5.4 · high                   default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭─────────────────────────────────┃ pr_revise      claude  claude-sonnet-5 · xhigh          default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_review   codex   gpt-6-astra · high               default  ┃                      ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃                                    ┃ pr_revise      codex   gpt-5.6-terra · high             default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  ╭─────────────────────────────────┃ pr_revise      claude  claude-sonnet-5 · high           default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_review   codex   gpt-6-astra · xhigh              default  ┃                      ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ contract                        ┃ issue_review   claude  claude-fable-5-1 · xhigh         default  ┃                      ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │  architecture                   ┃ issue_revise   claude  claude-fable-5-1 · high          default  ┃                      ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ issue_gate     codex   gpt-6-astra · xhigh              default  ┃                      ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago     ┃ issue_gate     codex   gpt-6-astra · high               default  ┃                      ┃  │ truncated payload.                 │ ┃║
 ║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ Document root owners, snapshot  ┃                                                                  ┃                      ┃  │ ◐ CI 9/12 · behind                 │ ┃║
 ║┃ ┃ approve_issues.py ┃    ┃┃  │ barriers, and the versioned     ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                      ┃  ╰────────────────────────────────────╯ ┃║
 ║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ envelope before implementation…     │ ┃                                         ┃                                         ┃                                         ┃║

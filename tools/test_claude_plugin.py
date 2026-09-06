@@ -1052,7 +1052,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         roster_source = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
         codex_cell = roster_cell(roster_source, "roles.pr_review.codex")
         claude_cell = roster_cell(roster_source, "roles.pr_review.claude")
-        self.assertEqual(codex_cell["model"], "gpt-5.6-terra")
+        self.assertEqual(codex_cell["model"], "gpt-5.6-sol")
         self.assertEqual(codex_cell["effort"], "xhigh")
         self.assertEqual(claude_cell["model"], "claude-opus-5")
         self.assertEqual(claude_cell["effort"], "xhigh")
@@ -1121,7 +1121,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         # edit is what the nested reviewer runs on, not the constants above.
         coordinator = load_review_pr_module()
         edited = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
-            '[roles.pr_review.codex]\nmodel = "gpt-5.6-terra"\neffort = "xhigh"',
+            '[roles.pr_review.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"',
             '[roles.pr_review.codex]\nmodel = "gpt-5.5"\neffort = "medium"',
         )
         self.assertIn('model = "gpt-5.5"', edited)
@@ -1164,7 +1164,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         # branch, not just the pre-existing unspecified-model assertions.
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn("CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT", coordinator_source)
-        self.assertIn('"gpt-5.6-terra@xhigh"', coordinator_source)
+        self.assertIn('"gpt-5.6-sol@xhigh"', coordinator_source)
 
 
 class ClaudePluginRootReferenceTests(unittest.TestCase):

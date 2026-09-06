@@ -292,19 +292,19 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         module = self.backend()
         self.assertEqual(module.MODEL_ROSTER_ERROR, None)
         self.assertEqual(module.CODEX_REVIEWER.model, "gpt-6-astra")
-        self.assertEqual(module.CODEX_REVIEWER.effort, "xhigh")
+        self.assertEqual(module.CODEX_REVIEWER.effort, "high")
         self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-fable-5-1")
-        self.assertEqual(module.CLAUDE_REVIEWER.effort, "xhigh")
+        self.assertEqual(module.CLAUDE_REVIEWER.effort, "high")
 
     def test_a_roster_file_moves_the_model_and_effort_the_cli_is_given(self):
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
             .replace(
-                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
                 '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
             )
             .replace(
-                '[roles.issue_gate.claude]\nmodel = "claude-fable-5-1"\neffort = "xhigh"',
+                '[roles.issue_gate.claude]\nmodel = "claude-fable-5-1"\neffort = "high"',
                 '[roles.issue_gate.claude]\nmodel = "claude-sonnet-5"\neffort = "medium"',
             )
         )
@@ -324,7 +324,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         # environment and be left with the file's effort.
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
-                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
                 '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
             )
         )
@@ -343,7 +343,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
     def test_the_published_marker_carries_the_resolved_assignment(self):
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
-                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "xhigh"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
                 '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
             )
         )
@@ -366,11 +366,13 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         # and (once the ledger has begun) whether the marker was written while
         # it was. A pair that never ran here is still stale.
         default = self.backend()
-        standing = default.reviewer_models([default.CODEX_REVIEWER])
+        self.assertEqual(
+            default.reviewer_models([default.CODEX_REVIEWER]), "gpt-6-astra@high"
+        )
 
         for old, new in (
-            ('model = "gpt-6-astra"\neffort = "xhigh"', 'model = "gpt-5.5"\neffort = "xhigh"'),
-            ('model = "gpt-6-astra"\neffort = "xhigh"', 'model = "gpt-6-astra"\neffort = "high"'),
+            ('model = "gpt-6-astra"\neffort = "high"', 'model = "gpt-5.5"\neffort = "high"'),
+            ('model = "gpt-6-astra"\neffort = "high"', 'model = "gpt-6-astra"\neffort = "xhigh"'),
         ):
             with self.subTest(edit=new):
                 self.write_roster(
@@ -380,10 +382,13 @@ class RosterBackedIssueGateTests(unittest.TestCase):
                     )
                 )
                 module = self.backend()
-                self.assertNotIn(
-                    standing,
-                    module.accepted_reviewer_models([module.CODEX_REVIEWER]),
-                )
+                accepted = module.accepted_reviewer_models([module.CODEX_REVIEWER])
+                # #614's gate assignment stands whatever the roster now says:
+                # it is in RETIRED_REVIEWER_CELLS at the effort it ran.
+                self.assertIn("gpt-6-astra@xhigh", accepted)
+                # An effort no assignment ever ran at does not.
+                self.assertNotIn("gpt-6-astra@minimal", accepted)
+                self.assertNotIn("gpt-5.5@minimal", accepted)
 
         # The legacy accepted models are not spawn values and stay literal, so
         # a marker recorded under one goes on validating.
@@ -736,11 +741,11 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
         module = self.backend()
         self.assertEqual(
             (module.CODEX_REVIEWER.model, module.CODEX_REVIEWER.effort),
-            ("gpt-6-astra", "xhigh"),
+            ("gpt-6-astra", "high"),
         )
         self.assertEqual(
             (module.CLAUDE_REVIEWER.model, module.CLAUDE_REVIEWER.effort),
-            ("claude-fable-5-1", "xhigh"),
+            ("claude-fable-5-1", "high"),
         )
         # The persona is not roster-derived and keeps its own override, so it
         # is pinned separately from the assignment beside it.
@@ -752,13 +757,13 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
         module = self.backend()
         codex_argv = self.invoke(module, module.CODEX_REVIEWER)
         self.assertEqual(codex_argv[codex_argv.index("-m") + 1], "gpt-6-astra")
-        self.assertIn('model_reasoning_effort="xhigh"', codex_argv)
+        self.assertIn('model_reasoning_effort="high"', codex_argv)
 
         claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
         self.assertEqual(
             claude_argv[claude_argv.index("--model") + 1], "claude-fable-5-1"
         )
-        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "xhigh")
+        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "high")
 
     def test_a_replaced_default_marker_goes_stale_only_outside_its_window(self):
         # PR #626 replaced #614's requirement-5 boundary. The retired
@@ -777,8 +782,8 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
             {
                 "recorded_at": "2026-09-06T00:00:00Z",
                 "assignments": {
-                    "codex": "gpt-6-astra@xhigh",
-                    "claude": "claude-fable-5-1@xhigh",
+                    "codex": "gpt-6-astra@high",
+                    "claude": "claude-fable-5-1@high",
                 },
             },
         ]
@@ -868,31 +873,56 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
                         )
                     )
 
-    def test_the_retained_legacy_routes_still_validate_at_matching_efforts(self):
+    def test_the_retained_legacy_routes_validate_at_two_efforts_and_no_more(self):
+        # PR #626 records each retired assignment at the effort it actually ran,
+        # and keeps accepting it at the effort this install runs now -- the
+        # behaviour before the cells carried an effort at all. Anything else
+        # is an assignment that never existed here.
         module = self.backend()
+        current_effort = module.CODEX_REVIEWER.effort
+        self.assertEqual(current_effort, "high")
         accepted_codex = module.accepted_reviewer_models(self.route(module, "codex"))
         for model in self.RETAINED["codex"]:
             with self.subTest(model=model):
                 self.assertIn(f"{model}@xhigh", accepted_codex)
+                self.assertIn(f"{model}@{current_effort}", accepted_codex)
+                self.assertNotIn(f"{model}@medium", accepted_codex)
         accepted_claude = module.accepted_reviewer_models(self.route(module, "claude"))
+        claude_effort = module.CLAUDE_REVIEWER.effort
         for model in self.RETAINED["claude"]:
             with self.subTest(model=model):
                 self.assertIn(f"{model}@xhigh", accepted_claude)
+                self.assertIn(f"{model}@{claude_effort}", accepted_claude)
         accepted_dual = module.accepted_reviewer_models(
             self.route(module, "codex+claude")
         )
         for recorded in (
             "gpt-5.6-terra@xhigh+claude-fable-5@xhigh",
             "gpt-5.5@xhigh+claude-fable-5@xhigh",
-            "gpt-6-astra@xhigh+claude-fable-5@xhigh",
-            "gpt-5.6-terra@xhigh+claude-fable-5-1@xhigh",
+            "gpt-6-astra@high+claude-fable-5@xhigh",
+            "gpt-5.6-terra@xhigh+claude-fable-5-1@high",
         ):
             with self.subTest(models=recorded):
                 self.assertIn(recorded, accepted_dual)
 
-        # Matching efforts, and only those: the same legacy model recorded at
-        # an effort this install does not run is a different assignment.
-        for recorded in ("gpt-5.6-terra@high", "gpt-5.5@medium"):
+        # PR #629 retired gpt-6-astra@xhigh -- #614's gate assignment -- when it
+        # moved the gate to high, so it is a retired era like any other and the
+        # approvals published under it stand. Recording the OUTGOING cell is
+        # what every assignment change owes; omitting it is the churn PR #626
+        # removed, and this case is what makes forgetting it fail.
+        self.assertIn("gpt-6-astra@xhigh", accepted_codex)
+        self.assertIn(
+            "claude-fable-5-1@xhigh",
+            module.accepted_reviewer_models(self.route(module, "claude")),
+        )
+        self.assertIn(
+            "gpt-6-astra@xhigh+claude-fable-5-1@xhigh",
+            module.accepted_reviewer_models(self.route(module, "codex+claude")),
+        )
+
+        # An effort no assignment ever ran at is still not a route this install
+        # knows.
+        for recorded in ("gpt-6-astra@medium", "gpt-6-astra@low"):
             with self.subTest(models=recorded):
                 self.assertNotIn(recorded, accepted_codex)
 
@@ -982,7 +1012,7 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
 
         prompt = module.review_prompt(reviewer, {"issue": {}}, mode="initial")
         self.assertIn(
-            "You are Team Reviewer, running on `claude-fable-5-1` at `xhigh` "
+            "You are Team Reviewer, running on `claude-fable-5-1` at `high` "
             "reasoning effort,",
             prompt,
         )
@@ -1014,13 +1044,13 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
             trigger=None,
         )
         self.assertIn(
-            "by Team Reviewer (`claude-fable-5-1` at `xhigh`).",
+            "by Team Reviewer (`claude-fable-5-1` at `high`).",
             comment,
         )
         # The summary line keeps the exact shape reviewer_display_names parses
         # back out, which is what a later rereview reads the verdict from.
         self.assertIn("- **Team Reviewer — APPROVE:**", comment)
-        self.assertIn("models=claude-fable-5-1@xhigh", comment)
+        self.assertIn("models=claude-fable-5-1@high", comment)
 
 
 class ReviewerLedgerTests(RosterBackedIssueGateTests):
@@ -1039,7 +1069,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
     """
 
     SOL_ERA = {"codex": "gpt-5.6-sol@xhigh", "claude": "claude-opus-5@xhigh"}
-    ASTRA_ERA = {"codex": "gpt-6-astra@xhigh", "claude": "claude-fable-5-1@xhigh"}
+    ASTRA_ERA = {"codex": "gpt-6-astra@high", "claude": "claude-fable-5-1@high"}
 
     def route(self, module, key):
         return {
@@ -1121,7 +1151,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             )
         ]
         current = module.reviewer_models(reviewers)
-        self.assertEqual(current, "gpt-6-astra@xhigh+claude-fable-5-1@xhigh")
+        self.assertEqual(current, "gpt-6-astra@high+claude-fable-5-1@high")
         self.assertTrue(
             module.marker_models_accepted(
                 current, "2026-11-01T00:00:00Z", reviewers, entries=behind

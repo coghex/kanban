@@ -75,10 +75,10 @@ class CompiledDefaultsTests(unittest.TestCase):
         # Requirement 16: with no roster file present, every argv these scripts
         # build is byte-identical to what the retired literals produced.
         for cell, expected in (
-            (("issue_gate", "codex"), ("gpt-6-astra", "xhigh")),
-            (("issue_gate", "claude"), ("claude-fable-5-1", "xhigh")),
+            (("issue_gate", "codex"), ("gpt-6-astra", "high")),
+            (("issue_gate", "claude"), ("claude-fable-5-1", "high")),
             (("drain_rereview", "codex"), ("gpt-5.6-terra", "medium")),
-            (("pr_review", "codex"), ("gpt-5.6-terra", "xhigh")),
+            (("pr_review", "codex"), ("gpt-5.6-sol", "xhigh")),
             (("pr_review", "claude"), ("claude-opus-5", "xhigh")),
         ):
             with self.subTest(cell=cell):
@@ -86,79 +86,97 @@ class CompiledDefaultsTests(unittest.TestCase):
                 self.assertEqual((assignment.model, assignment.effort), expected)
 
 
-class IssueAssignmentUpgradeTests(unittest.TestCase):
-    """Issue #614: the five issue cells moved and the other eight did not.
+class CompiledAssignmentTests(unittest.TestCase):
+    """Every compiled cell, model, effort and display, stated once here.
 
-    Enumerated in two halves rather than as one table, and checked to cover the
-    roster exactly, so neither half can quietly stop asserting: a role added
-    without a decision about which half it belongs to fails the completeness
-    case below rather than slipping past a rule that matches everything.
+    Enumerated as one table rather than split by which change last moved a
+    cell. #614 moved the five issue cells and PR #629 moved seven more, so a split
+    kept describing whichever change wrote it rather than the roster; the
+    property worth holding is that this table names the roster EXACTLY --
+    every cell, no extras, no omissions -- which the coverage case below
+    checks against the roster itself.
 
     `CompiledDefaultsTests` holds these same values against the tracked
     example, and `Spec.Config.Models` holds them from the Haskell side. This is
     the third, independent statement of them -- a mistake made identically in
     the compiled roster and the example still fails here.
+
+    Model, effort AND display, so a relabelling is a failure too.
     """
 
-    UPGRADED_ISSUE_CELLS = {
-        ("issue_review", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
+    EXPECTED_CELLS = {
+        ("solve", "codex"): ("gpt-5.6-terra", "high", "GPT-5.6-Terra high"),
+        ("solve", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("pr_review", "codex"): ("gpt-5.6-sol", "xhigh", "GPT-5.6-Sol xhigh"),
+        ("pr_review", "claude"): ("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("pr_revise", "codex"): ("gpt-5.6-terra", "high", "GPT-5.6-Terra high"),
+        ("pr_revise", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("issue_review", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
         ("issue_review", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
         ("issue_revise", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
-        ("issue_gate", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
-        ("issue_gate", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
-    }
-
-    # Requirement 4: model, effort AND display, so a relabelling is a failure
-    # too. The PR, solve and drainer lanes are untouched by this change.
-    PRESERVED_CELLS = {
-        ("solve", "codex"): ("gpt-5.4", "high", "gpt-5.4 high"),
-        ("solve", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
-        ("pr_review", "codex"): ("gpt-5.6-terra", "xhigh", "GPT-5.6-Terra xhigh"),
-        ("pr_review", "claude"): ("claude-opus-5", "xhigh", "Opus 5 xhigh"),
-        ("pr_revise", "codex"): ("gpt-5.4", "high", "gpt-5.4 high"),
-        ("pr_revise", "claude"): ("claude-sonnet-5", "xhigh", "Sonnet 5 xhigh"),
+        ("issue_gate", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
+        ("issue_gate", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
         ("drain_rereview", "codex"): ("gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"),
         ("drain_rereview", "claude"): ("claude-opus-5", "medium", "Opus 5 medium"),
     }
 
-    def assert_cells(self, expectations):
-        for cell, expected in expectations.items():
+    def test_every_cell_carries_its_compiled_assignment(self):
+        for cell, expected in self.EXPECTED_CELLS.items():
             with self.subTest(cell=cell):
                 assignment = kanban_models.DEFAULT_ROSTER.assignment_for(*cell)
                 self.assertEqual(
                     (assignment.model, assignment.effort, assignment.display), expected
                 )
 
-    def test_the_five_issue_cells_carry_the_upgraded_assignments(self):
-        self.assert_cells(self.UPGRADED_ISSUE_CELLS)
-
-    def test_the_eight_non_issue_cells_are_untouched(self):
-        self.assert_cells(self.PRESERVED_CELLS)
-
-    def test_the_two_halves_cover_the_roster_exactly_and_do_not_overlap(self):
+    def test_the_table_names_the_roster_exactly(self):
+        # What stops the table above from silently omitting a cell somebody
+        # added, or keeping one somebody removed.
         self.assertEqual(
-            set(self.UPGRADED_ISSUE_CELLS) & set(self.PRESERVED_CELLS), set()
-        )
-        self.assertEqual(
-            set(self.UPGRADED_ISSUE_CELLS) | set(self.PRESERVED_CELLS),
-            set(kanban_models.DEFAULT_ROSTER.assignments),
+            set(self.EXPECTED_CELLS), set(kanban_models.DEFAULT_ROSTER.assignments)
         )
 
-    def test_the_new_models_are_selectable_and_the_replaced_ones_remain(self):
-        # Requirement 3: the catalogs gained the upgraded models without losing
-        # a selectable one, which is what lets an operator pin a replaced
-        # assignment back and keep its standing issue approvals with it.
+    def test_the_efforts_are_the_one_scale_per_lane(self):
+        # PR #629: the efforts had drifted per cell. One value per lane, so a
+        # future edit that moves only one half of a lane fails here.
+        by_role = {}
+        for (role, _provider), (_model, effort, _display) in self.EXPECTED_CELLS.items():
+            by_role.setdefault(role, set()).add(effort)
+        self.assertEqual(
+            {role: sorted(efforts) for role, efforts in by_role.items()},
+            {
+                "solve": ["high"],
+                "pr_review": ["xhigh"],
+                "pr_revise": ["high"],
+                "issue_review": ["xhigh"],
+                "issue_revise": ["high"],
+                "issue_gate": ["high"],
+                "drain_rereview": ["medium"],
+            },
+        )
+
+    def test_the_selectable_models_are_the_ones_still_in_use(self):
+        # PR #629 retired gpt-5.4 from the catalog outright rather than leaving it
+        # selectable: a model no assignment names is how one drifts back.
         codex = kanban_models.DEFAULT_ROSTER.providers["codex"].models
         claude = kanban_models.DEFAULT_ROSTER.providers["claude"].models
         self.assertEqual(
-            codex, ("gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
+            codex, ("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
         )
+        self.assertNotIn("gpt-5.4", codex)
         self.assertEqual(
             claude,
             ("claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
         )
-        # The efforts this change does not touch, beside them, because a
-        # catalog edit is one edit and the vocabularies live in the same table.
+        # Every assigned model is selectable, which is what the roster's own
+        # validation demands of an operator's file too.
+        for (_role, provider), (model, _effort, _display) in self.EXPECTED_CELLS.items():
+            with self.subTest(model=model):
+                self.assertIn(
+                    model, kanban_models.DEFAULT_ROSTER.providers[provider].models
+                )
+
+        # The effort vocabularies, beside them, because a catalog edit is one
+        # edit and the two live in the same table.
         self.assertEqual(
             kanban_models.DEFAULT_ROSTER.providers["codex"].efforts,
             ("minimal", "low", "medium", "high", "xhigh"),
@@ -217,7 +235,7 @@ class AbsentFileTests(unittest.TestCase):
             )
 
     def test_a_fallback_stands_in_for_the_defaults_only_when_absent(self):
-        stand_in = kanban_models.Assignment("gpt-5.4", "low", "stand-in")
+        stand_in = kanban_models.Assignment("gpt-5.5", "low", "stand-in")
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "kanban" / "models.toml"
             self.assertEqual(
@@ -234,11 +252,11 @@ class AbsentFileTests(unittest.TestCase):
                 kanban_models.resolve_assignment(
                     "pr_review", "codex", fallback=stand_in, explicit_path=present
                 ).model,
-                "gpt-5.6-terra",
+                "gpt-5.6-sol",
             )
 
     def test_a_fallback_does_not_rescue_a_present_unusable_file(self):
-        stand_in = kanban_models.Assignment("gpt-5.4", "low", "stand-in")
+        stand_in = kanban_models.Assignment("gpt-5.5", "low", "stand-in")
         with tempfile.TemporaryDirectory() as tmp:
             broken = roster_file(Path(tmp), "schema_version = 1\nagents = 7\n")
             with self.assertRaises(kanban_models.RosterError):
@@ -312,7 +330,7 @@ class UnreadableFileTests(unittest.TestCase):
         roster.write_text(EXAMPLE, encoding="utf-8")
         closed.chmod(0o000)
         self.addCleanup(closed.chmod, 0o700)
-        stand_in = kanban_models.Assignment("gpt-5.4", "low", "stand-in")
+        stand_in = kanban_models.Assignment("gpt-5.5", "low", "stand-in")
         for fallback in (None, stand_in):
             with self.subTest(fallback=fallback):
                 with self.assertRaises(kanban_models.RosterError):
@@ -440,7 +458,7 @@ class DefectVocabularyTests(unittest.TestCase):
         self.assertIn(
             '"providers.codex.modles" is not a key this schema knows',
             self.defects(
-                self.edited(('models = ["gpt-5.4"', 'modles = ["gpt-5.4"'))
+                self.edited(('models = ["gpt-5.5"', 'modles = ["gpt-5.5"'))
             ),
         )
 
@@ -450,8 +468,8 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"\nmodle = "x"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\nmodle = "x"',
                     )
                 )
             ),
@@ -463,9 +481,9 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"\neffort = "high"\n'
-                        'display = "gpt-5.4 high"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"\neffort = "high"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"\n'
+                        'display = "GPT-5.6-Terra high"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"',
                     )
                 )
             ),
@@ -476,7 +494,7 @@ class DefectVocabularyTests(unittest.TestCase):
             '"roles.solve.codex.model" must be a string',
             self.defects(
                 self.edited(
-                    ('[roles.solve.codex]\nmodel = "gpt-5.4"',
+                    ('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
                      "[roles.solve.codex]\nmodel = 4")
                 )
             ),
@@ -497,12 +515,12 @@ class DefectVocabularyTests(unittest.TestCase):
 
     def test_a_repeated_catalog_entry(self):
         self.assertIn(
-            '"providers.codex.models" lists "gpt-5.4" more than once',
+            '"providers.codex.models" lists "gpt-5.5" more than once',
             self.defects(
                 self.edited(
                     (
-                        'models = ["gpt-5.4", "gpt-5.5"',
-                        'models = ["gpt-5.4", "gpt-5.4", "gpt-5.5"',
+                        'models = ["gpt-5.5", "gpt-5.6-terra"',
+                        'models = ["gpt-5.5", "gpt-5.5", "gpt-5.6-terra"',
                     )
                 )
             ),
@@ -567,8 +585,8 @@ class DefectVocabularyTests(unittest.TestCase):
                 self.edited(
                     (
                         '[roles.issue_revise.claude]',
-                        '[roles.issue_revise.codex]\nmodel = "gpt-5.4"\n'
-                        'effort = "high"\ndisplay = "gpt-5.4 high"\n\n'
+                        '[roles.issue_revise.codex]\nmodel = "gpt-6-astra"\n'
+                        'effort = "high"\ndisplay = "GPT-6-Astra high"\n\n'
                         "[roles.issue_revise.claude]",
                     )
                 )
@@ -580,7 +598,7 @@ class DefectVocabularyTests(unittest.TestCase):
             'roles.solve.codex names model "gpt-9", which is not in that '
             "provider's models list",
             self.defects(
-                self.edited(('[roles.solve.codex]\nmodel = "gpt-5.4"',
+                self.edited(('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
                              '[roles.solve.codex]\nmodel = "gpt-9"'))
             ),
         )
@@ -592,8 +610,8 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"\neffort = "high"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.4"\neffort = "extreme"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"',
+                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "extreme"',
                     )
                 )
             ),
@@ -601,8 +619,8 @@ class DefectVocabularyTests(unittest.TestCase):
 
     def test_a_missing_assignment_for_a_loaded_applicable_cell(self):
         text = EXAMPLE.replace(
-            '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "xhigh"\n'
-            'display = "GPT-6-Astra xhigh"\n',
+            '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"\n'
+            'display = "GPT-6-Astra high"\n',
             "",
             1,
         )
@@ -647,7 +665,7 @@ class DefectVocabularyTests(unittest.TestCase):
     def test_every_defect_is_reported_rather_than_only_the_first(self):
         message = self.defects(
             self.edited(
-                ('[roles.solve.codex]\nmodel = "gpt-5.4"',
+                ('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
                  '[roles.solve.codex]\nmodel = "gpt-9"'),
                 ('[roles.solve.claude]\nmodel = "claude-sonnet-5"',
                  '[roles.solve.claude]\nmodel = "claude-9"'),

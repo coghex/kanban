@@ -883,9 +883,9 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
         with self.rooted():
             first = drain_prs.refresh_finalize_assignment()
             self.assertEqual(first.model, "gpt-5.5")
-            self.write_roster(self.edited_example("gpt-5.4", "high"))
+            self.write_roster(self.edited_example("gpt-6-astra", "high"))
             second = drain_prs.refresh_finalize_assignment()
-        self.assertEqual((second.model, second.effort), ("gpt-5.4", "high"))
+        self.assertEqual((second.model, second.effort), ("gpt-6-astra", "high"))
 
     def test_the_drain_loop_refreshes_before_any_queue_work(self):
         source = (REPO_ROOT / "tools" / "drain_prs.py").read_text(encoding="utf-8")

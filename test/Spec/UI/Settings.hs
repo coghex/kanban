@@ -126,7 +126,7 @@ spec = describe "the settings overlay's model roster" $ do
       section `shouldSatisfy` Data.Text.isInfixOf "Press d to replace the file's contents"
       section `shouldSatisfy` Data.Text.isInfixOf "is not kept"
       -- And no fabricated rows beside it: not one compiled model is named.
-      section `shouldSatisfy` (not . Data.Text.isInfixOf "gpt-5.4")
+      section `shouldSatisfy` (not . Data.Text.isInfixOf "gpt-5.6-terra")
       section `shouldSatisfy` (not . Data.Text.isInfixOf "claude-")
 
   -- Requirement 5 of #486: the mode is shown here and set nowhere here. The
@@ -233,13 +233,13 @@ spec = describe "the settings overlay's model roster" $ do
     it "wraps through the provider's declared model order in both directions" $ do
       cycledModel (SettingsCycleModel 1) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-opus-5"
       cycledModel (SettingsCycleModel (-1)) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5-1"
-      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-6-astra"
-      cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-5.4"
+      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-5.5"
+      cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-5.5"
 
-    it "wraps through the declared effort vocabulary in both directions" $ do
+    it "steps through the declared effort vocabulary in both directions" $ do
       cycledEffort (SettingsCycleEffort 1) (SolveRole, CodexProvider) `shouldBe` Just "xhigh"
       cycledEffort (SettingsCycleEffort (-1)) (SolveRole, CodexProvider) `shouldBe` Just "medium"
-      cycledEffort (SettingsCycleEffort 1) (IssueGateRole, ClaudeProvider) `shouldBe` Just "low"
+      cycledEffort (SettingsCycleEffort 1) (IssueGateRole, ClaudeProvider) `shouldBe` Just "xhigh"
 
     it "names the wire model and effort in the display, replacing a curated label" $
       editedAssignment (SettingsCycleModel 1) defaults (SolveRole, ClaudeProvider)
@@ -277,7 +277,7 @@ spec = describe "the settings overlay's model roster" $ do
       case outcome SettingsResetAssignment (Right narrowedCodexRoster) (Just (SolveRole, CodexProvider)) of
         SettingsRefused message -> do
           message `shouldSatisfy` Data.Text.isInfixOf "solve.codex"
-          message `shouldSatisfy` Data.Text.isInfixOf "model gpt-5.4"
+          message `shouldSatisfy` Data.Text.isInfixOf "model gpt-5.6-terra"
         other -> expectationFailure ("expected a refusal and got " <> show other)
 
     it "writes nothing for a cell already at its compiled default" $
@@ -430,7 +430,7 @@ relabelledRoster :: ModelRoster
 relabelledRoster =
   defaultRoster
     { rosterAssignments =
-        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-5.4" "high" "the usual") defaultRoster.rosterAssignments
+        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-5.6-terra" "high" "the usual") defaultRoster.rosterAssignments
     }
 
 -- | One cell edited off its compiled default, as an edit through this screen
@@ -447,7 +447,7 @@ editedGateRoster :: ModelRoster
 editedGateRoster =
   defaultRoster
     { rosterAssignments =
-        Map.insert (IssueGateRole, CodexProvider) (Assignment "gpt-5.4" "xhigh" "gpt-5.4 xhigh") defaultRoster.rosterAssignments
+        Map.insert (IssueGateRole, CodexProvider) (Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh") defaultRoster.rosterAssignments
     }
 
 -- | A provider whose catalog declares one model and one effort, so cycling
@@ -473,7 +473,7 @@ narrowedCodexRoster =
     { rosterProviders =
         Map.insert
           CodexProvider
-          (ProviderCatalog ["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol"] ["medium", "high", "xhigh"])
+          (ProviderCatalog ["gpt-5.5", "gpt-5.6-sol", "gpt-6-astra"] ["medium", "high", "xhigh"])
           defaultRoster.rosterProviders,
       rosterAssignments =
         Map.insert (SolveRole, CodexProvider) (Assignment "gpt-5.5" "high" "gpt-5.5 high") defaultRoster.rosterAssignments

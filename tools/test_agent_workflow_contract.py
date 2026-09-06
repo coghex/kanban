@@ -4537,5 +4537,86 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
 
 
 
+class IssueGateInstructionParityTests(unittest.TestCase):
+    """The packaged workflow assets name the gate's models; the backend picks
+    them. PR #629 moved the `issue_gate` efforts and left four assets telling
+    agents a route the backend no longer takes.
+
+    Nothing executes these strings, so no other gate catches the drift -- and
+    they are the program an agent follows, which is exactly why CLAUDE.md holds
+    a bundle asset to a regression assertion like any other code. The
+    expectation is RESOLVED from the roster rather than spelled here, so the
+    next assignment change fails this instead of shipping stale instructions.
+    """
+
+    # Every asset that states the canonical gate route, and the negative
+    # control beneath it: assets that delegate reviewer selection without
+    # naming a model owe nothing here.
+    NAMING_ASSETS = (
+        "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
+        "claude-plugin/plugins/kanban/commands/issue-review.md",
+        "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md",
+        "claude-plugin/plugins/kanban/commands/issue-rereview.md",
+    )
+    DELEGATING_ASSETS = (
+        "codex-plugin/plugins/kanban/skills/pr-review/SKILL.md",
+        "claude-plugin/plugins/kanban/commands/pr-review.md",
+    )
+
+    def gate_displays(self):
+        # The tracked reader itself, not a second spelling of its values.
+        import sys
+
+        if str(REPO_ROOT / "tools") not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import kanban_models
+
+        roster = kanban_models.DEFAULT_ROSTER
+        return {
+            provider: roster.assignment_for("issue_gate", provider).display
+            for provider in ("codex", "claude")
+        }
+
+    def test_every_naming_asset_states_the_resolved_gate_route(self):
+        displays = self.gate_displays()
+        # "GPT-6-Astra high" / "Fable 5.1 high" -> the prose spells the persona
+        # and effort, so assert on the display the roster actually resolves.
+        codex_display = displays["codex"]
+        claude_display = displays["claude"].replace("Fable", "Claude Fable")
+        for asset in self.NAMING_ASSETS:
+            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
+            with self.subTest(asset=asset):
+                self.assertIn(codex_display, text)
+                self.assertIn(claude_display, text)
+
+    def test_no_naming_asset_states_a_route_the_backend_does_not_take(self):
+        displays = self.gate_displays()
+        stale = {
+            f"GPT-6-Astra {effort}"
+            for effort in ("minimal", "low", "medium", "high", "xhigh")
+        } - {displays["codex"]}
+        stale |= {
+            f"Claude Fable 5.1 {effort}"
+            for effort in ("low", "medium", "high", "xhigh")
+        } - {displays["claude"].replace("Fable", "Claude Fable")}
+        for asset in self.NAMING_ASSETS:
+            text = (REPO_ROOT / asset).read_text(encoding="utf-8")
+            for wording in sorted(stale):
+                with self.subTest(asset=asset, wording=wording):
+                    self.assertNotIn(wording, text)
+
+    def test_the_delegating_assets_name_no_gate_model_at_all(self):
+        # The negative control: a rule that matched everything could pass
+        # while asserting nothing.
+        for asset in self.DELEGATING_ASSETS:
+            path = REPO_ROOT / asset
+            with self.subTest(asset=asset):
+                # Asserted, not skipped: a rename would otherwise void the
+                # control silently, which is the one thing a negative control
+                # must never do.
+                self.assertTrue(path.exists(), f"{asset} is gone; retarget this control")
+                self.assertNotIn("GPT-6-Astra", path.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

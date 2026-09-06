@@ -844,9 +844,9 @@ solve reads `solve`, the embedded issue-review thread reads that thread's own
 provider's `issue_review`, and `kanban_run_claude` reads `issue_revise.claude`;
 which brand's column applies is the routing described here. The defaults
 reproduce today's assignments exactly: Codex-origin PRs on Opus 5 xhigh for
-review and GPT-5.4 high for revision and repair, Claude-origin PRs on
-GPT-5.6-Terra xhigh for review and Sonnet 5 xhigh for revision and repair, and
-both solvers on GPT-5.4 high and Sonnet 5 high.
+review and GPT-5.6-Terra high for revision and repair, Claude-origin PRs on
+GPT-5.6-Sol xhigh for review and Sonnet 5 high for revision and repair, and
+both solvers on GPT-5.6-Terra high and Sonnet 5 high.
 
 Single-agent mode moves that column rather than the roles. Every pull-request
 action — review, rereview, revision, repair — runs on the one loaded provider
@@ -940,26 +940,31 @@ the packaged issue-review and solve workflows resolve identically. Interactive r
 Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.
-   Claude-origin issues route to GPT-6-Astra xhigh, Codex-origin issues route
-   to Claude Fable 5.1 xhigh, and unmarked issues require both. A *replaced*
+   Claude-origin issues route to GPT-6-Astra high, Codex-origin issues route
+   to Claude Fable 5.1 high, and unmarked issues require both. A *replaced*
    default does not retire the approvals standing under it: an append-only
    reviewer ledger records which assignment was canonical from when, and a
    marker is judged against the assignment in force the day it was written
    (`tools/approve_issues.py`, `--reviewer-ledger --json`). A marker inside its
    assignment's recorded window is a legacy decision and is carried forward; one
    outside every window is stale and rereviewed. Markers older than the ledger's
-   first entry fall back to the compiled prehistory — GPT-5.6-Sol,
-   GPT-5.6-Terra, GPT-5.5, Claude Opus 5, Claude Fable 5 — so a provider
-   shipping a new model cannot invalidate a backlog of approvals in one step.
-   A record that is present but unreadable is the exception: it refuses every
-   route but the current assignment rather than falling back at all
-   (contract §2.3.1). The retired reviewer
+   first entry fall back to the compiled prehistory — GPT-6-Astra, GPT-5.6-Sol,
+   GPT-5.6-Terra and GPT-5.5, Claude Fable 5.1, Claude Opus 5 and Claude
+   Fable 5, each at the xhigh they ran at — so a provider shipping a new model
+   cannot invalidate a backlog of approvals in one step. Recording the OUTGOING
+   cell is what every assignment change owes that prehistory; omitting it is
+   the churn PR #626 removed. A record that is present but unreadable is the
+   exception: it refuses every route but the current assignment rather than
+   falling back at all (contract §2.3.1). The retired reviewer
    personas stay readable in the other direction, since a historical review that
    predates the marker's `verdicts=` field has only its human-readable summary
    to recover a per-reviewer verdict from.
 2. `reviewed:changes` switches back to the author brand for revision:
-   GPT-6-Astra high for Codex-origin issues and Claude Fable 5.1 high for
-   Claude-origin issues. Unmarked issues default to GPT-6-Astra high. The
+   GPT-6-Astra xhigh for Codex-origin issues and Claude Fable 5.1 high for
+   Claude-origin issues. Unmarked issues default to GPT-6-Astra xhigh. The
+   Codex half is the embedded thread's own coordinator and so reads
+   `issue_review.codex`, not the gate cell stage 1 names; the Claude half is
+   `issue_revise.claude`. The
    agent writes one canonical specification
    amendment as an issue comment, then replaces `reviewed:changes` with
    `reviewed:revised` without approving.
@@ -4105,9 +4110,9 @@ The first solve/autosolve-compatible slice is implemented.
   stopping after PR creation. Capital `A` opens the same chooser and invokes
   that ordinary solve workflow while Kanban owns the subsequent bounded
   review/fix loop. Escape cancels either chooser.
-- Canonical solvers are GPT-5.4 high and Sonnet 5 high.
+- Canonical solvers are GPT-5.6-Terra high and Sonnet 5 high.
 - Canonical opposite-brand PR reviewers are Opus 5 xhigh for Codex-origin
-  work and GPT-5.6-Terra xhigh for Claude-origin work.
+  work and GPT-5.6-Sol xhigh for Claude-origin work.
 - Those pairings, the embedded issue-review thread's own model and effort, and
   `kanban_run_claude`'s are roster cells rather than literals: the values above
   are the compiled defaults, and a roster that cannot supply a cell refuses the

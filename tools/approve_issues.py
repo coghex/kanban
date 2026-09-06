@@ -65,8 +65,10 @@ DEFAULT_INTERVAL_SECONDS = 60
 # every pre-ledger approval for a reason that has nothing to do with the model
 # that reviewed it.
 RETIRED_REVIEWER_CELLS: dict[str, tuple[str, ...]] = {
-    "codex": ("gpt-5.6-sol@xhigh", "gpt-5.6-terra@xhigh", "gpt-5.5@xhigh"),
-    "claude": ("claude-opus-5@xhigh", "claude-fable-5@xhigh"),
+    "codex": ("gpt-6-astra@xhigh", "gpt-5.6-sol@xhigh", "gpt-5.6-terra@xhigh",
+              "gpt-5.5@xhigh"),
+    "claude": ("claude-fable-5-1@xhigh", "claude-opus-5@xhigh",
+               "claude-fable-5@xhigh"),
 }
 # Retained spellings for the three this file named individually before the
 # table above existed.
@@ -4185,7 +4187,13 @@ def _self_test_body() -> None:
     failure_message = reviewer_failure_message(
         CLAUDE_REVIEWER, ApproveError("CLI transport reset")
     )
-    assert "Claude Fable 5.1 (claude-fable-5-1@xhigh) failed" in failure_message
+    # Derived from the reviewer rather than spelled: this asserts the message
+    # SHAPE, and which cell the gate runs is pinned by tools/test_kanban_models
+    # and Spec.Config.Models, so a roster edit does not have to touch it here.
+    assert (
+        f"{CLAUDE_REVIEWER.display_name} "
+        f"({CLAUDE_REVIEWER.model}@{CLAUDE_REVIEWER.effort}) failed"
+    ) in failure_message
     assert "no retry or fallback was attempted" in failure_message
     assert "Underlying reviewer error: CLI transport reset" in failure_message
     original_incident_dir = PIPELINE_INCIDENT_DIR
