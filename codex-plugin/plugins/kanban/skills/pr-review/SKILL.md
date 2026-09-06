@@ -47,7 +47,7 @@ Read the returned `"status"`:
     --json
   ```
 
-  `--publish-verdict` re-verifies the PR head and issue gate are still exactly what `--self-review` captured before accepting your verdict; if either drifted, it fails and tells you to rerun `--review --self-review` for a fresh context rather than publish against stale state.
+  `--publish-verdict` re-verifies the PR head and issue gate are still exactly what `--self-review` captured before accepting your verdict; if either drifted, it fails and tells you to rerun `--review --self-review` for a fresh context rather than publish against stale state. If your `--review`/`--rereview` invocation carried `--override-issue-gate` and `--override-reason`, pass that identical pair here too: the override is part of the gate key, so a publication that drops it is refused as a key mismatch even though nothing about the pull request changed. The refusal says which of the two halves carried the override, because regenerating the context does not fix that one.
 
 - `"reviewed"`: the coordinator already spawned and published a dual review (unknown/external origin only — Kanban's own invocation never produces this, since every Kanban-created PR carries a known `pr-origin` marker); nothing further to do.
 

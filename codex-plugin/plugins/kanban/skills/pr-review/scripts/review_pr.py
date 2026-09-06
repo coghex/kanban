@@ -1833,9 +1833,27 @@ def publish_verdict(
         config_path=config_path,
     )
     if gate["key"] != expected_gate_key:
+        # The override is part of the key, so a publication carrying a different
+        # override policy than its review produces this identical mismatch from
+        # a completely different cause -- and "regenerate the context" can never
+        # fix that one: the next review issues the same key and the next
+        # publication drops it again. Ask which it was, from the gate in hand.
+        if expected_gate_key != gate_key(
+            repo,
+            gate["issues"],
+            gate["invalid_links"],
+            allow_no_issue=allow_no_issue,
+            override_issue_gate=not override_issue_gate,
+        ):
+            raise WorkflowError(
+                "linked issues changed since the self-review context was generated; "
+                "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
+            )
         raise WorkflowError(
-            "linked issues changed since the self-review context was generated; "
-            "rerun $pr-review/$pr-rereview to get a fresh context before publishing"
+            "the self-review context and this publication disagree about "
+            "--override-issue-gate, so the gate key does not match. Nothing was "
+            "published. Pass the identical --override-issue-gate and "
+            "--override-reason to both, or to neither."
         )
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)

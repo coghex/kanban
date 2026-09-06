@@ -559,5 +559,169 @@ class IssueGateOverrideTests(unittest.TestCase):
                 self.assertIsNotNone(drain_prs.PR_REVIEW_V2_RE.search(posted[0]))
 
 
+    # ------------------ 6. the self-review -> publish round trip
+
+    def self_review_context(self, module, *, override: bool):
+        """Drive workflow()'s known-origin self-review path and return its
+        awaiting_self_review response, with only GitHub stubbed."""
+        pr = self.pr()
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    module, "operating_mode", return_value=("dual", ("codex", "claude"))
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(module, "resolve_repository", return_value="coghex/kanban")
+            )
+            stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+            stack.enter_context(
+                mock.patch.object(module, "linked_issue_numbers", return_value=([614], []))
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "check_issue", return_value={"issue": 614, "approved": False}
+                )
+            )
+            # collect_context is NOT stubbed: it is the thing that puts the
+            # override into the payload both prompts read, so stubbing it here
+            # would leave this case asserting against its own fixture. Its
+            # GitHub calls are stubbed instead.
+            stack.enter_context(
+                mock.patch.object(module, "run", return_value=mock.Mock(stdout="diff"))
+            )
+            stack.enter_context(mock.patch.object(module, "paginated_api", return_value=[]))
+            stack.enter_context(mock.patch.object(module, "pr_comments", return_value=[]))
+            stack.enter_context(mock.patch.object(module, "issue_context", return_value={}))
+            # Reached only by the non-overridden case below, which blocks.
+            gate_comment = stack.enter_context(
+                mock.patch.object(module, "publish_gate_comment")
+            )
+            gate_comment.return_value = ("posted", "https://example.test/gate")
+            extra = (
+                {"override_issue_gate": True, "override_reason": REASON} if override else {}
+            )
+            return module.workflow(
+                Path("/fake-repo"),
+                89,
+                rereview=False,
+                dry_run=False,
+                allow_no_issue=False,
+                self_review=True,
+                # pr-origin:claude routes to codex, so codex is the declaration
+                # this route accepts.
+                self_review_as="codex",
+                **extra,
+            )
+
+    def publish(self, module, context, *, override: bool):
+        """publish_verdict() against a self-review context, publication stubbed
+        at the point the verdict would actually be written."""
+        import tempfile
+
+        pr = self.pr()
+        with tempfile.TemporaryDirectory() as tmp:
+            result_file = Path(tmp) / "verdict.json"
+            result_file.write_text(
+                '{"verdict": "APPROVE", "summary": "Fine.", "blocking_concerns": []}',
+                encoding="utf-8",
+            )
+            with ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "operating_mode", return_value=("dual", ("codex", "claude"))
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "resolve_repository", return_value="coghex/kanban"
+                    )
+                )
+                stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "linked_issue_numbers", return_value=([614], [])
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "check_issue", return_value={"issue": 614, "approved": False}
+                    )
+                )
+                published = stack.enter_context(
+                    mock.patch.object(module, "publish_results")
+                )
+                published.return_value = (0, {"status": "reviewed"})
+                extra = (
+                    {"override_issue_gate": True, "override_reason": REASON}
+                    if override
+                    else {}
+                )
+                code, result = module.publish_verdict(
+                    Path("/fake-repo"),
+                    89,
+                    context["expected_head"],
+                    context["gate_key"],
+                    result_file,
+                    allow_no_issue=False,
+                    **extra,
+                )
+            return code, result, published
+
+    def test_an_overridden_self_review_publishes_when_the_flags_are_carried(self):
+        # The round trip the coordinator's own assets prescribe, end to end.
+        # The context and the publication have to agree about the gate, because
+        # the override is part of the key that binds them.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                code, context = self.self_review_context(module, override=True)
+                self.assertEqual(code, 0)
+                self.assertEqual(context["status"], "awaiting_self_review")
+                self.assertEqual(context["reviewer_key"], "codex")
+                # The reviewer really was told, on the path that hands the
+                # review to the calling session rather than spawning one.
+                self.assertIn("ISSUE-GATE OVERRIDE", context["instructions"])
+
+                code, result, published = self.publish(module, context, override=True)
+                self.assertEqual(code, 0)
+                self.assertEqual(result["status"], "reviewed")
+                self.assertTrue(published.called)
+
+    def test_an_override_mismatch_is_diagnosed_rather_than_blamed_on_the_links(self):
+        # The bug this pair exists for: the key carries the override, so a
+        # publication that drops it is refused -- and the refusal must NOT send
+        # the caller to regenerate a context that will fail the same way
+        # forever. Naming the override is what makes the mistake recoverable.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                _, context = self.self_review_context(module, override=True)
+                with self.assertRaises(module.WorkflowError) as raised:
+                    self.publish(module, context, override=False)
+                message = str(raised.exception)
+                self.assertIn("--override-issue-gate", message)
+                self.assertIn("Nothing was published", message)
+                self.assertNotIn("linked issues changed", message)
+
+    def test_publishing_a_plain_review_with_the_flags_is_refused_too(self):
+        # The mirror: a publication must not be able to assert an override the
+        # review it is publishing never ran under.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                _, context = self.self_review_context(module, override=False)
+                # A gate that is unapproved and NOT overridden never reaches
+                # awaiting_self_review at all; it blocks first.
+                self.assertEqual(context["status"], "blocked")
+
+    def test_a_genuinely_changed_link_still_reports_a_changed_link(self):
+        # The override diagnosis must not swallow the ordinary cause.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                _, context = self.self_review_context(module, override=True)
+                stale = {**context, "gate_key": "0" * 16}
+                with self.assertRaises(module.WorkflowError) as raised:
+                    self.publish(module, stale, override=True)
+                self.assertIn("linked issues changed", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
