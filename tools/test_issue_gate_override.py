@@ -821,5 +821,141 @@ class IssueGateOverrideTests(unittest.TestCase):
                 self.assertEqual(context["overridden_issues"], [614])
 
 
+    # ---- 8. the same binding on the self-reviewed route and after labelling
+
+    def publish_verdict_with(self, module, context, *, approved, expected_override):
+        """publish_verdict() against a self-review context, with the linked
+        issue's approval state under this caller's control."""
+        import tempfile
+
+        pr = self.pr()
+        with tempfile.TemporaryDirectory() as tmp:
+            result_file = Path(tmp) / "verdict.json"
+            result_file.write_text(
+                '{"verdict": "APPROVE", "summary": "Fine.", "blocking_concerns": []}',
+                encoding="utf-8",
+            )
+            with ExitStack() as stack:
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "operating_mode", return_value=("dual", ("codex", "claude"))
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(module, "resolve_repository", return_value="coghex/kanban")
+                )
+                stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+                stack.enter_context(
+                    mock.patch.object(module, "linked_issue_numbers", return_value=([614], []))
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "check_issue", return_value={"issue": 614, "approved": approved}
+                    )
+                )
+                published = stack.enter_context(mock.patch.object(module, "publish_results"))
+                published.return_value = (0, {"status": "reviewed"})
+                code, result = module.publish_verdict(
+                    Path("/fake-repo"),
+                    89,
+                    context["expected_head"],
+                    context["gate_key"],
+                    result_file,
+                    allow_no_issue=False,
+                    override_issue_gate=True,
+                    override_reason=REASON,
+                    expected_override=expected_override,
+                )
+            return code, result, published
+
+    def test_the_self_reviewed_route_refuses_a_bypass_that_moved_either_way(self):
+        """The nested path's guard, on the route that does not use it.
+
+        `publish_verdict` builds its own current gate and hands that to
+        `publish_results`, so `publish_results`' comparison is fresh-against-
+        fresher there and cannot see the briefing at all. The gate key does not
+        close it either, deliberately: it excludes approval state. So the
+        binding has to travel with the handoff, and both directions of the
+        transition have to be refused -- publishing a banner the reviewer never
+        saw, and dropping one it did.
+        """
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                _, briefed = self.self_review_context(module, override=True)
+                self.assertEqual(briefed["overridden_issues"], [614])
+
+                # Carried faithfully: publishes.
+                code, _, published = self.publish_verdict_with(
+                    module, briefed, approved=False, expected_override=[614]
+                )
+                self.assertEqual(code, 0)
+                self.assertTrue(published.called)
+
+                # The issue regained its approval after the briefing, so the
+                # banner the reviewer saw no longer describes the gate.
+                with self.assertRaises(module.WorkflowError) as raised:
+                    self.publish_verdict_with(
+                        module, briefed, approved=True, expected_override=[614]
+                    )
+                self.assertIn("bypass set changed", str(raised.exception))
+
+                # And the inverse: briefed on nothing, publishing under a bypass.
+                with self.assertRaises(module.WorkflowError) as raised:
+                    self.publish_verdict_with(
+                        module, briefed, approved=False, expected_override=[]
+                    )
+                self.assertIn("bypass set changed", str(raised.exception))
+
+    def test_the_post_label_verification_checks_the_bypass_too(self):
+        # The last window: approval moving between the pre-label re-read and
+        # the verification after the label leaves a published comment whose
+        # disclosure no longer matches the gate. The override keeps the
+        # aggregate approved, so only the bypass set catches it.
+        for brand, module in self.modules.items():
+            with self.subTest(brand=brand):
+                pr = {**self.pr(), "labels": [{"name": "reviewed:approve"}]}
+                with ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(module, "pr_view", return_value=pr))
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "linked_issue_numbers", return_value=([614], [])
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "check_issue", return_value={"issue": 614, "approved": False}
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(module, "viewer_login", return_value="kanban-bot")
+                    )
+                    stack.enter_context(mock.patch.object(module, "pr_comments", return_value=[]))
+                    gate = module.gate_status(
+                        Path("/fake-repo"),
+                        pr,
+                        "coghex/kanban",
+                        override_issue_gate=True,
+                        override_reason=REASON,
+                    )
+                    # Briefed on no bypass; the gate now reports one.
+                    with self.assertRaises(module.WorkflowError) as raised:
+                        module.verify_publication(
+                            Path("/fake-repo"),
+                            "coghex/kanban",
+                            89,
+                            [module.CODEX_REVIEWER],
+                            *( (["some-model"],) if brand == "claude" else () ),
+                            "a" * 40,
+                            "APPROVE",
+                            gate["key"],
+                            "reviewed:approve",
+                            "reviewed:changes",
+                            allow_no_issue=False,
+                            override_issue_gate=True,
+                            expected_overridden=[],
+                        )
+                self.assertIn("no longer matches the reviewer briefing", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

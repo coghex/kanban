@@ -1485,6 +1485,7 @@ def verify_publication(
     *,
     allow_no_issue: bool,
     override_issue_gate: bool = False,
+    expected_overridden: list[int] | None = None,
     config_path: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
@@ -1501,6 +1502,8 @@ def verify_publication(
     )
     if gate["key"] != gate_key_value or not gate["approved"]:
         raise WorkflowError("publication issue-gate verification failed")
+    if expected_overridden is not None and gate["overridden_issues"] != expected_overridden:
+        raise WorkflowError("published bypass set no longer matches the reviewer briefing")
     login = viewer_login(root)
     latest = latest_owned_review_marker(pr_comments(root, repo, number), login)
     if latest is None:
@@ -1642,6 +1645,7 @@ def publish_results(
             changes_requested_label,
             allow_no_issue=allow_no_issue,
             override_issue_gate=override_issue_gate,
+            expected_overridden=reviewed_bypass,
             config_path=config_path,
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
@@ -1659,6 +1663,7 @@ def publish_results(
                 changes_requested_label,
                 allow_no_issue=allow_no_issue,
                 override_issue_gate=override_issue_gate,
+                expected_overridden=reviewed_bypass,
                 config_path=config_path,
             )
             if not verified["ready_for_review"]:
@@ -1877,6 +1882,7 @@ def publish_verdict(
     allow_no_issue: bool,
     override_issue_gate: bool = False,
     override_reason: str | None = None,
+    expected_override: list[int] | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -1932,6 +1938,8 @@ def publish_verdict(
             "published. Pass the identical --override-issue-gate and "
             "--override-reason to both, or to neither."
         )
+    if expected_override is not None and gate["overridden_issues"] != expected_override:
+        raise WorkflowError("the bypass set changed since the self-review briefing; rerun $pr-review/$pr-rereview")
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
     if len(reviewers) != 1:
@@ -2112,6 +2120,11 @@ def parse_args() -> argparse.Namespace:
         "--result", type=Path, metavar="FILE", help="With --publish-verdict: path to the verdict JSON file"
     )
     parser.add_argument(
+        "--expected-override",
+        metavar="ISSUES",
+        help="With --publish-verdict: that response's overridden_issues, comma-separated (empty when none); binds the bypass the reviewer was briefed on as --expected-head binds the head",
+    )
+    parser.add_argument(
         "--allow-no-issue",
         action="store_true",
         help="Allow a PR with no linked issue; linked issues still require canonical approval",
@@ -2156,8 +2169,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.self_test and args.review is None and args.rereview is None and args.publish_verdict is None:
         parser.error("one of --review, --rereview, --publish-verdict, or --self-test is required")
-    if args.publish_verdict is not None and (args.expected_head is None or args.gate_key is None or args.result is None):
-        parser.error("--publish-verdict requires --expected-head, --gate-key, and --result")
+    if args.publish_verdict is not None and (args.expected_head is None or args.gate_key is None or args.result is None or args.expected_override is None):
+        parser.error("--publish-verdict requires --expected-head, --gate-key, --result, and --expected-override")
     number = args.review if args.review is not None else (args.rereview if args.rereview is not None else args.publish_verdict)
     if number is not None and number < 1:
         parser.error("PR number must be positive")
@@ -2184,6 +2197,7 @@ def main() -> None:
                 allow_no_issue=args.allow_no_issue,
                 override_issue_gate=args.override_issue_gate,
                 override_reason=args.override_reason,
+                expected_override=[int(i) for i in args.expected_override.split(",") if i.strip()],
                 config_path=args.config,
                 explicit_repo=args.repo,
             )

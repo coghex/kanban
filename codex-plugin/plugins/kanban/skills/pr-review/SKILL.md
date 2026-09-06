@@ -44,6 +44,7 @@ Read the returned `"status"`:
     --expected-head <result.expected_head> \
     --gate-key <result.gate_key> \
     --result <path-to-your-result.json> \
+    --expected-override <result.overridden_issues, comma-separated> \
     --json
   ```
 
