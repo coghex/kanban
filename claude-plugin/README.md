@@ -359,9 +359,9 @@ from [codex-plugin/](../codex-plugin/README.md)'s copy: the two are compared
 line for line, and the model-pinning divergence described above is the only
 difference permitted — including the import, the sibling loader, and the
 resolver issue #483 added to it, which widened that divergence without
-changing what it is about. Nothing is excluded — not a function, not a comment block
-— so a fix landing in one copy only fails there, which is how the
-issue-vs-pull-request number guard went eight days Codex-side only.
+changing what it is about. Nothing but blank lines is excluded — not a function,
+not a comment block — so a fix landing in one copy only fails there, which is how
+the issue-vs-pull-request number guard went eight days Codex-side only.
 
 `tools/test_agent_workflow_contract.py` reconciles this plugin's own bash
 surface (all twenty-five commands under
