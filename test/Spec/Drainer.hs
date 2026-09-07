@@ -461,6 +461,28 @@ spec = do
       unitExecStartArguments "[Service]\nExecStart=/bin/echo a\\\\\nRestart=no\n"
         `shouldBe` Right ["/bin/echo", "a\\"]
 
+    it "joins the physical lines raw and strips only the completed one" $ do
+      -- Round 1, blocker 1. systemd reads each physical line with `read_line`,
+      -- which trims nothing, joins them, and lets `parse_line` strip the
+      -- finished line. Stripping each physical line before joining is wrong
+      -- twice, and both ways produce an argv systemd never ran.
+      --
+      -- The indentation of a continued line is part of the value, so a word
+      -- broken inside its quotes keeps every space: one from the backslash the
+      -- continuation replaced, two from the way the next line is indented.
+      unitExecStartArguments "[Service]\nExecStart=/bin/echo \"a\\\n  b\"\n"
+        `shouldBe` Right ["/bin/echo", "a   b"]
+      -- And a backslash with trailing spaces after it ends no line in a
+      -- backslash, so systemd completes the assignment, strips it, and refuses
+      -- to load a unit whose value now ends in an escape of nothing. Reading
+      -- it as a continuation swallowed the directive below into the command.
+      unitRefusal "[Service]\nExecStart=/bin/echo a\\  \nRestart=no\n"
+        `shouldMention` "escapes nothing"
+      -- The same trailing space, but after `\\`, is an ordinary complete line
+      -- carrying a literal backslash.
+      unitExecStartArguments "[Service]\nExecStart=/bin/echo a\\\\  \nRestart=no\n"
+        `shouldBe` Right ["/bin/echo", "a\\"]
+
     it "counts a continued assignment once under the reset and multiplicity rules" $ do
       -- Requirement 4's other half, over the rules #549 added. Splitting on
       -- physical lines miscounted both directions: a continued command looked
@@ -502,6 +524,17 @@ spec = do
       valueRefusal "/bin/echo \\ud800" `shouldMention` "surrogate"
       valueRefusal "/bin/echo \\U0000d800" `shouldMention` "surrogate"
       valueRefusal "/bin/echo \\U00110000" `shouldMention` "not a Unicode code point"
+      -- Round 1, blocker 2. systemd's `unichar_is_valid` masks the low sixteen
+      -- bits, so the two noncharacters at the end of EVERY plane are refused,
+      -- not just U+FFFE and U+FFFF. A plane-0-only mask returned these as
+      -- commands systemd will not load the unit over.
+      valueRefusal "/bin/echo \\U0001fffe" `shouldMention` "not a Unicode code point"
+      valueRefusal "/bin/echo \\U0001ffff" `shouldMention` "not a Unicode code point"
+      valueRefusal "/bin/echo \\U0010ffff" `shouldMention` "not a Unicode code point"
+      valueRefusal "/bin/echo \\U0000fdd0" `shouldMention` "not a Unicode code point"
+      -- `\\u` carries only the NUL and surrogate rules, which is systemd's own
+      -- asymmetry: a noncharacter it round-trips through `\\u` deliberately.
+      execStart "/bin/echo \\ufffe" `shouldBe` Right ["/bin/echo", "\65534"]
       -- A high byte on its own is not a character. This reader's boundary is
       -- Text and String, so a byte sequence it cannot carry faithfully is
       -- refused rather than turned into replacement characters or into one

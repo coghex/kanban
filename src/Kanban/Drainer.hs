@@ -774,22 +774,37 @@ unitExecStartArguments contents = case effectiveCommands of
             <> Text.pack (show count)
             <> " commands, which systemd accepts only under Type=oneshot"
 
--- | A unit file's logical lines: comments dropped, continuations joined,
--- each one stripped of the whitespace systemd strips.
+-- | A unit file's logical lines: comments dropped, continuations joined, and
+-- the /completed/ line — not the physical ones it was built from — stripped.
 --
--- The order is systemd's own and it is not interchangeable. A line whose
--- first non-blank character is @#@ or @;@ is dropped /before/ the
--- continuation state is consulted, so a comment sitting in the middle of a
--- continued assignment interrupts nothing and the assignment survives it.
--- What remains is appended to whatever is being continued, and the whole
--- accumulated line is then scanned for the escape state its last character
--- leaves: a trailing backslash that is not itself escaped becomes a space and
--- opens a continuation, while @\\\\@ at the end of a line is a literal
--- backslash and closes the line as any other character would. A file ending
--- inside a continuation flushes what it accumulated, which is what systemd
--- does with it too.
+-- The order is systemd's own and it is not interchangeable.
 --
--- Joining first is what makes the reset and multiplicity rules in
+-- A line whose first non-whitespace character is @#@ or @;@ is dropped
+-- /before/ the continuation state is consulted, so a comment sitting in the
+-- middle of a continued assignment interrupts nothing and the assignment
+-- survives it. Skipping that leading whitespace is the only thing the comment
+-- test does to the line; nothing else here trims a physical line.
+--
+-- Every other line is appended to whatever is being continued exactly as it
+-- stands, and the whole accumulated text is then scanned for the escape state
+-- its last character leaves. A trailing backslash that is not itself escaped
+-- becomes a space and opens a continuation; @\\\\@ at the end of a line is a
+-- literal backslash and closes the line as any other character would. Only a
+-- completed line is stripped, which is where systemd strips it too, and a file
+-- ending inside a continuation flushes what it accumulated, which is also what
+-- systemd does with it.
+--
+-- Stripping the physical lines first would be easier and is wrong twice over.
+-- It eats the indentation of a continued line, so an @ExecStart@ broken inside
+-- a quoted word loses the spaces the next line is indented by and reports an
+-- argument systemd would have passed wider. And it makes a backslash with
+-- trailing spaces after it open a continuation, when for systemd that line
+-- does not end in a backslash at all: the assignment is complete, its stripped
+-- value ends in a backslash escaping nothing, and the unit does not load.
+-- Both are the same failure this function exists to stop — an argument vector
+-- that reads plausibly and is not the one systemd ran.
+--
+-- Joining at all is what makes the reset and multiplicity rules in
 -- 'unitExecStartArguments' count the assignments systemd counts. Splitting on
 -- physical lines instead reads a continued @ExecStart=@ as one truncated
 -- command, and reads a continuation fragment that happens to begin
@@ -797,20 +812,23 @@ unitExecStartArguments contents = case effectiveCommands of
 unitLogicalLines :: Text -> [Text]
 unitLogicalLines contents = go Nothing (Text.lines contents)
   where
-    go pending [] = maybe [] pure pending
+    go pending [] = maybe [] (pure . Text.strip) pending
     go pending (physical : rest)
-      | isComment stripped = go pending rest
+      | isComment physical = go pending rest
       | endsEscaped joined = go (Just (Text.init joined <> " ")) rest
-      | otherwise = joined : go Nothing rest
+      | otherwise = Text.strip joined : go Nothing rest
       where
-        stripped = Text.strip physical
-        -- No separator: the backslash the previous line ended on has already
-        -- become the space that separates them.
-        joined = maybe stripped (<> stripped) pending
+        -- No separator, and neither side trimmed: the backslash the previous
+        -- line ended on has already become the space that separates them, and
+        -- whatever whitespace this line carries belongs to the value until the
+        -- completed line is stripped.
+        joined = maybe physical (<> physical) pending
 
-    isComment line = case Text.uncons line of
+    isComment line = case Text.uncons (Text.dropWhile isUnitSpace line) of
       Just (character, _) -> character == '#' || character == ';'
       Nothing -> False
+
+    isUnitSpace character = character `elem` (" \t\r\n" :: String)
 
     endsEscaped = Text.foldl' step False
       where
@@ -910,10 +928,11 @@ unitWords = separated . Text.unpack
 -- deciding that per escape is exactly the mistake that turns a path into one
 -- systemd never had.
 --
--- The empty case is defensive rather than reachable: a value-final backslash
--- is a continuation marker, so 'unitLogicalLines' has already turned it into a
--- space by the time a word is split. It refuses rather than assumes, because
--- what makes it unreachable lives in another function.
+-- The empty case is a real refusal rather than a defensive one. A backslash at
+-- the very end of a /physical/ line is a continuation marker and never reaches
+-- here, but one with trailing whitespace after it is not: systemd completes
+-- that assignment and strips it, leaving a value whose last character escapes
+-- nothing, and refuses to load the unit over it.
 unitEscape :: String -> Either Text ([Word8], String)
 unitEscape input = case input of
   [] -> Left "its ExecStart ends in a backslash that escapes nothing"
@@ -1006,12 +1025,16 @@ unitEscape input = case input of
 
     -- systemd's own `unichar_is_valid`, noncharacters included: it applies
     -- this to `\U` and deliberately not to `\u`, whose only extra rule is
-    -- the surrogate one above.
+    -- the surrogate one above. That last mask is over the low sixteen bits,
+    -- so it rejects the two noncharacters ending every plane rather than
+    -- only U+FFFE and U+FFFF: `\U0001fffe` and `\U0010ffff` are refusals
+    -- too, and a mask that missed them would report a command systemd
+    -- refuses to load the unit over.
     isValidCodePoint value =
       value < 0x110000
         && not (isSurrogate value)
-        && (value .&. 0xFFFFFFFE) /= 0xFFFE
         && not (value >= 0xFDD0 && value <= 0xFDEF)
+        && (value .&. 0xFFFE) /= 0xFFFE
 
     isSurrogate value = value >= 0xD800 && value <= 0xDFFF
 
