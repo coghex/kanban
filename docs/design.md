@@ -941,15 +941,19 @@ Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the opposite brand performs the initial review.
    Claude-origin issues route to GPT-6-Astra xhigh, Codex-origin issues route
-   to Claude Fable 5.1 xhigh, and unmarked issues require both. GPT-5.6-Terra
-   and Claude Fable 5 remain accepted legacy models (`tools/approve_issues.py`)
-   so historical review markers keep validating after either default changes.
-   A *replaced* default is deliberately not among them: an approval recorded
-   under one goes stale and is rereviewed, which is the whole point of moving
-   the assignment. The retired reviewer personas — GPT-5.6-Sol, Claude Opus 5,
-   GPT-5.6-Terra, Claude Fable 5 — stay readable in the other direction, since
-   a historical review that predates the marker's `verdicts=` field has only
-   its human-readable summary to recover a per-reviewer verdict from.
+   to Claude Fable 5.1 xhigh, and unmarked issues require both. A *replaced*
+   default does not retire the approvals standing under it: an append-only
+   reviewer ledger records which assignment was canonical from when, and a
+   marker is judged against the assignment in force the day it was written
+   (`tools/approve_issues.py`, `--reviewer-ledger --json`). A marker inside its
+   assignment's recorded window is a legacy decision and is carried forward; one
+   outside every window is stale and rereviewed. Markers older than the ledger's
+   first entry fall back to the compiled prehistory — GPT-5.6-Sol, GPT-5.6-Terra,
+   GPT-5.5, Claude Opus 5, Claude Fable 5 — so a provider shipping a new model
+   cannot invalidate a backlog of approvals in one step. The retired reviewer
+   personas stay readable in the other direction, since a historical review that
+   predates the marker's `verdicts=` field has only its human-readable summary
+   to recover a per-reviewer verdict from.
 2. `reviewed:changes` switches back to the author brand for revision:
    GPT-6-Astra high for Codex-origin issues and Claude Fable 5.1 high for
    Claude-origin issues. Unmarked issues default to GPT-6-Astra high. The

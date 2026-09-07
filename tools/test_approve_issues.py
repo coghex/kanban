@@ -120,6 +120,10 @@ class PortableDefaultPathTests(unittest.TestCase):
             backend.DEFAULT_INCIDENT_DIR,
             backend.INSTALL_DIR / "runtime" / "incidents",
         )
+        self.assertEqual(
+            backend.REVIEWER_LEDGER_PATH,
+            backend.INSTALL_DIR / "runtime" / "reviewer_ledger.json",
+        )
 
     def test_default_paths_are_kanban_namespaced_on_an_xdg_host_too(self):
         backend = self.backend_for("linux")
@@ -133,6 +137,10 @@ class PortableDefaultPathTests(unittest.TestCase):
         self.assertEqual(
             backend.DEFAULT_INCIDENT_DIR,
             backend.INSTALL_DIR / "runtime" / "incidents",
+        )
+        self.assertEqual(
+            backend.REVIEWER_LEDGER_PATH,
+            backend.INSTALL_DIR / "runtime" / "reviewer_ledger.json",
         )
 
     def test_the_defaults_are_the_shared_resolvers_answers_rather_than_a_second_spelling(self):
@@ -156,6 +164,30 @@ class PortableDefaultPathTests(unittest.TestCase):
 
 
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
+
+# Every test that drives main() in-process reaches
+# `record_reviewer_assignment`, whose default target is the operator's real
+# managed install directory. Those tests already patch LOG_DIR and
+# PIPELINE_INCIDENT_DIR to keep a run off real paths; the ledger is redirected
+# here for the whole module instead of per class, so a test added later
+# inherits the guard rather than having to remember it. Tests that care about
+# the ledger pass an explicit path and are unaffected.
+_LEDGER_SANDBOX: tempfile.TemporaryDirectory | None = None
+_REAL_LEDGER_PATH = approve_issues.REVIEWER_LEDGER_PATH
+
+
+def setUpModule():
+    global _LEDGER_SANDBOX
+    _LEDGER_SANDBOX = tempfile.TemporaryDirectory(prefix="approve-issues-ledger-")
+    approve_issues.REVIEWER_LEDGER_PATH = (
+        Path(_LEDGER_SANDBOX.name) / "reviewer_ledger.json"
+    )
+
+
+def tearDownModule():
+    approve_issues.REVIEWER_LEDGER_PATH = _REAL_LEDGER_PATH
+    if _LEDGER_SANDBOX is not None:
+        _LEDGER_SANDBOX.cleanup()
 
 # A stand-in reviewer CLI: records the argument vector it was called with, and
 # writes the structured result its caller then reads. Enough for the one claim
@@ -716,26 +748,113 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
         )
         self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "xhigh")
 
-    def test_a_replaced_default_marker_goes_stale_on_every_route(self):
-        # Requirement 5's boundary: the retired assignment is deliberately NOT
-        # grandfathered, so every standing approval recorded under it is
-        # rereviewed rather than carried through the upgrade.
+    def test_a_replaced_default_marker_goes_stale_only_outside_its_window(self):
+        # PR #626 replaced #614's requirement-5 boundary. The retired
+        # assignment is no longer retired the instant it is replaced: an
+        # approval reached while it WAS the assignment is carried forward, and
+        # only a marker written outside its recorded window is rereviewed.
         module = self.backend()
-        stale = {
-            "codex": ("gpt-5.6-sol@xhigh",),
-            "claude": ("claude-opus-5@xhigh",),
-            "codex+claude": (
-                "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
-                # One replaced half is enough; a route is accepted whole.
-                "gpt-5.6-sol@xhigh+claude-fable-5-1@xhigh",
-                "gpt-6-astra@xhigh+claude-opus-5@xhigh",
-            ),
+        entries = [
+            {
+                "recorded_at": "2026-08-14T00:00:00Z",
+                "assignments": {
+                    "codex": "gpt-5.6-sol@xhigh",
+                    "claude": "claude-opus-5@xhigh",
+                },
+            },
+            {
+                "recorded_at": "2026-09-06T00:00:00Z",
+                "assignments": {
+                    "codex": "gpt-6-astra@xhigh",
+                    "claude": "claude-fable-5-1@xhigh",
+                },
+            },
+        ]
+        replaced = {
+            "codex": "gpt-5.6-sol@xhigh",
+            "claude": "claude-opus-5@xhigh",
+            "codex+claude": "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
         }
-        for key, recorded_models in stale.items():
-            accepted = module.accepted_reviewer_models(self.route(module, key))
-            for recorded in recorded_models:
-                with self.subTest(route=key, models=recorded):
-                    self.assertNotIn(recorded, accepted)
+        for key, recorded in replaced.items():
+            with self.subTest(route=key):
+                # Inside the window the replaced assignment held: carried.
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        recorded,
+                        "2026-08-20T00:00:00Z",
+                        self.route(module, key),
+                        entries=entries,
+                    )
+                )
+                # After it was replaced: stale, and rereviewed.
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        recorded,
+                        "2026-09-07T00:00:00Z",
+                        self.route(module, key),
+                        entries=entries,
+                    )
+                )
+                # Before the ledger began, PREHISTORY answers instead of the
+                # windows -- these are the approvals already standing when the
+                # install started keeping the log, and retiring them is the
+                # churn PR #626 exists to stop.
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        recorded,
+                        "2026-08-01T00:00:00Z",
+                        self.route(module, key),
+                        entries=entries,
+                    )
+                )
+
+        # The window's lower bound bites for an assignment prehistory does not
+        # know: a marker cannot predate the assignment it claims to name. The
+        # hypothetical era sits BETWEEN two recorded ones rather than newest,
+        # because a ledger whose newest entry is not what this run is using is
+        # a boundary the gate refuses to place at all.
+        dated = [
+            entries[0],
+            {
+                "recorded_at": "2026-08-20T00:00:00Z",
+                "assignments": {
+                    "codex": "gpt-7-vega@xhigh",
+                    "claude": "claude-fable-6@xhigh",
+                },
+            },
+            entries[1],
+        ]
+        for written, expected in (
+            ("2026-08-21T00:00:00Z", True),
+            ("2026-08-15T00:00:00Z", False),
+        ):
+            with self.subTest(written=written):
+                self.assertIs(
+                    module.marker_models_accepted(
+                        "gpt-7-vega@xhigh+claude-fable-6@xhigh",
+                        written,
+                        self.route(module, "codex+claude"),
+                        entries=dated,
+                    ),
+                    expected,
+                )
+
+        # A route that mixes the two assignments was never canonical at any
+        # instant, so no window contains it.
+        for recorded in (
+            "gpt-5.6-sol@xhigh+claude-fable-5-1@xhigh",
+            "gpt-6-astra@xhigh+claude-opus-5@xhigh",
+        ):
+            with self.subTest(models=recorded):
+                for written in ("2026-08-20T00:00:00Z", "2026-09-07T00:00:00Z"):
+                    self.assertFalse(
+                        module.marker_models_accepted(
+                            recorded,
+                            written,
+                            self.route(module, "codex+claude"),
+                            entries=entries,
+                        )
+                    )
 
     def test_the_retained_legacy_routes_still_validate_at_matching_efforts(self):
         module = self.backend()
@@ -890,6 +1009,597 @@ class IssueAssignmentUpgradeTests(RosterBackedIssueGateTests):
         # back out, which is what a later rereview reads the verdict from.
         self.assertIn("- **Team Reviewer — APPROVE:**", comment)
         self.assertIn("models=claude-fable-5-1@xhigh", comment)
+
+
+class ReviewerLedgerTests(RosterBackedIssueGateTests):
+    """PR #626: a standing approval survives a provider shipping a new model.
+
+    Before this, `accepted_reviewer_models` cross-produced three hand-maintained
+    literals with the current assignment, and nobody added the pair being
+    replaced. Moving the gate to GPT-6-Astra and Claude Fable 5.1 therefore
+    retired every approval recorded under GPT-5.6-Sol and Claude Opus 5 at once
+    -- dozens of them, none actually reviewed by a worse model.
+
+    The ledger replaces that with a record of what WAS canonical and from when,
+    so a marker is judged against the assignment in force the day it was
+    written. Inherits the re-import harness for the reason it exists: every
+    model constant is frozen at import.
+    """
+
+    SOL_ERA = {"codex": "gpt-5.6-sol@xhigh", "claude": "claude-opus-5@xhigh"}
+    ASTRA_ERA = {"codex": "gpt-6-astra@xhigh", "claude": "claude-fable-5-1@xhigh"}
+
+    def route(self, module, key):
+        return {
+            "codex": [module.CODEX_REVIEWER],
+            "claude": [module.CLAUDE_REVIEWER],
+            "codex+claude": [module.CODEX_REVIEWER, module.CLAUDE_REVIEWER],
+        }[key]
+
+    def ledger_path(self):
+        return self.root / "reviewer_ledger.json"
+
+    def write_ledger(self, entries, *, schema=None, version=None):
+        path = self.ledger_path()
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": (
+                        "approve-issues-reviewer-ledger" if schema is None else schema
+                    ),
+                    "version": 1 if version is None else version,
+                    "entries": entries,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def entry(self, recorded_at, assignments):
+        return {"recorded_at": recorded_at, "assignments": dict(assignments)}
+
+    def test_the_scenario_this_exists_for_carries_the_approval_forward(self):
+        # The exact shape of the incident: an issue approved by GPT-5.6-Sol and
+        # Claude Opus 5 hours before the roster moved to GPT-6-Astra and Claude
+        # Fable 5.1. Its approval stands.
+        module = self.backend()
+        entries = [
+            self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+            self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+        ]
+        self.assertTrue(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
+                "2026-09-06T03:56:17Z",
+                self.route(module, "codex+claude"),
+                entries=entries,
+            )
+        )
+
+    def test_the_current_assignment_never_needs_the_ledger(self):
+        module = self.backend()
+        for key in ("codex", "claude", "codex+claude"):
+            with self.subTest(route=key):
+                reviewers = self.route(module, key)
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        module.reviewer_models(reviewers),
+                        "2026-01-01T00:00:00Z",
+                        reviewers,
+                        entries=[],
+                    )
+                )
+
+    def test_the_current_assignment_never_depends_on_the_ledger_recording_it(self):
+        # The ledger write is best effort: an install directory this process
+        # cannot write leaves the on-disk record behind the assignment actually
+        # running. A marker this backend publishes RIGHT NOW must still be
+        # accepted then, so the short-circuit above the windows is load-bearing
+        # rather than an optimisation -- without it a failed append would
+        # invalidate the very reviews it is failing to record.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        behind = [
+            self.entry(
+                "2026-10-01T00:00:00Z",
+                {"codex": "gpt-7-vega@xhigh", "claude": "claude-fable-6@xhigh"},
+            )
+        ]
+        current = module.reviewer_models(reviewers)
+        self.assertEqual(current, "gpt-6-astra@xhigh+claude-fable-5-1@xhigh")
+        self.assertTrue(
+            module.marker_models_accepted(
+                current, "2026-11-01T00:00:00Z", reviewers, entries=behind
+            )
+        )
+
+    def test_changing_only_the_effort_retires_no_prehistoric_approval(self):
+        # The effort is half the assignment and half of what `models=` spells,
+        # so a prehistory rendered at whatever effort the install runs TODAY
+        # would go stale the moment an operator changed the effort alone --
+        # invalidating every pre-ledger approval for a reason that has nothing
+        # to do with the model that reviewed it.
+        module = self.backend(
+            APPROVE_ISSUES_CODEX_EFFORT="high",
+            APPROVE_ISSUES_CLAUDE_EFFORT="high",
+        )
+        reviewers = self.route(module, "codex+claude")
+        self.assertEqual(
+            module.reviewer_models(reviewers),
+            "gpt-6-astra@high+claude-fable-5-1@high",
+        )
+        # The effort those reviews actually ran at.
+        self.assertTrue(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
+                "2026-01-01T00:00:00Z",
+                reviewers,
+                entries=[],
+            )
+        )
+        # And the effort this install runs now, which is what the file
+        # accepted before these cells carried one at all.
+        self.assertTrue(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@high+claude-opus-5@high",
+                "2026-01-01T00:00:00Z",
+                reviewers,
+                entries=[],
+            )
+        )
+        # An effort neither of those is still not a route this install ran.
+        self.assertFalse(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@medium+claude-opus-5@medium",
+                "2026-01-01T00:00:00Z",
+                reviewers,
+                entries=[],
+            )
+        )
+
+    def test_a_run_of_identical_entries_reads_back_as_the_first_of_them(self):
+        # Adjacent duplicates are harmless to the windows -- they name one
+        # route across touching intervals -- but they make the record
+        # unreadable, and the earliest is where the assignment actually began.
+        module = self.backend()
+        path = self.write_ledger(
+            [
+                self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+                self.entry("2026-08-14T00:00:01Z", self.SOL_ERA),
+                self.entry("2026-08-14T00:00:02Z", self.SOL_ERA),
+                self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+                self.entry("2026-09-06T12:00:01Z", self.ASTRA_ERA),
+            ]
+        )
+        self.assertEqual(
+            [entry["recorded_at"] for entry in module.load_reviewer_ledger(path)],
+            ["2026-08-14T00:00:00Z", "2026-09-06T12:00:00Z"],
+        )
+        # The window still starts where the assignment did, so a marker
+        # written between the duplicates is still inside it.
+        self.assertTrue(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
+                "2026-08-14T00:00:01Z",
+                self.route(module, "codex+claude"),
+                entries=module.load_reviewer_ledger(path),
+            )
+        )
+
+    def test_prehistory_stops_applying_once_the_ledger_has_begun(self):
+        # A route the ledger never recorded is trusted only for markers older
+        # than the log. After the log begins, every canonical assignment has a
+        # window, so a route outside all of them was never canonical here.
+        module = self.backend()
+        entries = [self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA)]
+        reviewers = self.route(module, "codex+claude")
+        prehistoric = "gpt-5.6-terra@xhigh+claude-fable-5@xhigh"
+        self.assertIn(prehistoric, module.prehistoric_reviewer_models(reviewers))
+        self.assertTrue(
+            module.marker_models_accepted(
+                prehistoric, "2026-09-06T11:59:59Z", reviewers, entries=entries
+            )
+        )
+        self.assertFalse(
+            module.marker_models_accepted(
+                prehistoric, "2026-09-06T12:00:01Z", reviewers, entries=entries
+            )
+        )
+
+    def test_an_unreadable_timestamp_cannot_smuggle_a_route_past_the_windows(self):
+        module = self.backend()
+        entries = [self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA)]
+        reviewers = self.route(module, "codex+claude")
+        for created_at in (None, "", "not-a-date"):
+            with self.subTest(created_at=created_at):
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        "gpt-5.6-terra@xhigh+claude-fable-5@xhigh",
+                        created_at,
+                        reviewers,
+                        entries=entries,
+                    )
+                )
+
+    def test_recording_appends_only_when_the_assignment_actually_moves(self):
+        module = self.backend()
+        path = self.ledger_path()
+        first = module.record_reviewer_assignment(path)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[-1]["assignments"], self.ASTRA_ERA)
+        # Idempotent: the file grows once per change, not once per invocation.
+        again = module.record_reviewer_assignment(path)
+        self.assertEqual(again, first)
+
+        moved = module.record_reviewer_assignment(
+            path, cells={"codex": "gpt-7-vega@xhigh", "claude": "claude-fable-6@xhigh"}
+        )
+        self.assertEqual(len(moved), 2)
+        self.assertEqual(
+            [entry["assignments"] for entry in moved],
+            [self.ASTRA_ERA, {"codex": "gpt-7-vega@xhigh", "claude": "claude-fable-6@xhigh"}],
+        )
+        # And it round-trips through the reader.
+        self.assertEqual(module.load_reviewer_ledger(path), moved)
+
+    def test_entries_are_ordered_by_when_they_were_recorded(self):
+        module = self.backend()
+        path = self.write_ledger(
+            [
+                self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+                self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+            ]
+        )
+        self.assertEqual(
+            [entry["recorded_at"] for entry in module.load_reviewer_ledger(path)],
+            ["2026-08-14T00:00:00Z", "2026-09-06T12:00:00Z"],
+        )
+
+    def test_an_absent_ledger_bootstraps_but_a_damaged_one_fails_closed(self):
+        # Absence and damage are different facts. An ABSENT record is the
+        # fresh-install path: nothing was ever written here, so the compiled
+        # prehistory carries the standing approvals. A DAMAGED one is evidence
+        # that a record existed and cannot be read -- falling back to the
+        # prehistory there could accept a route the intact record had already
+        # closed, which is granting approval rather than withholding it.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        prehistoric = "gpt-5.6-terra@xhigh+claude-fable-5@xhigh"
+
+        absent = self.root / "no-such-ledger.json"
+        self.assertEqual(
+            module.read_reviewer_ledger(absent), (module.LEDGER_MISSING, [])
+        )
+        self.assertTrue(
+            module.marker_models_accepted(
+                prehistoric, "2026-09-06T12:00:01Z", reviewers,
+                entries=[], status=module.LEDGER_MISSING,
+            )
+        )
+
+        damaged = {
+            "corrupt": self.write_ledger([]),
+            "foreign-version": self.write_ledger([], version=99),
+            "foreign-schema": self.write_ledger([], schema="something-else"),
+        }
+        damaged["corrupt"].write_text("{not json", encoding="utf-8")
+        for label, path in damaged.items():
+            with self.subTest(case=label):
+                status, entries = module.read_reviewer_ledger(path)
+                self.assertEqual(status, module.LEDGER_DAMAGED)
+                self.assertEqual(entries, [])
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        prehistoric, "2026-09-06T12:00:01Z", reviewers,
+                        entries=entries, status=status,
+                    )
+                )
+                # The current assignment never depends on the record at all.
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        module.reviewer_models(reviewers),
+                        "2026-09-06T12:00:01Z", reviewers,
+                        entries=entries, status=status,
+                    )
+                )
+
+    def test_one_unreadable_entry_damages_the_whole_record(self):
+        # Skipping a malformed entry would splice the windows either side of
+        # it together, so the older assignment's window would span the
+        # transition that entry recorded and accept its markers written after
+        # it was replaced. Partial corruption is damage.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        middle = {"codex": "gpt-7-vega@xhigh", "claude": "claude-fable-6@xhigh"}
+        for label, broken in (
+            ("not-a-dict", "wat"),
+            ("no-assignments", {"recorded_at": "2026-08-20T00:00:00Z"}),
+            ("unreadable-cell", {"recorded_at": "2026-08-20T00:00:00Z",
+                                 "assignments": {"codex": 7}}),
+            ("unreadable-date", {"recorded_at": "not-a-date",
+                                 "assignments": middle}),
+        ):
+            path = self.write_ledger(
+                [
+                    self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+                    broken,
+                    self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+                ]
+            )
+            with self.subTest(case=label):
+                status, entries = module.read_reviewer_ledger(path)
+                self.assertEqual(status, module.LEDGER_DAMAGED)
+                self.assertEqual(entries, [])
+                # And the interval the dropped entry would have split no
+                # longer accepts the older assignment.
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
+                        "2026-08-25T00:00:00Z",
+                        reviewers,
+                        entries=entries,
+                        status=status,
+                    )
+                )
+
+    def test_the_cli_reports_whether_the_record_is_missing_or_damaged(self):
+        # Both list no entries; only one of them is silently retiring every
+        # legacy approval, so the one diagnostic for this record has to say
+        # which.
+        script = REPO_ROOT / "tools" / "approve_issues.py"
+        for label, seed, expected in (
+            ("missing", None, "missing"),
+            ("damaged", "{not json", "damaged"),
+        ):
+            install = self.root / f"cli-{label}"
+            (install / "runtime").mkdir(parents=True, exist_ok=True)
+            if seed is not None:
+                (install / "runtime" / "reviewer_ledger.json").write_text(
+                    seed, encoding="utf-8"
+                )
+            printed = subprocess.run(
+                [sys.executable, str(script), "--reviewer-ledger", "--json"],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(install),
+                    "XDG_CONFIG_HOME": str(self.config_home),
+                },
+            )
+            with self.subTest(case=label):
+                self.assertEqual(printed.returncode, 0, printed.stderr)
+                document = json.loads(printed.stdout)
+                self.assertEqual(document["status"], expected)
+                self.assertEqual(document["entries"], [])
+
+    def test_the_self_test_answer_cannot_be_changed_by_a_host_ledger(self):
+        # --self-test is contracted to answer identically on every
+        # installation, and it exercises marker_matches with fixture markers
+        # dated 2026-01. Without the pin inside self_test, a host ledger whose
+        # first entry predates those fixtures makes the offline check fail --
+        # which is what this asserts, by running the real CLI against one.
+        script = REPO_ROOT / "tools" / "approve_issues.py"
+        install = self.root / "self-test-install"
+        (install / "runtime").mkdir(parents=True, exist_ok=True)
+        (install / "runtime" / "reviewer_ledger.json").write_text(
+            json.dumps(
+                {
+                    "schema": "approve-issues-reviewer-ledger",
+                    "version": 1,
+                    "entries": [
+                        self.entry("2025-01-01T00:00:00Z", self.SOL_ERA)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, str(script), "--self-test"],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(install),
+                "XDG_CONFIG_HOME": str(self.config_home),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("self-test passed", result.stdout)
+
+    def test_a_no_agent_install_records_nothing_rather_than_an_empty_entry(self):
+        module = self.backend()
+        path = self.ledger_path()
+        self.assertEqual(module.record_reviewer_assignment(path, cells={}), [])
+        self.assertFalse(path.exists())
+
+    def test_a_damaged_ledger_is_never_overwritten_by_the_next_append(self):
+        # An append-only record must not lose its history to a reader that
+        # could not parse it; the gate already refuses on damage, and that is
+        # recoverable by repairing the file, while overwriting it is not.
+        module = self.backend()
+        path = self.write_ledger([self.entry("2026-08-14T00:00:00Z", self.SOL_ERA)])
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original[:-8], encoding="utf-8")  # truncate: unparseable
+        damaged = path.read_text(encoding="utf-8")
+        module.record_reviewer_assignment(path)
+        self.assertEqual(path.read_text(encoding="utf-8"), damaged)
+
+    def test_an_unrecorded_transition_refuses_every_non_current_route(self):
+        # What a failed append looks like from the gate's side: the newest
+        # recorded assignment is not the one this run uses, so the boundary
+        # between them was never written. Left open-ended, the previous
+        # assignment's window would accept its own markers written long after
+        # it was replaced -- granting approval, not withholding it.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        behind = [self.entry("2026-08-14T00:00:00Z", self.SOL_ERA)]
+        sol_route = "gpt-5.6-sol@xhigh+claude-opus-5@xhigh"
+        # Inside its window it would otherwise be a legacy decision...
+        self.assertTrue(
+            module.marker_models_accepted(
+                sol_route, "2026-08-20T00:00:00Z", reviewers,
+                entries=behind + [self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA)],
+            )
+        )
+        # ...but with the transition unrecorded, nothing but the current
+        # assignment is accepted, whenever it was written.
+        for written in ("2026-08-20T00:00:00Z", "2026-12-01T00:00:00Z"):
+            with self.subTest(written=written):
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        sol_route, written, reviewers, entries=behind
+                    )
+                )
+        self.assertTrue(
+            module.marker_models_accepted(
+                module.reviewer_models(reviewers),
+                "2026-12-01T00:00:00Z", reviewers, entries=behind,
+            )
+        )
+
+    def test_the_first_recorded_assignment_bootstraps_markers_older_than_it(self):
+        # An operator's own previous assignment is not in any compiled table,
+        # so a marker predating the ledger can only be recognised through the
+        # first thing the ledger ever saw. Both a model-only and an
+        # effort-only change, since the effort is half the assignment.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        for label, first in (
+            ("effort-only", {"codex": "gpt-6-astra@medium",
+                             "claude": "claude-fable-5-1@medium"}),
+            ("model-only", {"codex": "gpt-5.5@high",
+                            "claude": "claude-sonnet-5@high"}),
+        ):
+            entries = [
+                self.entry("2026-08-14T00:00:00Z", first),
+                self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+            ]
+            route = "+".join(first[key] for key in ("codex", "claude"))
+            with self.subTest(case=label):
+                # Older than the ledger: carried by the first observed cell.
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        route, "2026-08-01T00:00:00Z", reviewers, entries=entries
+                    )
+                )
+                # Inside its own window: carried by the window.
+                self.assertTrue(
+                    module.marker_models_accepted(
+                        route, "2026-08-20T00:00:00Z", reviewers, entries=entries
+                    )
+                )
+                # After it was replaced: stale.
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        route, "2026-09-07T00:00:00Z", reviewers, entries=entries
+                    )
+                )
+
+    def test_an_entry_missing_a_provider_the_route_needs_is_ignored(self):
+        module = self.backend()
+        entries = [
+            self.entry("2026-08-14T00:00:00Z", {"codex": "gpt-5.6-sol@xhigh"}),
+            self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+        ]
+        # Readable for the codex-only route it does name...
+        self.assertTrue(
+            module.marker_models_accepted(
+                "gpt-5.6-sol@xhigh",
+                "2026-08-20T00:00:00Z",
+                self.route(module, "codex"),
+                entries=entries,
+            )
+        )
+        # ...and ignored, rather than half-read, for the route it does not.
+        self.assertEqual(
+            module.reviewer_models_from_cells(
+                self.route(module, "codex+claude"), entries[0]["assignments"]
+            ),
+            None,
+        )
+
+    def test_the_gate_reads_the_marker_timestamp_the_comment_carries(self):
+        # The seam that matters: 'review_records' copies `created_at` off the
+        # comment onto the marker, and 'marker_matches' is what spends it.
+        module = self.backend()
+        marker_body = (
+            "<!-- issue-review:v2 spec={spec} origin=legacy reviewers=codex+claude "
+            "models=gpt-5.6-sol@xhigh+claude-opus-5@xhigh base={base} mode=initial "
+            "verdicts=codex:APPROVE,claude:APPROVE verdict=APPROVE -->"
+        ).format(spec="a" * 64, base="b" * 40)
+        comments = [
+            {
+                "id": 7,
+                "body": marker_body,
+                "author_association": "OWNER",
+                "created_at": "2026-09-06T03:56:17Z",
+                "html_url": "https://example.invalid/c7",
+            }
+        ]
+        marker = module.latest_review_marker(comments)
+        self.assertEqual(marker["created_at"], "2026-09-06T03:56:17Z")
+        reviewers = self.route(module, "codex+claude")
+        with mock.patch.object(
+            module,
+            "read_reviewer_ledger",
+            return_value=(
+                module.LEDGER_INTACT,
+                [
+                    self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+                    self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+                ],
+            ),
+        ):
+            self.assertTrue(
+                module.marker_matches(
+                    marker, spec_sha="a" * 64, origin=None, reviewers=reviewers
+                )
+            )
+            stale = {**marker, "created_at": "2026-09-07T00:00:00Z"}
+            self.assertFalse(
+                module.marker_matches(
+                    stale, spec_sha="a" * 64, origin=None, reviewers=reviewers
+                )
+            )
+
+    def test_the_cli_prints_the_ledger_and_refuses_a_bare_invocation(self):
+        script = REPO_ROOT / "tools" / "approve_issues.py"
+        env = {
+            **os.environ,
+            "HOME": str(self.root / "cli-home"),
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "XDG_DATA_HOME": str(self.root / "cli-data"),
+        }
+        printed = subprocess.run(
+            [sys.executable, str(script), "--reviewer-ledger", "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        document = json.loads(printed.stdout)
+        self.assertEqual(document["schema"], "approve-issues-reviewer-ledger")
+        self.assertEqual(document["version"], 1)
+        self.assertEqual(document["current"], self.ASTRA_ERA)
+        # Reads, never records: a diagnostic that appends to an append-only
+        # file would close the real assignment's window for its own duration.
+        self.assertEqual(document["entries"], [])
+        self.assertFalse(
+            (self.root / "cli-home" / "Library" / "Application Support" / "kanban"
+             / "issue-review" / "runtime" / "reviewer_ledger.json").exists()
+        )
+
+        # It is a document mode like the other two, so it owes --json.
+        refused = subprocess.run(
+            [sys.executable, str(script), "--reviewer-ledger"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("--reviewer-ledger requires --json", refused.stderr)
 
 
 class InstalledConfigReferenceTests(unittest.TestCase):
