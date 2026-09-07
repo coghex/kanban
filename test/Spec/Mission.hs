@@ -2011,6 +2011,86 @@ sessionTreeSpec = describe "the session tree" $ do
       ]
       `shouldBe` Left (MissionSessionCycle [MissionSessionId "a", MissionSessionId "b"])
 
+  it "names the sessions on the loop, not the one that merely leads into it" $
+    -- tail -> a -> b -> a. A walk from "tail" visits three sessions and only
+    -- two of them are on the loop; a walk from "a" visits exactly the two. The
+    -- node order decides which walk finds the loop first, so both orders are
+    -- asserted: the cycle-first one passes against a walk that reports its own
+    -- history, and the tail-first one does not.
+    forM_ [[leadIn, loopA, loopB], [loopA, loopB, leadIn]] $ \nodes ->
+      validateMissionSessionTree theMission nodes
+        `shouldBe` Left (MissionSessionCycle [MissionSessionId "a", MissionSessionId "b"])
+
+  it "names the sessions on the loop however long the lineage leading into it is" $ do
+    -- Two sessions ahead of the loop rather than one, so dropping only the
+    -- session a walk started from is not enough to pass.
+    let approach =
+          [ sessionNode "tail" (Just (MissionSessionId "neck")) settled,
+            sessionNode "neck" (Just (MissionSessionId "a")) settled,
+            loopA,
+            loopB
+          ]
+    forM_ [approach, reverse approach] $ \nodes ->
+      validateMissionSessionTree theMission nodes
+        `shouldBe` Left (MissionSessionCycle [MissionSessionId "a", MissionSessionId "b"])
+
+  it "names the one session of a self-parent loop reached through a lineage" $
+    -- The parent field permits self-reference, so the repeated identity is the
+    -- session the walk is standing on rather than one behind it.
+    forM_ [[leadIn, selfParent], [selfParent, leadIn]] $ \nodes ->
+      validateMissionSessionTree theMission nodes
+        `shouldBe` Left (MissionSessionCycle [MissionSessionId "a"])
+
+  it "names one whole loop, the same one, when a node set holds two of them" $ do
+    -- Correcting the walk alone is not enough: with two loops present, every
+    -- walk reports its own, and which of those is returned would still be
+    -- decided by the order the sessions arrive in.
+    let firstLoop =
+          [ sessionNode "a-tail" (Just (MissionSessionId "a-one")) settled,
+            sessionNode "a-one" (Just (MissionSessionId "a-two")) settled,
+            sessionNode "a-two" (Just (MissionSessionId "a-one")) settled
+          ]
+        secondLoop =
+          [ sessionNode "b-tail" (Just (MissionSessionId "b-one")) settled,
+            sessionNode "b-one" (Just (MissionSessionId "b-two")) settled,
+            sessionNode "b-two" (Just (MissionSessionId "b-one")) settled
+          ]
+        -- A component that does terminate, in the same node set, to show it is
+        -- neither reported nor able to change which loop is.
+        healthy =
+          [ sessionNode "root" Nothing settled,
+            sessionNode "leaf" (Just (MissionSessionId "root")) settled
+          ]
+    forM_
+      [ firstLoop <> secondLoop <> healthy,
+        secondLoop <> healthy <> firstLoop,
+        reverse (firstLoop <> secondLoop <> healthy)
+      ]
+      $ \nodes ->
+        validateMissionSessionTree theMission nodes
+          `shouldBe` Left (MissionSessionCycle [MissionSessionId "a-one", MissionSessionId "a-two"])
+
+  it "still reports each earlier failure ahead of a loop in the same node set" $ do
+    let looping = [loopA, loopB]
+    validateMissionSessionTree theMission (looping <> [sessionNode "twin" Nothing settled, sessionNode "twin" Nothing settled])
+      `shouldBe` Left (MissionSessionDuplicate (MissionSessionId "twin"))
+    validateMissionSessionTree theMission (looping <> [sessionNode "orphan" (Just (MissionSessionId "absent")) settled])
+      `shouldBe` Left (MissionSessionMissingParent (MissionSessionId "orphan") (MissionSessionId "absent"))
+    validateMissionSessionTree
+      theMission
+      ( looping
+          <> [ (sessionNode "elsewhere" Nothing settled) {missionSessionMission = MissionId "mission-0002"},
+               sessionNode "child" (Just (MissionSessionId "elsewhere")) settled
+             ]
+      )
+      `shouldBe` Left (MissionSessionCrossMissionParent (MissionSessionId "child") (MissionSessionId "elsewhere"))
+    validateMissionSessionTree theMission (looping <> [(sessionNode "stranger" Nothing settled) {missionSessionMission = MissionId "mission-0002"}])
+      `shouldBe` Left (MissionSessionForeign (MissionSessionId "stranger") (MissionId "mission-0002"))
+    -- And a parent that does not resolve still stops the walk rather than
+    -- being reported a second time as a lineage that loops.
+    validateMissionSessionTree theMission [sessionNode "child" (Just (MissionSessionId "absent")) settled]
+      `shouldBe` Left (MissionSessionMissingParent (MissionSessionId "child") (MissionSessionId "absent"))
+
   it "calls a session with no observation and no recorded process unverifiable rather than finished" $
     missionSessionDisposition (sessionNode "session-a" Nothing Nothing) `shouldBe` MissionSessionUnverifiable
 
@@ -2065,6 +2145,50 @@ sessionTreeSpec = describe "the session tree" $ do
       stored <- readMissionSnapshot store theMission
       stored `shouldBe` MissionAbsent
 
+  it "names only the loop on both durable paths, and neither message names what led into it" $
+    withStore $ \_ store -> do
+      let clause = "the sessions \"a\", \"b\" form a lineage that never reaches a root"
+      written <-
+        writeMissionSnapshot
+          store
+          (snapshotWith MissionRunning [] [leadIn, loopA, loopB] [])
+      case written of
+        Left message -> do
+          Text.unpack message `shouldSatisfy` isInfixOf clause
+          Text.unpack message `shouldSatisfy` (not . isInfixOf "\"tail\"")
+        Right () -> expectationFailure "expected the snapshot write to be refused"
+      -- The refused write published nothing, so reading now would only report
+      -- the mission absent. The read path needs the same malformed snapshot
+      -- placed independently: a tree the writer accepts, then the one edit
+      -- that closes the loop, which is how one arrives from a restore or a
+      -- hand-repair in the first place.
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              ( snapshotWith
+                  MissionRunning
+                  []
+                  [ leadIn,
+                    loopA,
+                    sessionNode "b" (Just (MissionSessionId "stem")) settled,
+                    sessionNode "stem" Nothing settled
+                  ]
+                  []
+              )
+        )
+      collide
+        store
+        "\"missionSessionParent\":{\"unMissionSessionId\":\"stem\"}"
+        "\"missionSessionParent\":{\"unMissionSessionId\":\"a\"}"
+      stored' <- readMissionSnapshot store theMission
+      case stored' of
+        MissionUnreadable message -> do
+          Text.unpack message `shouldSatisfy` isInfixOf clause
+          Text.unpack message `shouldSatisfy` (not . isInfixOf "\"tail\"")
+          Text.unpack message `shouldSatisfy` (not . isInfixOf "\"stem\"")
+        other -> expectationFailure ("expected a diagnostic, got " <> show other)
+
   it "says what it rejected, in each of the five ways a node set is not a tree" $
     map
       (fmap missionSessionTreeErrorMessage . flipEither . validateMissionSessionTree theMission)
@@ -2093,6 +2217,17 @@ collide store from to = do
   let replaced = Text.replace from to existing
   replaced `shouldNotBe` existing
   ByteString.writeFile path (TextEncoding.encodeUtf8 replaced)
+
+-- | The lineage @tail -> a -> b -> a@: two sessions on the loop and one
+-- ahead of it, which is the shape a walk reporting its own history gets wrong.
+leadIn, loopA, loopB :: MissionSessionNode
+leadIn = sessionNode "tail" (Just (MissionSessionId "a")) settled
+loopA = sessionNode "a" (Just (MissionSessionId "b")) settled
+loopB = sessionNode "b" (Just (MissionSessionId "a")) settled
+
+-- | The same lineage with the loop closed on one session instead of two.
+selfParent :: MissionSessionNode
+selfParent = sessionNode "a" (Just (MissionSessionId "a")) settled
 
 flipEither :: Either failure () -> Maybe failure
 flipEither result = case result of
