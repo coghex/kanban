@@ -364,6 +364,14 @@ spec = do
     -- The systemd counterpart of reading ProgramArguments out of a plist. The
     -- unit is authoritative for what would actually run, so this has to read
     -- systemd's own quoting rather than a convenient subset of it.
+    -- Most of what follows is about one ExecStart value rather than a whole
+    -- unit, so the surrounding two directives are supplied once here.
+    let execStart value =
+          unitExecStartArguments ("[Service]\nType=exec\nExecStart=" <> value <> "\n")
+        unitRefusal contents =
+          either id (const "unexpectedly resolved an argument vector") (unitExecStartArguments contents)
+        valueRefusal value =
+          unitRefusal ("[Service]\nType=exec\nExecStart=" <> value <> "\n")
     it "splits a quoted ExecStart into the exact argument vector" $
       unitExecStartArguments
         "[Service]\nType=exec\nExecStart=\"/usr/bin/python3\" \"/install dir/c.py\" \"--repo\" \"a/b\" \"run\"\nRestart=no\n"
@@ -380,6 +388,204 @@ spec = do
         `shouldBe` Right ["/tmp/100%/c.py"]
       unitExecStartArguments "[Service]\nExecStart=\"/tmp/say \\\"hi\\\"/c.py\"\n"
         `shouldBe` Right ["/tmp/say \"hi\"/c.py"]
+
+    it "decodes single quotes, empty quoted words, and a quote opened part-way through" $ do
+      -- Requirement 1. `'` quotes exactly as `"` does, and it is the spelling
+      -- a hand-edited unit most often carries a path with a space in. The old
+      -- reader opened a word on `"` alone, so this one arrived as three
+      -- arguments with the quotes still attached to two of them.
+      execStart "/usr/bin/python3 '/install dir/c.py' run"
+        `shouldBe` Right ["/usr/bin/python3", "/install dir/c.py", "run"]
+      -- An empty quoted word is an argument, not an absence: dropping it
+      -- shortens the vector systemd would pass.
+      execStart "/bin/echo '' \"\" x" `shouldBe` Right ["/bin/echo", "", "", "x"]
+      -- A quote opening part-way through a word joins its two halves, which is
+      -- what systemd's own extractor does with it. The canonical review asked
+      -- for this shape to be refused rather than mis-split into extra
+      -- arguments; reading it the way systemd does refuses nothing systemd
+      -- runs and still never invents an argument, which is that requirement
+      -- met from the other side.
+      execStart "/bin/echo a\"b c\"d" `shouldBe` Right ["/bin/echo", "ab cd"]
+      execStart "/bin/echo \"a\"'b'" `shouldBe` Right ["/bin/echo", "ab"]
+
+    it "decodes systemd's escapes outside quotes as well as inside them" $ do
+      -- Requirement 2, as the canonical review's correction restates it: `\s`
+      -- is systemd's spelling of a literal space, and it applies in an
+      -- unquoted word.
+      execStart "/usr/bin/python3 /install\\sdir/c.py run"
+        `shouldBe` Right ["/usr/bin/python3", "/install dir/c.py", "run"]
+      -- Requirement 3. The reader that kept only the character after the
+      -- backslash made `"a\tb"` into `atb`.
+      execStart "/bin/echo \"a\\tb\"" `shouldBe` Right ["/bin/echo", "a\tb"]
+      execStart "/bin/echo a\\tb" `shouldBe` Right ["/bin/echo", "a\tb"]
+      -- Every escape systemd names, in one quoted word.
+      execStart "/bin/echo \"\\a\\b\\f\\n\\r\\t\\v\\\\\\\"\\'\\s\""
+        `shouldBe` Right ["/bin/echo", "\a\b\f\n\r\t\v\\\"' "]
+      -- One left-to-right pass and no rescanning: the backslash `\\` produces
+      -- is not then read as the start of another escape, so this word carries
+      -- the four characters `\x41` rather than an `A`.
+      execStart "/bin/echo \"a\\\\x41b\"" `shouldBe` Right ["/bin/echo", "a\\x41b"]
+      -- An escaped delimiter is a character, not a delimiter: neither of these
+      -- opens a quote, and neither splits the word.
+      execStart "/bin/echo a\\\"b a\\'b" `shouldBe` Right ["/bin/echo", "a\"b", "a'b"]
+
+    it "reads a byte escape as a byte and a code-point escape as a character" $ do
+      -- Requirement 3 with the review's byte/code-point clarification. `\xhh`
+      -- and three-digit octal each name one byte, so a two-byte UTF-8 sequence
+      -- spelled as two of them is one character. Mapping each byte to a
+      -- character of its own is exactly the mangling this refuses to do, and
+      -- it is what turns a path into a different path.
+      execStart "/bin/echo \\xc3\\xa9" `shouldBe` Right ["/bin/echo", "\233"]
+      execStart "/bin/echo \\303\\251" `shouldBe` Right ["/bin/echo", "\233"]
+      execStart "/bin/echo \\101\\102" `shouldBe` Right ["/bin/echo", "AB"]
+      execStart "/bin/echo \\u00e9 \\U0001f600"
+        `shouldBe` Right ["/bin/echo", "\233", "\128512"]
+
+    it "joins a continued assignment, comments and all, before anything is counted" $ do
+      -- Requirement 4. The backslash becomes a space and the next line is more
+      -- of the same assignment, so the command names all of its words rather
+      -- than the two the first physical line held.
+      unitExecStartArguments "[Service]\nType=exec\nExecStart=/usr/bin/python3 \\\n  /tmp/c.py run\n"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/c.py", "run"]
+      -- A comment line is dropped before the continuation state is consulted,
+      -- so one sitting inside a continued assignment interrupts nothing.
+      unitExecStartArguments "[Service]\nExecStart=/usr/bin/python3 \\\n# a note\n; and another\n  /tmp/c.py run\n"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/c.py", "run"]
+      -- A file that ends inside a continuation names what it accumulated,
+      -- which is what systemd does with it too.
+      unitExecStartArguments "[Service]\nExecStart=/usr/bin/python3 /tmp/c.py \\"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/c.py"]
+      -- `\\` at the end of a line is a literal backslash and closes the line:
+      -- the escape state is read off the whole line rather than off the last
+      -- character.
+      unitExecStartArguments "[Service]\nExecStart=/bin/echo a\\\\\nRestart=no\n"
+        `shouldBe` Right ["/bin/echo", "a\\"]
+
+    it "counts a continued assignment once under the reset and multiplicity rules" $ do
+      -- Requirement 4's other half, over the rules #549 added. Splitting on
+      -- physical lines miscounted both directions: a continued command looked
+      -- like two assignments, and a continuation fragment that happens to
+      -- begin `ExecStart=` looked like a second command rather than like more
+      -- of the first.
+      unitExecStartArguments "[Service]\nExecStart=/old/ctl \\\n  run\nExecStart=\nExecStart=/actual/ctl run\n"
+        `shouldBe` Right ["/actual/ctl", "run"]
+      unitExecStartArguments "[Service]\nExecStart=/a/ctl \\\nExecStart=/b/ctl\n"
+        `shouldBe` Right ["/a/ctl", "ExecStart=/b/ctl"]
+      unitExecStartArguments "[Service]\nType=oneshot\nExecStart=/a/ctl \\\n  run\nExecStart=/b/ctl run\n"
+        `shouldBe` Left "its Type=oneshot ExecStart declares 2 commands, so it names no single controller command"
+      -- Type= is read off the same logical lines, so a continued one still
+      -- decides which of the two multiplicity refusals the unit earns.
+      unitExecStartArguments "[Service]\nType=\\\n  oneshot\nExecStart=/a/ctl run\nExecStart=/b/ctl run\n"
+        `shouldBe` Left "its Type=oneshot ExecStart declares 2 commands, so it names no single controller command"
+
+    it "refuses syntax it cannot decode rather than answering with a plausible command" $ do
+      -- Requirement 5. The unmatched quote is the worst of these: systemd
+      -- refuses to load such a unit, so nothing is running from it at all, and
+      -- the old reader answered with an argument vector all the same.
+      valueRefusal "/usr/bin/python3 \"/install dir/c.py" `shouldMention` "\" quote unmatched"
+      valueRefusal "/usr/bin/python3 '/install dir/c.py" `shouldMention` "' quote unmatched"
+      -- The review's correction to requirement 2: a backslash before a literal
+      -- space is not one of systemd's escapes, and the message says which
+      -- spelling is.
+      valueRefusal "/usr/bin/python3 /install\\ dir/c.py run" `shouldMention` "\\s"
+      valueRefusal "/bin/echo a\\zb" `shouldMention` "\\z"
+      -- Malformed digits, then each numeric range systemd rejects.
+      valueRefusal "/bin/echo \\xZZ" `shouldMention` "\\x escape"
+      valueRefusal "/bin/echo \\x4" `shouldMention` "\\x escape"
+      valueRefusal "/bin/echo \\u00e" `shouldMention` "\\u escape"
+      valueRefusal "/bin/echo \\09" `shouldMention` "octal escape"
+      valueRefusal "/bin/echo \\400" `shouldMention` "above one byte"
+      valueRefusal "/bin/echo \\x00" `shouldMention` "NUL"
+      valueRefusal "/bin/echo \\000" `shouldMention` "NUL"
+      valueRefusal "/bin/echo \\u0000" `shouldMention` "NUL"
+      valueRefusal "/bin/echo \\U00000000" `shouldMention` "NUL"
+      valueRefusal "/bin/echo \\ud800" `shouldMention` "surrogate"
+      valueRefusal "/bin/echo \\U0000d800" `shouldMention` "surrogate"
+      valueRefusal "/bin/echo \\U00110000" `shouldMention` "not a Unicode code point"
+      -- A high byte on its own is not a character. This reader's boundary is
+      -- Text and String, so a byte sequence it cannot carry faithfully is
+      -- refused rather than turned into replacement characters or into one
+      -- character per byte.
+      valueRefusal "/bin/echo \\xff" `shouldMention` "not valid UTF-8"
+
+    it "refuses every specifier but %%, after the escapes have been decoded" $ do
+      -- Requirement 6. `%h`, `%i` and the rest are not expanded here, and a
+      -- path with an unexpanded specifier in it does not exist, so passing one
+      -- through names a command that could never have run.
+      valueRefusal "%h/bin/c.py run" `shouldMention` "%h"
+      execStart "/tmp/100%%/c.py" `shouldBe` Right ["/tmp/100%/c.py"]
+      -- Resolved left to right without rescanning what it produces, so `%%h`
+      -- is the literal `%h` while `%%%h` still leaves a specifier behind.
+      execStart "/bin/echo %%h" `shouldBe` Right ["/bin/echo", "%h"]
+      valueRefusal "/bin/echo %%%h" `shouldMention` "%h"
+      valueRefusal "/bin/echo 50%" `shouldMention` "ends in a %"
+      -- An escape is not a way past that check. Specifiers are systemd's rule
+      -- over the file's own text, resolved before anything is unescaped, so a
+      -- `%` that exists only after decoding is refused rather than expanded or
+      -- quietly passed through — which is at least the refusal `%h` itself
+      -- earns, for every spelling of it.
+      valueRefusal "/bin/echo \\x25h" `shouldMention` "writes a % with \\x25"
+      valueRefusal "/bin/echo \\u0025h" `shouldMention` "writes a % with \\u0025"
+      valueRefusal "/bin/echo \\045h" `shouldMention` "writes a % with \\045"
+
+    it "reads back the exact argv tools/service_manager.py wrote" $ do
+      -- Requirement 8. These three ExecStart lines are the bytes
+      -- `SystemdBackend.render_definition` produces for the argument vectors
+      -- beside them: `_unit_word` quotes every word and escapes `\` and `"`,
+      -- and `_unit_value` doubles `%` before it. `tools/test_service_manager.py`
+      -- pins the writer to these same strings by name, so neither half of the
+      -- round trip can drift from the other without a test saying so.
+      unitExecStartArguments
+        "[Service]\nExecStart=\"/usr/bin/python3\" \"/a b/c.py\" \"--repo\" \"a/b\"\nRestart=no\n"
+        `shouldBe` Right ["/usr/bin/python3", "/a b/c.py", "--repo", "a/b"]
+      unitExecStartArguments
+        "[Service]\nExecStart=\"/usr/bin/python3\" \"/tmp/100%%/say \\\"hi\\\"/c.py\"\nRestart=no\n"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/100%/say \"hi\"/c.py"]
+      unitExecStartArguments
+        "[Service]\nExecStart=\"/usr/bin/python3\" \"/tmp/back\\\\slash/c.py\"\nRestart=no\n"
+        `shouldBe` Right ["/usr/bin/python3", "/tmp/back\\slash/c.py"]
+
+    it "carries both new refusal classes into the drainer's own diagnostic" $ do
+      -- Requirement 7. A unit this reader cannot decode has to reach the same
+      -- unreadable-definition message the older refusals do — the file to go
+      -- and look at, the parser's own cause, and the repair that rewrites the
+      -- file — and it has to yield no controller for anything to invoke.
+      let repository = Repository "/tmp/current-project" "example" "project"
+          unit = "/home/example/.config/systemd/user/kanban-drainer.service"
+          controllerRefusal contents =
+            either
+              id
+              (const "unexpectedly resolved a controller")
+              (systemdControllerFromUnit repository unit contents)
+      systemdControllerFromUnit
+        repository
+        unit
+        "[Service]\nType=exec\nExecStart='/install dir/python3' '/install dir/drain_prs_service.py' run\n"
+        `shouldBe` Right
+          ( DrainerController
+              "/install dir/python3"
+              [ "/install dir/drain_prs_service.py",
+                "--path",
+                "/tmp/current-project",
+                "--repo",
+                "example/project"
+              ]
+              DrainerSystemd
+          )
+      let unmatched =
+            controllerRefusal
+              "[Service]\nType=exec\nExecStart=\"/install dir/python3 /install dir/drain_prs_service.py run\n"
+      unmatched `shouldMention` "could not read the PR drainer's systemd unit at /home/example/.config/systemd/user/kanban-drainer.service"
+      unmatched `shouldMention` "quote unmatched"
+      unmatched `shouldMention` "install_drainer.py"
+      unmatched `shouldNotMention` "/install dir/python3 /install"
+      let specifier =
+            controllerRefusal
+              "[Service]\nType=exec\nExecStart=%h/kanban/python3 %h/kanban/drain_prs_service.py run\n"
+      specifier `shouldMention` "could not read the PR drainer's systemd unit at"
+      specifier `shouldMention` "%h"
+      specifier `shouldMention` "install_drainer.py"
+      specifier `shouldNotMention` "/kanban/drain_prs_service.py"
 
     it "resolves an empty ExecStart as systemd's reset, not as a directive to skip" $ do
       -- Requirement 1. systemd clears the command list on an empty

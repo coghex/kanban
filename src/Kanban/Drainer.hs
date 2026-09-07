@@ -54,14 +54,17 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser, parseEither)
+import Data.Bits ((.&.))
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Char (chr, digitToInt, isHexDigit, isOctDigit)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import Data.Word (Word8)
 import Kanban.Domain
   ( BoardColumn (..),
     BoardItem (..),
@@ -661,14 +664,24 @@ systemdControllerFromUnit repository unit text = do
 
 -- | The argument vector a systemd unit's @ExecStart@ names.
 --
--- systemd's own quoting, which is what the backend writes and what a user
--- hand-editing the unit would reasonably spell: words separated by whitespace,
--- any word optionally double-quoted, @\\\\@ and @\\"@ escaping themselves
--- inside the quotes, and @%%@ standing for a literal @%@ once specifiers have
--- been expanded. Nothing else is interpreted — no shell, no globbing, no
--- variable expansion — because @ExecStart@ without @\/bin\/sh -c@ has none of
--- those either, and inventing one here would make Kanban report a command
--- systemd would not run.
+-- systemd's own syntax, which is what the backend writes and what a user
+-- hand-editing the unit would reasonably spell. Decoded here, in the order
+-- systemd's own reader applies the three layers:
+--
+-- 1. Comment lines are dropped and a line ending in an unescaped backslash is
+--    joined to the one after it, the backslash becoming a space, so a value
+--    split across several physical lines is one assignment — see
+--    'unitLogicalLines'.
+-- 2. Those assignments accumulate under systemd's reset and multiplicity
+--    rules, below.
+-- 3. The one surviving value is split into words under systemd's quoting,
+--    escaping, and specifier rules — see 'unitWords'.
+--
+-- Anything those three cannot decode faithfully comes back as 'Left' rather
+-- than as a plausible argument vector. That direction matters more here than
+-- anywhere else in discovery: what comes out of this is exactly what @status@,
+-- @start@, and @stop@ invoke, so a reader that guesses reports — and runs — a
+-- command systemd never did.
 --
 -- systemd's own accumulation rules too, because what is read here stays
 -- authoritative for what the service manager will actually run. Each
@@ -687,14 +700,34 @@ systemdControllerFromUnit repository unit text = do
 --
 -- A unit with no @ExecStart@, or one whose only assignment is empty, names no
 -- controller and is rejected rather than turned into an empty command.
+--
+-- What this deliberately does /not/ interpret, and what that costs:
+--
+-- * @$FOO@ and @${FOO}@, which systemd substitutes from the service's own
+--   environment without a shell, and @$$@, which it reads as a literal @$@.
+--   Left as they stand — a word carrying one is reported unexpanded. This is
+--   deferred rather than solved, and it is the one shape below where the
+--   argument vector reported can still differ from the one systemd runs.
+-- * Shell syntax and globbing, which @ExecStart@ without @\/bin\/sh -c@ does
+--   not have either.
+-- * @[Section]@ headers and whitespace around the @=@. An assignment is
+--   recognized by its name and an immediate @=@ wherever in the file it
+--   appears, so @ExecStart =@ is no assignment at all and reaches the
+--   no-@ExecStart@ refusal. Unchanged, and fail-closed in both directions.
+--
+-- The fidelity claimed here is over the quoting, escaping, continuation, and
+-- specifier boundary the three layers name — not over the whole of
+-- @ExecStart@'s semantics.
 unitExecStartArguments :: Text -> Either Text [String]
 unitExecStartArguments contents = case effectiveCommands of
   []
     | any (not . Text.null) execStartAssignments -> Left "its ExecStart names no command"
     | otherwise -> Left "it declares no ExecStart"
-  [command] -> case unitWords command of
-    [] -> Left "its ExecStart names no command"
-    arguments -> Right (map Text.unpack arguments)
+  [command] -> do
+    arguments <- unitWords command
+    case arguments of
+      [] -> Left "its ExecStart names no command"
+      _ -> Right (map Text.unpack arguments)
   commands -> Left (tooManyCommands (length commands))
   where
     -- Every ExecStart in the file, in order, the empty ones included: an empty
@@ -719,12 +752,17 @@ unitExecStartArguments contents = case effectiveCommands of
     -- spellings @ExecStart=@ already accepts and no more: a unit whose
     -- @Type=@ this misses is one whose @ExecStart=@ would be missed too, and
     -- it is refused either way — only which refusal it earns would move.
+    --
+    -- Over the logical lines rather than the physical ones, so a continued
+    -- assignment is one assignment here and counts once in the reset and
+    -- multiplicity rules above, exactly as it does for systemd.
     directiveValues directive =
       [ Text.strip value
-        | line <- Text.lines contents,
-          let stripped = Text.strip line,
-          Just value <- [Text.stripPrefix directive stripped]
+        | line <- logicalLines,
+          Just value <- [Text.stripPrefix directive line]
       ]
+
+    logicalLines = unitLogicalLines contents
 
     tooManyCommands count
       | unitType == Just "oneshot" =
@@ -736,29 +774,266 @@ unitExecStartArguments contents = case effectiveCommands of
             <> Text.pack (show count)
             <> " commands, which systemd accepts only under Type=oneshot"
 
--- | One @ExecStart@ value, split into words under systemd's quoting rules.
-unitWords :: Text -> [Text]
-unitWords = go . Text.unpack
+-- | A unit file's logical lines: comments dropped, continuations joined,
+-- each one stripped of the whitespace systemd strips.
+--
+-- The order is systemd's own and it is not interchangeable. A line whose
+-- first non-blank character is @#@ or @;@ is dropped /before/ the
+-- continuation state is consulted, so a comment sitting in the middle of a
+-- continued assignment interrupts nothing and the assignment survives it.
+-- What remains is appended to whatever is being continued, and the whole
+-- accumulated line is then scanned for the escape state its last character
+-- leaves: a trailing backslash that is not itself escaped becomes a space and
+-- opens a continuation, while @\\\\@ at the end of a line is a literal
+-- backslash and closes the line as any other character would. A file ending
+-- inside a continuation flushes what it accumulated, which is what systemd
+-- does with it too.
+--
+-- Joining first is what makes the reset and multiplicity rules in
+-- 'unitExecStartArguments' count the assignments systemd counts. Splitting on
+-- physical lines instead reads a continued @ExecStart=@ as one truncated
+-- command, and reads a continuation fragment that happens to begin
+-- @ExecStart=@ as a second assignment rather than as more of the first.
+unitLogicalLines :: Text -> [Text]
+unitLogicalLines contents = go Nothing (Text.lines contents)
   where
-    go [] = []
-    go (character : rest)
-      | character `elem` (" \t" :: String) = go rest
-      | character == '"' = let (word, remaining) = quoted rest "" in word : go remaining
-      | otherwise = let (word, remaining) = bare (character : rest) "" in word : go remaining
+    go pending [] = maybe [] pure pending
+    go pending (physical : rest)
+      | isComment stripped = go pending rest
+      | endsEscaped joined = go (Just (Text.init joined <> " ")) rest
+      | otherwise = joined : go Nothing rest
+      where
+        stripped = Text.strip physical
+        -- No separator: the backslash the previous line ended on has already
+        -- become the space that separates them.
+        joined = maybe stripped (<> stripped) pending
 
-    quoted [] acc = (finish acc, [])
-    quoted ('\\' : escaped : rest) acc = quoted rest (escaped : acc)
-    quoted ('"' : rest) acc = (finish acc, rest)
-    quoted (character : rest) acc = quoted rest (character : acc)
+    isComment line = case Text.uncons line of
+      Just (character, _) -> character == '#' || character == ';'
+      Nothing -> False
 
-    bare [] acc = (finish acc, [])
-    bare (character : rest) acc
-      | character `elem` (" \t" :: String) = (finish acc, rest)
-      | otherwise = bare rest (character : acc)
+    endsEscaped = Text.foldl' step False
+      where
+        step escaped character
+          | escaped = False
+          | otherwise = character == '\\'
 
-    -- `%%` is systemd's escape for a literal `%`, resolved after the word has
-    -- been assembled because it is a specifier rule rather than a quoting one.
-    finish = Text.replace "%%" "%" . Text.pack . reverse
+-- | One @ExecStart@ value, split into the words systemd would split it into,
+-- or the refusal naming what could not be decoded.
+--
+-- What is decoded:
+--
+-- * Whitespace separates words, and a run of it separates no more than one.
+-- * @\'@ and @\"@ quote. A quote opens where it appears and closes at its
+--   match, so a whole word may be quoted, an empty quoted word survives as an
+--   empty argument, and a quote opening part-way through a word joins rather
+--   than splits — @a\"b c\"d@ is the one argument @ab cd@, never three.
+-- * A backslash escapes, inside quotes and outside them alike:
+--   @\\a \\b \\f \\n \\r \\t \\v \\\\ \\\" \\\'@, @\\s@ for a space, the byte
+--   escapes @\\xhh@ and @\\nnn@ (three octal digits), and the code-point
+--   escapes @\\uXXXX@ and @\\UXXXXXXXX@.
+-- * @%%@ stands for a literal @%@.
+--
+-- What is refused, because a reader that guessed would name a command systemd
+-- would not run:
+--
+-- * An unmatched quote of either kind. systemd refuses to load such a unit, so
+--   nothing is running from it, and answering with a plausible argument vector
+--   is the worst of the failures this replaces.
+-- * A backslash escaping nothing, and an escape systemd does not define —
+--   @\\ @ among them. A backslash before a literal space is not an escape;
+--   @\\s@ or a quoted word is how a space belongs in a word.
+-- * A numeric escape whose digits are missing or malformed, or whose value
+--   names a NUL byte, is above one byte, names a UTF-16 surrogate, or is not a
+--   Unicode code point.
+-- * An escape that produces a @%@. Specifiers are resolved from the file's own
+--   text, so a @%@ arriving through an escape cannot be told from one, and
+--   refusing it is what keeps @\\x25h@ from walking past the check below.
+-- * A word whose decoded bytes are not valid UTF-8. systemd puts raw bytes in
+--   argv; this reader's boundary is 'Text' and 'String', so a byte sequence it
+--   cannot carry faithfully is refused rather than mangled into replacement
+--   characters or one character per byte.
+-- * Any specifier but @%%@ — @%h@, @%i@, and the rest are unexpanded here, and
+--   a path with an unexpanded specifier in it does not exist. A trailing @%@
+--   naming no specifier is refused for the same reason.
+unitWords :: Text -> Either Text [Text]
+unitWords = separated . Text.unpack
+  where
+    separated [] = Right []
+    separated (character : rest)
+      | isSeparator character = separated rest
+      | otherwise = word Nothing [] (character : rest)
+
+    isSeparator character = character == ' ' || character == '\t'
+
+    -- One word, accumulated as the bytes it decodes to rather than as
+    -- characters, because a byte escape names a byte and only the assembled
+    -- sequence says which character — if any — those bytes are. `quote` is the
+    -- delimiter currently open: inside it a separator is just a character, and
+    -- outside it a quote opens wherever it stands.
+    word quote acc input = case input of
+      [] -> case quote of
+        Just delimiter -> Left (unmatchedQuote delimiter)
+        Nothing -> finish acc []
+      '\\' : escaped -> do
+        (bytes, remaining) <- unitEscape escaped
+        word quote (reverse bytes <> acc) remaining
+      character : rest
+        | Just character == quote -> word Nothing acc rest
+        | isNothing quote && (character == '"' || character == '\'') ->
+            word (Just character) acc rest
+        | isNothing quote && isSeparator character -> finish acc rest
+        | otherwise -> word quote (reverse (characterBytes character) <> acc) rest
+
+    finish acc rest = do
+      decoded <- case Text.decodeUtf8' (ByteString.pack (reverse acc)) of
+        Left _ ->
+          Left
+            "its ExecStart has a word whose escapes decode to bytes that are not valid UTF-8, which this reader cannot carry to a command faithfully"
+        Right text -> resolveSpecifiers text
+      remaining <- separated rest
+      pure (decoded : remaining)
+
+    unmatchedQuote delimiter =
+      "its ExecStart leaves a "
+        <> Text.singleton delimiter
+        <> " quote unmatched, which systemd refuses to load the unit over"
+
+    characterBytes character = ByteString.unpack (Text.encodeUtf8 (Text.singleton character))
+
+-- | One escape, from the character after the backslash: the bytes it stands
+-- for and what is left of the value.
+--
+-- @systemd@'s @cunescape_one@, refusal for refusal. The byte escapes name one
+-- byte each and the code-point escapes name a character, which is why this
+-- answers in bytes: @\\xc3\\xa9@ is one @é@ and not two characters, and
+-- deciding that per escape is exactly the mistake that turns a path into one
+-- systemd never had.
+--
+-- The empty case is defensive rather than reachable: a value-final backslash
+-- is a continuation marker, so 'unitLogicalLines' has already turned it into a
+-- space by the time a word is split. It refuses rather than assumes, because
+-- what makes it unreachable lives in another function.
+unitEscape :: String -> Either Text ([Word8], String)
+unitEscape input = case input of
+  [] -> Left "its ExecStart ends in a backslash that escapes nothing"
+  'a' : rest -> Right ([0x07], rest)
+  'b' : rest -> Right ([0x08], rest)
+  'f' : rest -> Right ([0x0C], rest)
+  'n' : rest -> Right ([0x0A], rest)
+  'r' : rest -> Right ([0x0D], rest)
+  't' : rest -> Right ([0x09], rest)
+  'v' : rest -> Right ([0x0B], rest)
+  '\\' : rest -> Right ([0x5C], rest)
+  '"' : rest -> Right ([0x22], rest)
+  '\'' : rest -> Right ([0x27], rest)
+  -- An extension of the XDG syntax rather than C's, and the only spelling of a
+  -- literal space inside an unquoted word systemd accepts.
+  's' : rest -> Right ([0x20], rest)
+  'x' : rest -> hexadecimalEscape rest
+  'u' : rest -> codePointEscape 4 "\\u" rest
+  'U' : rest -> codePointEscape 8 "\\U" rest
+  character : rest
+    | isOctDigit character -> octalEscape (character : rest)
+    | character == ' ' || character == '\t' ->
+        Left
+          "its ExecStart escapes whitespace with a bare backslash, which systemd reads as no escape at all; a literal space is \\s, or the word can be quoted"
+    | otherwise ->
+        Left ("its ExecStart uses the escape \\" <> Text.singleton character <> ", which systemd does not define")
+  where
+    hexadecimalEscape (first : second : rest)
+      | isHexDigit first,
+        isHexDigit second =
+          byteFrom ("\\x" <> Text.pack [first, second]) (digitToInt first * 16 + digitToInt second) rest
+    hexadecimalEscape _ =
+      Left "its ExecStart has a \\x escape that is not the two hexadecimal digits systemd requires"
+
+    octalEscape (first : second : third : rest)
+      | all isOctDigit [first, second, third] =
+          let value = digitToInt first * 64 + digitToInt second * 8 + digitToInt third
+              spelling = "\\" <> Text.pack [first, second, third]
+           in if value > 0xFF
+                then Left ("its ExecStart escape " <> spelling <> " is above one byte, which systemd refuses")
+                else byteFrom spelling value rest
+    octalEscape _ =
+      Left "its ExecStart has an octal escape that is not the three octal digits systemd requires"
+
+    codePointEscape width spelling rest
+      | length digits == width,
+        all isHexDigit digits =
+          codePoint width spelling digits (drop width rest)
+      | otherwise =
+          Left
+            ( "its ExecStart has a "
+                <> spelling
+                <> " escape that is not the "
+                <> Text.pack (show width)
+                <> " hexadecimal digits systemd requires"
+            )
+      where
+        digits = take width rest
+
+    codePoint width spelling digits rest
+      | value == 0 = Left (nulEscape named)
+      | isSurrogate value =
+          Left ("its ExecStart escape " <> named <> " names a UTF-16 surrogate, which is not encodable")
+      | value == 0x25 = Left (percentEscape named)
+      | width == 8 && not (isValidCodePoint value) =
+          Left ("its ExecStart escape " <> named <> " is not a Unicode code point")
+      | otherwise =
+          Right (ByteString.unpack (Text.encodeUtf8 (Text.singleton (chr value))), rest)
+      where
+        value = foldl' (\accumulated digit -> accumulated * 16 + digitToInt digit) 0 digits
+        named = spelling <> Text.pack digits
+
+    byteFrom spelling value rest
+      | value == 0 = Left (nulEscape spelling)
+      | value == 0x25 = Left (percentEscape spelling)
+      | otherwise = Right ([fromIntegral value], rest)
+
+    nulEscape spelling =
+      "its ExecStart names a NUL byte with " <> spelling <> ", which no command argument can carry"
+
+    -- Specifiers are systemd's rule over the file's own text, resolved before
+    -- anything is unescaped, so a `%` that only exists after decoding is one
+    -- this reader has no honest answer for: expanding it would invent a
+    -- specifier systemd never saw, and passing it through would walk `\x25h`
+    -- past the refusal every other spelling of `%h` earns.
+    percentEscape spelling =
+      "its ExecStart writes a % with "
+        <> spelling
+        <> ", which cannot be told from the specifier syntax this reader does not expand"
+
+    -- systemd's own `unichar_is_valid`, noncharacters included: it applies
+    -- this to `\U` and deliberately not to `\u`, whose only extra rule is
+    -- the surrogate one above.
+    isValidCodePoint value =
+      value < 0x110000
+        && not (isSurrogate value)
+        && (value .&. 0xFFFFFFFE) /= 0xFFFE
+        && not (value >= 0xFDD0 && value <= 0xFDEF)
+
+    isSurrogate value = value >= 0xD800 && value <= 0xDFFF
+
+-- | @%%@ resolved to a literal @%@, and any other specifier refused.
+--
+-- Over the decoded word, and over a @%@ that came from the file rather than
+-- from an escape — 'unitEscape' has already refused the latter. Left to right
+-- and without rescanning what it produces, so @%%h@ is the literal @%h@ while
+-- @%%%h@ still refuses the @%h@ that follows the pair.
+resolveSpecifiers :: Text -> Either Text Text
+resolveSpecifiers = fmap Text.pack . go . Text.unpack
+  where
+    go [] = Right []
+    go ('%' : '%' : rest) = ('%' :) <$> go rest
+    go ['%'] = Left "its ExecStart ends in a % that names no specifier"
+    go ('%' : specifier : _) =
+      Left
+        ( "its ExecStart uses the specifier %"
+            <> Text.singleton specifier
+            <> ", which this reader does not expand"
+        )
+    go (character : rest) = (character :) <$> go rest
 
 -- | Rebinds the installed job's command to this dashboard's own checkout, and
 -- states which repository that checkout is expected to be a clone of.

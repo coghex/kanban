@@ -571,6 +571,23 @@ class SystemdDefinitionTests(SystemdBackendTestCase):
         )
         self.assertIn("WorkingDirectory=/tmp/100%%", directives)
 
+    def test_a_backslash_in_an_exec_start_word_is_doubled_rather_than_dropped(self):
+        # The third character `_unit_word` escapes, and the one the `%` and `"`
+        # cases above leave uncovered. Together the three pin every escape the
+        # writer performs; `Spec.Drainer`'s "reads back the exact argv
+        # tools/service_manager.py wrote" fixture reads these same three
+        # `ExecStart` lines back into the argv they were written from, so
+        # neither side of that round trip can move without a test saying so.
+        rendered = self.backend.render_definition(
+            self.definition(
+                program_arguments=["/usr/bin/python3", "/tmp/back\\slash/c.py"]
+            )
+        )
+        self.assertIn(
+            'ExecStart="/usr/bin/python3" "/tmp/back\\\\slash/c.py"',
+            self.directives(rendered),
+        )
+
     def test_a_path_directive_is_percent_escaped_and_never_quoted(self):
         # Established against real systemd (255.9 and 257.9), because guessing
         # gets this wrong in both directions:
