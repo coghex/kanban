@@ -43,10 +43,16 @@ look like a regression to a reader:
   without observing either managed job while trying to stop one that does not
   exist -- `tools/install_issue_review.py` installs a backend and starts no
   daemon. The two managed jobs are the PR drainer and the issue approval
-  service, each observed through its own controller's recorded `status` state.
+  service, each observed through its own controller's returned `status` state.
   `SUPPORT.md` told a reporter the same false thing, which is why it is a
   subject of this module rather than of one of its own: the claim is one rule,
-  and a second module would be a second place for it to drift.
+  and a second module would be a second place for it to drift. What the rule
+  reads is the claim itself -- "reports X" parsed out and held to naming
+  AI-action readiness and nothing wider -- rather than whether the right words
+  appear near `--doctor`. Asking the looser question is how the first attempt
+  at this rule accepted "AI-action readiness and all optional-component
+  readiness": every required phrase was present, and the sentence still handed
+  a managed service back.
 
 The runbook is also version-neutral, which is what makes it reusable at all: a
 release's own numbers belong to that release's issue.
@@ -166,6 +172,38 @@ UPGRADE_ITEMS = {
 # mentioned by a gate that credits it with the whole upgrade, which is how the
 # false claim survived a passing suite: what has to be checked is what the gate
 # *says* about each of these, not that the words appear.
+
+# --- What a `kanban --doctor` claim may say, in either document ---
+#
+# `--doctor` is a read-only report on AI-action readiness
+# (src/Kanban/Preflight/Readiness.hs). Both documents credited it with more,
+# and the claim is one rule, so one vocabulary serves both.
+#
+# The claim is read as a clause rather than as a substring of the surrounding
+# prose. Requiring `ai-action readiness` to appear *somewhere* nearby is what
+# let the first attempt at this rule pass a claim reading "AI-action readiness
+# and all optional-component readiness": the correct words were present, and
+# the sentence still handed a managed service back to doctor.
+DOCTOR_CLAIM_RE = re.compile(r"--doctor[^;.]*?\breport(?:s|ing)?\b (?P<claim>[^;.]*)")
+
+# The scope a claim has to carry.
+DOCTOR_SCOPE_RULE = "ai-action readiness"
+
+# A managed service named inside a claim, in the word either is recognizable
+# by once the claim is normalized.
+CLAIMED_SERVICE_WORDS = ("drainer", "approval service")
+
+# The other way a claim reaches a managed service: quantifying over the
+# components instead of naming one. This is what makes the rule a rule rather
+# than a list of forbidden sentences -- "every advertised component ready",
+# "all optional-component readiness", and the anaphoric "which of them are
+# ready" are one defect written three ways, and every one of them quantifies.
+COMPONENT_QUANTIFIER_RE = re.compile(
+    r"\b(?:every|all|each|both|any|which)\b[^;.]*"
+    r"\b(?:component|components|them|three|service|services|job|jobs)\b"
+)
+
+# --- The runbook's manual upgrade gate ---
 #
 # The two managed jobs, named as they are installed --
 # `tools/install_drainer.py`'s and `tools/install_issue_approval.py`'s.
@@ -181,18 +219,9 @@ MANAGED_SERVICE_NAMES = {
 # appears, and a mention that migrated into another step is the same defect.
 ABSENT_MANAGED_SERVICE = "issue-review service"
 
-# What the gate's `--doctor` item is allowed to claim, and what it may not.
-# `--doctor` is a read-only report on AI-action readiness
-# (src/Kanban/Preflight/Readiness.hs) -- it observes neither managed job, and
-# the runbook has to say so rather than leave a reader to infer the boundary.
-DOCTOR_SCOPE_RULE = "ai-action readiness"
+# That the doctor item denies substituting for the two service checks, which
+# is the sentence a reader acts on when deciding whether to run them.
 DOCTOR_SUBSTITUTION_RULE = "does not stand in for"
-
-# The claim the gate actually carried, restored verbatim by a control below.
-# One phrase rather than a vocabulary of paraphrases: this rule exists to keep
-# the specific false claim from coming back, and the positive rules above are
-# what a rewrite has to keep satisfying.
-FALSE_DOCTOR_CLAIM = "every advertised component ready"
 
 # Each managed job is observed through its own controller, and the two rules
 # are separate so a control can drop one check while the other stands. The
@@ -204,10 +233,14 @@ SERVICE_STATUS_RULES = {
     "approval-status": "the issue approval service's controller status",
 }
 
-# How a status result is recorded. `status` exits zero for a repository whose
-# job was never installed (docs/issue-approval.md, "Reading status"), so the
-# returned `state` is the evidence and a zero exit is not.
-RECORDED_STATE_RULE = "not that the command exited zero"
+# How a status result is recorded, in both halves. The positive half is the
+# one the canonical review asked for: `status` exits zero for a repository
+# whose job was never installed (docs/issue-approval.md, "Reading status"), so
+# the returned `state` is the evidence. Stating only the prohibition would let
+# the instruction to read the state disappear while the gate still forbade the
+# exit code -- which leaves an operator told what not to do and not what to do.
+RETURNED_STATE_RULE = "the state the controller returned"
+NOT_AN_EXIT_CODE_RULE = "not that the command exited zero"
 
 # The repository metadata the settings step checks, exactly as the decision
 # that fixed it states. Restated here so drift in either direction fails.
@@ -356,21 +389,12 @@ VERSION_LITERAL_RE = re.compile(r"(?<![.\d])\d+(?:\.\d+){2,}(?![.\d])")
 # SUPPORT.md's report-what-you-have-installed bullet, which told a reporter
 # `kanban --doctor` reports which of the three optional components are ready.
 # A support report could therefore cite a clean doctor run as evidence that the
-# drainer or the approval job was healthy when neither was observed.
+# drainer or the approval job was healthy when neither was observed. Scoped to
+# the one bullet rather than to the section: the neighbouring "Read the guides"
+# bullet ends on "why one might not be ready", which is a true sentence about
+# the components and no claim about anything that observes them.
 SUPPORT_HEADING = "Before opening an issue"
-
-# The claim itself, read as a clause rather than as a substring of the bullet:
-# the defect was anaphoric -- "reports which of them are ready", where "them"
-# was the three-component list in the sentence before -- so a rule looking for
-# a service name anywhere near `--doctor` would have missed it, and one looking
-# for a service name in the bullet at all would report the corrected bullet,
-# which names both services on purpose. What is read is what the sentence says
-# doctor reports, up to the punctuation that ends the claim.
-DOCTOR_CLAIM_RE = re.compile(r"--doctor reports (?P<claim>[^.;]*)")
-
-# A managed service named inside that claim, in the two words either is
-# recognizable by once the claim is normalized.
-MANAGED_SERVICE_WORDS = ("drainer", "approval service")
+SUPPORT_BULLET_OPENING = "Say what you have installed"
 
 # Where the bullet sends a reporter for the other two components. The same
 # phrases the runbook's gate uses, because it is the same instruction: observe
@@ -379,6 +403,19 @@ SUPPORT_CONTROLLER_RULES = {
     "drainer-controller": "the pr drainer's controller status",
     "approval-controller": "the issue approval service's controller status",
 }
+
+# A readiness attribution anywhere in that bullet, and the two things allowed
+# to carry one. The claim rules above read the doctor sentence; they cannot see
+# a *second* sentence that hands the same readiness back without naming doctor
+# again -- "It also reports whether the PR drainer and the issue approval
+# service are ready" recreates the defect with every clause-level rule still
+# satisfied. So every readiness attribution in the bullet has to name what
+# observes it, and the only two observers are `--doctor` and a controller's
+# status. Deliberately strict, and deliberately confined to this one bullet:
+# the repair for a sentence it reports is to say what observes the readiness
+# it claims, never to loosen the rule.
+READINESS_RE = re.compile(r"\bread(?:y|iness)\b|\breport(?:s|ed|ing)?\b")
+CONTROLLER_OBSERVER = "controller status"
 
 HEADING_RE = re.compile(r"^(?P<hashes>#+)\s+(?P<heading>.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<text>[^\]\n]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
@@ -427,6 +464,31 @@ def section(text, wanted, level=2):
         if active:
             collected.append(line)
     return "\n".join(collected)
+
+
+def bullet(text, heading, opening):
+    """The one `- ` list item beneath `heading` whose first line contains
+    `opening`, with its continuation lines joined. Empty when absent, which is
+    how a deleted bullet reaches the rules above."""
+    collected = []
+    active = False
+    for line in section(text, heading).splitlines():
+        if line.startswith("- "):
+            if active:
+                break
+            active = opening in line
+            if not active:
+                continue
+        if active:
+            collected.append(line)
+    return "\n".join(collected)
+
+
+def sentences(body):
+    """`body`, already normalized, split into sentences. Crude on purpose: the
+    rule that reads these is about which sentence carries a claim, and the
+    documents it reads write plain declarative prose."""
+    return [said.strip() for said in body.split(". ") if said.strip()]
 
 
 def missing_rules(haystack, rules):
@@ -481,56 +543,85 @@ def upgrade_coverage_gaps(text):
     return missing_rules(normalized(section(text, UPGRADE_HEADING)), UPGRADE_ITEMS)
 
 
+def doctor_claim_gaps(claim):
+    """What one `kanban --doctor` claim gets wrong, if anything.
+
+    Shared by both documents because it is one rule stated twice. A claim is
+    sound when it says AI-action readiness, names no managed service, and
+    quantifies over no set of components -- the third being what a claim
+    reaches a managed service through when it declines to name one."""
+    gaps = []
+    if DOCTOR_SCOPE_RULE not in claim:
+        gaps.append("doctor-scope")
+    gaps += [
+        f"doctor-covers:{word}" for word in CLAIMED_SERVICE_WORDS if word in claim
+    ]
+    if COMPONENT_QUANTIFIER_RE.search(claim):
+        gaps.append("doctor-covers-every-component")
+    return gaps
+
+
+def doctor_claims(body):
+    """Every `--doctor` claim in already-normalized `body`, in order. Every one
+    of them is held to the rule: a document is free to mention doctor twice,
+    and the second mention is exactly where a corrected first one grows a
+    qualifier back."""
+    return [match.group("claim") for match in DOCTOR_CLAIM_RE.finditer(body)]
+
+
 def upgrade_service_readiness_gaps(text):
     """What the gate says about the managed jobs and about `--doctor`.
 
-    Issue #618, in one predicate because the two halves are one rule: the gate
+    Issue #618, in one predicate because the halves are one rule: the gate
     names the two managed jobs that exist, requires each one's own controller
-    `status` and the `state` it returned, and scopes `--doctor` to the
-    AI-action readiness it actually reports. Drop any of those and a clean
-    doctor run stands in for a service nothing observed.
+    `status` and the `state` that status returned, and scopes every `--doctor`
+    claim it makes. Drop any of those and a clean doctor run stands in for a
+    service nothing observed.
 
-    The two absence rules report a defect being present rather than a rule
-    being absent, so neither of them fires against an empty document. Their
-    teeth are the controls that plant the wording back."""
+    `absent-managed-service` reports a defect being present rather than a rule
+    being absent, so it does not fire against an empty document. Its teeth are
+    the control that plants the wrong name back."""
     body = normalized(section(text, UPGRADE_HEADING))
     gaps = missing_rules(body, MANAGED_SERVICE_NAMES)
     gaps += missing_rules(body, SERVICE_STATUS_RULES)
-    if RECORDED_STATE_RULE not in body:
-        gaps.append("recorded-state")
-    if DOCTOR_SCOPE_RULE not in body:
-        gaps.append("doctor-scope")
+    if RETURNED_STATE_RULE not in body:
+        gaps.append("returned-state")
+    if NOT_AN_EXIT_CODE_RULE not in body:
+        gaps.append("not-an-exit-code")
     if DOCTOR_SUBSTITUTION_RULE not in body:
         gaps.append("doctor-not-a-substitute")
-    if FALSE_DOCTOR_CLAIM in body:
-        gaps.append("false-doctor-claim")
+    claims = doctor_claims(body)
+    if not claims:
+        gaps.append("doctor-claim")
+    for claim in claims:
+        gaps += doctor_claim_gaps(claim)
     if ABSENT_MANAGED_SERVICE in normalized(text):
         gaps.append("absent-managed-service")
-    return sorted(gaps)
+    return sorted(set(gaps))
 
 
 def support_doctor_scope_gaps(text):
     """What SUPPORT.md tells a reporter `kanban --doctor` covers.
 
     The bullet has to claim AI-action readiness, claim it for nothing else,
-    and send the reporter to each managed service's own controller for the
-    other two. `doctor-claim` is the gap when the bullet makes no doctor claim
-    at all, which is also how a deleted section reaches this rule."""
-    body = normalized(section(text, SUPPORT_HEADING))
+    attribute every other readiness it mentions to a controller's status, and
+    send the reporter to each managed service's own controller for the other
+    two. `doctor-claim` is the gap when the bullet makes no doctor claim at
+    all, which is also how a deleted bullet reaches this rule."""
+    body = normalized(bullet(text, SUPPORT_HEADING, SUPPORT_BULLET_OPENING))
     gaps = missing_rules(body, SUPPORT_CONTROLLER_RULES)
-    claim = DOCTOR_CLAIM_RE.search(body)
-    if claim is None:
+    claims = doctor_claims(body)
+    if not claims:
         gaps.append("doctor-claim")
-    else:
-        stated = claim.group("claim")
-        if DOCTOR_SCOPE_RULE not in stated:
-            gaps.append("doctor-scope")
-        gaps += [
-            f"doctor-covers:{word}"
-            for word in MANAGED_SERVICE_WORDS
-            if word in stated
-        ]
-    return sorted(gaps)
+    for claim in claims:
+        gaps += doctor_claim_gaps(claim)
+    for said in sentences(body):
+        if not READINESS_RE.search(said):
+            continue
+        if "--doctor" in said or CONTROLLER_OBSERVER in said:
+            continue
+        gaps.append("unattributed-readiness")
+    return sorted(set(gaps))
 
 
 def repository_setting_gaps(text):
@@ -894,17 +985,47 @@ class RunbookRuleControlTests(unittest.TestCase):
         )
 
     def test_a_doctor_item_claiming_every_component_is_reported(self):
-        # The false claim on its own, restored into an item that otherwise
-        # still scopes itself correctly: the claim is the defect, and it is
-        # reported without the scope rules also having to fail.
+        # The false claim, in the wording the gate carried and in two that mean
+        # the same thing. Each is planted into an item that still says
+        # `AI-action readiness` and still denies substituting, so what is
+        # reported is the claim alone -- and a rule keyed to the one historical
+        # sentence would pass the other two, which is how the first attempt at
+        # this rule failed its canonical review.
+        equivalents = (
+            "every advertised component ready",
+            "all optional-component readiness",
+            "which of them are ready",
+        )
+        for claim in equivalents:
+            with self.subTest(claim=claim):
+                planted = self.without(
+                    "reporting AI-action readiness;",
+                    f"reporting AI-action readiness and {claim};",
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted),
+                    ["doctor-covers-every-component"],
+                )
+
+    def test_a_doctor_item_naming_a_managed_service_is_reported(self):
+        # The other way a claim reaches a managed job: naming one outright.
         planted = self.without(
-            "reporting AI-action readiness; that is the whole of what it reports",
-            "reporting AI-action readiness and every advertised component ready; "
-            "that is the whole of what it reports",
+            "reporting AI-action readiness;",
+            "reporting AI-action readiness and the PR drainer's;",
         )
         self.assertEqual(
-            upgrade_service_readiness_gaps(planted), ["false-doctor-claim"]
+            upgrade_service_readiness_gaps(planted), ["doctor-covers:drainer"]
         )
+
+    def test_a_doctor_item_with_no_readable_claim_is_reported(self):
+        # The rule reads a claim rather than a sentence containing the right
+        # words, so an item that states none is reported rather than passing
+        # for lack of anything to disagree with.
+        planted = self.without(
+            "`kanban --doctor`, reporting AI-action readiness;",
+            "`kanban --doctor`, which covers what it covers;",
+        )
+        self.assertEqual(upgrade_service_readiness_gaps(planted), ["doctor-claim"])
 
     def test_a_doctor_item_that_does_not_scope_itself_is_reported(self):
         planted = self.without(
@@ -961,7 +1082,16 @@ class RunbookRuleControlTests(unittest.TestCase):
         planted = self.without(
             "not that the\ncommand exited zero", "and the command exited zero"
         )
-        self.assertEqual(upgrade_service_readiness_gaps(planted), ["recorded-state"])
+        self.assertEqual(upgrade_service_readiness_gaps(planted), ["not-an-exit-code"])
+
+    def test_a_gate_that_never_asks_for_the_returned_state_is_reported(self):
+        # The positive half, dropped while the prohibition stands: an operator
+        # told only what a result is *not* has been told nothing to record.
+        planted = self.without(
+            "is the `state` the controller returned, not that the",
+            "is not that the",
+        )
+        self.assertEqual(upgrade_service_readiness_gaps(planted), ["returned-state"])
 
     def test_a_drifted_repository_description_is_reported(self):
         planted = self.without(
@@ -1098,15 +1228,21 @@ class RunbookRuleControlTests(unittest.TestCase):
             + [f"topic:{topic}" for topic in REPOSITORY_TOPICS]
         ))
         self.assertEqual(run_selection_gaps(""), NO_SELECTION_COMMAND_GAPS)
-        # The two absence rules report a defect being present, so an empty
-        # document leaves them silent by construction -- their controls above
-        # are what shows them non-vacuous.
+        # `absent-managed-service` reports a defect being present, so an empty
+        # document leaves it silent by construction -- its control above is
+        # what shows it non-vacuous. The claim rules report `doctor-claim`
+        # here for the same reason: there is no claim to read.
         self.assertEqual(
             upgrade_service_readiness_gaps(""),
             sorted(
                 list(MANAGED_SERVICE_NAMES)
                 + list(SERVICE_STATUS_RULES)
-                + ["recorded-state", "doctor-scope", "doctor-not-a-substitute"]
+                + [
+                    "doctor-claim",
+                    "doctor-not-a-substitute",
+                    "not-an-exit-code",
+                    "returned-state",
+                ]
             ),
         )
 
@@ -1231,25 +1367,30 @@ class SupportDocumentTests(unittest.TestCase):
         self.assertEqual(support_doctor_scope_gaps(self.text), [])
 
     def test_the_bullet_that_gave_doctor_the_whole_roster_is_reported(self):
-        # The wording this document actually carried, planted back verbatim:
-        # the claim is anaphoric -- "which of them" is the three-component
-        # list in the clause before it -- so what catches it is that it does
-        # not claim AI-action readiness, and the controller directions go with
-        # it.
+        # The wording this document actually carried, planted back verbatim.
+        # The claim is anaphoric -- "which of them" is the three-component list
+        # in the clause before it -- so what catches it is that it quantifies
+        # over the components instead of naming one, and the controller
+        # directions go with it.
         planted = self.without(
-            "installed separately, and no single\n  check reports all three. "
+            "installed separately, and no single\n  check covers all three. "
             "`kanban --doctor` reports AI-action readiness and\n  nothing else. "
             "For the other two, run each managed service's own controller\n"
-            "  `status` and say what state it returned — [the PR drainer's "
-            "controller\n  status](docs/pr-drainer.md#manual-status) and [the "
-            "issue approval service's\n  controller "
+            "  `status` and say what state it returned — the\n"
+            "  [PR drainer's controller status](docs/pr-drainer.md#manual-status) "
+            "and the\n  [issue approval service's controller "
             "status](docs/issue-approval.md#reading-status).",
             "installed separately;\n  `kanban --doctor` reports which of them "
             "are ready on your machine.",
         )
         self.assertEqual(
             support_doctor_scope_gaps(planted),
-            ["approval-controller", "doctor-scope", "drainer-controller"],
+            [
+                "approval-controller",
+                "doctor-covers-every-component",
+                "doctor-scope",
+                "drainer-controller",
+            ],
         )
 
     def test_a_doctor_claim_naming_a_managed_service_is_reported(self):
@@ -1270,15 +1411,40 @@ class SupportDocumentTests(unittest.TestCase):
             ],
         )
 
+    def test_a_doctor_claim_that_quantifies_over_the_components_is_reported(self):
+        # The scope words kept, a quantifier added: the bullet still says
+        # AI-action readiness and still names both controllers, and the claim
+        # still hands the other two components back.
+        planted = self.without(
+            "reports AI-action readiness and\n  nothing else.",
+            "reports AI-action readiness and which of them are ready.",
+        )
+        self.assertEqual(
+            support_doctor_scope_gaps(planted), ["doctor-covers-every-component"]
+        )
+
+    def test_a_later_sentence_reassigning_readiness_is_reported(self):
+        # The hole a clause-level rule cannot see: the doctor sentence is left
+        # exactly as it stands, correct in isolation, and a sentence after it
+        # gives the two managed services back without naming doctor again.
+        planted = self.without(
+            "nothing else. For the other two,",
+            "nothing else. It also reports whether the PR drainer and the "
+            "issue approval service are ready. For the other two,",
+        )
+        self.assertEqual(
+            support_doctor_scope_gaps(planted), ["unattributed-readiness"]
+        )
+
     def test_dropping_one_controller_direction_is_reported(self):
         controls = {
             "drainer-controller": (
-                "[the PR drainer's controller\n  "
+                "the\n  [PR drainer's controller "
                 "status](docs/pr-drainer.md#manual-status) and ",
                 "",
             ),
             "approval-controller": (
-                " and [the issue approval service's\n  controller "
+                " and the\n  [issue approval service's controller "
                 "status](docs/issue-approval.md#reading-status)",
                 "",
             ),
@@ -1289,7 +1455,9 @@ class SupportDocumentTests(unittest.TestCase):
                 self.assertEqual(support_doctor_scope_gaps(planted), [gap])
 
     def test_a_bullet_that_says_nothing_about_doctor_is_reported(self):
-        # The blanket control: no section, no claim to read, every gap.
+        # The blanket control: no bullet, no claim to read, every gap. The
+        # readiness sweep reports a defect being present, so it is silent
+        # here -- the control above is what shows it non-vacuous.
         self.assertEqual(
             support_doctor_scope_gaps(""),
             sorted(list(SUPPORT_CONTROLLER_RULES) + ["doctor-claim"]),
