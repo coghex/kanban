@@ -73,8 +73,8 @@ rerosteredDefaults =
 -- 'rerosteredDefaults' cannot do this job: it rotates model and effort and
 -- leaves @display@ alone, and the compiled defaults deliberately share
 -- displays across cells -- @solve.codex@ and @pr_revise.codex@ are both
--- @gpt-5.4 high@, and @issue_review.claude@ and @issue_gate.claude@ are both
--- @Fable 5.1 xhigh@ -- so a surface reading the wrong one of those pairs
+-- @GPT-5.6-Terra high@, and @solve.claude@ and @pr_revise.claude@ are both
+-- @Sonnet 5 high@ -- so a surface reading the wrong one of those pairs
 -- would pass against defaults. Which cells collide moves with the roster;
 -- that some do is what this fixture exists for, so it never reads a display
 -- off 'defaultRoster' to build one.

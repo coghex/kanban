@@ -582,7 +582,7 @@ spec = do
         encodedValue threadParams `shouldMention` "\"model\":\"gpt-6-astra\""
         sendReviewMessage client (threadOn connection "thread-1") Nothing "carry on" `shouldReturn` Right ()
         (_, turnParams) <- nextClientRequest wire
-        encodedValue turnParams `shouldMention` "\"effort\":\"high\""
+        encodedValue turnParams `shouldMention` "\"effort\":\"xhigh\""
 
     -- The cell a client resolves is its own backend's, and this fixture's
     -- backend is the app-server's, so a Claude-only roster cannot reach it
@@ -878,26 +878,29 @@ spec = do
     -- pinned against the compiled defaults so an unintended one is a failure.
     it "keeps every default label byte-identical except the two this slice corrects" $ do
       let defaults = Right defaultRoster
-      solveChooserDisplay defaults CodexSolver `shouldBe` "gpt-5.4 high"
+      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-5.6-Terra high"
       solveChooserDisplay defaults ClaudeSolver `shouldBe` "Sonnet 5 high"
-      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · gpt-5.4 high"
+      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-5.6-Terra high"
       solveReviewerDisplay defaults CodexSolver `shouldBe` "Opus 5 xhigh"
-      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-5.6-Terra xhigh"
+      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-5.6-Sol xhigh"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
-        `shouldBe` "codex · GPT-5.6-Terra xhigh"
+        `shouldBe` "codex · GPT-5.6-Sol xhigh"
       withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
         claudeTranscriptStart (claudeStartDisplay client)
           `shouldBe` "\n[sonnet] Starting authenticated Fable 5.1 high…\n"
-      -- The PR-revision label is the correction: the flow has always spawned
-      -- pr_revise, while the label read solve.claude and said "Sonnet 5 high".
+      -- The PR-revision label reads pr_revise.claude, which the flow has
+      -- always spawned. PR #629 moved that cell to "Sonnet 5 high", which is
+      -- also what solve.claude says -- so this pair no longer distinguishes
+      -- the two cells on the default roster; 'distinctDisplays' is what
+      -- still does.
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRevision ClaudeSolver defaults
-        `shouldBe` "claude · Sonnet 5 xhigh"
+        `shouldBe` "claude · Sonnet 5 high"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRepair ClaudeSolver defaults
-        `shouldBe` "claude · Sonnet 5 xhigh"
+        `shouldBe` "claude · Sonnet 5 high"
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high".
       reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
-        `shouldMention` "authored by you as GPT-6-Astra high; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra high."
+        `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra xhigh."
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 

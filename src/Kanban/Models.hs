@@ -353,12 +353,16 @@ operatingModeLabel mode = case mode of
 rosterSchemaVersion :: Integer
 rosterSchemaVersion = 1
 
--- | The compiled defaults: today's wire values, cell for cell, from the
--- verified matrix in @docs/model_settings_design.md@. Thirteen applicable
--- cells, every one valued. Two are new in this arc (D-14) and consulted by
--- no dual-mode spawn until their slices land: @issue_review.claude@ (the
--- Claude embedded-review backend, MODEL-13) and @drain_rereview.claude@ (a
--- Claude-only install's drainer, MODEL-11).
+-- | The compiled defaults: today's wire values, cell for cell. Thirteen
+-- applicable cells, every one valued.
+--
+-- The authoritative statements of these values are the tracked
+-- @models.toml.example@ (held equal to this map by @Spec.Config.Models@),
+-- @tools/kanban_models.py@'s @DEFAULT_ROSTER@ (its Python mirror), and
+-- @docs/design.md@ §7\/§19, which name them in prose. Deliberately NOT
+-- @docs\/model_settings_design.md@: that records a matrix verified on
+-- 2026-08-20, before #614 and PR #629 moved these cells, and is a historical
+-- design record rather than a source to reconcile against.
 defaultRoster :: ModelRoster
 defaultRoster =
   ModelRoster
@@ -367,7 +371,7 @@ defaultRoster =
         Map.fromList
           [ ( CodexProvider,
               ProviderCatalog
-                { catalogModels = ["gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"],
+                { catalogModels = ["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"],
                   catalogEfforts = ["minimal", "low", "medium", "high", "xhigh"]
                 }
             ),
@@ -380,17 +384,17 @@ defaultRoster =
           ],
       rosterAssignments =
         Map.fromList
-          [ ((SolveRole, CodexProvider), Assignment "gpt-5.4" "high" "gpt-5.4 high"),
+          [ ((SolveRole, CodexProvider), Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
             ((SolveRole, ClaudeProvider), Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
-            ((PrReviewRole, CodexProvider), Assignment "gpt-5.6-terra" "xhigh" "GPT-5.6-Terra xhigh"),
+            ((PrReviewRole, CodexProvider), Assignment "gpt-5.6-sol" "xhigh" "GPT-5.6-Sol xhigh"),
             ((PrReviewRole, ClaudeProvider), Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
-            ((PrReviseRole, CodexProvider), Assignment "gpt-5.4" "high" "gpt-5.4 high"),
-            ((PrReviseRole, ClaudeProvider), Assignment "claude-sonnet-5" "xhigh" "Sonnet 5 xhigh"),
-            ((IssueReviewRole, CodexProvider), Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
+            ((PrReviseRole, CodexProvider), Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
+            ((PrReviseRole, ClaudeProvider), Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
+            ((IssueReviewRole, CodexProvider), Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
             ((IssueReviewRole, ClaudeProvider), Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
             ((IssueReviseRole, ClaudeProvider), Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
-            ((IssueGateRole, CodexProvider), Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
-            ((IssueGateRole, ClaudeProvider), Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
+            ((IssueGateRole, CodexProvider), Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
+            ((IssueGateRole, ClaudeProvider), Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
             ((DrainRereviewRole, CodexProvider), Assignment "gpt-5.6-terra" "medium" "GPT-5.6-Terra medium"),
             ((DrainRereviewRole, ClaudeProvider), Assignment "claude-opus-5" "medium" "Opus 5 medium")
           ]

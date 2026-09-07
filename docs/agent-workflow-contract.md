@@ -273,7 +273,7 @@ arithmetic, which §2.3 owns.
   (`claude-plugin/plugins/kanban/scripts/review_pr.py`) is a deliberate,
   reviewed exception to this one nested-call policy: unlike the Codex
   plugin's otherwise-identical coordinator copy, it pins and verifies that
-  nested reviewer to the exact `gpt-5.6-terra`/`claude-opus-5` at `xhigh`
+  nested reviewer to the exact `gpt-5.6-sol`/`claude-opus-5` at `xhigh`
   values the `roles.pr_review.codex` and `roles.pr_review.claude` cells of
   `models.toml.example` declare — the cells Kanban's own
   `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the

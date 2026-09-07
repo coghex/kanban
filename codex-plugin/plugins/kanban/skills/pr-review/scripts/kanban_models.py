@@ -248,7 +248,7 @@ DEFAULT_ROSTER = ModelRoster(
     agents=("codex", "claude"),
     providers={
         "codex": ProviderCatalog(
-            models=("gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
+            models=("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
             efforts=("minimal", "low", "medium", "high", "xhigh"),
         ),
         "claude": ProviderCatalog(
@@ -262,15 +262,21 @@ DEFAULT_ROSTER = ModelRoster(
         ),
     },
     assignments={
-        ("solve", "codex"): Assignment("gpt-5.4", "high", "gpt-5.4 high"),
+        ("solve", "codex"): Assignment(
+            "gpt-5.6-terra", "high", "GPT-5.6-Terra high"
+        ),
         ("solve", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
         ("pr_review", "codex"): Assignment(
-            "gpt-5.6-terra", "xhigh", "GPT-5.6-Terra xhigh"
+            "gpt-5.6-sol", "xhigh", "GPT-5.6-Sol xhigh"
         ),
         ("pr_review", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
-        ("pr_revise", "codex"): Assignment("gpt-5.4", "high", "gpt-5.4 high"),
-        ("pr_revise", "claude"): Assignment("claude-sonnet-5", "xhigh", "Sonnet 5 xhigh"),
-        ("issue_review", "codex"): Assignment("gpt-6-astra", "high", "GPT-6-Astra high"),
+        ("pr_revise", "codex"): Assignment(
+            "gpt-5.6-terra", "high", "GPT-5.6-Terra high"
+        ),
+        ("pr_revise", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("issue_review", "codex"): Assignment(
+            "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
+        ),
         ("issue_review", "claude"): Assignment(
             "claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"
         ),
@@ -278,10 +284,10 @@ DEFAULT_ROSTER = ModelRoster(
             "claude-fable-5-1", "high", "Fable 5.1 high"
         ),
         ("issue_gate", "codex"): Assignment(
-            "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
+            "gpt-6-astra", "high", "GPT-6-Astra high"
         ),
         ("issue_gate", "claude"): Assignment(
-            "claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"
+            "claude-fable-5-1", "high", "Fable 5.1 high"
         ),
         ("drain_rereview", "codex"): Assignment(
             "gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"

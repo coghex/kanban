@@ -12,10 +12,10 @@
 ║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃                                                                                      ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
 ║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ [N]  #812 ⠋                                                                          ┃          │ ┃  │ master.                            │ ┃║
 ║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ claude · display:solve.claude is autosolving                                         ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ reviewer: GPT-5.6-Terra xhigh                                                        ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ reviewer: GPT-5.6-Sol xhigh                                                          ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰────────────────────┃ workflow: autosolve                                                                  ┃            ┃                                         ┃║
 ║┃                          ┃┃                          ┃ solver: claude · Sonnet 5 high                                                       ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                          ┃ reviewer: GPT-5.6-Terra xhigh                                                        ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃                          ┃ reviewer: GPT-5.6-Sol xhigh                                                          ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing ha┃                                                                                      ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃  complete                ┃                                                                                      ┃          │ ┃  │ #812 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  STANDALONE              ┃                                                                                      ┃r ·       │ ┃  │ updated 3h ago                     │ ┃║

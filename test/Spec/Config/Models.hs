@@ -48,7 +48,7 @@ spec = do
       defaultRoster.rosterAgents `shouldBe` [CodexProvider, ClaudeProvider]
       Map.lookup CodexProvider defaultRoster.rosterProviders
         `shouldBe` Just
-          (ProviderCatalog ["gpt-5.4", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"] ["minimal", "low", "medium", "high", "xhigh"])
+          (ProviderCatalog ["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"] ["minimal", "low", "medium", "high", "xhigh"])
       Map.lookup ClaudeProvider defaultRoster.rosterProviders
         `shouldBe` Just
           (ProviderCatalog ["claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"] ["low", "medium", "high", "xhigh"])
@@ -60,17 +60,17 @@ spec = do
       Map.size defaultRoster.rosterAssignments `shouldBe` 13
       let cell role provider = Map.lookup (role, provider) defaultRoster.rosterAssignments
           expectations =
-            [ (SolveRole, CodexProvider, Assignment "gpt-5.4" "high" "gpt-5.4 high"),
+            [ (SolveRole, CodexProvider, Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
               (SolveRole, ClaudeProvider, Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
-              (PrReviewRole, CodexProvider, Assignment "gpt-5.6-terra" "xhigh" "GPT-5.6-Terra xhigh"),
+              (PrReviewRole, CodexProvider, Assignment "gpt-5.6-sol" "xhigh" "GPT-5.6-Sol xhigh"),
               (PrReviewRole, ClaudeProvider, Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
-              (PrReviseRole, CodexProvider, Assignment "gpt-5.4" "high" "gpt-5.4 high"),
-              (PrReviseRole, ClaudeProvider, Assignment "claude-sonnet-5" "xhigh" "Sonnet 5 xhigh"),
-              (IssueReviewRole, CodexProvider, Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
+              (PrReviseRole, CodexProvider, Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
+              (PrReviseRole, ClaudeProvider, Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
+              (IssueReviewRole, CodexProvider, Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
               (IssueReviewRole, ClaudeProvider, Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
               (IssueReviseRole, ClaudeProvider, Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
-              (IssueGateRole, CodexProvider, Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
-              (IssueGateRole, ClaudeProvider, Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
+              (IssueGateRole, CodexProvider, Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
+              (IssueGateRole, ClaudeProvider, Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
               (DrainRereviewRole, CodexProvider, Assignment "gpt-5.6-terra" "medium" "GPT-5.6-Terra medium"),
               (DrainRereviewRole, ClaudeProvider, Assignment "claude-opus-5" "medium" "Opus 5 medium")
             ]
@@ -200,7 +200,7 @@ spec = do
               { rosterAssignments =
                   Map.insert
                     (IssueReviseRole, CodexProvider)
-                    (Assignment "gpt-5.4" "high" "gpt-5.4 high")
+                    (Assignment "gpt-6-astra" "high" "GPT-6-Astra high")
                     defaultRoster.rosterAssignments
               }
       decodeRoster (encodeRoster inapplicable)
@@ -224,7 +224,7 @@ spec = do
               { rosterAssignments =
                   Map.insert
                     (SolveRole, CodexProvider)
-                    (Assignment "gpt-5.4" "high" "gpt-5.4 high")
+                    (Assignment "gpt-6-astra" "high" "GPT-6-Astra high")
                     singleClaudeRoster.rosterAssignments
               }
       decodeRoster (encodeRoster strayCodex)
