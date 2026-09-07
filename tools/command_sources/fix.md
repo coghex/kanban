@@ -85,10 +85,16 @@ string and never the label alone: take the configured `approval_label` (default
 configuration the caller supplied — the global `[workflow]` table, overridden
 per repository by `[repositories."<owner>/<name>".workflow]` — and match the
 label case-insensitively, exactly as `approvedPullRequest` does in
-`src/Kanban/Workflow.hs`. Honour the configured mode: `label` accepts the
-configured approval label, `review` accepts GitHub's own `reviewDecision ==
-APPROVED`, and `either` accepts one or both. A repository configured for
-`review` would otherwise look unapproved with a perfectly good approval on it.
+`src/Kanban/Workflow.hs`. Honour the configured mode: `label` reads the
+configured approval label, `review` reads GitHub's own `reviewDecision ==
+APPROVED`, and `either` reads both. A repository configured for `review` would
+otherwise look unapproved with a perfectly good approval on it.
+
+**None of those signals is approval on its own.** Each is necessary and none is
+sufficient: a label and a `reviewDecision` are mutable metadata that name no
+commit, so neither can say which head a reviewer accepted. Step 2c binds the
+mode's signal to the current head, and only a signal that survives that binding
+is the approval this workflow acts on.
 
 Also resolve the configured `changes_requested_label` (default
 `reviewed:changes`) and `blocked_labels` (default `blocked`) from that same
@@ -135,6 +141,117 @@ unapproved pull request is somebody else's turn: a changes-requested pull
 request belongs to {{cmd:pr-revise}}, a blocked one to a human, and a pull
 request that has never been reviewed to {{cmd:pr-review}}. Never remove a
 blocking label to proceed: a blocking label is a human's decision.
+
+## 2c. Bind that approval to the current head
+
+An approval names a commit. The signals step 2 read do not: a configured label
+and a `reviewDecision` are mutable pull-request metadata that outlive a push,
+so a third party can add a commit while every one of them still reads green
+over code nobody reviewed. Left there, this workflow would take that unreviewed
+head as its authority to create a worktree, edit it, and push another commit on
+top of it.
+
+**An approval that cannot be bound to the current `headRefOid` is not an
+approval here.** Establish the binding before step 3 diagnoses anything. A pull
+request whose current head does not carry head-bound approval gets no worktree,
+no repair, no commit, no push, and no rereview handoff: the run stops having
+changed nothing, exactly as it does for a pull request that was never approved.
+
+This is the rule the rest of this repository already applies.
+`tools/drain_prs.py` records the approved head with no default — inventing one
+would let an unreviewed head through — and refuses with `approved_head_changed`
+when the approval label is attached to a head that is not the approved one.
+Carrying the approval forward instead is not available here: the drainer's
+content-safe carry answers for a branch update the drainer itself performed and
+observed, while this workflow faces an arbitrary third-party push whose
+contents it can establish nothing about.
+
+Weigh the two kinds of evidence independently, whichever mode is configured.
+`label` requires the canonical-marker evidence below, `review` requires the
+native-approval evidence below, and `either` is met by whichever of the two
+holds — one path failing never vetoes valid evidence from the other. The
+configured changes-requested and blocking labels remain unconditional refusals
+under every mode and are weighed against neither path.
+
+### The canonical marker binds the `label` path
+
+The canonical coordinator writes the reviewed SHA into the marker it publishes,
+`<!-- pr-review:v2 reviewers=... models=... head=<40 hex> verdict=APPROVE -->`,
+and refuses to publish a verdict once the head has moved. That marker is the
+head-bound evidence the label itself carries no trace of. Read the whole feed,
+exactly as {{cmd:finalize}}'s gate and the coordinator's own
+`latest_owned_review_marker` do:
+
+```bash
+VIEWER="$(gh api user --jq .login)"
+COMMENTS="$(mktemp)"
+gh api --paginate --slurp "repos/<owner>/<name>/issues/<pr>/comments?per_page=100" > "$COMMENTS"
+# ... select the marker below, then:
+rm -f "$COMMENTS"
+```
+
+Resolve the authenticated publisher first, and fail closed when it cannot be
+resolved: an unresolved login makes every ownership test below vacuously true.
+Read the COMPLETE paginated feed rather than a bounded view — on a long pull
+request the newest marker falls outside a capped one, and an older verdict
+would then speak for a head nobody reviewed. Among the comments that publisher
+wrote, select the newest marker-bearing comment by creation time with the
+comment id breaking ties, and only THEN test what it says. Accept the
+established v2 shape and the legacy v1 shape.
+
+The configured approval label stays necessary and stops being sufficient, in
+`either` mode exactly as in `label` mode. The `label` path is met only when
+that label is still attached, the selected comment carries `verdict=APPROVE`,
+its `head=` equals the current `headRefOid`, and its `reviewers=` list does not
+name the origin brand step 2b validated — an approval published by the pull
+request's own brand is a self-review, and the marker alone cannot tell you
+that. **Missing evidence, an unreadable feed, and
+a malformed or multiply-markered selected comment each leave this path unmet
+rather than falling back to an older approval**, and so does a newer
+non-approval standing over an older approval: the selection is by recency, not
+by verdict.
+
+### A native approval binds the `review` path
+
+`reviewDecision == APPROVED` stays necessary and stops being sufficient: it is
+an aggregate over the pull request, not a statement about a commit. Read the
+reviews themselves and bind them:
+
+```bash
+REVIEWS="$(mktemp)"
+gh api --paginate --slurp "repos/<owner>/<name>/pulls/<pr>/reviews?per_page=100" > "$REVIEWS"
+# ... select the effective reviews below, then:
+rm -f "$REVIEWS"
+```
+
+Keep only the opinionated reviews — `APPROVED` and `CHANGES_REQUESTED` — and
+for each author keep only their newest one by `submitted_at`, with the review
+id breaking ties. A `DISMISSED` review is not evidence, and an author's later
+opinion supersedes their earlier one. **The `review` path is met only when one
+of those surviving reviews is `APPROVED` and its `commit_id` equals the current
+`headRefOid`.** A superseded or dismissed approval, the aggregate
+`reviewDecision` on its own, and a review whose commit attribution is absent or
+unreadable are each insufficient rather than assumed current.
+
+### The refusal, and who clears it
+
+Report the mismatch concretely and stop: the current `headRefOid`, the head the
+approval actually belongs to when the evidence names one, and — when it does
+not — that the evidence is missing or unreadable rather than naming any head at
+all. Say which mode was in force and which path went unmet.
+
+Then name the remedy without performing it. A `label` path left unmet is
+cleared by a fresh canonical review of the current head, which is
+{{cmd:pr-rereview}}'s job for a pull request that has been reviewed before and
+{{cmd:pr-review}}'s for one that has not. A `review` path left unmet is NOT
+cleared that way: the canonical coordinator publishes a comment and switches
+verdict labels, and publishes no native GitHub approval at all, so that path is
+cleared only by a reviewer approving the current head on GitHub itself.
+
+**This workflow manufactures neither.** It synthesizes no verdict label, and it
+invokes no review of its own to produce the approval it is missing. Verdict
+labels change only as a consequence of the one canonical rereview step 6 hands
+off to after a real push, which a run stopping here never reaches.
 
 ## 3. Diagnose the remaining obstacle
 
@@ -342,15 +459,27 @@ Reapply step 2's configured approval decision to that FRESH `labels` and
 `reviewDecision`, reapply its configured changes-requested and blocking-label
 refusal, and reapply step 2b's complete origin-marker parse — including that
 the result still names THIS bundle's active brand. Require the fresh
-`headRefOid` to equal the recorded SHA too. If approval was withdrawn, any
-configured problem label appeared, the origin became missing, malformed, or a
-different brand, or the head no longer matches, STOP with no push and no
-rereview. Do not perform other work between this fresh gate check and the push.
+`headRefOid` to equal the recorded SHA too.
+
+**Re-run step 2c against freshly fetched evidence as well.** Re-read the
+comment feed for the `label` path, or the reviews for the `review` path,
+whichever the configured mode selected, and re-establish the head binding from
+what comes back. The marker read at step 2c and the reviews read there cannot
+answer for this moment: a canonical verdict can be superseded and a native
+approval dismissed while the head never moves, so a cached initial reading
+would carry an authority that has since been withdrawn straight into the push.
+
+If approval was withdrawn, the selected mode's head-bound evidence no longer
+holds, any configured problem label appeared, the origin became missing,
+malformed, or a different brand, or the head no longer matches, STOP with no
+push and no rereview. Leave the worktree's existing work exactly as it is: a
+stop here is a loss of authority to publish, not a reason to discard what was
+built. Do not perform other work between this fresh gate check and the push.
 
 The remote-ref comparison does not replace this revalidation. A pull request's
-body, labels, and `reviewDecision` can all change without moving its head SHA;
-the workflow's authority can therefore disappear while the branch itself
-still looks unchanged.
+body, labels, `reviewDecision`, canonical marker, and native reviews can all
+change without moving its head SHA; the workflow's authority can therefore
+disappear while the branch itself still looks unchanged.
 
 Only after BOTH pre-push checks pass, push to that exact branch in the recorded
 head repository, without force.
@@ -388,8 +517,8 @@ the pull request is still approved after you push — it is not, because the
 approval named the SHA you replaced.
 
 When you pushed nothing — any of step 3's non-mutating branches, or a stop in
-step 2 or 2b — there is no new head, so invoke no rereview and simply report
-what you found.
+step 2, 2b, or 2c — there is no new head, so invoke no rereview and simply
+report what you found.
 
 <!-- brand:claude -->
 This plugin bundles its own copy of the coordinator at
@@ -434,8 +563,8 @@ setting a label yourself.
 ## 7. Report
 
 Return the pull request number, how approval was established and under which
-configured mode, the origin marker that admitted it, and the diagnosed
-obstacle. For a non-mutating branch, that plus what it reported is the whole
+configured mode, which head-bound evidence bound it to the current head, the
+origin marker that admitted it, and the diagnosed obstacle. For a non-mutating branch, that plus what it reported is the whole
 report. For a fix or a branch update: the recorded and pushed head SHAs, which
 worktree was used and whether it was reused or created, exactly what changed
 and what was run, the state of the pushed head's checks, and the canonical

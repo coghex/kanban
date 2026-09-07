@@ -18,10 +18,11 @@ against BOTH rendered outputs rather than the source, because the rendered
 files are what an agent actually executes, and because a phrase that survives
 rendering is one that survived sigil substitution and brand-block projection.
 
-Three groups of requirement are checked as text the workflow states in terms an
+Four groups of requirement are checked as text the workflow states in terms an
 agent will act on: the approval and origin-brand preconditions that bound what
-it may touch at all, the ordered obstacle branches and which of them mutate
-anything, and the push/rereview authority boundary -- specifically that a push
+it may touch at all, the head binding that turns those mutable approval signals
+into authority over one specific commit, the ordered obstacle branches and
+which of them mutate anything, and the push/rereview authority boundary -- specifically that a push
 invalidates the approval and therefore always invokes exactly one rereview,
 while every non-mutating branch invokes none.
 
@@ -51,6 +52,19 @@ CLAUDE_REPAIR = REPO_ROOT / "claude-plugin/plugins/kanban/commands/repair.md"
 REPAIR_ASSETS = (CODEX_REPAIR, CLAUDE_REPAIR)
 
 WORKFLOW_HS = REPO_ROOT / "src/Kanban/Workflow.hs"
+DRAINER = REPO_ROOT / "tools/drain_prs.py"
+FINALIZE_SOURCE = REPO_ROOT / "tools/command_sources/finalize.md"
+
+COORDINATORS = (
+    REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+    REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py",
+)
+
+# Every shell variable the assets point a redirect at. The hygiene rules below
+# are asserted over this tuple rather than over one hard-coded name, because a
+# rule naming only the first scratch file would leave a later one unmeasured --
+# and the head-binding evidence fences added two.
+SCRATCH_VARIABLES = ("ROLLUP", "COMMENTS", "REVIEWS")
 
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):", re.MULTILINE)
@@ -146,10 +160,16 @@ REQUIRED_PHRASES = {
         "the global `[workflow]` table, overridden\nper repository by "
         '`[repositories."<owner>/<name>".workflow]`'
     ),
-    "approval-modes-are-all-three-honoured": (
-        "Honour the configured mode: `label` accepts the\n"
-        "configured approval label, `review` accepts GitHub's own `reviewDecision ==\n"
-        "APPROVED`, and `either` accepts one or both."
+    "approval-modes-are-read-never-accepted-on-their-own": (
+        "Honour the configured mode: `label` reads the\n"
+        "configured approval label, `review` reads GitHub's own `reviewDecision ==\n"
+        "APPROVED`, and `either` reads both."
+    ),
+    "an-unbound-signal-is-never-sufficient": (
+        "**None of those signals is approval on its own.** Each is necessary "
+        "and none is\nsufficient: a label and a `reviewDecision` are mutable "
+        "metadata that name no\ncommit, so neither can say which head a "
+        "reviewer accepted."
     ),
     "an-unapproved-pull-request-stops-having-changed-nothing": (
         "Stop, having changed nothing, when the pull request is not approved under the\n"
@@ -160,6 +180,139 @@ REQUIRED_PHRASES = {
         "Never remove a\nblocking label to proceed: a blocking label is a human's "
         "decision."
     ),
+    # --- The head binding: a mutable signal is not authority over a commit. ---
+    "head-bound-approval-is-required-before-anything-mutates": (
+        "**An approval that cannot be bound to the current `headRefOid` is "
+        "not an\napproval here.** Establish the binding before step 3 "
+        "diagnoses anything. A pull\nrequest whose current head does not "
+        "carry head-bound approval gets no worktree,\nno repair, no commit, "
+        "no push, and no rereview handoff: the run stops having\nchanged "
+        "nothing, exactly as it does for a pull request that was never "
+        "approved."
+    ),
+    "why-an-unbound-approval-is-authority-over-unreviewed-code": (
+        "a third party can add a commit while every one of them still reads "
+        "green\nover code nobody reviewed. Left there, this workflow would "
+        "take that unreviewed\nhead as its authority to create a worktree, "
+        "edit it, and push another commit on\ntop of it."
+    ),
+    "the-drainer-already-keys-on-the-approved-head": (
+        "`tools/drain_prs.py` records the approved head with no default — "
+        "inventing one\nwould let an unreviewed head through — and refuses "
+        "with `approved_head_changed`\nwhen the approval label is attached "
+        "to a head that is not the approved one."
+    ),
+    "carrying-the-approval-forward-is-not-available-here": (
+        "Carrying the approval forward instead is not available here: the "
+        "drainer's\ncontent-safe carry answers for a branch update the "
+        "drainer itself performed and\nobserved, while this workflow faces "
+        "an arbitrary third-party push whose\ncontents it can establish "
+        "nothing about."
+    ),
+    "the-two-evidence-paths-are-weighed-independently": (
+        "`label` requires the canonical-marker evidence below, `review` "
+        "requires the\nnative-approval evidence below, and `either` is met "
+        "by whichever of the two\nholds — one path failing never vetoes "
+        "valid evidence from the other."
+    ),
+    "problem-labels-refuse-under-every-mode": (
+        "The\nconfigured changes-requested and blocking labels remain "
+        "unconditional refusals\nunder every mode and are weighed against "
+        "neither path."
+    ),
+    "an-unresolved-publisher-fails-closed": (
+        "Resolve the authenticated publisher first, and fail closed when it "
+        "cannot be\nresolved: an unresolved login makes every ownership test "
+        "below vacuously true."
+    ),
+    "the-whole-paginated-comment-feed-is-read": (
+        "Read the COMPLETE paginated feed rather than a bounded view — on a "
+        "long pull\nrequest the newest marker falls outside a capped one, "
+        "and an older verdict\nwould then speak for a head nobody reviewed."
+    ),
+    "the-marker-is-selected-by-recency-before-it-is-tested": (
+        "Among the comments that publisher\nwrote, select the newest "
+        "marker-bearing comment by creation time with the\ncomment id "
+        "breaking ties, and only THEN test what it says. Accept the\n"
+        "established v2 shape and the legacy v1 shape."
+    ),
+    "the-label-path-needs-a-current-head-approve-marker": (
+        "The configured approval label stays necessary and stops being "
+        "sufficient, in\n`either` mode exactly as in `label` mode. The "
+        "`label` path is met only when\nthat label is still attached, the "
+        "selected comment carries `verdict=APPROVE`,\nits `head=` equals the "
+        "current `headRefOid`, and its `reviewers=` list does not\nname the "
+        "origin brand step 2b validated"
+    ),
+    "missing-or-malformed-evidence-never-falls-back": (
+        "**Missing evidence, an unreadable feed, and\na malformed or "
+        "multiply-markered selected comment each leave this path unmet\n"
+        "rather than falling back to an older approval**, and so does a "
+        "newer\nnon-approval standing over an older approval: the selection "
+        "is by recency, not\nby verdict."
+    ),
+    "the-aggregate-review-decision-is-necessary-not-sufficient": (
+        "`reviewDecision == APPROVED` stays necessary and stops being "
+        "sufficient: it is\nan aggregate over the pull request, not a "
+        "statement about a commit."
+    ),
+    "the-effective-review-per-author-is-the-native-evidence": (
+        "Keep only the opinionated reviews — `APPROVED` and "
+        "`CHANGES_REQUESTED` — and\nfor each author keep only their newest "
+        "one by `submitted_at`, with the review\nid breaking ties. A "
+        "`DISMISSED` review is not evidence, and an author's later\nopinion "
+        "supersedes their earlier one."
+    ),
+    "the-review-path-needs-an-approval-naming-the-current-commit": (
+        "**The `review` path is met only when one\nof those surviving "
+        "reviews is `APPROVED` and its `commit_id` equals the current\n"
+        "`headRefOid`.**"
+    ),
+    "stale-or-unattributed-native-approval-is-insufficient": (
+        "A superseded or dismissed approval, the aggregate\n"
+        "`reviewDecision` on its own, and a review whose commit attribution "
+        "is absent or\nunreadable are each insufficient rather than assumed "
+        "current."
+    ),
+    "the-refusal-names-both-heads-or-says-there-is-none": (
+        "Report the mismatch concretely and stop: the current `headRefOid`, "
+        "the head the\napproval actually belongs to when the evidence names "
+        "one, and — when it does\nnot — that the evidence is missing or "
+        "unreadable rather than naming any head at\nall."
+    ),
+    "the-review-path-is-not-cleared-by-a-canonical-review": (
+        "A `review` path left unmet is NOT\ncleared that way: the canonical "
+        "coordinator publishes a comment and switches\nverdict labels, and "
+        "publishes no native GitHub approval at all, so that path is\n"
+        "cleared only by a reviewer approving the current head on GitHub "
+        "itself."
+    ),
+    "neither-a-label-nor-a-review-is-manufactured": (
+        "**This workflow manufactures neither.** It synthesizes no verdict "
+        "label, and it\ninvokes no review of its own to produce the approval "
+        "it is missing. Verdict\nlabels change only as a consequence of the "
+        "one canonical rereview step 6 hands\noff to after a real push, "
+        "which a run stopping here never reaches."
+    ),
+    "the-head-binding-is-re-established-before-the-push": (
+        "**Re-run step 2c against freshly fetched evidence as well.** "
+        "Re-read the\ncomment feed for the `label` path, or the reviews for "
+        "the `review` path,\nwhichever the configured mode selected, and "
+        "re-establish the head binding from\nwhat comes back."
+    ),
+    "a-cached-initial-reading-cannot-answer-for-the-push": (
+        "The marker read at step 2c and the reviews read there cannot\n"
+        "answer for this moment: a canonical verdict can be superseded and a "
+        "native\napproval dismissed while the head never moves, so a cached "
+        "initial reading\nwould carry an authority that has since been "
+        "withdrawn straight into the push."
+    ),
+    "a-pre-push-stop-preserves-the-worktree": (
+        "Leave the worktree's existing work exactly as it is: a\nstop here "
+        "is a loss of authority to publish, not a reason to discard what "
+        "was\nbuilt."
+    ),
+
     # --- A pull request behind its base is unmergeable, not clear. ---
     "the-conflict-branch-precedes-the-rollup-test": (
         "1. **Merge conflict** — resolve it against the recorded "
@@ -339,8 +492,8 @@ REQUIRED_PHRASES = {
     ),
     "no-push-means-no-rereview": (
         "When you pushed nothing — any of step 3's non-mutating branches, or a "
-        "stop in step 2 or 2b — there is no new head, so invoke no rereview and "
-        "simply report what you found."
+        "stop in step 2, 2b, or 2c — there is no new head, so invoke no "
+        "rereview and simply report what you found."
     ),
     "never-merges-and-never-closes": (
         "Never merge the pull request, and never close an issue or pull request."
@@ -394,14 +547,16 @@ REQUIRED_PHRASES = {
         "parse — including that the result still names THIS bundle's active brand."
     ),
     "lost-pre-push-authority-stops-without-pushing": (
-        "If approval was withdrawn, any configured problem label appeared, the "
-        "origin became missing, malformed, or a different brand, or the head no "
+        "If approval was withdrawn, the selected mode's head-bound evidence no "
+        "longer holds, any configured problem label appeared, the origin "
+        "became missing, malformed, or a different brand, or the head no "
         "longer matches, STOP with no push and no rereview."
     ),
     "an-unchanged-head-does-not-prove-authority": (
-        "A pull request's body, labels, and `reviewDecision` can all change "
-        "without moving its head SHA; the workflow's authority can therefore "
-        "disappear while the branch itself still looks unchanged."
+        "A pull request's body, labels, `reviewDecision`, canonical marker, and "
+        "native reviews can all change without moving its head SHA; the "
+        "workflow's authority can therefore disappear while the branch itself "
+        "still looks unchanged."
     ),
     "verifies-the-push-actually-advanced-the-head": (
         "a push that left the head unchanged\ntransferred no fix, so treat it as "
@@ -467,7 +622,29 @@ FIX_ONLY_REQUIREMENTS = (
     "an-ambiguous-request-is-read-as-diagnostic",
     "approval-is-required-before-diagnosis",
     "approval-is-configured-not-a-fixed-string",
-    "approval-modes-are-all-three-honoured",
+    "approval-modes-are-read-never-accepted-on-their-own",
+    "an-unbound-signal-is-never-sufficient",
+    "head-bound-approval-is-required-before-anything-mutates",
+    "why-an-unbound-approval-is-authority-over-unreviewed-code",
+    "the-drainer-already-keys-on-the-approved-head",
+    "carrying-the-approval-forward-is-not-available-here",
+    "the-two-evidence-paths-are-weighed-independently",
+    "problem-labels-refuse-under-every-mode",
+    "an-unresolved-publisher-fails-closed",
+    "the-whole-paginated-comment-feed-is-read",
+    "the-marker-is-selected-by-recency-before-it-is-tested",
+    "the-label-path-needs-a-current-head-approve-marker",
+    "missing-or-malformed-evidence-never-falls-back",
+    "the-aggregate-review-decision-is-necessary-not-sufficient",
+    "the-effective-review-per-author-is-the-native-evidence",
+    "the-review-path-needs-an-approval-naming-the-current-commit",
+    "stale-or-unattributed-native-approval-is-insufficient",
+    "the-refusal-names-both-heads-or-says-there-is-none",
+    "the-review-path-is-not-cleared-by-a-canonical-review",
+    "neither-a-label-nor-a-review-is-manufactured",
+    "the-head-binding-is-re-established-before-the-push",
+    "a-cached-initial-reading-cannot-answer-for-the-push",
+    "a-pre-push-stop-preserves-the-worktree",
 )
 
 
@@ -934,46 +1111,52 @@ class WorkingTreeHygieneTests(unittest.TestCase):
                     f"{path} redirects into the working tree: {line!r}",
                 )
 
-    def test_the_redirect_detector_finds_the_one_redirect_that_exists(self):
+    def test_the_redirect_detector_finds_every_redirect_that_exists(self):
         # Non-vacuous anchor: a detector that matched nothing would make the
-        # rule above pass on an asset that redirected anywhere it liked.
+        # rule above pass on an asset that redirected anywhere it liked. Every
+        # scratch variable is named, so a fence added without one fails here
+        # rather than going unmeasured.
         for path in FIX_ASSETS:
             targets = [t for _, t in self._redirect_targets(read(path))]
-            self.assertIn('"$ROLLUP"', targets, path)
+            for variable in SCRATCH_VARIABLES:
+                self.assertIn(f'"${variable}"', targets, f"{path}: {variable}")
 
-    def test_the_scratch_path_uses_portable_argument_free_mktemp(self):
+    def test_every_scratch_path_uses_portable_argument_free_mktemp(self):
         for path in FIX_ASSETS:
             text = read(path)
-            self.assertIn('ROLLUP="$(mktemp)"', text, path)
+            for variable in SCRATCH_VARIABLES:
+                self.assertIn(f'{variable}="$(mktemp)"', text, f"{path}: {variable}")
             self.assertNotIn(
                 "mktemp -t",
                 text,
                 f"{path} uses BSD -t syntax that GNU mktemp rejects without Xs",
             )
 
-    def test_the_scratch_path_is_assigned_before_it_is_redirected_into(self):
+    def test_every_scratch_path_is_assigned_before_it_is_redirected_into(self):
         # A reader executes the fence top to bottom. An assignment that came
         # after the redirect would leave the target empty, which is the shape
         # this ordering assertion exists to refuse.
         for path in FIX_ASSETS:
             text = read(path)
-            assignment = text.index('ROLLUP="$(mktemp')
-            redirect = text.index('> "$ROLLUP"')
-            self.assertLess(
-                assignment,
-                redirect,
-                f"{path} redirects into $ROLLUP before assigning it",
-            )
+            for variable in SCRATCH_VARIABLES:
+                assignment = text.index(f'{variable}="$(mktemp')
+                redirect = text.index(f'> "${variable}"')
+                self.assertLess(
+                    assignment,
+                    redirect,
+                    f"{path} redirects into ${variable} before assigning it",
+                )
 
-    def test_the_scratch_file_is_removed_in_the_same_fence(self):
+    def test_every_scratch_file_is_removed_in_the_same_fence(self):
         for path in FIX_ASSETS:
             text = read(path)
-            redirect = text.index('> "$ROLLUP"')
-            self.assertIn(
-                'rm -f "$ROLLUP"',
-                text[redirect:],
-                f"{path} never removes its scratch file",
-            )
+            for variable in SCRATCH_VARIABLES:
+                redirect = text.index(f'> "${variable}"')
+                self.assertIn(
+                    f'rm -f "${variable}"',
+                    text[redirect:],
+                    f"{path} never removes ${variable}",
+                )
 
     def test_no_other_packaged_asset_redirects_into_the_tree(self):
         # Non-vacuous control: this rule is measured against every rendered
@@ -1159,6 +1342,46 @@ class ContractDocumentationTests(unittest.TestCase):
         self.assertIn("`--self-review`", section)
         self.assertIn("rather than reviewing itself", section)
 
+    def test_that_section_states_the_head_binding_precondition(self):
+        # The workflow's authority over a commit is a contract dimension of its
+        # own: §2.9's Preconditions bullet documents the board's
+        # label/reviewDecision predicate, which is deliberately NOT narrowed,
+        # so the additional precondition `fix` imposes needs its own statement
+        # or the contract reads as though the board predicate were sufficient.
+        text = self.CONTRACT.read_text(encoding="utf-8")
+        start = text.index("### 2.9 Approved-pull-request fix")
+        end = text.index("## 3. Migration boundary", start)
+        section = text[start:end]
+        self.assertIn(
+            "**Head-bound approval, an additional precondition of `fix` alone:**",
+            section,
+            "§2.9 does not document the head binding as its own precondition",
+        )
+        flattened = flat(section)
+        for claim in (
+            "the Done-column classification `docs/design.md` documents as "
+            "`classifyPullRequest`'s own verdict is unchanged",
+            "that approval must additionally be bound to the CURRENT "
+            "`headRefOid`",
+            "the two are evaluated independently and either binding suffices",
+            "never falls back to an older approval",
+            "no worktree, no repair, no commit, no push, no rereview",
+            "re-fetched and re-evaluated in the workflow's own pre-push "
+            "authority revalidation",
+            "`approved_head_changed`",
+        ):
+            self.assertIn(flat(claim), flattened, f"§2.9 omits: {claim!r}")
+
+    def test_the_board_predicate_the_section_preserves_still_exists(self):
+        # Non-vacuous anchor for "the board predicate is unchanged": §2.9 says
+        # `fix` adds a precondition rather than narrowing what Kanban itself
+        # classifies as approved, so that classification must still be there.
+        workflow = read(WORKFLOW_HS)
+        self.assertIn("approvedPullRequest ::", workflow)
+        self.assertIn("classifyPullRequest ::", workflow)
+        design = read(REPO_ROOT / "docs/design.md")
+        self.assertIn("`classifyPullRequest`'s own verdict", design)
+
     def test_the_scope_sentence_names_the_action(self):
         # Prose that enumerates the actions, audited the way the README
         # inventories below are.
@@ -1174,6 +1397,194 @@ class ContractDocumentationTests(unittest.TestCase):
         workflow = (REPO_ROOT / "src/Kanban/Workflow.hs").read_text(encoding="utf-8")
         self.assertIn("mergeStateReady", workflow)
         self.assertIn('StatusPending "merge pending"', workflow)
+
+
+class HeadBoundApprovalTests(unittest.TestCase):
+    """An approval signal is not authority over a particular commit.
+
+    A configured approval label and GitHub's `reviewDecision` are both mutable
+    pull-request metadata that name no SHA, so both survive a third party's
+    push and keep reading green over code nobody reviewed. This workflow pushes
+    a commit onto the head it accepted, so it must bind that approval to the
+    CURRENT `headRefOid` before it may create a worktree at all -- the rule
+    `tools/drain_prs.py` already applies when it refuses `approved_head_changed`.
+
+    The phrase table above pins what the assets SAY. This class pins the parts
+    a phrase cannot: that the binding is stated before every mutating step,
+    that both evidence feeds are actually fetched, and that the components the
+    rules cite by name still exist.
+    """
+
+    # Every rule the head binding added. Each is asserted present in both
+    # rendered assets by the table above and ABSENT from the repair pair by
+    # RepairDelegationTests, so this tuple is the join between the two.
+    HEAD_BINDING_RULES = (
+        "approval-modes-are-read-never-accepted-on-their-own",
+        "an-unbound-signal-is-never-sufficient",
+        "head-bound-approval-is-required-before-anything-mutates",
+        "why-an-unbound-approval-is-authority-over-unreviewed-code",
+        "the-drainer-already-keys-on-the-approved-head",
+        "carrying-the-approval-forward-is-not-available-here",
+        "the-two-evidence-paths-are-weighed-independently",
+        "problem-labels-refuse-under-every-mode",
+        "an-unresolved-publisher-fails-closed",
+        "the-whole-paginated-comment-feed-is-read",
+        "the-marker-is-selected-by-recency-before-it-is-tested",
+        "the-label-path-needs-a-current-head-approve-marker",
+        "missing-or-malformed-evidence-never-falls-back",
+        "the-aggregate-review-decision-is-necessary-not-sufficient",
+        "the-effective-review-per-author-is-the-native-evidence",
+        "the-review-path-needs-an-approval-naming-the-current-commit",
+        "stale-or-unattributed-native-approval-is-insufficient",
+        "the-refusal-names-both-heads-or-says-there-is-none",
+        "the-review-path-is-not-cleared-by-a-canonical-review",
+        "neither-a-label-nor-a-review-is-manufactured",
+        "the-head-binding-is-re-established-before-the-push",
+        "a-cached-initial-reading-cannot-answer-for-the-push",
+        "a-pre-push-stop-preserves-the-worktree",
+    )
+
+    def test_every_head_binding_rule_is_asserted_and_is_fix_only(self):
+        for requirement in self.HEAD_BINDING_RULES:
+            self.assertIn(
+                requirement,
+                REQUIRED_PHRASES,
+                f"{requirement} is not asserted against the rendered assets",
+            )
+            self.assertIn(
+                requirement,
+                FIX_ONLY_REQUIREMENTS,
+                f"{requirement} is not in the repair negative control",
+            )
+
+    def test_the_binding_is_stated_before_every_step_that_can_mutate(self):
+        # Requirement 1 is an ordering claim, not a wording one: a section that
+        # stated the rule after the diagnosis or the worktree would leave the
+        # unreviewed head already acted on.
+        for path in FIX_ASSETS:
+            text = read(path)
+            binding = text.index("## 2c. Bind that approval to the current head")
+            diagnosis = text.index("## 3. Diagnose the remaining obstacle")
+            worktree = text.index("## 4. Work in the pull request's own worktree")
+            self.assertLess(binding, diagnosis, path)
+            self.assertLess(diagnosis, worktree, path)
+
+    def test_both_evidence_feeds_are_fetched_in_full(self):
+        # An approval bound to a head read off a capped view is not bound at
+        # all: the newest marker or review can be the one outside the cap.
+        for path in FIX_ASSETS:
+            text = read(path)
+            for command in (
+                'gh api --paginate --slurp '
+                '"repos/<owner>/<name>/issues/<pr>/comments?per_page=100" '
+                '> "$COMMENTS"',
+                'gh api --paginate --slurp '
+                '"repos/<owner>/<name>/pulls/<pr>/reviews?per_page=100" '
+                '> "$REVIEWS"',
+            ):
+                self.assertIn(command, text, f"{path} omits: {command}")
+
+    def test_the_binding_is_re_established_inside_the_pre_push_gate(self):
+        # The re-read has to sit between the remote-head check and the push,
+        # in the same window step 4's other authority checks occupy.
+        for path in FIX_ASSETS:
+            text = read(path)
+            fresh_gate = text.index("IMMEDIATELY before the push")
+            rebind = text.index(
+                "**Re-run step 2c against freshly fetched evidence as well.**"
+            )
+            push = text.index("Only after BOTH pre-push checks pass, push", fresh_gate)
+            self.assertLess(fresh_gate, rebind, path)
+            self.assertLess(rebind, push, path)
+
+    def test_the_drainer_refusal_the_rules_cite_still_exists(self):
+        # Non-vacuous anchor: both assets tell a reader the drainer refuses
+        # with `approved_head_changed` when the label names another head. A
+        # rename there must fail here rather than leave the assets citing a
+        # refusal that no longer exists.
+        self.assertIn("approved_head_changed", read(DRAINER))
+        for path in FIX_ASSETS:
+            self.assertIn("`approved_head_changed`", read(path))
+
+    def test_the_marker_the_label_path_reads_is_the_one_published(self):
+        # Non-vacuous anchor: the label path is only head-bound because the
+        # coordinator writes a head into its marker and selects the newest one
+        # its own login published. Both must still be true in both bundles.
+        for coordinator in COORDINATORS:
+            source = read(coordinator)
+            self.assertIn("REVIEW_MARKER_RE = ", source, coordinator)
+            self.assertIn("head=(?P<head>[0-9a-f]{40})", source, coordinator)
+            self.assertIn("def latest_owned_review_marker(", source, coordinator)
+        for path in FIX_ASSETS:
+            self.assertIn("`latest_owned_review_marker`", read(path))
+
+    def test_the_selection_rule_matches_the_finalize_gate_it_cites(self):
+        # Non-vacuous anchor for "newest by creation time, comment id breaking
+        # ties": that is the ordering finalize's gate actually implements, and
+        # the assets point a reader at it by name.
+        gate = read(FINALIZE_SOURCE)
+        self.assertIn(
+            'key=lambda item: (str(item.get("created_at") or ""), '
+            'int(item.get("id") or 0)),',
+            gate,
+            "finalize's gate no longer orders the feed by created_at then id",
+        )
+        self.assertIn("reverse=True,", gate)
+
+    def test_the_approval_modes_the_binding_branches_on_are_the_haskell_ones(self):
+        # The binding is per mode, so the three modes must still be the three
+        # `approvedPullRequest` resolves.
+        source = read(WORKFLOW_HS)
+        for mode in ("ApprovalByLabel", "ApprovalByReview", "ApprovalByEither"):
+            self.assertIn(mode, source)
+        for path in FIX_ASSETS:
+            text = read(path)
+            for mode in ("`label`", "`review`", "`either`"):
+                self.assertIn(mode, text, f"{path} no longer names {mode}")
+
+
+class VacuousRuleControlTests(unittest.TestCase):
+    """The negative control the new rules owe, exercised rather than asserted.
+
+    `RepairDelegationTests` proves today's table is fix-specific, but it does
+    that by passing -- on a table that had decayed into fragments common to
+    every packaged workflow it would fail, and nothing demonstrates that it
+    still CAN. These two tests run the same predicates over a deliberately
+    vacuous phrase and require them to reject it, so "the head-binding rules
+    are not vacuous" is a measured property rather than a claim.
+    """
+
+    VACUOUS_PHRASE = "the pull request"
+
+    def test_a_phrase_present_in_every_asset_fails_the_fix_only_control(self):
+        # The phrase matches every fix asset, so the positive test would pass
+        # on it. The repair control is what has to refuse it.
+        for path in FIX_ASSETS:
+            self.assertIn(self.VACUOUS_PHRASE, flat(read(path)))
+        leaked = [
+            path.relative_to(REPO_ROOT)
+            for path in REPAIR_ASSETS
+            if self.VACUOUS_PHRASE in flat(read(path))
+        ]
+        self.assertNotEqual(
+            leaked,
+            [],
+            "a phrase common to every packaged workflow slipped past the "
+            "repair negative control, which therefore proves nothing about "
+            "the head-binding rules either",
+        )
+
+    def test_a_head_binding_rule_is_absent_from_the_repair_pair(self):
+        # The other half of the same control: a real rule must NOT match, or
+        # the test above would be refusing everything indiscriminately.
+        for requirement in HeadBoundApprovalTests.HEAD_BINDING_RULES:
+            phrase = flat(REQUIRED_PHRASES[requirement])
+            for path in REPAIR_ASSETS:
+                self.assertNotIn(
+                    phrase,
+                    flat(read(path)),
+                    f"{path.relative_to(REPO_ROOT)} carries {requirement}",
+                )
 
 
 class RepairDelegationTests(unittest.TestCase):
