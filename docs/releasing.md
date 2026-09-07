@@ -250,11 +250,13 @@ of:
 
 A recorded `status` result is the `state` the controller returned, not that the
 command exited zero: `status` exits zero for a repository whose job was never
-installed, so a bare exit code cannot tell that apart from a healthy job. Both
-controllers are read-only, so recording the two results starts nothing: [the
-README's upgrade section](../README.md#upgrade-to-a-new-release) is what stops
-and restarts these jobs, and a job that was stopped before the upgrade is still
-stopped after it.
+installed, so a bare exit code cannot tell that apart from a healthy job. It is
+the two `status` checks that are read-only, not the controllers around them —
+each also installs, starts, stops, uninstalls, and acknowledges incidents, and
+none of that belongs to this step — so recording the two results starts nothing.
+[The README's upgrade section](../README.md#upgrade-to-a-new-release) is what
+stops and restarts these jobs, and a job that was stopped before the upgrade is
+still stopped after it.
 
 A failure here returns to step 3 with a new candidate.
 
