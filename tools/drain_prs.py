@@ -146,14 +146,31 @@ RECOVERY_STASH_MESSAGE_RE = re.compile(
 # whole stash.
 STASH_SELECTOR_RE = re.compile(r"stash@\{[0-9]+\}")
 STASH_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+# How a published marker names itself, written down once because the merge
+# policy and the diagnostics both report it. `MARKER_CANONICAL` is what the
+# packaged review coordinator publishes; the other two are this drainer's own
+# stale-head rereviewer and the spelling that predates it. These name a
+# producer, not a rank -- `blocking_marker_in` explains why the precedence
+# policy deliberately does not order them.
+MARKER_CANONICAL = "pr-review:v2"
+MARKER_DRAINER = "pr-review:v1"
+MARKER_LEGACY = "codex-review"
 PR_REVIEW_V1_RE = re.compile(
     r"<!--\s*pr-review:v1\s+reviewer=(claude|codex)\s+"
     r"head=([0-9a-fA-F]{40})\s+"
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
 )
+# `reviewers=` is a comma-separated SET, not one brand. The canonical
+# coordinator publishes `reviewers=claude,codex` whenever it routes a pull
+# request to both brands -- an unknown or external origin, or an operator's
+# explicit dual request -- and a pattern accepting only a single token cannot
+# see that marker at all. An unreadable rejection is a rejection that does not
+# block, which is the exact failure this whole precedence policy exists to
+# prevent, so the list shape is matched here rather than approximated with
+# `[^\s]+`: every element still has to be a brand this drainer knows.
 PR_REVIEW_V2_RE = re.compile(
-    r"<!--\s*pr-review:v2\s+reviewers=(claude|codex)\s+"
+    r"<!--\s*pr-review:v2\s+reviewers=((?:claude|codex)(?:,(?:claude|codex))*)\s+"
     r"models=[^\s]+\s+head=([0-9a-fA-F]{40})\s+"
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
@@ -407,7 +424,7 @@ def finalize_reviewer_provider() -> str | None:
 
 
 def marker_provider_accepted(marker_provider: str) -> bool:
-    """Whether a published review marker's brand counts for this installation.
+    """Whether a published review marker's brands count for this installation.
 
     An existing marker recovers a stale approval only when the brand that
     published it is one this installation actually reviews with. Dual mode
@@ -422,13 +439,21 @@ def marker_provider_accepted(marker_provider: str) -> bool:
     mode's fail-closed behavior to the pull requests that actually reach a
     stale-head rereview, so a pull request whose approval is already backed by
     a current-head marker keeps exactly the treatment it has today.
+
+    A canonical marker can name a SET -- `reviewers=claude,codex` for a pull
+    request routed to both brands -- and one loaded brand in it is enough. The
+    coordinator aggregates a dual review by refusing on any rejection, so an
+    APPROVE naming both brands is a statement that each of them approved,
+    including the one this installation still reviews with. Requiring the whole
+    set instead would discard a review this installation did perform because of
+    one it no longer does.
     """
     if FINALIZE_LOADED_PROVIDERS is None:
         refresh_finalize_assignment()
     loaded = FINALIZE_LOADED_PROVIDERS
     if not loaded:
         return True
-    return marker_provider in loaded
+    return any(brand in loaded for brand in marker_provider.split(","))
 
 
 def notify_model_failure(
@@ -1086,25 +1111,87 @@ def get_pr(ctx: RepoContext, number: int) -> dict[str, Any]:
     )
 
 
+@dataclass(frozen=True)
+class ReviewMarker:
+    """One published review verdict, and where it was published.
+
+    `reviewers` is the marker's own `reviewers=`/`reviewer=` token verbatim in
+    lower case, so a canonical dual review keeps the whole comma-separated set
+    rather than being narrowed to whichever brand happens to be first. Nothing
+    reading it may assume one brand: `marker_provider_accepted` splits it, and
+    the drainer's own post-spawn verification compares it whole, which is what
+    stops a dual-brand canonical marker from standing in for the single-brand
+    rereview this drainer just ran.
+
+    The comment identity is empty on a marker parsed out of a bare body and
+    filled in by `review_markers`, which is the only reader that knows which
+    comment a body came from. It exists so a refusal can name the comment an
+    operator has to go and read.
+    """
+
+    version: str
+    reviewers: str
+    head: str
+    verdict: str
+    comment_id: str = ""
+    comment_url: str = ""
+
+
+def parse_review_marker_records(body: str) -> list[ReviewMarker]:
+    """Every marker in one comment body, the drainer's own spelling first.
+
+    All of them, not the first one. A comment carrying an approval and a
+    rejection is a shape §2.10's manual finalization gate already refuses
+    outright, and reading only the first marker out of one would hide the
+    rejection from the veto -- a rejection that cannot be read is a rejection
+    that does not block. Whatever else such a comment is, it is not evidence
+    that nobody asked for changes.
+
+    The order is the pattern order this module has always resolved a body by --
+    `pr-review:v1`, then `pr-review:v2`, then the legacy spelling -- so the
+    first element is exactly the marker the single-record readers picked before
+    every marker was kept.
+    """
+    records = [
+        ReviewMarker(
+            MARKER_DRAINER,
+            match.group(1).lower(),
+            match.group(2).lower(),
+            match.group(3).upper(),
+        )
+        for match in PR_REVIEW_V1_RE.finditer(body)
+    ]
+    records += [
+        ReviewMarker(
+            MARKER_CANONICAL,
+            match.group(1).lower(),
+            match.group(2).lower(),
+            match.group(3).upper(),
+        )
+        for match in PR_REVIEW_V2_RE.finditer(body)
+    ]
+    records += [
+        ReviewMarker(
+            MARKER_LEGACY,
+            "codex",
+            match.group(1).lower(),
+            match.group(2).upper(),
+        )
+        for match in LEGACY_CODEX_REVIEW_RE.finditer(body)
+    ]
+    return records
+
+
+def parse_review_marker_record(body: str) -> ReviewMarker | None:
+    records = parse_review_marker_records(body)
+    return records[0] if records else None
+
+
 def parse_review_marker_details(body: str) -> tuple[str, str, str] | None:
-    match = PR_REVIEW_V1_RE.search(body)
-    if match:
-        return (
-            match.group(1).lower(),
-            match.group(2).lower(),
-            match.group(3).upper(),
-        )
-    match = PR_REVIEW_V2_RE.search(body)
-    if match:
-        return (
-            match.group(1).lower(),
-            match.group(2).lower(),
-            match.group(3).upper(),
-        )
-    match = LEGACY_CODEX_REVIEW_RE.search(body)
-    if match:
-        return "codex", match.group(1).lower(), match.group(2).upper()
-    return None
+    record = parse_review_marker_record(body)
+    if record is None:
+        return None
+    return record.reviewers, record.head, record.verdict
 
 
 def parse_review_marker(body: str) -> tuple[str, str] | None:
@@ -1115,13 +1202,21 @@ def parse_review_marker(body: str) -> tuple[str, str] | None:
     return head, verdict
 
 
-def latest_review_details(
-    ctx: RepoContext, number: int
-) -> tuple[str, str, str] | None:
-    # `gh pr view --json comments` returns a bounded window, so on a long PR
-    # the newest marker can fall outside it -- verification then fails, or an
-    # older marker wins and a stale verdict is treated as current. Page the
-    # whole feed in so the marker chosen is the globally newest one.
+def review_markers(ctx: RepoContext, number: int) -> list[ReviewMarker]:
+    """Every published review marker on one pull request, newest first.
+
+    `gh pr view --json comments` returns a bounded window, so on a long pull
+    request the newest marker can fall outside it -- verification then fails,
+    or an older marker wins and a stale verdict is treated as current. The
+    whole feed is paged in so the markers read are the globally newest ones.
+
+    The whole feed rather than the newest marker alone, because the merge
+    policy is not a question about one marker: a rejection naming the current
+    head vetoes the merge wherever in the feed it sits, including underneath a
+    later approval of that same head, and answering that needs every marker.
+    A feed that cannot be read raises, exactly as it did when this only ever
+    returned the newest one -- an unreadable feed is not an empty one.
+    """
     pages = run_json(
         [
             "gh",
@@ -1144,11 +1239,120 @@ def latest_review_details(
         key=lambda comment: (comment.get("created_at") or "", comment.get("id") or 0),
         reverse=True,
     )
+    markers: list[ReviewMarker] = []
     for comment in comments:
-        details = parse_review_marker_details(comment.get("body") or "")
-        if details is not None:
-            return details
+        identity = (
+            str(comment.get("id") or ""),
+            str(comment.get("html_url") or ""),
+        )
+        markers += [
+            ReviewMarker(
+                record.version,
+                record.reviewers,
+                record.head,
+                record.verdict,
+                *identity,
+            )
+            for record in parse_review_marker_records(comment.get("body") or "")
+        ]
+    return markers
+
+
+def latest_review_details(
+    ctx: RepoContext, number: int
+) -> tuple[str, str, str] | None:
+    """The globally newest marker's reviewer set, head, and verdict.
+
+    Still the newest marker and nothing else: this answers "what did the last
+    review say", which is the question the stale-approval recovery and the
+    post-spawn verification ask. Whether a merge is vetoed is a different
+    question and `blocking_marker_in` is the one that answers it.
+    """
+    markers = review_markers(ctx, number)
+    if not markers:
+        return None
+    newest = markers[0]
+    return newest.reviewers, newest.head, newest.verdict
+
+
+def blocking_marker_in(
+    markers: list[ReviewMarker], head: str | None
+) -> ReviewMarker | None:
+    """The rejection that vetoes merging `head`, or None if none does.
+
+    The precedence policy, in one place (issue #628). A `CHANGES_REQUESTED`
+    marker naming the pull request's CURRENT head refuses the merge, and no
+    later marker at that same head lifts it -- not a `pr-review:v1` approval
+    from the drainer's own stale-head rereviewer, and not a second canonical
+    `pr-review:v2` approval either.
+
+    Newest-wins was the rule, and it is the wrong one. One push starts two
+    rereviews -- the drainer's own, and the canonical one the `$fix` and
+    `$pr-revise` workflows hand off -- so whichever finished last decided
+    whether a pull request merged. On PR #625 that was a `medium`-effort
+    `pr-review:v1` approval arriving 21 seconds after the canonical
+    `xhigh` review had requested changes on the very same commit, and the
+    defect it named merged.
+
+    Rank does not decide it either, and deliberately so. Preferring the
+    canonical verdict outright would mean merging a pull request whose
+    `reviewed:changes` label the drainer's own reviewer had just applied, since
+    that label and that marker are written together -- so the gate would have
+    to fail *open* against a signal `gate_regression` already treats as
+    blocking. A rejection is therefore a veto whatever published it, which
+    makes the outcome the same in either arrival order and keeps the marker
+    policy and the label policy saying one thing.
+
+    Scoped to one head, and only the current one. A rejection of some earlier
+    head is a verdict on work that has since been replaced, so it imposes
+    nothing here; pushing a new commit is what clears a veto, which is what a
+    reviewer asking for changes was asking for.
+    """
+    if not head:
+        return None
+    wanted = head.lower()
+    for marker in markers:
+        if marker.head == wanted and marker.verdict == "CHANGES_REQUESTED":
+            return marker
     return None
+
+
+def canonical_marker_in(
+    markers: list[ReviewMarker], head: str | None
+) -> ReviewMarker | None:
+    """The newest canonical review naming `head`, or None if there is none.
+
+    "Which reviewer owns this pull request's verdicts" is answered by evidence
+    on the pull request rather than by configuration: a canonical marker at the
+    head whose approval just went stale means the packaged coordinator reviewed
+    this pull request, so the rereview for the push that invalidated it is that
+    coordinator's to run and not this drainer's.
+    """
+    if not head:
+        return None
+    wanted = head.lower()
+    for marker in markers:
+        if marker.head == wanted and marker.version == MARKER_CANONICAL:
+            return marker
+    return None
+
+
+def describe_blocking_marker(number: int, marker: ReviewMarker) -> str:
+    """Why a merge was refused, naming the comment an operator has to read."""
+    where = f" ({marker.comment_url})" if marker.comment_url else ""
+    identity = f" in comment {marker.comment_id}" if marker.comment_id else ""
+    return (
+        f"PR #{number}: a {marker.version} review by {marker.reviewers} "
+        f"requested changes on its current head {marker.head[:12]}"
+        f"{identity}{where}. That verdict stands until a new commit is pushed, "
+        "whatever later marker or label sits beside it."
+    )
+
+
+def blocking_review_marker(
+    ctx: RepoContext, number: int, head: str | None
+) -> ReviewMarker | None:
+    return blocking_marker_in(review_markers(ctx, number), head)
 
 
 def parse_check_name(item: dict[str, Any]) -> str | None:
@@ -2076,7 +2280,7 @@ def merge_past_base_advance(
         # call; this is the same check immediately before this one, on the
         # response that was just read rather than the one that preceded the
         # build.
-        regression = gate_regression(current, gates)
+        regression = gate_regression(ctx, current, gates)
         if regression is not None:
             reason, message, note = regression
             log(f"PR #{number}: {note}; deferring before the swap")
@@ -2781,6 +2985,37 @@ def recover_stale_approval(
             continue
 
         if entry.get("last_rereviewed_head") == current_head:
+            continue
+
+        # One push, one rereview (issue #628). A pull request whose stale
+        # approval was published by the canonical coordinator is one the
+        # canonical gate reviews: `$fix` and `$pr-revise` hand off a
+        # `pr-review:v2` rereview for the very push that invalidated it, and
+        # spawning this drainer's own reviewer alongside it produced two
+        # verdicts for one commit at two different efforts, with whichever
+        # published last deciding the merge.
+        #
+        # Deferring rather than racing is what makes that outcome independent
+        # of completion order: nothing here publishes a marker, switches a
+        # label, or restores an approval, so an unfinished or failed canonical
+        # review cannot be overtaken into merge permission by a second opinion
+        # this drainer produced meanwhile. The pull request waits for the
+        # canonical verdict, exactly as it waits above for a stale approval to
+        # be dismissed.
+        #
+        # Scoped by evidence and not by configuration: only the lineage that
+        # actually carries a canonical marker defers. A pull request approved
+        # by this drainer's own reviewer, or by the legacy spelling, has no
+        # canonical producer to wait for and keeps the rereview it has always
+        # had.
+        canonical = canonical_marker_in(review_markers(ctx, number), approved_head)
+        if canonical is not None:
+            log(
+                f"PR #{number}: head changed from {approved_head[:12]} to "
+                f"{current_head[:12]}, and its approval came from a "
+                f"{canonical.version} review; waiting for the canonical "
+                "rereview rather than running a second one"
+            )
             continue
 
         if finalize_assignment() is None:
@@ -4579,7 +4814,7 @@ def describe_check_gates(
 
 
 def gate_regression(
-    pr: dict[str, Any], gates: GateConfig
+    ctx: RepoContext, pr: dict[str, Any], gates: GateConfig
 ) -> tuple[str, str, str] | None:
     """Why a candidate no longer passes its gates, or None if it still does.
 
@@ -4589,6 +4824,12 @@ def gate_regression(
     the exceptional path asks it again immediately before its swap, because
     building a staging merge takes long enough for a verdict to be withdrawn
     or a check to regress in between.
+
+    The published verdicts are read here and not only from the labels beside
+    them. A label says what the last writer thought; the markers say what every
+    reviewer of this head actually returned, and the two disagree exactly when
+    two rereviews raced for one push (issue #628). Both merge boundaries ask
+    this question, so neither can land a head some reviewer rejected.
     """
     number = pr["number"]
     # The changes label wins when both are attached, exactly as it does when
@@ -4604,6 +4845,16 @@ def gate_regression(
             "not_approved",
             f"PR #{number} lost {APPROVE_LABEL} before the merge.",
             "approval changed before merge",
+        )
+    # Read fresh, immediately before the merge, for the same reason the labels
+    # above are: a canonical rejection published while this candidate was being
+    # prepared is one nothing may merge past.
+    blocking = blocking_review_marker(ctx, number, pr.get("headRefOid"))
+    if blocking is not None:
+        return (
+            "changes_requested",
+            describe_blocking_marker(number, blocking),
+            f"{blocking.version} changes requested on the merged head",
         )
     build_state = configured_check_state(pr, gates.required_ci_check)
     review_state = configured_check_state(pr, gates.required_review_check)
@@ -4715,6 +4966,24 @@ def process_pr(
                 "not_approved",
                 f"PR #{number} is not labelled {APPROVE_LABEL}.",
             )
+        return False
+
+    # Before anything mutating, not only before the merge. A vetoed candidate
+    # must not have a CI rerun requested for it, a conflict incident opened on
+    # it, or its branch updated: those are all actions taken on a pull request
+    # this pass has already established it may not land, and the branch update
+    # in particular carries the approval forward onto a new head. The re-check
+    # inside `gate_regression` still stands -- this one refuses early, that one
+    # refuses on a rejection published while the candidate was being prepared.
+    blocking = blocking_review_marker(ctx, number, pr.get("headRefOid"))
+    if blocking is not None:
+        log(
+            f"PR #{number}: {blocking.version} requested changes on its current "
+            f"head; skipping"
+        )
+        set_outcome(
+            report, "changes_requested", describe_blocking_marker(number, blocking)
+        )
         return False
 
     mergeable = pr.get("mergeable")
@@ -4829,7 +5098,7 @@ def process_pr(
     # successful merge and raises a fatal PostMergeAuditError if it doesn't
     # match what was just checked here.
     pr = get_pr(ctx, number)
-    regression = gate_regression(pr, gates)
+    regression = gate_regression(ctx, pr, gates)
     if regression is not None:
         reason, message, note = regression
         log(f"PR #{number}: {note}; deferring")

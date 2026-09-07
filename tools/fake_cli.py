@@ -175,6 +175,28 @@ class FakeCli:
         ) as handle:
             handle.write(json.dumps(entry) + "\n")
 
+    def scripted(self, binary: str, match: list[str]) -> bool:
+        """Whether a response is already queued for exactly this match."""
+        responses = _responses_path(self.state_dir, binary)
+        if not responses.exists():
+            return False
+        for line in responses.read_text(encoding="utf-8").splitlines():
+            if line.strip() and json.loads(line)["match"] == match:
+                return True
+        return False
+
+    def ensure_script(self, binary: str, match: list[str], **kwargs) -> None:
+        """Queue a response only if the scenario has not scripted this match.
+
+        For a call every path makes but almost no scenario is about -- reading
+        a pull request's comment feed, say. A fixture supplies the uninteresting
+        answer for it without displacing the scenario's own: `script` queues,
+        so a default written first would be handed to the first call and the
+        scenario's own answer to the second.
+        """
+        if not self.scripted(binary, match):
+            self.script(binary, match, **kwargs)
+
     def calls(self, binary: str) -> list[dict]:
         path = _calls_path(self.state_dir, binary)
         if not path.exists():

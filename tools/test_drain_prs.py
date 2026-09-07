@@ -174,6 +174,187 @@ class BranchUpdateCarriedApprovalTests(unittest.TestCase):
                 )
 
 
+class ReviewAuthorityIsDocumentedTests(unittest.TestCase):
+    """The merge policy of issue #628 is a contract, so it is written down.
+
+    `docs/agent-workflow-contract.md` §2.4 is authoritative for what the
+    drainer's merge obeys, and `docs/pr-drainer.md` is what an operator reads
+    when a pull request they expected to merge did not. Both state the policy,
+    and both are held to naming the marker spellings this module actually
+    recognises rather than a spelling that has drifted out of it.
+    """
+
+    CONTRACT = REPO_ROOT / "docs" / "agent-workflow-contract.md"
+    OPERATOR_GUIDE = REPO_ROOT / "docs" / "pr-drainer.md"
+
+    def section(self):
+        text = self.CONTRACT.read_text(encoding="utf-8")
+        start = text.index("### 2.4 Incident/controller capability")
+        return text[start : text.index("### 2.5 ", start)]
+
+    def test_the_contract_states_the_precedence_rule(self):
+        section = self.section()
+        self.assertIn("**Review authority and the verdict a merge obeys:**", section)
+        # The rule itself, and the two ways of getting it wrong it rules out.
+        self.assertIn("no later marker at that same head lifts it", section)
+        self.assertIn("Neither arrival order nor marker", section)
+
+    def test_the_contract_states_that_one_producer_runs_per_push(self):
+        self.assertIn(
+            "the drainer spawns no rereview of its own and waits for the",
+            self.section(),
+        )
+
+    def test_both_documents_name_every_marker_spelling_this_module_reads(self):
+        section = self.section()
+        guide = self.OPERATOR_GUIDE.read_text(encoding="utf-8")
+        for version in (
+            drain_prs.MARKER_CANONICAL,
+            drain_prs.MARKER_DRAINER,
+            drain_prs.MARKER_LEGACY,
+        ):
+            with self.subTest(version=version):
+                self.assertIn(f"`{version}`", section)
+                self.assertIn(f"`{version}`", guide)
+
+    def test_the_operator_guide_states_the_rule_and_its_escape(self):
+        guide = self.OPERATOR_GUIDE.read_text(encoding="utf-8")
+        self.assertIn("### Which review verdict wins", guide)
+        self.assertIn("### One rereview per push", guide)
+        # A veto an operator cannot clear is one they have to be told how to
+        # clear, and a new commit is the only thing that does it.
+        self.assertIn("Pushing a new commit is", guide)
+
+
+class OneRereviewPerPushTests(unittest.TestCase):
+    """Issue #628, requirement 3: one push starts one rereview, not two.
+
+    `$fix` and `$pr-revise` push a fix and hand off a canonical `pr-review:v2`
+    rereview for that very push. The drainer used to spawn its own reviewer for
+    the same commit, at a different effort, and whichever finished last decided
+    the merge. A pull request whose stale approval was canonical now waits for
+    the canonical verdict instead, so there is no second producer to overtake
+    an unfinished or failed canonical review into merge permission.
+
+    A pull request the drainer's own reviewer approved has no canonical
+    producer to wait for and keeps the rereview it has always had.
+    """
+
+    APPROVED_HEAD = "a" * 40
+    HEAD = "b" * 40
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / ".git").mkdir()
+        assignment = kanban_models.DEFAULT_ROSTER.assignment_for(
+            "drain_rereview", "codex"
+        )
+        for name, value in (
+            ("FINALIZE_ASSIGNMENT", assignment),
+            ("FINALIZE_PROVIDER", "codex"),
+            ("FINALIZE_LOADED_PROVIDERS", ("codex",)),
+        ):
+            patched = mock.patch.object(drain_prs, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.ctx = drain_prs.RepoContext(
+            path=self.root,
+            repo_slug="coghex/kanban",
+            repo_name="kanban",
+            default_branch="master",
+        )
+
+    def state(self):
+        return {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "active_pr": None,
+            "prs": {
+                "42": {
+                    "approved_head": self.APPROVED_HEAD,
+                    "last_rereviewed_head": None,
+                    "consecutive_failures": 0,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 0,
+                    "last_error": None,
+                    "cleanup": None,
+                }
+            },
+        }
+
+    def pr(self):
+        """The shape a dismissed stale approval leaves: a new head, no verdict."""
+        return {
+            "number": 42,
+            "state": "OPEN",
+            "headRefOid": self.HEAD,
+            "headRefName": "issue-42-topic",
+            "labels": [],
+            "statusCheckRollup": [],
+        }
+
+    def marker(self, version, head):
+        return drain_prs.ReviewMarker(
+            version, "codex", head.lower(), "APPROVE", "1", ""
+        )
+
+    def recover(self, *markers):
+        state = self.state()
+        with mock.patch.object(drain_prs, "get_pr", return_value=self.pr()):
+            with mock.patch.object(
+                drain_prs, "review_markers", return_value=list(markers)
+            ):
+                with mock.patch.object(
+                    drain_prs, "rereview_pr_with_model"
+                ) as spawn:
+                    recovered = drain_prs.recover_stale_approval(
+                        self.ctx, state, dry_run=False
+                    )
+        return spawn, recovered, state
+
+    def test_a_canonically_approved_pull_request_launches_no_second_review(self):
+        spawn, recovered, state = self.recover(
+            self.marker(drain_prs.MARKER_CANONICAL, self.APPROVED_HEAD)
+        )
+
+        spawn.assert_not_called()
+        # Nothing was mutated and nothing was claimed as recovery work, so the
+        # rest of the queue keeps draining in this same pass.
+        self.assertFalse(recovered)
+        self.assertIsNone(state["prs"]["42"]["last_rereviewed_head"])
+        self.assertEqual(state["prs"]["42"]["approved_head"], self.APPROVED_HEAD)
+
+    def test_it_keeps_waiting_however_many_passes_run(self):
+        # The canonical review can take as long as it takes; no pass converts
+        # waiting into a second opinion.
+        for _ in range(3):
+            spawn, _, _ = self.recover(
+                self.marker(drain_prs.MARKER_CANONICAL, self.APPROVED_HEAD)
+            )
+            spawn.assert_not_called()
+
+    def test_the_drainer_s_own_lineage_still_gets_its_rereview(self):
+        for version in (drain_prs.MARKER_DRAINER, drain_prs.MARKER_LEGACY):
+            with self.subTest(version=version):
+                spawn, _, _ = self.recover(self.marker(version, self.APPROVED_HEAD))
+                spawn.assert_called_once()
+
+    def test_a_pull_request_with_no_marker_at_all_still_gets_its_rereview(self):
+        spawn, _, _ = self.recover()
+        spawn.assert_called_once()
+
+    def test_a_canonical_marker_at_some_other_head_does_not_defer(self):
+        # Only the approval that just went stale decides whose rereview this
+        # is. A canonical review of an unrelated commit says nothing about it.
+        spawn, _, _ = self.recover(
+            self.marker(drain_prs.MARKER_CANONICAL, "c" * 40),
+            self.marker(drain_prs.MARKER_DRAINER, self.APPROVED_HEAD),
+        )
+        spawn.assert_called_once()
+
+
 class NoAgentStaleHeadIncidentTests(unittest.TestCase):
     """Issue #572, requirements 25 through 27: a pull request that needs a
     stale-head rereview no loaded provider can run is recorded and left
@@ -258,12 +439,23 @@ class NoAgentStaleHeadIncidentTests(unittest.TestCase):
     def open_incidents(self):
         return drain_prs_service.open_no_agent_incidents(self.root)
 
+    def no_markers(self):
+        """No review marker anywhere on the pull request.
+
+        These cases are about the no-agent roster, so the pull request has to
+        be one this drainer would rereview if it could: a canonical marker at
+        the approved head would make it wait for the canonical rereview
+        instead, and no incident would be owed at all.
+        """
+        return mock.patch.object(drain_prs, "review_markers", return_value=[])
+
     def recover(self, pr, state):
         with mock.patch.object(drain_prs, "get_pr", return_value=pr):
-            with mock.patch.object(drain_prs, "rereview_pr_with_model") as spawn:
-                recovered = drain_prs.recover_stale_approval(
-                    self.ctx, state, dry_run=False
-                )
+            with self.no_markers():
+                with mock.patch.object(drain_prs, "rereview_pr_with_model") as spawn:
+                    recovered = drain_prs.recover_stale_approval(
+                        self.ctx, state, dry_run=False
+                    )
         spawn.assert_not_called()
         return recovered
 
@@ -308,7 +500,9 @@ class NoAgentStaleHeadIncidentTests(unittest.TestCase):
         # The loop reads its own state from disk, so PR #42's stale entry has
         # to be there for the sweep to reach it at all.
         drain_prs.save_drain_state(self.ctx, self.state(), dry_run=False)
-        with mock.patch.object(drain_prs, "get_pr", return_value=self.pr()):
+        with mock.patch.object(
+            drain_prs, "get_pr", return_value=self.pr()
+        ), self.no_markers():
             with mock.patch.object(
                 drain_prs, "get_open_approved_prs", return_value=[other]
             ):
@@ -330,7 +524,9 @@ class NoAgentStaleHeadIncidentTests(unittest.TestCase):
 
     def test_a_dry_run_records_nothing(self):
         state = self.state()
-        with mock.patch.object(drain_prs, "get_pr", return_value=self.pr()):
+        with mock.patch.object(
+            drain_prs, "get_pr", return_value=self.pr()
+        ), self.no_markers():
             drain_prs.recover_stale_approval(self.ctx, state, dry_run=True)
         self.assertEqual(self.open_incidents(), [])
 
