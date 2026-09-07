@@ -171,14 +171,39 @@ REQUIRED_PHRASES = {
         "metadata that name no\ncommit, so neither can say which head a "
         "reviewer accepted."
     ),
-    "an-unapproved-pull-request-stops-having-changed-nothing": (
-        "Stop, having changed nothing, when the pull request is not approved under the\n"
-        "resolved mode, or when it carries a configured changes-requested or blocking\n"
-        "label."
+    # A verdict label is a decision already taken, so 2b stops on it without
+    # reading any further evidence. The absence of a raw approval signal is
+    # not that: it is the question 2c answers, and stopping on it here is what
+    # sent a stale-approval dismissal to a first review (see the pair below).
+    "a-blocking-or-changes-requested-label-stops-having-changed-nothing": (
+        "Stop, having changed nothing, when the pull request carries a configured\n"
+        "changes-requested or blocking label"
+    ),
+    "that-label-stop-needs-no-further-evidence": (
+        "that stop needs no further evidence,\nsince the label itself is a "
+        "human's decision to reverse."
     ),
     "a-blocking-label-is-never-removed-to-proceed": (
-        "Never remove a\nblocking label to proceed: a blocking label is a human's "
-        "decision."
+        "Never remove a blocking label to proceed."
+    ),
+    # The defect this pair pins, observed live: review-gate dismissed a stale
+    # approval, and 2b could not tell the stripped label apart from a pull
+    # request nobody had ever reviewed, so both were sent to a first review.
+    "a-missing-raw-approval-signal-is-not-a-stop-at-2b": (
+        "A pull request that simply lacks the resolved mode's raw approval signal — no\n"
+        "configured label attached, no `reviewDecision == APPROVED` — is not a stop\n"
+        "here."
+    ),
+    "a-stripped-label-and-a-superseded-marker-both-mean-reviewed-before": (
+        "A label a legitimate stale-approval dismissal just stripped,\n"
+        "and a marker bound to a head this pull request has since moved past, both mean\n"
+        "it HAS been reviewed before; only a feed with no marker at all means it has\n"
+        "not."
+    ),
+    "the-remedy-turns-on-the-marker-not-the-surviving-label": (
+        "regardless of which\n"
+        "head it named, whether a later marker superseded it, or whether the configured\n"
+        "label is currently attached"
     ),
     # --- The head binding: a mutable signal is not authority over a commit. ---
     "head-bound-approval-is-required-before-anything-mutates": (

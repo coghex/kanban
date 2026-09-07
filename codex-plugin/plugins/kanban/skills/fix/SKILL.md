@@ -122,13 +122,20 @@ review — the one thing the whole origin-marker mechanism exists to prevent. An
 unknown-origin pull request stops here too; it has no declared brand to match,
 and guessing one would be inventing the very fact this check exists to read.
 
-Stop, having changed nothing, when the pull request is not approved under the
-resolved mode, or when it carries a configured changes-requested or blocking
-label. Report which condition held and what the pull request would need. An
-unapproved pull request is somebody else's turn: a changes-requested pull
-request belongs to $pr-revise, a blocked one to a human, and a pull
-request that has never been reviewed to $pr-review. Never remove a
-blocking label to proceed: a blocking label is a human's decision.
+Stop, having changed nothing, when the pull request carries a configured
+changes-requested or blocking label — that stop needs no further evidence,
+since the label itself is a human's decision to reverse. Report which one: a
+changes-requested pull request belongs to $pr-revise, a blocked one to
+a human. Never remove a blocking label to proceed.
+
+A pull request that simply lacks the resolved mode's raw approval signal — no
+configured label attached, no `reviewDecision == APPROVED` — is not a stop
+here. Whether the right remedy is $pr-review or $pr-rereview
+turns on review history the raw signal alone cannot carry: a label a
+legitimate stale-approval dismissal just stripped, and a pull request nobody
+has ever reviewed, look identical if judged by the label's absence alone.
+Continue to 2c, which reads the same evidence that binds an approval to the
+current head and settles that question from it.
 
 ## 2c. Bind that approval to the current head
 
@@ -229,12 +236,18 @@ not — that the evidence is missing or unreadable rather than naming any head a
 all. Say which mode was in force and which path went unmet.
 
 Then name the remedy without performing it. A `label` path left unmet is
-cleared by a fresh canonical review of the current head, which is
-$pr-rereview's job for a pull request that has been reviewed before and
-$pr-review's for one that has not. A `review` path left unmet is NOT
-cleared that way: the canonical coordinator publishes a comment and switches
-verdict labels, and publishes no native GitHub approval at all, so that path is
-cleared only by a reviewer approving the current head on GitHub itself.
+cleared by a fresh canonical review of the current head: name
+$pr-rereview when the comment feed already read for this step contains
+any canonical `pr-review` marker for this pull request — regardless of which
+head it named, whether a later marker superseded it, or whether the configured
+label is currently attached — and name $pr-review only when that feed
+contains none. A label a legitimate stale-approval dismissal just stripped,
+and a marker bound to a head this pull request has since moved past, both mean
+it HAS been reviewed before; only a feed with no marker at all means it has
+not. A `review` path left unmet is NOT cleared that way: the canonical
+coordinator publishes a comment and switches verdict labels, and publishes no
+native GitHub approval at all, so that path is cleared only by a reviewer
+approving the current head on GitHub itself.
 
 **This workflow manufactures neither.** It synthesizes no verdict label, and it
 invokes no review of its own to produce the approval it is missing. Verdict
