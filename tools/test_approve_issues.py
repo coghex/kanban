@@ -169,6 +169,14 @@ MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
 # stand in for a record written by a future build.
 REVIEWER_LEDGER_FUTURE_VERSION = 99
 
+
+# A sentinel so a fixture can write `"version": null` explicitly.
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
+
 # Every test that drives main() in-process reaches
 # `record_reviewer_assignment`, whose default target is the operator's real
 # managed install directory. Those tests already patch LOG_DIR and
@@ -1043,7 +1051,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
     def ledger_path(self):
         return self.root / "reviewer_ledger.json"
 
-    def write_ledger(self, entries, *, schema=None, version=None, name=None):
+    def write_ledger(self, entries, *, schema=None, version=_UNSET, name=None):
         # `name` is not a convenience: without it every fixture in one example
         # writes the SAME file, so the last write wins and the earlier cases
         # silently assert against somebody else's content.
@@ -1054,7 +1062,7 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
                     "schema": (
                         "approve-issues-reviewer-ledger" if schema is None else schema
                     ),
-                    "version": 1 if version is None else version,
+                    "version": 1 if version is _UNSET else version,
                     "entries": entries,
                 }
             ),
@@ -1615,6 +1623,43 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
                     self.assertFalse(
                         path.exists(), "a no-agent install wrote a ledger entry"
                     )
+
+    def test_a_version_that_is_not_an_integer_is_damage(self):
+        # `True == 1` and `1.0 == 1` in Python, so equality alone would let a
+        # record this build was not written for read as version 1 -- and, with
+        # otherwise valid entries, grant a legacy approval from malformed
+        # state.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        for label, version in (
+            ("true", True),
+            ("float", 1.0),
+            ("string", "1"),
+            ("null", None),
+        ):
+            path = self.write_ledger(
+                [
+                    self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
+                    self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
+                ],
+                version=version,
+                name=f"version-{label}",
+            )
+            with self.subTest(version=label):
+                status, entries = module.read_reviewer_ledger(path)
+                self.assertEqual(status, module.LEDGER_DAMAGED)
+                self.assertEqual(entries, [])
+                # And a marker inside what the malformed record claims is its
+                # window is refused rather than carried.
+                self.assertFalse(
+                    module.marker_models_accepted(
+                        "gpt-5.6-sol@xhigh+claude-opus-5@xhigh",
+                        "2026-08-20T00:00:00Z",
+                        reviewers,
+                        entries=entries,
+                        status=status,
+                    )
+                )
 
     def test_a_ledger_of_invalid_utf8_is_damage_rather_than_an_exception(self):
         # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a

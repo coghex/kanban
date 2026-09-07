@@ -1056,7 +1056,17 @@ def read_reviewer_ledger(path: Path | None = None) -> tuple[str, list[dict[str, 
         return (LEDGER_DAMAGED, [])
     if document.get("schema") != REVIEWER_LEDGER_SCHEMA:
         return (LEDGER_DAMAGED, [])
-    if document.get("version") != REVIEWER_LEDGER_VERSION:
+    version = document.get("version")
+    # The same shape the queue and reconcile validators use, and for the same
+    # reason: in Python `True == 1` and `1.0 == 1`, so equality alone lets a
+    # record carrying `"version": true` read as a version-1 document this
+    # build understands. A version this build was not written for must be
+    # damaged, not silently accepted.
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != REVIEWER_LEDGER_VERSION
+    ):
         return (LEDGER_DAMAGED, [])
     raw = document.get("entries")
     if not isinstance(raw, list):
