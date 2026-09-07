@@ -3327,14 +3327,15 @@ Suggested paths:
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/specification.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/snapshot.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/events.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/invocations.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/control/requests/<id>.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/lease/owner.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.log
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.seal.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/specification.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/snapshot.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/events.jsonl
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/invocations.jsonl
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/control/requests/<id>.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/lease/owner.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
+~/.local/state/kanban/missions/.deleted/<token>/
 ```
 
 Defaults:
@@ -3425,6 +3426,66 @@ Defaults:
   included; and no write ever treats that silence as permission, so
   "is one already there?" is always a question for the filesystem rather than
   for a successful decode.
+- A repository's mission root spells the owner and the name as separate path
+  components under `repositories/`, and that spelling is **injective**: each
+  component is refused unless it is a single plain name, so it carries no
+  separator, so the path recovers the identity that produced it and two
+  identities share a root only when they are the same identity. An owner or a
+  name that cannot name such a component is reported with its reason rather
+  than mapped onto some other repository's root, and nothing is created for it.
+  The spelling this replaced joined the two with the same hyphen it substituted
+  for separators, which is not injective at all — `data-science/tools` and
+  `data/science-tools` both wrote `data-science-tools`, so one repository's
+  snapshot replaced the other's, one repository's specification made the
+  other's mission report that it already existed, and one repository's lease
+  blocked the other's unrelated mission.
+- Missions written under that ambiguous root stay readable there; nothing is
+  migrated. This is the recorded choice, and migration is the rejected
+  alternative: the advancement lease is a directory inside the mission's own
+  directory, so moving a mission moves its lease, and a holder still running
+  against the old path would go on writing there while a third process — finding
+  no lease where the holder believes it left one — acquired that mission's lease
+  a second time. Reading in place resolves one mission to one directory for
+  every release, so there is exactly one lease per repository-qualified mission
+  whichever one opened it. Ownership of a legacy mission is established per
+  mission from the durable records it carries — its specification, its
+  snapshot, and its lease owner record, each of which names a repository — and
+  never from the ambiguous root as a whole, which belongs to no repository in
+  particular. Only a legacy directory that is *provably absent* routes past it:
+  a stat that could not be taken, and an entry present without being a
+  directory this store could have written, both refuse, because reading either
+  as "there is nothing there" would address the repository-qualified root and
+  let a second mission — with a second advancement lease — start beside history
+  nobody could see. A record that is there and was written under a schema
+  version this release does not recognize is likewise not evidence of absence:
+  it makes the mission unattributable, since the record silence hides may be
+  the other repository's. Records that disagree with one another, that name another
+  mission, that will not read, or that name no repository at all leave the
+  mission attributed to nobody: addressing it reports its path and why it was
+  refused, and not a byte of it is read as one repository's or replaced. The
+  same refusal covers a mission that has records under both roots. Enumeration
+  goes through that one resolution too, so an identifier it refuses is listed
+  by neither repository: reporting one would name a mission nothing can read or
+  write. `repositories/` and `.deleted` are the two
+  names the old spelling could never produce — every key it produced carries
+  the hyphen it joined owner to name with — which is what keeps the two
+  namespaces from aliasing, and what lets the holding area a delete moves a
+  mission through sit at the missions root where no repository's store can be
+  it.
+- A mission still living under that ambiguous root is never deleted. Every
+  other operation works on it exactly as on any other — it reads, it writes, it
+  enumerates, it holds one lease — but a delete removes a *directory* rather
+  than the records whose identity was checked on the way in, and a shared
+  directory holds nothing that can be proven to be one repository's alone. The
+  journal, the invocation log and the sealed archives are only ever read record
+  by record; a submitted command and the control token name no repository at
+  all; a record under a schema version this release does not recognize says
+  nothing about who wrote it; an unterminated tail is a record that was never
+  decoded; and a subdirectory that cannot be listed is not a subdirectory that
+  is empty. Each is a way to mistake "I could not tell" for "it is mine", and
+  the only answer that cannot be got wrong is to remove nothing there. Clearing
+  such a directory out is an operator's decision about history two repositories
+  may have written, and this release has no evidence to make it.
 - A mission a controller advances holds two further records, and each answers
   a question the four above cannot. `invocations.jsonl` is written *before*
   every external effect and flushed to the disk before that effect is

@@ -82,6 +82,7 @@ import Kanban.Mission.Paths
     missionControlRequestDirectory,
     readMissionRecord,
     MissionRead (..),
+    withMissionRoot,
     writeMissionRecord,
   )
 import Kanban.Mission.Types
@@ -304,22 +305,23 @@ data MissionCommandRead = MissionCommandRead
 -- scoped to the run that is actually advancing the mission, which is the only
 -- run whose console can be \"connected to this runner\".
 openMissionControl :: MissionStore -> MissionId -> IO (Either Text MissionControlEndpoint)
-openMissionControl store mission = case endpointPaths store mission of
-  Left message -> pure (Left message)
-  Right (directory, requests) -> do
-    prepared <- ensureMissionDirectory directory
-    case prepared of
-      Left message -> pure (Left message)
-      Right () -> do
-        preparedRequests <- ensureMissionDirectory requests
-        pure
-          ( MissionControlEndpoint
-              { missionControlMission = mission,
-                missionControlDirectoryPath = directory,
-                missionControlRequests = requests
-              }
-              <$ preparedRequests
-          )
+openMissionControl store mission = withMissionRoot store mission Left $ \root ->
+  case endpointPaths root mission of
+    Left message -> pure (Left message)
+    Right (directory, requests) -> do
+      prepared <- ensureMissionDirectory directory
+      case prepared of
+        Left message -> pure (Left message)
+        Right () -> do
+          preparedRequests <- ensureMissionDirectory requests
+          pure
+            ( MissionControlEndpoint
+                { missionControlMission = mission,
+                  missionControlDirectoryPath = directory,
+                  missionControlRequests = requests
+                }
+                <$ preparedRequests
+            )
 
 -- | One command built inside the controller's own process.
 --
@@ -417,11 +419,11 @@ consumeMissionCommand :: MissionSubmittedCommand -> IO ()
 consumeMissionCommand command =
   mapM_ (ignoreFileOperation . removeFile) command.missionCommandPath
 
-endpointPaths :: MissionStore -> MissionId -> Either Text (FilePath, FilePath)
-endpointPaths store mission =
+endpointPaths :: FilePath -> MissionId -> Either Text (FilePath, FilePath)
+endpointPaths root mission =
   (,)
-    <$> missionControlDirectory store.missionStoreDirectory mission
-    <*> missionControlRequestDirectory store.missionStoreDirectory mission
+    <$> missionControlDirectory root mission
+    <*> missionControlRequestDirectory root mission
 
 -- | A file name that is one plain component whatever the identifier says.
 commandFileName :: Text -> FilePath

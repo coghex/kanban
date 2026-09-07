@@ -64,6 +64,7 @@ import Kanban.Mission.Paths
     missionLeaseOwnerPath,
     missionLeasePath,
     readMissionRecordFor,
+    withMissionRoot,
     writeMissionRecord,
   )
 import Kanban.Mission.Types
@@ -175,15 +176,17 @@ acquireMissionLease = acquireMissionLeaseWith missionHolderPresence
 -- | 'acquireMissionLease' with the liveness probe injected, so a fixture can
 -- stage a probe that cannot answer and prove the lease stays held.
 acquireMissionLeaseWith :: (Int -> IO MissionHolderPresence) -> MissionStore -> MissionId -> IO MissionLeaseAcquisition
-acquireMissionLeaseWith holderPresence store mission = case (,) <$> missionLeasePath store.missionStoreDirectory mission <*> missionLeaseOwnerPath store.missionStoreDirectory mission of
-  Left message -> pure (MissionLeaseUnusable message)
-  Right (leaseDirectory, ownerPath) -> case missionDirectory store.missionStoreDirectory mission of
-    Left message -> pure (MissionLeaseUnusable message)
-    Right directory -> do
-      prepared <- ensureMissionDirectory directory
-      case prepared of
-        Left message -> pure (MissionLeaseUnusable ("could not prepare the mission directory: " <> message))
-        Right () -> attempt leaseDirectory ownerPath True
+acquireMissionLeaseWith holderPresence store mission =
+  withMissionRoot store mission MissionLeaseUnusable $ \root ->
+    case (,) <$> missionLeasePath root mission <*> missionLeaseOwnerPath root mission of
+      Left message -> pure (MissionLeaseUnusable message)
+      Right (leaseDirectory, ownerPath) -> case missionDirectory root mission of
+        Left message -> pure (MissionLeaseUnusable message)
+        Right directory -> do
+          prepared <- ensureMissionDirectory directory
+          case prepared of
+            Left message -> pure (MissionLeaseUnusable ("could not prepare the mission directory: " <> message))
+            Right () -> attempt leaseDirectory ownerPath True
   where
     attempt leaseDirectory ownerPath mayRetire = do
       created <- try @IOException (createDirectory leaseDirectory)
@@ -366,16 +369,17 @@ releaseMissionLease lease = do
 -- | The owner record of whatever holds a mission's lease, for a caller that
 -- wants to say who rather than to take it.
 readMissionLeaseOwner :: MissionStore -> MissionId -> IO (MissionRead MissionLeaseOwner)
-readMissionLeaseOwner store mission = case missionLeaseOwnerPath store.missionStoreDirectory mission of
-  Left message -> pure (MissionUnreadable message)
-  Right ownerPath ->
-    readMissionRecordFor
-      mission
-      [missionLeaseSchemaVersion]
-      store.missionStoreRepository
-      missionLeaseOwnerMission
-      missionLeaseOwnerRepository
-      ownerPath
+readMissionLeaseOwner store mission =
+  withMissionRoot store mission MissionUnreadable $ \root -> case missionLeaseOwnerPath root mission of
+    Left message -> pure (MissionUnreadable message)
+    Right ownerPath ->
+      readMissionRecordFor
+        mission
+        [missionLeaseSchemaVersion]
+        store.missionStoreRepository
+        missionLeaseOwnerMission
+        missionLeaseOwnerRepository
+        ownerPath
 
 newLeaseToken :: IO Text
 newLeaseToken = do

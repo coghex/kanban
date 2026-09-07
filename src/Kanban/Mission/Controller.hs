@@ -110,7 +110,7 @@ import Kanban.Mission.Lease
     acquireMissionLease,
     releaseMissionLease,
   )
-import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), missionDirectory, missionInvocationPath)
+import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), missionDirectory, missionInvocationPath, missionRoot)
 import Kanban.Mission.Reconcile
   ( MissionContinuation (..),
     MissionExternalWork (..),
@@ -385,56 +385,58 @@ startMissionController store repository mission buildDriver = do
           opened <- openMissionControl store mission
           case opened of
             Left detail -> releaseMissionLease lease >> pure (Left (MissionStoreUnusable detail))
-            Right endpoint -> case missionInvocationPath store.missionStoreDirectory mission of
-              Left detail -> releaseMissionLease lease >> pure (Left (MissionStoreUnusable detail))
-              Right invocationPath -> do
-                driver <- buildDriver store mission
-                -- 4: recorded workers, processes, provider sessions, and
-                -- invocation records.
-                inventoried <- driver.missionDriverInventory
-                invocations <- readMissionInvocations mission store.missionStoreRepository invocationPath
-                case (inventoried, invocations) of
-                  (Left detail, _) -> releaseMissionLease lease >> pure (Left (MissionStoreUnusable detail))
-                  (_, Left detail) -> releaseMissionLease lease >> pure (Left (MissionRecordUnreadable mission detail))
-                  (Right inventory, Right recorded) -> do
-                    reported <- newIORef Set.empty
-                    console <- newIORef []
-                    now <- getCurrentTime
-                    _ <-
-                      recordMissionEvent
-                        store
-                        ( missionEvent
-                            mission
-                            store.missionStoreRepository
-                            now
-                            "controller_started"
-                            ( Just
-                                ( "inventoried "
-                                    <> countOf inventory.missionInventoryMissions
-                                    <> " mission(s) and "
-                                    <> countOf inventory.missionInventoryWorkers
-                                    <> " worker(s); "
-                                    <> countOf (unresolvedMissionInvocations recorded)
-                                    <> " invocation(s) with no recorded outcome"
-                                )
-                            )
+            Right endpoint -> do
+              rooted <- missionRoot store mission
+              case rooted >>= \root -> missionInvocationPath root mission of
+                Left detail -> releaseMissionLease lease >> pure (Left (MissionStoreUnusable detail))
+                Right invocationPath -> do
+                  driver <- buildDriver store mission
+                  -- 4: recorded workers, processes, provider sessions, and
+                  -- invocation records.
+                  inventoried <- driver.missionDriverInventory
+                  invocations <- readMissionInvocations mission store.missionStoreRepository invocationPath
+                  case (inventoried, invocations) of
+                    (Left detail, _) -> releaseMissionLease lease >> pure (Left (MissionStoreUnusable detail))
+                    (_, Left detail) -> releaseMissionLease lease >> pure (Left (MissionRecordUnreadable mission detail))
+                    (Right inventory, Right recorded) -> do
+                      reported <- newIORef Set.empty
+                      console <- newIORef []
+                      now <- getCurrentTime
+                      _ <-
+                        recordMissionEvent
+                          store
+                          ( missionEvent
+                              mission
+                              store.missionStoreRepository
+                              now
+                              "controller_started"
+                              ( Just
+                                  ( "inventoried "
+                                      <> countOf inventory.missionInventoryMissions
+                                      <> " mission(s) and "
+                                      <> countOf inventory.missionInventoryWorkers
+                                      <> " worker(s); "
+                                      <> countOf (unresolvedMissionInvocations recorded)
+                                      <> " invocation(s) with no recorded outcome"
+                                  )
+                              )
+                          )
+                      pure
+                        ( Right
+                            MissionController
+                              { missionControllerStore = store,
+                                missionControllerMission = mission,
+                                missionControllerSpecification = specification,
+                                missionControllerLease = lease,
+                                missionControllerControl = endpoint,
+                                missionControllerDriver = driver,
+                                missionControllerInvocations = invocationPath,
+                                missionControllerInventory = inventory,
+                                missionControllerUnresolved = unresolvedMissionInvocations recorded,
+                                missionControllerConsole = console,
+                                missionControllerReported = reported
+                              }
                         )
-                    pure
-                      ( Right
-                          MissionController
-                            { missionControllerStore = store,
-                              missionControllerMission = mission,
-                              missionControllerSpecification = specification,
-                              missionControllerLease = lease,
-                              missionControllerControl = endpoint,
-                              missionControllerDriver = driver,
-                              missionControllerInvocations = invocationPath,
-                              missionControllerInventory = inventory,
-                              missionControllerUnresolved = unresolvedMissionInvocations recorded,
-                              missionControllerConsole = console,
-                              missionControllerReported = reported
-                            }
-                      )
   where
     countOf values = Text.pack (show (length values))
 
