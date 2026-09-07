@@ -1623,8 +1623,8 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   session editing a pull request of the other brand's origin would author a
   change and then hand it to its own brand to review.
 - **Preconditions:** the pull request must be approved under the caller's
-  effective `approval_mode` — `label` accepts the configured `approval_label`,
-  `review` accepts GitHub's own `reviewDecision`, `either` accepts both — the
+  effective `approval_mode` — `label` reads the configured `approval_label`,
+  `review` reads GitHub's own `reviewDecision`, `either` reads both — the
   same decision `approvedPullRequest` makes in `src/Kanban/Workflow.hs`. An
   unapproved pull request, one carrying the configured
   `changes_requested_label`, and one carrying a configured blocked label are
@@ -1633,6 +1633,39 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   deliberately works on unapproved and changes-requested pull requests too, and
   it is what keeps the workflow's remit to the gap between accepted work and
   the merge queue.
+- **Head-bound approval, an additional precondition of `fix` alone:**
+  `approvedPullRequest`'s label/`reviewDecision` predicate is the board's, and
+  it stays exactly that — the Done-column classification `docs/design.md`
+  documents as `classifyPullRequest`'s own verdict is unchanged, and nothing
+  here narrows it. `fix` requires more of the same pull request before it may
+  act, because it pushes a commit onto the head that predicate accepted: that
+  approval must additionally be bound to the CURRENT `headRefOid`. Neither a
+  label nor a `reviewDecision` names a commit, so a third-party push leaves
+  both reading green over unreviewed code. Under `label`, the attached approval
+  label stays necessary and the binding is the newest canonical `pr-review:v2`
+  (or legacy `pr-review:v1`) marker published by the authenticated login on the
+  complete paginated comment feed, chosen by creation time with the comment id
+  breaking ties, reading `verdict=APPROVE` at `head=<current headRefOid>` and
+  naming a `reviewers=` list that excludes the validated origin brand. Under
+  `review`, it is an effective, non-dismissed
+  `APPROVED` review — the newest opinionated review of its author — whose
+  `commit_id` is the current head; the aggregate `reviewDecision` alone and
+  unavailable commit attribution are both insufficient. Under `either`, the two
+  are evaluated independently and either binding suffices. Missing, unreadable,
+  malformed, or superseded evidence never falls back to an older approval. An
+  unbound approval is refused with nothing changed — no worktree, no repair,
+  no commit, no push, no rereview — and the refusal names the current head, the
+  head the approval belongs to or that the evidence names none, and the remedy:
+  a fresh canonical review of the current head for the `label` path, and a
+  native current-head approval on GitHub for the `review` path, which the
+  canonical coordinator cannot publish because it publishes a comment and
+  verdict labels instead. The workflow performs neither on its own initiative.
+  The same evidence is re-fetched and re-evaluated in the workflow's own
+  pre-push authority revalidation, because a verdict can be superseded or
+  dismissed without the head moving. This is the rule `tools/drain_prs.py`
+  already applies when it refuses `approved_head_changed`; #230's content-safe
+  approval carry is deliberately NOT reused, because its premise is a branch
+  update the drainer performed and observed, not an arbitrary third-party push.
 - **Outputs:** at most one focused commit pushed to the pull request's own head
   branch, followed by exactly one canonical rereview — on the same
   verified-head-advanced condition §2.7 states. Every other branch mutates
