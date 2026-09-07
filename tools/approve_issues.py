@@ -4473,7 +4473,13 @@ def main() -> None:
     # returned above without recording, and --self-test never gets here.
     # Best effort by construction; see record_reviewer_assignment for what the
     # gate does when the append does not land.
-    record_reviewer_assignment()
+    if not args.dry_run:
+        # --dry-run promises no writes, and this one is not incidental: an
+        # entry it appends establishes or closes a window that decides which
+        # existing approvals validate later, permanently. A dry run carrying an
+        # APPROVE_ISSUES_* override would record an assignment nothing ever
+        # reviewed with.
+        record_reviewer_assignment()
     try:
         effective_config_path = resolve_effective_config_path(args.config)
         raw_config, config_warnings = kanban_config.load_raw_config(effective_config_path)

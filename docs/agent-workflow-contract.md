@@ -387,8 +387,10 @@ arithmetic, which §2.3 owns.
     build cannot parse is `damaged`: a record existed and cannot be read, so
     the windows it would have supplied are unknown rather than empty, and every
     route but the current assignment is refused. A damaged file is never
-    overwritten by the next append, so repairing or removing it restores the
-    history rather than losing it. A second state refuses the same way: a
+    overwritten by the next append, so repairing the file restores the history
+    and removing it restores ACCEPTANCE -- a removed record reverts to the
+    prehistory rather than recovering what it held. A second state refuses the
+    same way: a
     newest recorded entry that is not the assignment this run is using, which
     is what a failed append looks like — left trusted, the previous
     assignment's window would still be open-ended and would accept its markers
@@ -452,7 +454,9 @@ arithmetic, which §2.3 owns.
       changes-requested barrier, records the message, and polls again at its
       ordinary interval, so adding a provider back resumes the service by
       itself. `--self-test` still runs, spawning no reviewer and answering no
-      gate question.
+      gate question. `--reviewer-ledger` still prints the record, with an
+      empty `current` — a mode that loads no provider resolves no assignment,
+      and records none rather than appending an entry naming nothing.
     A roster that is present and *unusable* is none of these three: it keeps
     the refusal above, naming the file and the defect. The two must never be
     reported as one — a defective file described to an operator as a
@@ -1880,7 +1884,7 @@ commands need.
 
 - **`tools/approve_issues.py`** is the tracked source of truth. A fresh
   checkout can run its `--self-test`, `--check`, `--review`, `--rereview`,
-  `--review-queue`, and `--reviewer-ledger`
+  `--review-queue`, `--reconcile-approvals`, and `--reviewer-ledger`
   paths directly, with no file beneath `~/work` or
   `~/.codex/skills/approve-issues/`. Its portable runtime locations — the
   install links under `~/Library/Application Support/kanban/issue-review/` on

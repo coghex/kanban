@@ -164,6 +164,9 @@ class PortableDefaultPathTests(unittest.TestCase):
 
 
 MODELS_TOML_EXAMPLE = REPO_ROOT / "models.toml.example"
+# A schema version past the one this build writes, for the fixtures that
+# stand in for a record written by a future build.
+REVIEWER_LEDGER_FUTURE_VERSION = 99
 
 # Every test that drives main() in-process reaches
 # `record_reviewer_assignment`, whose default target is the operator's real
@@ -347,12 +350,12 @@ class RosterBackedIssueGateTests(unittest.TestCase):
             module.accepted_reviewer_models([module.CODEX_REVIEWER]),
         )
 
-    def test_a_changed_assignment_makes_a_standing_marker_stale(self):
-        # Stale-approval reconciliation compares the recorded `models` field,
-        # so a roster edit invalidates standing approvals and forces rereview.
-        # That is the intended consequence, and it has to hold for an effort
-        # change as much as a model one -- while the deliberately retained
-        # legacy models keep validating.
+    def test_a_changed_assignment_keeps_what_was_canonical_and_refuses_the_rest(self):
+        # PR #626 replaced this case's original claim. A roster edit no longer
+        # invalidates the approvals standing under the assignment it replaces:
+        # what decides is whether the recorded pair was EVER canonical here,
+        # and (once the ledger has begun) whether the marker was written while
+        # it was. A pair that never ran here is still stale.
         default = self.backend()
         standing = default.reviewer_models([default.CODEX_REVIEWER])
 
@@ -1039,8 +1042,11 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
     def ledger_path(self):
         return self.root / "reviewer_ledger.json"
 
-    def write_ledger(self, entries, *, schema=None, version=None):
-        path = self.ledger_path()
+    def write_ledger(self, entries, *, schema=None, version=None, name=None):
+        # `name` is not a convenience: without it every fixture in one example
+        # writes the SAME file, so the last write wins and the earlier cases
+        # silently assert against somebody else's content.
+        path = self.ledger_path() if name is None else self.root / f"{name}.json"
         path.write_text(
             json.dumps(
                 {
@@ -1277,12 +1283,26 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             )
         )
 
+        corrupt = self.write_ledger([], name="damaged-corrupt")
+        corrupt.write_text("{not json", encoding="utf-8")
         damaged = {
-            "corrupt": self.write_ledger([]),
-            "foreign-version": self.write_ledger([], version=99),
-            "foreign-schema": self.write_ledger([], schema="something-else"),
+            "corrupt": corrupt,
+            "foreign-version": self.write_ledger(
+                [self.entry("2026-08-14T00:00:00Z", self.SOL_ERA)],
+                version=99,
+                name="damaged-version",
+            ),
+            "foreign-schema": self.write_ledger(
+                [self.entry("2026-08-14T00:00:00Z", self.SOL_ERA)],
+                schema="something-else",
+                name="damaged-schema",
+            ),
+            "unreadable-entries": self.write_ledger(
+                "not-a-list", name="damaged-entries"
+            ),
         }
-        damaged["corrupt"].write_text("{not json", encoding="utf-8")
+        # Each case is its own file, so each guard is genuinely reached.
+        self.assertEqual(len(set(damaged.values())), len(damaged))
         for label, path in damaged.items():
             with self.subTest(case=label):
                 status, entries = module.read_reviewer_ledger(path)
@@ -1412,6 +1432,66 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
         path = self.ledger_path()
         self.assertEqual(module.record_reviewer_assignment(path, cells={}), [])
         self.assertFalse(path.exists())
+
+    def test_a_foreign_versioned_record_survives_an_append(self):
+        # The version guard's own consequence, which the JSON-decode case
+        # cannot stand in for: a ledger written by a FUTURE build must not be
+        # replaced by this one, and must not fall back to the prehistory.
+        module = self.backend()
+        path = self.write_ledger(
+            [self.entry("2026-08-14T00:00:00Z", self.SOL_ERA)],
+            version=REVIEWER_LEDGER_FUTURE_VERSION,
+            name="future-version",
+        )
+        before = path.read_text(encoding="utf-8")
+        status, entries = module.read_reviewer_ledger(path)
+        self.assertEqual(status, module.LEDGER_DAMAGED)
+        module.record_reviewer_assignment(path)
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertFalse(
+            module.marker_models_accepted(
+                "gpt-5.6-terra@xhigh+claude-fable-5@xhigh",
+                "2026-01-01T00:00:00Z",
+                self.route(module, "codex+claude"),
+                entries=entries,
+                status=status,
+            )
+        )
+
+    def test_the_ledger_mode_is_in_the_mutual_exclusion_set(self):
+        # §2.3.1 states the exclusion; nothing held it.
+        script = REPO_ROOT / "tools" / "approve_issues.py"
+        refused = subprocess.run(
+            [sys.executable, str(script), "--reviewer-ledger", "--check", "5", "--json"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "XDG_CONFIG_HOME": str(self.config_home)},
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("--reviewer-ledger", refused.stderr)
+        self.assertIn("mutually exclusive", refused.stderr)
+
+    def test_a_dry_run_leaves_the_record_untouched(self):
+        # --dry-run promises no writes, and a ledger entry is not incidental:
+        # it establishes or closes a window that decides which existing
+        # approvals validate later.
+        script = REPO_ROOT / "tools" / "approve_issues.py"
+        install = self.root / "dry-run-install"
+        install.mkdir(parents=True, exist_ok=True)
+        ledger = install / "runtime" / "reviewer_ledger.json"
+        subprocess.run(
+            [sys.executable, str(script), "--path", str(self.root),
+             "--dry-run", "--once"],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "KANBAN_ISSUE_REVIEW_INSTALL_DIR": str(install),
+                "XDG_CONFIG_HOME": str(self.config_home),
+            },
+        )
+        self.assertFalse(ledger.exists(), "a dry run wrote the reviewer ledger")
 
     def test_a_damaged_ledger_is_never_overwritten_by_the_next_append(self):
         # An append-only record must not lose its history to a reader that
