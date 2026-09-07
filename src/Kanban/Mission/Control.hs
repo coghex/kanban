@@ -50,6 +50,7 @@ module Kanban.Mission.Control
     missionCommandAuthorityTag,
     MissionCommandPayload (..),
     missionCommandPayloadTag,
+    MissionCommandFile (..),
     MissionChildRequest (..),
     MissionSubmittedCommand (..),
     MissionCommandRejection (..),

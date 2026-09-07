@@ -54,6 +54,7 @@ module Kanban.Mission.Invocation
     recordMissionInvocation,
     concludeMissionInvocation,
     readMissionInvocations,
+    unattributableMissionInvocations,
   )
 where
 
@@ -420,26 +421,84 @@ readMissionInvocations mission repository path = do
                 )
         Just (Right (MissionInvocationClosed identity outcome _)) ->
           Right (Map.adjust (\state -> state {missionInvocationOutcome = Just outcome}) identity states, order)
-    decodeLine line = case eitherDecodeStrict' line of
-      Left message -> Just (Left ("an invocation record in " <> Text.pack path <> " will not decode: " <> Text.pack message))
-      Right value -> case value of
-        Object fields -> case fromJSON (Object fields) :: Result (MissionEnvelope Value) of
-          Error message -> Just (Left ("an invocation record in " <> Text.pack path <> " will not decode: " <> Text.pack message))
-          Success envelope
-            | envelope.missionEnvelopeSchemaVersion /= missionInvocationSchemaVersion -> Nothing
-            | otherwise -> case fromJSON envelope.missionEnvelopePayload :: Result MissionInvocationRecord of
-                Error message -> Just (Left ("an invocation record in " <> Text.pack path <> " will not decode: " <> Text.pack message))
-                Success record -> Just (belongsHere record)
-        _ -> Just (Left ("an invocation record in " <> Text.pack path <> " is not an object"))
+    decodeLine line = case classifyInvocationLine mission repository path line of
+      InvocationLineUnknownVersion -> Nothing
+      InvocationLineRefused message -> Just (Left message)
+      InvocationLineRecord record -> Just (Right record)
+
+-- | What one line of an invocation log turned out to be.
+--
+-- The three answers 'readMissionInvocations' and
+-- 'unattributableMissionInvocations' both need, decided in one place: one
+-- reader treats an unrecognized schema version as silence and the other treats
+-- it as a record whose owner it cannot establish, and two spellings of the
+-- decode would be two chances for those to stop describing the same file.
+data InvocationLine
+  = -- | Written under a schema version this release does not recognize.
+    InvocationLineUnknownVersion
+  | InvocationLineRefused Text
+  | InvocationLineRecord MissionInvocationRecord
+
+classifyInvocationLine :: MissionId -> MissionRepository -> FilePath -> ByteString.ByteString -> InvocationLine
+classifyInvocationLine mission repository path line = case eitherDecodeStrict' line of
+  Left message -> willNotDecode (Text.pack message)
+  Right value -> case value of
+    Object fields -> case fromJSON (Object fields) :: Result (MissionEnvelope Value) of
+      Error message -> willNotDecode (Text.pack message)
+      Success envelope
+        | envelope.missionEnvelopeSchemaVersion /= missionInvocationSchemaVersion -> InvocationLineUnknownVersion
+        | otherwise -> case fromJSON envelope.missionEnvelopePayload :: Result MissionInvocationRecord of
+            Error message -> willNotDecode (Text.pack message)
+            Success record -> belongsHere record
+    _ -> InvocationLineRefused ("an invocation record in " <> Text.pack path <> " is not an object")
+  where
+    willNotDecode message =
+      InvocationLineRefused ("an invocation record in " <> Text.pack path <> " will not decode: " <> message)
     belongsHere record@(MissionInvocationOpened invocation)
       | invocation.missionInvocationMission /= mission =
-          Left
+          InvocationLineRefused
             ( "an invocation record in "
                 <> Text.pack path
                 <> " belongs to mission "
                 <> invocation.missionInvocationMission.unMissionId
             )
       | not (missionRepositoryMatches repository invocation.missionInvocationRepository) =
-          Left ("an invocation record in " <> Text.pack path <> " belongs to another repository")
-      | otherwise = Right record
-    belongsHere record = Right record
+          InvocationLineRefused ("an invocation record in " <> Text.pack path <> " belongs to another repository")
+      | otherwise = InvocationLineRecord record
+    belongsHere record = InvocationLineRecord record
+
+-- | Every record in an invocation log whose owner this release cannot
+-- establish: one that will not decode, one that names another mission or
+-- another repository, and — unlike every ordinary read — one written under a
+-- schema version this release does not recognize.
+--
+-- That last one is the difference from 'readMissionInvocations', and it is
+-- deliberate. A reader that skips a record it cannot decode goes on to read
+-- the ones it can, which is §16's rule and right. A caller about to /remove/
+-- the file cannot treat the same silence as permission: the record it cannot
+-- read may be another repository's, and under the ambiguous pre-#615 root it
+-- may well be.
+unattributableMissionInvocations :: MissionId -> MissionRepository -> FilePath -> IO (Either Text [Text])
+unattributableMissionInvocations mission repository path = do
+  contentResult <- try @IOException (ByteString.readFile path)
+  pure $ case contentResult of
+    Left exception
+      | isDoesNotExistError exception -> Right []
+      | otherwise -> Left (Text.pack (show exception))
+    Right content ->
+      Right
+        [ reason
+          | line <- fst (consumeJournalLines 0 content),
+            Just reason <- [unattributable (classifyInvocationLine mission repository path line)]
+        ]
+  where
+    unattributable line = case line of
+      InvocationLineUnknownVersion ->
+        Just
+          ( "an invocation record in "
+              <> Text.pack path
+              <> " was written under a schema version this release does not recognize,"
+              <> " so whose record it is cannot be established"
+          )
+      InvocationLineRefused message -> Just message
+      InvocationLineRecord _ -> Nothing

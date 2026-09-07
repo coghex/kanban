@@ -69,6 +69,11 @@ module Kanban.Mission.Paths
     ensureMissionDirectory,
     listMissionEntries,
     isPlainDirectory,
+    MissionEntry (..),
+    missionEntryAt,
+    missionStagingMarker,
+    missionLeaseReleasedMarker,
+    missionLeaseRetiredMarker,
     ignoreFileOperation,
   )
 where
@@ -365,10 +370,19 @@ missionRoot store mission =
     Right (ownDirectory, legacyDirectory) -> do
       -- The common case costs one non-following stat: a repository with no
       -- legacy history reads nothing at all.
-      legacyPresent <- isPlainDirectory legacyDirectory
-      if not legacyPresent
-        then pure (Right store.missionStoreDirectory)
-        else do
+      --
+      -- Absence is the /only/ answer that routes past the legacy root. A stat
+      -- that could not be taken, and an entry present without being a
+      -- directory this store could have written, both refuse: reading either
+      -- as \"there is nothing there\" would address the new root, and a second
+      -- mission — with a second advancement lease — could then be created
+      -- beside history nobody could see.
+      legacyPresence <- missionEntryAt legacyDirectory
+      case legacyPresence of
+        MissionEntryUndecidable reason -> pure (Left (undecidable legacyDirectory reason))
+        MissionEntryOther -> pure (Left (undecidable legacyDirectory notADirectory))
+        MissionEntryAbsent -> pure (Right store.missionStoreDirectory)
+        MissionEntryDirectory -> do
           claim <- legacyMissionClaim store.missionStoreRepository mission store.missionStoreLegacyDirectory
           case claim of
             -- Another repository's mission that happens to share this
@@ -378,12 +392,22 @@ missionRoot store mission =
             LegacyForeign -> pure (Right store.missionStoreDirectory)
             LegacyUnattributable reason -> pure (Left (unattributable legacyDirectory reason))
             LegacyOurs -> do
-              ownPresent <- isPlainDirectory ownDirectory
-              pure $
-                if ownPresent
-                  then Left (bothPlaces ownDirectory legacyDirectory)
-                  else Right store.missionStoreLegacyDirectory
+              ownPresence <- missionEntryAt ownDirectory
+              pure $ case ownPresence of
+                MissionEntryUndecidable reason -> Left (undecidable ownDirectory reason)
+                MissionEntryOther -> Left (undecidable ownDirectory notADirectory)
+                MissionEntryDirectory -> Left (bothPlaces ownDirectory legacyDirectory)
+                MissionEntryAbsent -> Right store.missionStoreLegacyDirectory
   where
+    notADirectory = "it is not a directory this store could have written"
+    undecidable directory reason =
+      "mission "
+        <> mission.unMissionId
+        <> ": whether "
+        <> Text.pack directory
+        <> " holds this mission's history could not be established ("
+        <> reason
+        <> "), and nothing was read, written, or routed past it"
     unattributable directory reason =
       "mission "
         <> mission.unMissionId
@@ -439,7 +463,9 @@ data LegacyClaim
 -- one to decide where a mission lives would make the cheapest operation in the
 -- store cost the whole of its history. Nothing is lost by it: a journal line
 -- or a seal written for another repository is refused by the identity check
--- every read of one already applies.
+-- every read of one already applies, and the one operation that /removes/ a
+-- record without reading it — 'Kanban.Mission.Store.deleteMission' — accounts
+-- for all of them itself before it removes anything.
 legacyMissionClaim :: MissionRepository -> MissionId -> FilePath -> IO LegacyClaim
 legacyMissionClaim expected mission root =
   case (,,) <$> missionSpecificationPath root mission
@@ -485,25 +511,44 @@ legacyEvidence ::
   IO (Maybe (Either Text MissionRepository))
 legacyEvidence mission version recordedMission recordedRepository path = do
   result <- readMissionRecord mission [version] path
-  pure $ case result of
-    -- Absent, and — by §16's rule — a version this release does not
-    -- recognize. Silence there is what it always is: this record says nothing
-    -- about who owns the mission, and the other two are asked instead. A
-    -- mission whose every record is silent is unattributable, which is where
-    -- that case is caught.
-    MissionAbsent -> Nothing
-    MissionUnreadable reason -> Just (Left reason)
-    MissionRefused reason -> Just (Left reason)
-    MissionPresent value
-      | recordedMission value /= mission ->
+  case result of
+    -- 'MissionAbsent' is two different answers here, and telling them apart is
+    -- the whole of this branch. A file that is not there says nothing, and the
+    -- other records are asked instead. A file that /is/ there and read as
+    -- absent was written under a schema version this release does not
+    -- recognize — §16's silence, which is right for a read and wrong for a
+    -- question about ownership: a record written for another repository under
+    -- a later schema would otherwise leave this mission looking like ours, and
+    -- a snapshot write would then replace it. So a present record this release
+    -- cannot decide about makes the mission unattributable.
+    MissionAbsent -> do
+      presence <- missionEntryAt path
+      pure $ case presence of
+        MissionEntryAbsent -> Nothing
+        MissionEntryUndecidable reason ->
+          Just (Left ("whether " <> Text.pack path <> " is there could not be established (" <> reason <> ")"))
+        _ ->
           Just
             ( Left
                 ( Text.pack path
-                    <> " records the mission "
-                    <> (recordedMission value).unMissionId
+                    <> " was written under a schema version this release does not recognize,"
+                    <> " so whose record it is cannot be established"
                 )
             )
-      | otherwise -> Just (Right (recordedRepository value))
+    MissionUnreadable reason -> pure (Just (Left reason))
+    MissionRefused reason -> pure (Just (Left reason))
+    MissionPresent value
+      | recordedMission value /= mission ->
+          pure
+            ( Just
+                ( Left
+                    ( Text.pack path
+                        <> " records the mission "
+                        <> (recordedMission value).unMissionId
+                    )
+                )
+            )
+      | otherwise -> pure (Just (Right (recordedRepository value)))
 
 -- | The legacy root's missions that this repository's own records claim.
 --
@@ -524,16 +569,61 @@ adoptedLegacyMissions store = do
           claim <- legacyMissionClaim store.missionStoreRepository mission store.missionStoreLegacyDirectory
           pure (claim == LegacyOurs)
 
+-- | What is at a path, in the answers a decision can act on.
+--
+-- Four rather than two, and the fourth is the point. A boolean \"is this a
+-- directory?\" has to answer /something/ when the question cannot be asked at
+-- all — a permission the store lost, an I\/O error, a filesystem that went
+-- away — and whichever way it answers, it has turned \"I could not find out\"
+-- into a fact. Here that case keeps its own answer and its own diagnostic, so
+-- a caller that must fail closed can.
+--
+-- The stat does not follow links, deliberately: a symbolic link pointing at
+-- somewhere else on the filesystem, a socket, a stray file — none of them is a
+-- mission this store wrote, and following one is the difference between
+-- reading what the store holds and being pointed anywhere by whatever wrote a
+-- name into it.
+data MissionEntry
+  = MissionEntryAbsent
+  | MissionEntryDirectory
+  | -- | Present, and not a directory in its own right.
+    MissionEntryOther
+  | -- | The question could not be answered.
+    MissionEntryUndecidable Text
+  deriving stock (Eq, Show)
+
+missionEntryAt :: FilePath -> IO MissionEntry
+missionEntryAt path = do
+  status <- try @IOException (getSymbolicLinkStatus path)
+  pure $ case status of
+    Right entry
+      | isDirectory entry -> MissionEntryDirectory
+      | otherwise -> MissionEntryOther
+    Left exception
+      | isDoesNotExistError exception -> MissionEntryAbsent
+      | otherwise -> MissionEntryUndecidable (Text.pack (show exception))
+
 -- | Whether a path is a directory in its own right rather than a link to one.
 --
--- A non-following stat, deliberately: a symbolic link pointing at somewhere
--- else on the filesystem, a socket, a stray file — each is not a mission, and
--- following one is the difference between reading what the store holds and
--- being pointed anywhere by whatever wrote a name into it.
+-- The enumerating half of 'missionEntryAt', for the callers filtering a
+-- listing rather than deciding where a mission lives: an entry that cannot be
+-- statted is not one a listing can report, and every caller that must fail
+-- closed asks 'missionEntryAt' instead.
 isPlainDirectory :: FilePath -> IO Bool
-isPlainDirectory path = do
-  status <- try @IOException (getSymbolicLinkStatus path)
-  pure (either (const False) isDirectory status)
+isPlainDirectory path = (== MissionEntryDirectory) <$> missionEntryAt path
+
+-- | The three names this store writes that are not records: a file staged for
+-- a write interrupted before its commit, and a lease directory moved aside on
+-- its way out by a release or a retirement.
+--
+-- Declared here, with every other path shape, because two modules produce them
+-- and a third has to recognize them: "Kanban.Mission.Store"'s delete accounts
+-- for every entry in a mission's directory, and a marker spelled twice would
+-- make an entry one module wrote another one's stray.
+missionStagingMarker, missionLeaseReleasedMarker, missionLeaseRetiredMarker :: String
+missionStagingMarker = ".staged-"
+missionLeaseReleasedMarker = ".released-"
+missionLeaseRetiredMarker = ".retired-"
 
 -- | Creates a mission's directory with @0700@ on every level below the XDG
 -- state root, whatever the umask and whichever writer created it first.
@@ -699,7 +789,7 @@ openPrivateStagingFile :: FilePath -> IO (FilePath, Handle)
 openPrivateStagingFile path = do
   processId <- getProcessID
   now <- getCurrentTime
-  attempt (path <> ".staged-" <> show processId <> "-" <> stamp now) (0 :: Int)
+  attempt (path <> missionStagingMarker <> show processId <> "-" <> stamp now) (0 :: Int)
   where
     stamp = filter (`notElem` ("-:. TZ" :: String)) . show
     attempt base attemptsMade = do

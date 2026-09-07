@@ -29,6 +29,7 @@ module Spec.Mission (spec) where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (bracket_)
 import Control.Monad (forM_, void)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteStringChar
@@ -42,6 +43,7 @@ import Kanban.Mission
   ( MissionArchiveState (..),
     MissionAttention (..),
     MissionAutonomy (MissionConfirmOnAmbiguity),
+    MissionCommandPayload (MissionResumeCommand),
     MissionCreation (..),
     MissionDecisionPolicy (..),
     MissionDispositionRefusal (..),
@@ -101,6 +103,8 @@ import Kanban.Mission
     missionSessionDisposition,
     missionSessionTreeErrorMessage,
     missionStepLifecycleIsTerminal,
+    openMissionControl,
+    submitMissionCommand,
     missionStepLifecycleTag,
     missionStepLifecycles,
     missionStoreRoot,
@@ -144,6 +148,8 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import System.FilePath (takeDirectory, (</>))
 import System.Environment (getEnv)
 import System.Posix.Files (createSymbolicLink, setFileMode)
+import System.Posix.Types (FileMode)
+import System.Posix.User (getRealUserID)
 import System.Posix.Process (getProcessID)
 import System.Process (createProcess, getPid, proc, waitForProcess)
 import Test.Hspec
@@ -705,7 +711,7 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
             directory = ambiguous </> "mission-0001"
         writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
         void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
-        stage root directory (rerootedStore ambiguous name)
+        stage root directory (rerootedStore ambiguous owner) (rerootedStore ambiguous name)
         -- Attribution still reads this mission as this repository's: its
         -- specification, snapshot and lease owner all say so, which is exactly
         -- why the delete has to look further than they do.
@@ -727,6 +733,62 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
       void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
       void (expectRight =<< deleteMission owner theMission)
       doesDirectoryExist (ambiguous </> "mission-0001") `shouldReturn` False
+
+  it "is refused when the legacy entry is present without being a directory this store could have written" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      createDirectoryIfMissing True ambiguous
+      -- Something is at the identifier's legacy path, and it is not a mission
+      -- directory. Reading that as absence would address the new root and
+      -- create a second mission — with a second advancement lease — beside
+      -- whatever this is.
+      ByteString.writeFile (ambiguous </> "mission-0001") (ByteStringChar.pack "not a mission directory")
+      created <- createMissionSpecification owner (specificationFor splitOwner theMission "should not be created")
+      case created of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "could not be established"
+        Right outcome -> expectationFailure ("expected a refusal, got " <> show outcome)
+      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` False
+      listMissions owner `shouldReturn` []
+
+  it "is refused when whether the legacy directory is there cannot be established at all" $
+    withCollidingStores $ \root owner _ -> do
+      user <- getRealUserID
+      if user == 0
+        then pendingWith "a superuser is not stopped by a directory mode"
+        else do
+          let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+          writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+          created <-
+            withMode ambiguous 0o000 $
+              createMissionSpecification owner (specificationFor splitOwner theMission "should not be created")
+          case created of
+            Left message -> Text.unpack message `shouldSatisfy` isInfixOf "could not be established"
+            Right outcome -> expectationFailure ("expected a refusal, got " <> show outcome)
+          -- The legacy history is still where it was, and nothing was started
+          -- under the new root in its place.
+          doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` False
+          kept <- expectPresent =<< readMissionSpecification owner theMission
+          kept.missionSpecificationRequest `shouldBe` "under the ambiguous root"
+
+  it "is refused when a record sitting there was written under a schema version this release does not recognize" $
+    withCollidingStores $ \root owner name -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+          directory = ambiguous </> "mission-0001"
+      void (expectRight =<< createMissionSpecification (rerootedStore ambiguous owner) (specificationFor splitOwner theMission "the owner's specification"))
+      void (expectRight =<< writeMissionSnapshot (rerootedStore ambiguous name) (snapshotIn splitName theMission))
+      -- The other repository's snapshot, as a later release will leave it: the
+      -- payload its writer produced, under a version this one cannot decide
+      -- about. Reading that silence as \"no record\" would leave the owner's
+      -- specification the only evidence, and the mission adopted.
+      laterRelease (directory </> "snapshot.json")
+      beforehand <- inventoryOf directory
+      written <- writeMissionSnapshot owner (completedIn splitOwner theMission)
+      case written of
+        Left message -> Text.unpack message `shouldSatisfy` isInfixOf "does not recognize"
+        Right () -> expectationFailure "expected the write to be refused"
+      listMissions owner `shouldReturn` []
+      afterwards <- inventoryOf directory
+      afterwards `shouldBe` beforehand
 
   it "is refused when the same mission has records under both roots, and neither copy is touched" $
     withCollidingStores $ \root owner _ -> do
@@ -793,30 +855,99 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
 -- through a store rooted at the shared directory for the other repository,
 -- which is exactly how the release before #615 produced one.
 --
--- Each entry is given the scratch root, the mission's own directory, and that
--- other repository's store.
-unprovenRecords :: [(String, FilePath -> FilePath -> MissionStore -> IO ())]
+-- Each entry is given the scratch root, the mission's own directory, this
+-- repository's store rooted at the shared directory, and the other
+-- repository's store rooted there.
+unprovenRecords :: [(String, FilePath -> FilePath -> MissionStore -> MissionStore -> IO ())]
 unprovenRecords =
   [ ( "another repository's journal event",
-      \_ _ foreignStore ->
+      \_ _ _ foreignStore ->
         void (expectRight =<< recordMissionEvent foreignStore (eventIn splitName theMission "the other repository's"))
     ),
     ( "another repository's sealed archive",
-      \root _ foreignStore -> do
+      \root _ _ foreignStore -> do
         let source = root </> "the-other-repository.log"
         ByteString.writeFile source (ByteStringChar.pack "the other repository's stream\n")
         void (expectRight =<< sealMissionLog foreignStore theMission (MissionSessionId "session-b") MissionEventStreamLog source)
     ),
     ( "another repository's invocation opening",
-      \_ _ foreignStore -> do
+      \_ _ _ foreignStore -> do
         path <- expectRight (missionInvocationPath foreignStore.missionStoreDirectory theMission)
         void (expectRight =<< recordMissionInvocation path (invocationIn splitName theMission))
     ),
     ( "a journal line that will not decode",
-      \_ directory _ ->
+      \_ directory _ _ ->
         ByteString.appendFile (directory </> "events.jsonl") (ByteStringChar.pack "not a record at all\n")
+    ),
+    -- Everything below is a record a later release wrote, or one this store
+    -- left in a shape it cannot vouch for. A read passes over each of them in
+    -- silence, which is §16's rule and right; a delete may not take that
+    -- silence for permission to destroy it.
+    ( "a journal record written under a schema version this release does not recognize",
+      \_ directory _ _ -> laterRelease (directory </> "events.jsonl")
+    ),
+    ( "an invocation record written under a schema version this release does not recognize",
+      \_ directory ownStore _ -> do
+        path <- expectRight (missionInvocationPath ownStore.missionStoreDirectory theMission)
+        void (expectRight =<< recordMissionInvocation path (invocationIn splitOwner theMission))
+        laterRelease (directory </> "invocations.jsonl")
+    ),
+    ( "a seal record written under a schema version this release does not recognize",
+      \root directory ownStore _ -> do
+        let source = root </> "sealed-by-a-later-release.log"
+        ByteString.writeFile source (ByteStringChar.pack "a child's stream\n")
+        sealed <- expectRight =<< sealMissionLog ownStore theMission (MissionSessionId "session-a") MissionEventStreamLog source
+        laterRelease (directory </> "archive" </> Text.unpack (Text.replace ".log" ".seal.json" (Text.pack sealed.missionSealedName)))
+    ),
+    ( "an archived copy with no seal beside it",
+      \root directory ownStore _ -> do
+        let source = root </> "interrupted.log"
+        ByteString.writeFile source (ByteStringChar.pack "a child's stream\n")
+        sealed <- expectRight =<< sealMissionLog ownStore theMission (MissionSessionId "session-a") MissionEventStreamLog source
+        removeFile (directory </> "archive" </> Text.unpack (Text.replace ".log" ".seal.json" (Text.pack sealed.missionSealedName)))
+    ),
+    ( "a submitted command written under a schema version this release does not recognize",
+      \_ directory ownStore _ -> do
+        submitCommand ownStore "resume-0001"
+        laterRelease (directory </> "control" </> "requests" </> "resume-0001.json")
+    ),
+    ( "a submitted command addressed to another mission",
+      \_ directory _ foreignStore -> do
+        elsewhere <- expectRight =<< openMissionControl foreignStore (MissionId "mission-elsewhere")
+        void (expectRight =<< submitMissionCommand elsewhere "resume-0002" MissionResumeCommand)
+        createDirectoryIfMissing True (directory </> "control" </> "requests")
+        renameFile
+          (foreignStore.missionStoreDirectory </> "mission-elsewhere" </> "control" </> "requests" </> "resume-0002.json")
+          (directory </> "control" </> "requests" </> "resume-0002.json")
     )
   ]
+
+-- | Submits one ordinary command to a mission, through the endpoint a run
+-- opens for it.
+submitCommand :: MissionStore -> Text -> IO ()
+submitCommand store commandId = do
+  endpoint <- expectRight =<< openMissionControl store theMission
+  void (expectRight =<< submitMissionCommand endpoint commandId MissionResumeCommand)
+
+-- | Runs @action@ with @path@ at @mode@, restoring a private mode afterwards
+-- so the temporary tree can still be cleared up.
+withMode :: FilePath -> FileMode -> IO result -> IO result
+withMode path mode action = bracket_ (setFileMode path mode) (setFileMode path 0o700) action
+
+-- | Rewrites a record's schema version to one this release does not
+-- recognize, leaving the payload its writer produced exactly as it was.
+--
+-- That is what a record a later release wrote looks like from here, and the
+-- version is the only part of it a test running today can produce. Every line
+-- of a journal is rewritten, since a file is what a delete removes.
+laterRelease :: FilePath -> IO ()
+laterRelease path = do
+  existing <- ByteString.readFile path
+  ByteString.writeFile
+    path
+    ( TextEncoding.encodeUtf8
+        (Text.replace "\"schemaVersion\":1" "\"schemaVersion\":9999" (TextEncoding.decodeUtf8 existing))
+    )
 
 -- | One opening invocation record, for whichever repository and mission.
 invocationIn :: MissionRepository -> MissionId -> MissionInvocation

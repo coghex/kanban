@@ -63,6 +63,8 @@ import Kanban.Mission.Paths
     missionDirectory,
     missionLeaseOwnerPath,
     missionLeasePath,
+    missionLeaseReleasedMarker,
+    missionLeaseRetiredMarker,
     readMissionRecordFor,
     withMissionRoot,
     writeMissionRecord,
@@ -251,7 +253,7 @@ acquireMissionLeaseWith holderPresence store mission =
                       -- move that loses to another retirer is not an error;
                       -- the retry below settles which of them acquires.
                       retiring <- newLeaseToken
-                      let retiredPath = leaseDirectory <> ".retired-" <> Text.unpack retiring
+                      let retiredPath = leaseDirectory <> missionLeaseRetiredMarker <> Text.unpack retiring
                       moved <- try @IOException (renameDirectory leaseDirectory retiredPath)
                       case moved of
                         Left _ -> pure ()
@@ -336,7 +338,7 @@ releaseMissionLease lease = do
     -- Named for the acquisition rather than the mission, so two acquisitions
     -- can never contend for one aside directory and a leftover from a release
     -- that was interrupted cannot block a later one.
-    asidePath = lease.missionLeaseDirectory <> ".released-" <> Text.unpack lease.missionLeaseToken
+    asidePath = lease.missionLeaseDirectory <> missionLeaseReleasedMarker <> Text.unpack lease.missionLeaseToken
 
     readOwner path =
       readMissionRecordFor
