@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -44,10 +46,30 @@ VERDICT_LABEL_SPECS = {
     ),
 }
 DEFAULT_INTERVAL_SECONDS = 60
-# The accepted-marker model set, and the one part of this file's model
-# vocabulary the roster has no words for. These are not spawn values: they are
-# what keeps historical review markers validating across a default change
-# (accepted_reviewer_models below), so they stay literal by design.
+# Every issue-gate model this build has ever shipped as canonical, per
+# provider, newest retirement first. These are not spawn values and the roster
+# has no words for them: they are what lets a review marker published before
+# this machine started keeping a reviewer ledger still validate, so they stay
+# literal by design.
+#
+# This list is the PREHISTORY only. It answers for markers older than the
+# ledger's first recorded assignment change and nothing else -- once the ledger
+# has an observed entry, a retired model is trusted inside its recorded window
+# rather than forever. Names are only ever added: dropping one retires every
+# standing approval recorded under it, which is exactly the churn PR #626
+# removed.
+# Recorded as `model@effort` cells, not bare model names. The effort is half
+# the assignment and half of what a marker's `models=` field spells, so a
+# prehistory that rendered these at whatever effort the install runs TODAY
+# would go stale the moment an operator changed the effort alone -- retiring
+# every pre-ledger approval for a reason that has nothing to do with the model
+# that reviewed it.
+RETIRED_REVIEWER_CELLS: dict[str, tuple[str, ...]] = {
+    "codex": ("gpt-5.6-sol@xhigh", "gpt-5.6-terra@xhigh", "gpt-5.5@xhigh"),
+    "claude": ("claude-opus-5@xhigh", "claude-fable-5@xhigh"),
+}
+# Retained spellings for the three this file named individually before the
+# table above existed.
 LEGACY_CODEX_MODEL = "gpt-5.6-terra"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
 LEGACY_CLAUDE_MODEL = "claude-fable-5"
@@ -113,10 +135,13 @@ def gate_effort(provider: str, variable: str) -> str:
     return assignment.effort if assignment else UNRESOLVED_ASSIGNMENT_VALUE
 
 
-# The current canonical reviewer assignment, per provider. Both the published
-# marker's `models=` field and accepted_reviewer_models' "current" route read
-# these, so a roster or environment edit both changes what runs and retires the
-# standing approvals recorded under the old assignment.
+# The current canonical reviewer assignment, per provider. The published
+# marker's `models=` field and 'marker_models_accepted''s rule 1 both read
+# these, so a roster or environment edit changes what runs -- and, since PR #626,
+# does NOT retire the approvals standing under the assignment it replaces.
+# Those are carried forward by the reviewer ledger's window for the assignment
+# in force the day each marker was written; see 'marker_models_accepted' and
+# docs/agent-workflow-contract.md §2.3.1.
 PRIMARY_CODEX_MODEL = gate_model("codex", "APPROVE_ISSUES_CODEX_MODEL")
 CODEX_EFFORT = gate_effort("codex", "APPROVE_ISSUES_CODEX_EFFORT")
 PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")
@@ -142,6 +167,12 @@ INSTALL_DIR = kanban_config.issue_review_install_dir()
 DEFAULT_LOG_DIR = kanban_config.default_issue_review_log_dir()
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
+# PR #626: the append-only record of which models have been THE canonical
+# issue-gate assignment on this install, and from when. Derived here beside the
+# incident directory rather than spelled in kanban_config, for the same reason
+# that one is: both are this backend's own runtime state under the one managed
+# install directory kanban_config resolves.
+REVIEWER_LEDGER_PATH = RUNTIME_DIR / "reviewer_ledger.json"
 INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 # Optional: unset by default. No private endpoint ships as a tracked default
 # (docs/agent-workflow-contract.md §5); a reviewer-model failure or a
@@ -150,6 +181,23 @@ INSTALLED_CONFIG_REFERENCE_PATH = INSTALL_DIR / "config.json"
 NTFY_URL = os.environ.get("KANBAN_ISSUE_REVIEW_NTFY_URL")
 MAX_CONSECUTIVE_QUEUE_FAILURES = 3
 PIPELINE_INCIDENT_DIR = DEFAULT_INCIDENT_DIR
+
+# The reviewer ledger's own schema, versioned like every other bounded document
+# this backend writes so a reader can refuse one it was not built for. A
+# foreign version reads as LEDGER_DAMAGED -- deliberately NOT as "no ledger",
+# which is LEDGER_MISSING and the only state that bootstraps: see
+# read_reviewer_ledger for why a record that exists but cannot be read fails
+# CLOSED.
+REVIEWER_LEDGER_SCHEMA = "approve-issues-reviewer-ledger"
+REVIEWER_LEDGER_VERSION = 1
+# How much this run can trust the record, which is NOT the same question as
+# whether it could be parsed. An absent ledger is the fresh-install path and
+# the only absence that may bootstrap from the compiled prehistory; a present
+# one this build cannot read is evidence that a record existed, so the windows
+# it would have supplied are unknown rather than empty.
+LEDGER_MISSING = "missing"
+LEDGER_INTACT = "intact"
+LEDGER_DAMAGED = "damaged"
 
 # The one bounded document --review-queue writes to stdout, versioned the same
 # way tools/drain_prs.py versions its single-PR result so a controller can
@@ -860,40 +908,439 @@ def reviewer_models_for_route(
     return "+".join(f"{models[item.key]}@{item.effort}" for item in reviewers)
 
 
-def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
-    """Allow the canonical route plus historical reviewer-model routes."""
-    return {
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=PRIMARY_CODEX_MODEL,
-            claude_model=PRIMARY_CLAUDE_MODEL,
-        ),
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=FALLBACK_CODEX_MODEL,
-            claude_model=LEGACY_CLAUDE_MODEL,
-        ),
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=PRIMARY_CODEX_MODEL,
-            claude_model=LEGACY_CLAUDE_MODEL,
-        ),
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=FALLBACK_CODEX_MODEL,
-            claude_model=PRIMARY_CLAUDE_MODEL,
-        ),
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=LEGACY_CODEX_MODEL,
-            claude_model=PRIMARY_CLAUDE_MODEL,
-        ),
-        reviewer_models_for_route(
-            reviewers,
-            codex_model=LEGACY_CODEX_MODEL,
-            claude_model=LEGACY_CLAUDE_MODEL,
-        ),
+def reviewer_models_from_cells(
+    reviewers: list[Reviewer], cells: dict[str, str]
+) -> str | None:
+    """Render a marker `models=` route from one ledger entry's cells.
+
+    `None` when the entry does not name every provider the route needs, which
+    is how an entry written by a build with a different provider set is
+    ignored rather than half-read.
+    """
+    rendered: list[str] = []
+    for item in reviewers:
+        cell = cells.get(item.key)
+        if not cell:
+            return None
+        rendered.append(cell)
+    return "+".join(rendered)
+
+
+def current_reviewer_cells() -> dict[str, str]:
+    """This run's canonical issue-gate assignment, one `model@effort` cell per
+    provider. What a marker published now records, and what the ledger appends
+    when it changes."""
+    cells = {
+        CODEX_REVIEWER.key: f"{PRIMARY_CODEX_MODEL}@{CODEX_EFFORT}",
+        CLAUDE_REVIEWER.key: f"{PRIMARY_CLAUDE_MODEL}@{CLAUDE_EFFORT}",
     }
+    # Keyed on the LOADED provider set, not merely on whether the cell
+    # resolved. `gate_model`/`gate_effort` answer an APPROVE_ISSUES_* override
+    # BEFORE consulting the roster, so a no-agent or single-agent install whose
+    # operator has those variables set would otherwise report -- and record --
+    # an assignment for a provider that cannot run a reviewer at all, creating
+    # a window for something no marker could ever name. The unresolved-value
+    # filter stays behind it for the loaded-but-unvalued case.
+    return {
+        key: cell
+        for key, cell in cells.items()
+        if key in LOADED_PROVIDERS and UNRESOLVED_ASSIGNMENT_VALUE not in cell
+    }
+
+
+def prehistoric_reviewer_cells(reviewer: Reviewer) -> set[str]:
+    """Every `model@effort` cell one reviewer's half of a prehistoric route may
+    spell: this run's own assignment, each retired cell at the effort it
+    actually ran, and each retired model at the effort this install runs now.
+
+    The last of those keeps the behaviour this file had before the cells
+    carried efforts, so an operator whose effort differs from the recorded one
+    does not lose their history to this change.
+    """
+    cells = {f"{reviewer.model}@{reviewer.effort}"}
+    for cell in RETIRED_REVIEWER_CELLS.get(reviewer.key, ()):
+        cells.add(cell)
+        cells.add(f"{cell.split('@', 1)[0]}@{reviewer.effort}")
+    return cells
+
+
+def prehistoric_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
+    """Every route this build recognizes WITHOUT consulting a date.
+
+    The cross product of each reviewer's cells above. Deliberately the cross
+    product rather than ordered pairs: this file never recorded which codex
+    model was canonical alongside which claude one, and inventing an order now
+    would retire approvals that were genuinely canonical.
+
+    Reachable only for markers older than the ledger's first observed entry --
+    'marker_models_accepted' is what enforces that, and is the only caller that
+    should exist.
+    """
+    routes = {""}
+    for reviewer in reviewers:
+        routes = {
+            f"{prefix}+{cell}" if prefix else cell
+            for prefix in routes
+            for cell in prehistoric_reviewer_cells(reviewer)
+        }
+    return routes - {""}
+
+
+def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
+    """Every route accepted without a date: the canonical one and the
+    prehistory behind it.
+
+    Not a gate: nothing in production decides a verdict from this. The gate
+    goes through 'marker_models_accepted', which is strictly narrower -- it
+    consults the marker's own date, the ledger's windows, and how far the
+    record can be trusted. This is the dateless view the tests and diagnostics
+    read to state what the prehistory contains.
+    """
+    return prehistoric_reviewer_models(reviewers)
+
+
+def parse_ledger_timestamp(value: Any) -> datetime | None:
+    """An ISO-8601 instant as an aware datetime, or `None` for anything this
+    build cannot read. Both GitHub's `created_at` and this ledger's own
+    `recorded_at` come through here, so a comparison can never straddle two
+    spellings."""
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def read_reviewer_ledger(path: Path | None = None) -> tuple[str, list[dict[str, Any]]]:
+    """The recorded assignment history, oldest first, with how far it can be
+    trusted.
+
+    Absence and damage are answered DIFFERENTLY, and the distinction is the
+    whole safety of this record. An absent ledger is the fresh-install path:
+    nothing has been recorded here, so a marker older than the record falls
+    back to the compiled prehistory and the standing approvals survive. A
+    ledger that is present but unreadable, corrupt or foreign-versioned is
+    evidence that a record DID exist and that this build cannot see what it
+    said -- so the windows it would have supplied are unknown, not empty, and
+    'marker_models_accepted' refuses everything but the current assignment
+    rather than falling back to a prehistory that might accept a route the
+    intact record had already closed.
+
+    Reading never raises: the caller decides what an unusable record costs,
+    and for every mode here that cost is a rereview rather than a crash.
+    """
+    target = REVIEWER_LEDGER_PATH if path is None else path
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (LEDGER_MISSING, [])
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a
+        # ledger holding invalid UTF-8 would escape both and raise out of a
+        # reader this file promises never raises -- crashing --check and
+        # --review before their safe refusal, and leaving the diagnostic
+        # unable to report the damage it exists to report.
+        return (LEDGER_DAMAGED, [])
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return (LEDGER_DAMAGED, [])
+    if not isinstance(document, dict):
+        return (LEDGER_DAMAGED, [])
+    if document.get("schema") != REVIEWER_LEDGER_SCHEMA:
+        return (LEDGER_DAMAGED, [])
+    version = document.get("version")
+    # The same shape the queue and reconcile validators use, and for the same
+    # reason: in Python `True == 1` and `1.0 == 1`, so equality alone lets a
+    # record carrying `"version": true` read as a version-1 document this
+    # build understands. A version this build was not written for must be
+    # damaged, not silently accepted.
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != REVIEWER_LEDGER_VERSION
+    ):
+        return (LEDGER_DAMAGED, [])
+    raw = document.get("entries")
+    if not isinstance(raw, list):
+        return (LEDGER_DAMAGED, [])
+    entries: list[dict[str, Any]] = []
+    for item in raw:
+        # An entry this build cannot read is DAMAGE, not something to skip
+        # past. Dropping one silently would splice the windows either side of
+        # it together, so the older assignment's window would span the
+        # transition that entry recorded -- accepting its markers written after
+        # it was replaced, which is the granting-approval direction this
+        # reader exists to refuse.
+        if not isinstance(item, dict):
+            return (LEDGER_DAMAGED, [])
+        cells = item.get("assignments")
+        if not isinstance(cells, dict) or not cells:
+            return (LEDGER_DAMAGED, [])
+        readable = {
+            key: value
+            for key, value in cells.items()
+            if isinstance(key, str) and isinstance(value, str) and value
+        }
+        if len(readable) != len(cells):
+            return (LEDGER_DAMAGED, [])
+        if parse_ledger_timestamp(item.get("recorded_at")) is None:
+            return (LEDGER_DAMAGED, [])
+        entries.append(
+            {"recorded_at": item["recorded_at"], "assignments": readable}
+        )
+    entries.sort(key=lambda entry: parse_ledger_timestamp(entry["recorded_at"]))
+    # Collapse a run of identical assignments to the FIRST of them. Adjacent
+    # duplicates are harmless to the windows -- they name one route across
+    # touching intervals -- but they make the record unreadable, and keeping
+    # the earliest keeps each assignment's window starting when it actually
+    # began.
+    collapsed: list[dict[str, Any]] = []
+    for entry in entries:
+        if collapsed and collapsed[-1]["assignments"] == entry["assignments"]:
+            continue
+        collapsed.append(entry)
+    return (LEDGER_INTACT, collapsed)
+
+
+def load_reviewer_ledger(path: Path | None = None) -> list[dict[str, Any]]:
+    """'read_reviewer_ledger''s entries alone, for the callers that only render
+    the record. Never use this to decide whether a marker stands: the status it
+    drops is exactly what separates a fresh install from a damaged one."""
+    return read_reviewer_ledger(path)[1]
+
+
+def record_reviewer_assignment(
+    path: Path | None = None,
+    *,
+    cells: dict[str, str] | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Append this run's canonical assignment when it differs from the newest
+    recorded one, and answer with the ledger as it now stands.
+
+    Idempotent: a run that changes nothing writes nothing, so the file grows
+    once per actual assignment change rather than once per invocation. Writing
+    is best effort -- an install directory this process cannot write is a
+    diagnostic the gate must not fail on, since the ledger only ever widens
+    what the gate accepts.
+
+    The whole read-modify-replace runs under an exclusive lock on a sibling
+    file, and the record is re-read after the lock is held. Atomic replacement
+    alone is not enough: two unlocked writers can each read [A], and the second
+    to finish replaces the first's [A,B] with its own stale [A,C]. That does
+    not merely lose B's transition -- it leaves C looking like the newest
+    assignment, so A's window runs to C's timestamp and swallows the markers
+    written while B was canonical. Losing an append that way WIDENS acceptance,
+    which is the one direction this record must never fail in.
+
+    A lock this process cannot take is not fatal: the append is skipped, which
+    leaves the newest recorded assignment behind the running one, and the gate
+    reads that as a boundary it cannot place and refuses every non-current
+    route.
+    """
+    target = REVIEWER_LEDGER_PATH if path is None else path
+    assignment = current_reviewer_cells() if cells is None else dict(cells)
+    if not assignment:
+        # A no-agent install resolves no cell at all. Recording an empty
+        # assignment would append an entry the reader then rejects, rewriting
+        # an append-only file on every run to say nothing.
+        return read_reviewer_ledger(target)[1]
+    with reviewer_ledger_lock(target) as locked:
+        if not locked:
+            return read_reviewer_ledger(target)[1]
+        return _record_reviewer_assignment_locked(target, assignment, now)
+
+
+@contextlib.contextmanager
+def reviewer_ledger_lock(target: Path):
+    """An exclusive lock on a sibling of the ledger, held across the whole
+    read-modify-replace. Yields False when it cannot be taken, which the caller
+    treats as "do not write" rather than as a failure."""
+    lock_path = target.parent / (target.name + ".lock")
+    handle = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "w", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        if handle is not None:
+            handle.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _record_reviewer_assignment_locked(
+    target: Path, assignment: dict[str, str], now: datetime | None
+) -> list[dict[str, Any]]:
+    # Re-read under the lock: whatever this process saw before taking it may
+    # already be stale.
+    status, entries = read_reviewer_ledger(target)
+    if status == LEDGER_DAMAGED:
+        # Appending would REPLACE the file, destroying whatever an append-only
+        # record was holding. The gate already refuses everything but the
+        # current assignment while it reads damaged, so leaving it untouched
+        # costs rereviews the operator can end by repairing or removing the
+        # file -- which is recoverable, and overwriting it is not.
+        return entries
+    if entries and entries[-1]["assignments"] == assignment:
+        return entries
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    appended = entries + [
+        {
+            "recorded_at": stamp.isoformat().replace("+00:00", "Z"),
+            "assignments": assignment,
+        }
+    ]
+    document = {
+        "schema": REVIEWER_LEDGER_SCHEMA,
+        "version": REVIEWER_LEDGER_VERSION,
+        "entries": appended,
+    }
+    temporary: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f"{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(document, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, target)
+    except OSError:
+        # Best effort, and the gate is what makes it safe: a transition this
+        # could not persist leaves the newest recorded assignment behind the
+        # one actually running, which 'marker_models_accepted' reads as a
+        # boundary it cannot place and refuses every non-current route on.
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+    return appended
+
+
+def reviewer_ledger_windows(
+    entries: list[dict[str, Any]], reviewers: list[Reviewer]
+) -> list[tuple[datetime, datetime | None, str]]:
+    """Each recorded assignment as the half-open window it was canonical for.
+
+    Entry *i* runs from its own `recorded_at` until entry *i+1*'s, and the
+    newest runs open-endedly forward. A marker is a legacy decision when it was
+    written inside the window of the assignment it names -- which is what stops
+    a model that was canonical for one week from validating a marker written a
+    year later.
+    """
+    windows: list[tuple[datetime, datetime | None, str]] = []
+    for index, entry in enumerate(entries):
+        start = parse_ledger_timestamp(entry["recorded_at"])
+        if start is None:
+            continue
+        route = reviewer_models_from_cells(reviewers, entry["assignments"])
+        if route is None:
+            continue
+        end: datetime | None = None
+        if index + 1 < len(entries):
+            end = parse_ledger_timestamp(entries[index + 1]["recorded_at"])
+        windows.append((start, end, route))
+    return windows
+
+
+def marker_models_accepted(
+    models: str | None,
+    created_at: Any,
+    reviewers: list[Reviewer],
+    *,
+    entries: list[dict[str, Any]] | None = None,
+    status: str | None = None,
+) -> bool:
+    """Does this marker's `models=` field still stand?
+
+    Four ways, in order:
+
+    1. It names the canonical assignment. Always current, no date needed, and
+       deliberately decided before the ledger is consulted at all -- the record
+       is best effort, and a transition this install failed to persist must
+       never invalidate the reviews it is failing to record.
+    2. It names an assignment the ledger recorded, and the marker was written
+       inside that assignment's window. This is the legacy-decision rule
+       (PR #626): an approval reached under a model that was canonical AT THE TIME
+       is carried forward rather than retired the next time a provider ships
+       something newer.
+    3. The marker predates the ledger's first entry, and names either the
+       compiled prehistory or THAT FIRST RECORDED ASSIGNMENT. The second half
+       matters for an operator whose own roster differs from this build's
+       compiled one: the first thing the ledger ever saw is the assignment
+       their standing approvals were reached under, and no compiled table can
+       know it.
+    4. Otherwise it is stale and rereviewed.
+
+    Two states refuse everything but rule 1, because in both the boundary
+    between assignments is unknown rather than absent:
+
+    * a ledger this build cannot read ('LEDGER_DAMAGED') -- falling back to the
+      prehistory could accept a route the intact record had already closed; and
+    * a ledger whose newest entry is not the assignment this run is using,
+      which is what a failed append looks like. Left alone, that assignment's
+      window would still be open-ended and would accept its markers written
+      long after it was replaced.
+
+    Both cost rereviews rather than granting approval, which is the direction
+    an unreadable history must fail in.
+    """
+    if not models or not reviewers:
+        return False
+    if models == reviewer_models(reviewers):
+        return True
+    if entries is None:
+        status, recorded = read_reviewer_ledger()
+    else:
+        recorded = entries
+        status = LEDGER_INTACT if status is None else status
+    if status == LEDGER_DAMAGED:
+        return False
+    if recorded and recorded[-1]["assignments"] != current_reviewer_cells():
+        return False
+    windows = reviewer_ledger_windows(recorded, reviewers)
+    written = parse_ledger_timestamp(created_at)
+    if written is not None:
+        for start, end, route in windows:
+            if route != models:
+                continue
+            if written >= start and (end is None or written < end):
+                return True
+    if not recorded:
+        return models in prehistoric_reviewer_models(reviewers)
+    # The ledger has begun. Whether it has is decided by the first RECORDED
+    # ENTRY, never by the first window: an entry that does not name every
+    # provider this route needs renders no window, so keying the cutoff on
+    # windows[0] would place it later than the record actually starts and let
+    # a marker written after the ledger began be judged as prehistory. An
+    # install that changes its provider set is exactly that shape.
+    ledger_start = parse_ledger_timestamp(recorded[0]["recorded_at"])
+    if written is None or ledger_start is None or written >= ledger_start:
+        return False
+    bootstrap = set(prehistoric_reviewer_models(reviewers))
+    first = reviewer_models_from_cells(reviewers, recorded[0]["assignments"])
+    if first is not None:
+        bootstrap.add(first)
+    return models in bootstrap
 
 
 def expected_origin_name(origin: str | None) -> str:
@@ -910,10 +1357,11 @@ def reviewer_for_key(key: str) -> Reviewer:
 
 # Every display name a canonical reviewer has signed a human-readable summary
 # with, newest first, per reviewer key. Deliberately NOT the same question as
-# `accepted_reviewer_models`: that decides whether an approval still *stands*,
-# and a retired assignment must go stale there so the documented rereview
-# happens. This decides only whether a historical review's individual verdicts
-# are still *readable*, and they must remain readable however many times the
+# `marker_models_accepted`: that decides whether an approval still *stands*,
+# by the window rule PR #626 introduced -- a retired assignment is carried forward
+# inside the window it was canonical for, and goes stale outside it. This
+# decides only whether a historical review's individual verdicts are still
+# *readable*, and they must remain readable however many times the
 # persona changes -- `rereview_reviewers` computes the rereview route from
 # them, and a v2 review that predates the `verdicts=` marker field has nowhere
 # else to recover a per-reviewer verdict from. Dropping a name here strands
@@ -1082,7 +1530,12 @@ def marker_matches(
         marker.get("spec") == spec_sha
         and marker.get("origin") == expected_origin_name(origin)
         and marker.get("reviewers") == reviewer_route(reviewers)
-        and marker.get("models") in accepted_reviewer_models(reviewers)
+        # The marker's own publication instant, which 'review_records' copies
+        # off the comment: a retired assignment stands only for the markers
+        # written while it WAS the assignment (PR #626).
+        and marker_models_accepted(
+            marker.get("models"), marker.get("created_at"), reviewers
+        )
     )
 
 
@@ -3415,9 +3868,19 @@ def self_test() -> None:
         claude_cell.effort,
     )
     PRIMARY_CODEX_MODEL, PRIMARY_CLAUDE_MODEL = codex_cell.model, claude_cell.model
+    # And the ledger, for the same reason and by the same means. Without this
+    # the offline checks read durable host state: 'marker_matches' reaches
+    # 'marker_models_accepted', whose default is to load this machine's own
+    # record, while the fixture markers below carry fixed 2026-01 timestamps.
+    # A ledger whose first entry predates them would make an installation-
+    # independent check answer differently per machine -- and this file's
+    # contract, stated above, is that it does not.
+    saved_reader = globals()["read_reviewer_ledger"]
+    globals()["read_reviewer_ledger"] = lambda path=None: (LEDGER_MISSING, [])
     try:
         _self_test_body()
     finally:
+        globals()["read_reviewer_ledger"] = saved_reader
         (
             OPERATING_MODE,
             LOADED_PROVIDERS,
@@ -3940,6 +4403,17 @@ def parse_args() -> argparse.Namespace:
             "verdict."
         ),
     )
+    parser.add_argument(
+        "--reviewer-ledger",
+        action="store_true",
+        help=(
+            "Print the recorded canonical issue-gate assignment history as one "
+            "JSON document (requires --json) and exit. Reads only: unlike the "
+            "issue modes it records nothing, so a diagnostic run cannot append "
+            "to an append-only file. The document's `status` field reports "
+            "whether the record is missing, intact, or damaged."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print check output as JSON.")
     parser.add_argument("--self-test", action="store_true", help="Run pure unit checks.")
     parser.add_argument(
@@ -3990,11 +4464,12 @@ def main() -> None:
     selected_actions = sum(
         value is not None
         for value in (args.check, args.review, args.rereview, args.reconcile_approvals)
-    ) + int(args.review_queue)
+    ) + int(args.review_queue) + int(args.reviewer_ledger)
     if selected_actions > 1:
         fail(
             "approve-issues.py error: --check, --review, --rereview, "
-            "--review-queue, and --reconcile-approvals are mutually exclusive"
+            "--review-queue, --reconcile-approvals, and --reviewer-ledger are "
+            "mutually exclusive"
         )
     # Both document-producing modes are resolved here, together, because the
     # obligation is identical and stating it once is what stops the two
@@ -4003,6 +4478,7 @@ def main() -> None:
     for flag, selected in (
         ("--review-queue", args.review_queue),
         ("--reconcile-approvals", args.reconcile_approvals is not None),
+        ("--reviewer-ledger", args.reviewer_ledger),
     ):
         if not selected:
             continue
@@ -4019,6 +4495,32 @@ def main() -> None:
         # log line can ever share stdout with it.
         if not args.json:
             fail(f"approve-issues.py error: {flag} requires --json")
+    if args.reviewer_ledger:
+        # Reads, never records. A mode whose whole job is to print the record
+        # must not be able to change it: a one-off diagnostic run -- especially
+        # one carrying an APPROVE_ISSUES_* override -- would otherwise append a
+        # permanent entry to an append-only file and close the real
+        # assignment's window for the length of that run.
+        status, entries = read_reviewer_ledger()
+        print(
+            json.dumps(
+                {
+                    "schema": REVIEWER_LEDGER_SCHEMA,
+                    "version": REVIEWER_LEDGER_VERSION,
+                    "path": str(REVIEWER_LEDGER_PATH),
+                    # The one diagnostic for this record must distinguish a
+                    # fresh install from a damaged one: both list no entries,
+                    # and only the second is silently retiring every legacy
+                    # approval until the file is repaired or removed.
+                    "status": status,
+                    "current": current_reviewer_cells(),
+                    "entries": entries,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
     if args.self_test:
         self_test()
         return
@@ -4029,6 +4531,20 @@ def main() -> None:
     LOG_DIR = Path(args.log_dir).expanduser().resolve()
     LOG_TO_STDERR = args.json
     PIPELINE_INCIDENT_DIR = Path(args.incident_dir).expanduser().resolve()
+    # PR #626: record this run's canonical assignment before anything reads
+    # a marker, so the window a review published by THIS run falls into is
+    # already open when a later run comes to judge it. Reached only by the
+    # modes that go on to read or publish a marker -- --reviewer-ledger
+    # returned above without recording, and --self-test never gets here.
+    # Best effort by construction; see record_reviewer_assignment for what the
+    # gate does when the append does not land.
+    if not args.dry_run:
+        # --dry-run promises no writes, and this one is not incidental: an
+        # entry it appends establishes or closes a window that decides which
+        # existing approvals validate later, permanently. A dry run carrying an
+        # APPROVE_ISSUES_* override would record an assignment nothing ever
+        # reviewed with.
+        record_reviewer_assignment()
     try:
         effective_config_path = resolve_effective_config_path(args.config)
         raw_config, config_warnings = kanban_config.load_raw_config(effective_config_path)

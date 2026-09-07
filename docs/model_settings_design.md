@@ -115,6 +115,12 @@ all (`Ping.hs:139-153` records why).
   change invalidates standing approvals and forces rereview. That is correct
   behavior — a review by a retired model is not the canonical review — but it
   is a consequence to state, not discover.
+  *Superseded by PR #626:* invalidating on the roster change alone proved
+  too blunt, retiring a whole backlog of approvals every time a provider
+  shipped a model. The reviewer ledger narrowed it to the marker's own date —
+  a review by a model that was canonical **when the review happened** is still
+  the canonical review, and only a marker outside every recorded window goes
+  stale.
 
 ### Infrastructure already in place
 

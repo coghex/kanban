@@ -360,11 +360,59 @@ arithmetic, which §2.3 owns.
     backend parses historical summaries with only ever grows: a retired name
     stays readable, because a review predating the marker's `verdicts=` field
     has nothing else to recover a per-reviewer verdict — and therefore a
-    rereview route — from. That is the opposite of the `models=` field's rule
-    stated next, where a *replaced* assignment must go stale.
+    rereview route — from. The `models=` field's rule is narrower, and stated
+    next.
     The resolved assignment is what a published marker's `models=` field
-    records and what §2.3.1's reconciliation accepts as current, so changing
-    either half of it retires standing approvals and forces rereview.
+    records and what §2.3.1's reconciliation accepts as current. Changing
+    either half of it does **not** retire the approvals already standing under
+    the old one: the backend keeps an append-only *reviewer ledger* at
+    `<install dir>/runtime/reviewer_ledger.json`, appending this run's
+    canonical assignment whenever it differs from the newest recorded one, and
+    a marker is judged against the assignment that was in force **the day the
+    marker was written**. So a marker naming a replaced assignment stands when
+    it falls inside that assignment's recorded window, and goes stale outside
+    it — which is what stops a model that was canonical for a week from
+    validating a marker written a year later. A marker older than the ledger's
+    first recorded entry is judged against the compiled prehistory in
+    `tools/approve_issues.py`'s `RETIRED_REVIEWER_CELLS` instead — recorded as
+    `model@effort`, so changing an effort alone retires nothing — and so the
+    approvals already standing when an install began keeping the log are
+    carried forward rather than retired wholesale — as is the first assignment
+    the ledger itself observed, which is how an operator's own previous cell
+    survives when no compiled table names it.
+    That reader answers ABSENCE and DAMAGE differently, and the distinction is
+    the whole safety of the record. An *absent* ledger is the fresh-install
+    path and bootstraps from the prehistory above. A ledger that is present but
+    unreadable, corrupt, foreign-versioned, or that carries even one entry this
+    build cannot parse is `damaged`: a record existed and cannot be read, so
+    the windows it would have supplied are unknown rather than empty, and every
+    route but the current assignment is refused. A damaged file is never
+    overwritten by the next append, so repairing the file restores the history
+    and removing it restores ACCEPTANCE -- a removed record reverts to the
+    prehistory rather than recovering what it held. A second state refuses the
+    same way: a
+    newest recorded entry that is not the assignment this run is using, which
+    is what a failed append looks like — left trusted, the previous
+    assignment's window would still be open-ended and would accept its markers
+    written long after it was replaced. Both cost rereviews rather than
+    granting approval, which is the direction an unreadable history must fail
+    in; the *roster*, by contrast, fails closed outright, because it decides
+    what runs rather than what already ran.
+    `--reviewer-ledger --json` prints the record, including which of those
+    three states it is in. It READS and never records: a diagnostic that
+    appended would close the running assignment's window for its own duration,
+    and the file is append-only. Its refusals match the other document modes —
+    it requires `--json`, is mutually exclusive with `--self-test` and with the
+    five issue modes (`--check`, `--review`, `--rereview`, `--review-queue`,
+    `--reconcile-approvals`), and is resolved before the repository context
+    loads.
+
+    The windows are per-install, so a marker published before THIS install's
+    first recorded entry rests on the compiled prehistory and on the first
+    assignment the ledger did observe. When a pair currently in force is
+    replaced, its outgoing cells must be added to `RETIRED_REVIEWER_CELLS` in
+    the same change — that is the one manual step this record does not remove,
+    and omitting it is what PR #626 was filed for.
     `tools/drain_prs.py` resolves the `roles.drain_rereview` cell for the
     provider its operating mode selects (below) the same way for its
     stale-head rereview, re-read once per drain cycle so a roster edit
@@ -406,7 +454,9 @@ arithmetic, which §2.3 owns.
       changes-requested barrier, records the message, and polls again at its
       ordinary interval, so adding a provider back resumes the service by
       itself. `--self-test` still runs, spawning no reviewer and answering no
-      gate question.
+      gate question. `--reviewer-ledger` still prints the record, with an
+      empty `current` — a mode that loads no provider resolves no assignment,
+      and records none rather than appending an entry naming nothing.
     A roster that is present and *unusable* is none of these three: it keeps
     the refusal above, naming the file and the defect. The two must never be
     reported as one — a defective file described to an operator as a
@@ -525,9 +575,10 @@ reimplement the removal, and `--check` remains read-only.
 
 - **Authority.** `python3 tools/approve_issues.py --path <root> --repo
   <owner/name> --reconcile-approvals [<issue>...] --legacy-policy dual --json`.
-  It joins `--check`, `--review`, `--rereview`, and `--review-queue` in one
-  mutual-exclusion set sharing their diagnostic, is mutually exclusive with
-  `--self-test`, and requires `--json`. Every one of those refusals is resolved
+  It joins `--check`, `--review`, `--rereview`, `--review-queue`, and
+  `--reviewer-ledger` in one mutual-exclusion set sharing their diagnostic, is
+  mutually exclusive with `--self-test`, and requires `--json`. Every one of
+  those refusals is resolved
   before the repository context loads, so a rejected invocation costs no GitHub
   call and writes nothing to stdout. It performs **no** model call — the
   `MODEL_INVOCATIONS` counter reads zero across a run — publishes no review
@@ -1823,7 +1874,8 @@ report did not name.
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
 CLI flags (`--path`, `--review ISSUE [ISSUE ...]`/`--rereview`/`--check`/
-`--review-queue`, `--legacy-policy dual`, `--json`), its JSON/comment/label
+`--review-queue`/`--reconcile-approvals`/`--reviewer-ledger`,
+`--legacy-policy dual`, `--json`), its JSON/comment/label
 output contract, its
 role as the
 sole source of truth for both the interactive review workflow and the solve
@@ -1832,8 +1884,8 @@ describes — its implementation and every runtime component its supported
 commands need.
 
 - **`tools/approve_issues.py`** is the tracked source of truth. A fresh
-  checkout can run its `--self-test`, `--check`, `--review`, `--rereview`, and
-  `--review-queue`
+  checkout can run its `--self-test`, `--check`, `--review`, `--rereview`,
+  `--review-queue`, `--reconcile-approvals`, and `--reviewer-ledger`
   paths directly, with no file beneath `~/work` or
   `~/.codex/skills/approve-issues/`. Its portable runtime locations — the
   install links under `~/Library/Application Support/kanban/issue-review/` on
@@ -1841,9 +1893,11 @@ commands need.
   (`~/.local/share/kanban/issue-review/` when that variable is unset)
   elsewhere, the daily logs under `~/Library/Logs/kanban/issue-review/` on
   macOS and `$XDG_STATE_HOME/kanban/issue-review/`
-  (`~/.local/state/kanban/issue-review/` when unset) elsewhere, and the
+  (`~/.local/state/kanban/issue-review/` when unset) elsewhere, the
   incident circuit breaker beneath that install directory's
-  `runtime/incidents/` — are a namespaced Kanban footprint, not personal
+  `runtime/incidents/`, and the reviewer ledger beside it at
+  `runtime/reviewer_ledger.json` (§2.3.1) — are a namespaced Kanban
+  footprint, not personal
   state, and its optional crash/incident notification
   (`KANBAN_ISSUE_REVIEW_NTFY_URL`) is a documented non-fatal no-op when
   unset, matching §5.
