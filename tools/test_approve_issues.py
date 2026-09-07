@@ -1616,6 +1616,55 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
                         path.exists(), "a no-agent install wrote a ledger entry"
                     )
 
+    def test_a_ledger_of_invalid_utf8_is_damage_rather_than_an_exception(self):
+        # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a
+        # binary-corrupt record would escape both and raise out of a reader
+        # this file promises never raises -- crashing --check before its safe
+        # refusal.
+        module = self.backend()
+        path = self.root / "binary-ledger.json"
+        path.write_bytes(b'{"schema": "approve-issues-reviewer-ledger", \xff\xfe')
+        status, entries = module.read_reviewer_ledger(path)
+        self.assertEqual(status, module.LEDGER_DAMAGED)
+        self.assertEqual(entries, [])
+        self.assertFalse(
+            module.marker_models_accepted(
+                "gpt-5.6-terra@xhigh+claude-fable-5@xhigh",
+                "2026-01-01T00:00:00Z",
+                self.route(module, "codex+claude"),
+                entries=entries,
+                status=status,
+            )
+        )
+
+    def test_the_prehistory_cutoff_is_the_first_entry_not_the_first_window(self):
+        # An entry that does not name every provider a route needs renders no
+        # window for it. Keying the cutoff on windows[0] would then place the
+        # ledger's start LATER than it is, and judge a marker written after
+        # the record began as prehistory -- accepting a route that was never
+        # canonical here. An install that changes its provider set is exactly
+        # that shape.
+        module = self.backend()
+        reviewers = self.route(module, "codex+claude")
+        entries = [
+            # Codex-only: renders no dual window at all.
+            self.entry("2026-01-01T00:00:00Z", {"codex": "gpt-5.6-sol@xhigh"}),
+            self.entry("2026-02-01T00:00:00Z", self.ASTRA_ERA),
+        ]
+        prehistoric = "gpt-5.6-terra@xhigh+claude-fable-5@xhigh"
+        # Written after the ledger began, before its first DUAL window.
+        self.assertFalse(
+            module.marker_models_accepted(
+                prehistoric, "2026-01-15T00:00:00Z", reviewers, entries=entries
+            )
+        )
+        # Genuinely older than the record: still carried.
+        self.assertTrue(
+            module.marker_models_accepted(
+                prehistoric, "2025-12-31T00:00:00Z", reviewers, entries=entries
+            )
+        )
+
     def test_a_damaged_ledger_is_never_overwritten_by_the_next_append(self):
         # An append-only record must not lose its history to a reader that
         # could not parse it; the gate already refuses on damage, and that is

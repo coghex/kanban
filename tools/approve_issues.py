@@ -1041,7 +1041,12 @@ def read_reviewer_ledger(path: Path | None = None) -> tuple[str, list[dict[str, 
         text = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return (LEDGER_MISSING, [])
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is neither an OSError nor a JSONDecodeError, so a
+        # ledger holding invalid UTF-8 would escape both and raise out of a
+        # reader this file promises never raises -- crashing --check and
+        # --review before their safe refusal, and leaving the diagnostic
+        # unable to report the damage it exists to report.
         return (LEDGER_DAMAGED, [])
     try:
         document = json.loads(text)
@@ -1310,11 +1315,16 @@ def marker_models_accepted(
                 continue
             if written >= start and (end is None or written < end):
                 return True
-    if not windows:
+    if not recorded:
         return models in prehistoric_reviewer_models(reviewers)
-    # The ledger has begun. Prehistory covers only what predates it, and a
-    # marker whose timestamp cannot be read has nothing to place it there.
-    if written is None or written >= windows[0][0]:
+    # The ledger has begun. Whether it has is decided by the first RECORDED
+    # ENTRY, never by the first window: an entry that does not name every
+    # provider this route needs renders no window, so keying the cutoff on
+    # windows[0] would place it later than the record actually starts and let
+    # a marker written after the ledger began be judged as prehistory. An
+    # install that changes its provider set is exactly that shape.
+    ledger_start = parse_ledger_timestamp(recorded[0]["recorded_at"])
+    if written is None or ledger_start is None or written >= ledger_start:
         return False
     bootstrap = set(prehistoric_reviewer_models(reviewers))
     first = reviewer_models_from_cells(reviewers, recorded[0]["assignments"])
