@@ -234,14 +234,29 @@ of:
 - the executable, installed from the candidate archive and reporting the
   candidate's version;
 - the optional workflow assets, re-registered from the new archive;
-- the managed components — the issue-review service and the PR drainer — stopped,
-  re-pointed at the new archive, and restarted only where they were running
-  before;
-- `kanban --doctor`, reporting every advertised component ready;
+- the managed components — the PR drainer and the issue approval service —
+  stopped, re-pointed at the new archive, and restarted only where they were
+  running before;
+- `kanban --doctor`, reporting AI-action readiness; that is the whole of what it
+  reports, so it does not stand in for either service check below;
+- the PR drainer's controller `status`, for every repository the drainer's own
+  record named;
+- the issue approval service's controller `status`, for every repository its own
+  record named;
 - an interactive board run against a real repository;
 - preservation of supported configuration and durable state — the configuration
   files, the cached snapshot, and the service records survive the upgrade rather
   than being recreated empty.
+
+A recorded `status` result is the `state` the controller returned, not that the
+command exited zero: `status` exits zero for a repository whose job was never
+installed, so a bare exit code cannot tell that apart from a healthy job. It is
+the two `status` checks that are read-only, not the controllers around them —
+each also installs, starts, stops, uninstalls, and acknowledges incidents, and
+none of that belongs to this step — so recording the two results starts nothing.
+[The README's upgrade section](../README.md#upgrade-to-a-new-release) is what
+stops and restarts these jobs, and a job that was stopped before the upgrade is
+still stopped after it.
 
 A failure here returns to step 3 with a new candidate.
 

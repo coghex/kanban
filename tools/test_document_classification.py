@@ -78,6 +78,11 @@ TEST_PARSED_PATHS = {
     # both read the tracked pull-request template and run the three parsers
     # that route on its absent pr-origin marker over it (issue #494).
     ".github/pull_request_template.md",
+    # tools/test_release_runbook.py reads the report-what-you-have-installed
+    # bullet, which may credit `kanban --doctor` with AI-action readiness alone
+    # and has to send a reporter to each managed service's own controller for
+    # the PR drainer and the issue approval service (issue #618).
+    "SUPPORT.md",
     # tools/test_agent_workflow_contract.py parses §4; this module parses §7.
     "docs/agent-workflow-contract.md",
     # test/Spec/UI/Keys.hs parses the §7 keybinding table.

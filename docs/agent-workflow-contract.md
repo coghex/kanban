@@ -3337,7 +3337,7 @@ CODE_OF_CONDUCT.md | pr-atomic | release-document
 CONTRIBUTING.md | pr-atomic | release-document
 README.md | pr-atomic | release-document
 SECURITY.md | pr-atomic | release-document
-SUPPORT.md | pr-atomic | release-document
+SUPPORT.md | pr-atomic | test-parsed;release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
 codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
@@ -3400,7 +3400,7 @@ docs/workflow_command_vendoring_design.md | coordination | audit-report
 tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The eleven `test-parsed` rows name what actually parses them:
+The twelve `test-parsed` rows name what actually parses them:
 `tools/test_issue_templates.py` reads the frontmatter, headings, and
 preselected labels of every template under `.github/ISSUE_TEMPLATE/`, the
 `Children` checklist of the epic one, and the blank-issue switch and contact
@@ -3423,8 +3423,13 @@ the frontmatter and body of every packaged workflow under `claude-plugin/` and
 `codex-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
 `docs/releasing.md` and the safety rules inside them — the recorded
 authorization gate ahead of the tag push, the prohibitions that keep a pushed
-tag immutable, where a release's evidence lives, and what the dependency review
-covers — and `tools/test_render_command_sources.py` reads the authored
+tag immutable, where a release's evidence lives, what the dependency review
+covers, and what the manual upgrade gate claims for `kanban --doctor` beside
+the controller `status` it requires for each managed service — and reads that
+same scope claim in `SUPPORT.md`'s report-what-you-have-installed bullet, so a
+public document crediting `--doctor` with PR drainer or issue approval
+readiness fails `build-test` rather than sending a reporter to cite it, and
+`tools/test_render_command_sources.py` reads the authored
 command sources under `tools/command_sources/` and byte-compares the Markdown
 rendered from them.
 
