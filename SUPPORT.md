@@ -47,8 +47,12 @@ an answer than the public issue it belongs in.
   recorded.
 - **Say which version you are on.** `kanban --version` prints it.
 - **Say what you have installed.** Kanban's AI actions, PR drainer, and issue
-  approval service are optional components installed separately;
-  `kanban --doctor` reports which of them are ready on your machine.
+  approval service are optional components installed separately, and no single
+  check reports all three. `kanban --doctor` reports AI-action readiness and
+  nothing else. For the other two, run each managed service's own controller
+  `status` and say what state it returned — [the PR drainer's controller
+  status](docs/pr-drainer.md#manual-status) and [the issue approval service's
+  controller status](docs/issue-approval.md#reading-status).
 - **Read the guides.** The [user guide](docs/user-guide.md) covers the board and
   its controls, and [workflow setup and preflight](docs/workflow-setup.md)
   covers the optional components and why one might not be ready.
