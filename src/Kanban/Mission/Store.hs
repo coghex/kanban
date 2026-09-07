@@ -21,9 +21,19 @@
 -- an @O_EXCL@ create for a specification, and a file test for a seal.
 --
 -- A refusal reports every reason it found, not the first. Delete has five
--- gates, and a caller told only about the first one repairs it, retries, and
--- is refused again — which is how a gate added later gets reported as if it
--- were the only one.
+-- disposition gates — a nonterminal lifecycle, a live session, an unverifiable
+-- session, a step whose outcome is unknown, and the sole record of a retained
+-- worktree — and they report together, because a caller told only about the
+-- first one repairs it, retries, and is refused again, which is how a gate
+-- added later gets reported as if it were the only one.
+--
+-- One further gate reports alone, and before all five. A mission still living
+-- under the ambiguous root the spelling before #615 wrote to is refused
+-- without its state being consulted at all: that refusal is about where its
+-- records are rather than about what they say, no repair to the mission can
+-- clear it, and reporting it beside gates the mission may well pass would
+-- suggest otherwise. Only the five above apply to a repository-qualified
+-- mission, which is the only kind this store removes.
 --
 -- This module is internal — "Kanban.Mission" re-exports the parts of it that
 -- module's public contract promises.

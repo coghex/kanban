@@ -458,11 +458,17 @@ data LegacyClaim
 -- deliberately not read. Attribution runs on every operation and, for
 -- enumeration, once per legacy mission, and a journal is unbounded — reading
 -- one to decide where a mission lives would make the cheapest operation in the
--- store cost the whole of its history. Nothing is lost by it: a journal line
--- or a seal written for another repository is refused by the identity check
--- every read of one already applies, and the one operation that /removes/ a
--- record without reading it — 'Kanban.Mission.Store.deleteMission' — accounts
--- for all of them itself before it removes anything.
+-- store cost the whole of its history.
+--
+-- Nothing is lost by it, and the reason is worth being exact about. A journal
+-- line or a seal written for another repository is refused by the identity
+-- check every read of one already applies, so no unread record is ever handed
+-- back as this repository's. The one operation that would /remove/ such a
+-- record without reading it does not run against this root at all:
+-- 'Kanban.Mission.Store.deleteMission' refuses a mission living here outright,
+-- before consulting its state, rather than deciding from an attribution that
+-- never read the records it would destroy. That refusal is what lets this
+-- function stay cheap without being a hole.
 legacyMissionClaim :: MissionRepository -> MissionId -> FilePath -> IO LegacyClaim
 legacyMissionClaim expected mission root =
   case (,,) <$> missionSpecificationPath root mission
