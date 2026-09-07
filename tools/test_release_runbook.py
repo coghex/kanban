@@ -8,7 +8,7 @@ history. `docs/releasing.md` states it reusably, and `.github/ISSUE_TEMPLATE/`'s
 `release.md` is the per-release checklist that drives it. Both are prose, so
 most of what they say is not this module's business.
 
-Four things in them are, because each is a rule whose quiet removal would not
+Five things in them are, because each is a rule whose quiet removal would not
 look like a regression to a reader:
 
 * **Publication cannot happen without a recorded human authorization.** The
@@ -27,6 +27,14 @@ look like a regression to a reader:
 * **The dependency review is real work with a recorded result.** Five named
   subjects, two cadences, the ordinary issue lane for anything it finds, and a
   durable place to record a review that finds nothing.
+* **The rehearsal is bound to the run its own dispatch created.** `gh workflow
+  run` reports no run id, so the run has to be found afterwards. Found by the
+  scratch branch, the candidate commit, and a creation floor captured before
+  dispatching -- never by taking whichever `Release` run is newest, which
+  selects another operator's dispatch as readily as this one's and puts it in
+  the release evidence. This rule reads the fenced command rather than the
+  paragraph around it, because that is what an operator runs, and the
+  template's item records which run the answer turned out to be.
 
 The runbook is also version-neutral, which is what makes it reusable at all: a
 release's own numbers belong to that release's issue.
@@ -173,6 +181,111 @@ DEPENDENCY_RULES = {
     "record-off-cycle": "dependency-review issue",
 }
 
+REHEARSAL_HEADING = "4. Rehearse the release on the candidate"
+
+# The rehearsal's fenced commands, with backslash continuations joined: the
+# discovery command wraps across four lines, and a flag on the third of them
+# belongs to the command that starts on the first.
+CONSOLE_FENCE_RE = re.compile(r"```console\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
+CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+
+# What the fenced `gh run list` filters on, so the row it returns belongs to
+# this rehearsal's own dispatch: the scratch branch, the candidate commit, and
+# the creation floor captured before dispatching. Either flag spelling
+# satisfies a rule -- these are about what the command asks GitHub for, not how
+# it is typed.
+RUN_SELECTION_FILTERS = {
+    "branch": re.compile(r"(?<![\w-])(?:--branch|-b)[ =]+\"?release-candidate-<n>\"?"),
+    "commit": re.compile(r"(?<![\w-])(?:--commit|-c)[ =]+\"?<commit>\"?"),
+    "created": re.compile(r"(?<![\w-])--created[ =]+\"?>=?<dispatched-after>\"?"),
+}
+
+# The identity the same command asks for. `databaseId` is what gets watched and
+# recorded; the other four are what let the operator check that the row it came
+# from is this rehearsal's before either happens.
+RUN_SELECTION_FIELDS = ("databaseId", "headBranch", "headSha", "createdAt", "url")
+
+# `--limit`/`-L` truncates the listing, which is how the repository-wide
+# newest-first selection hid the ambiguity it should have reported: a second
+# eligible run has to be visible before the procedure can refuse to choose
+# between them.
+LIMIT_FLAG_RE = re.compile(r"(?<![\w-])(?:--limit|-L)(?:[ =]|$)")
+JSON_FIELDS_RE = re.compile(r"(?<![\w-])--json[ =]+([A-Za-z0-9_,]+)")
+
+# The instructions around that command, which stay prose because that is where
+# they live: a listing that has not caught up is waited out, a listing with two
+# rows stops the step, a row failing a correlation check is rejected rather
+# than watched, and the record names the run together with what it was
+# correlated on.
+REHEARSAL_PROCEDURE_RULES = {
+    "fresh-branch": "its own scratch-branch name and is dispatched once against it",
+    "stable-window": "reuses that one value rather than a fresh reading",
+    "repeat-the-query": "repeat the same query",
+    "wait-not-redispatch": "do not dispatch again",
+    "investigate-a-fault": "is a fault to investigate",
+    "ambiguous-listing": "newest-first is not a tiebreak",
+    "reject-foreign-run": "is not this rehearsal's evidence",
+    "keep-querying": "reject it and keep querying",
+    "record-run-identity": "its url or databaseid",
+    "record-correlation": "the scratch branch and the candidate commit it was "
+    "correlated on",
+}
+
+# The template's half of that record: the box is checked against a named run,
+# not against "a rehearsal happened". Which run was watched, and what made it
+# this rehearsal's, is the whole of what a later reader can check.
+TEMPLATE_REHEARSAL_RULES = {
+    "run-identity": "url or database id",
+    "correlation": "the branch and commit it was correlated on",
+}
+
+# The fenced discovery command itself, and the repository-wide newest-first one
+# it replaced. Spelled out so the controls below can swap one for the other and
+# assert what the rules then report -- the defect restored verbatim, rather
+# than an approximation of it.
+SELECTION_COMMAND = """gh run list --workflow Release --event workflow_dispatch \\
+  --branch release-candidate-<n> --commit <commit> \\
+  --created ">=<dispatched-after>" \\
+  --json databaseId,headBranch,headSha,createdAt,status,conclusion,url"""
+UNCORRELATED_COMMAND = """gh run list --workflow Release --event workflow_dispatch --limit 1 \\
+  --json databaseId,headSha,status,conclusion"""
+SELECTION_FENCE = f"```console\n{SELECTION_COMMAND}\n```"
+UNCORRELATED_FENCE = f"```console\n{UNCORRELATED_COMMAND}\n```"
+
+# One mutation per filter, each a substring of that command, so a control
+# names the filter it dropped rather than reporting that something changed.
+# Cut from the command rather than from the document, because `--commit
+# <commit>` is also how step 3 asks for the candidate's CI run.
+FILTER_CONTROL_PHRASES = {
+    "branch": "--branch release-candidate-<n>",
+    "commit": "--commit <commit>",
+    "created": '--created ">=<dispatched-after>"',
+}
+
+# What run_selection_gaps reports when the step carries no single fenced
+# command for its rules to be about: the missing command, and every rule that
+# had nothing to read.
+NO_SELECTION_COMMAND_GAPS = sorted(
+    ["selection-command"]
+    + list(RUN_SELECTION_FILTERS)
+    + [f"field:{field}" for field in RUN_SELECTION_FIELDS]
+)
+
+# The gaps the uncorrelated command leaves: every filter, the three identity
+# fields it never requested, and the truncation that hid the ambiguity.
+UNCORRELATED_SELECTION_GAPS = sorted(
+    list(RUN_SELECTION_FILTERS)
+    + ["field:createdAt", "field:headBranch", "field:url", "no-limit-selection"]
+)
+
+# The remediation the correlation replaces, as a prohibition: nothing reaches a
+# second dispatch from a listing that merely has not matched yet. The causes
+# the step does name for a fresh attempt are a run that failed and a dispatch
+# that was never accepted, and a listing is neither.
+REDISPATCH_ON_MISMATCH_RE = re.compile(
+    r"(?:anything else|no row|does not match|mismatch)[^.]*\bdispatch again\b"
+)
+
 # A four-component package version, or any other dotted numeric run. The
 # runbook spells every version `<version>`: a literal here is either a
 # particular release's number or evidence from one, and requirement 2 forbids
@@ -301,6 +414,82 @@ def dependency_review_gaps(text):
     )
 
 
+def console_fences(text):
+    """Every ```console fence body in `text`, in document order."""
+    return [match.group("body") for match in CONSOLE_FENCE_RE.finditer(text)]
+
+
+def fenced_commands(fence):
+    """A fence's commands, with backslash continuations joined into one line."""
+    joined = CONTINUATION_RE.sub(" ", fence)
+    return [line.strip() for line in joined.splitlines() if line.strip()]
+
+
+def run_selection_command(text):
+    """The rehearsal step's fenced `gh run list` invocation.
+
+    `None` when the step carries no such fenced command, or carries more than
+    one: either way there is no single command for the rules below to be
+    about, and two discovery commands are themselves the ambiguity the step
+    exists to refuse.
+
+    Read out of the fence deliberately. normalized() strips backticks, so a
+    rule run over the section's prose is satisfied by a sentence that merely
+    names the flags, while the command an operator runs is the one in the
+    fence. The extraction is tools/test_finalize_workflow.py's, adapted to
+    this document's `console` fences."""
+    found = [
+        command
+        for fence in console_fences(section(text, REHEARSAL_HEADING))
+        for command in fenced_commands(fence)
+        if command.startswith("gh run list")
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def requested_json_fields(command):
+    """The field names `command` asks `--json` for."""
+    match = JSON_FIELDS_RE.search(command)
+    if match is None:
+        return set()
+    return {field for field in match.group(1).split(",") if field}
+
+
+def run_selection_gaps(text):
+    """The correlation, against the fenced command rather than the paragraph
+    around it: the filters that bind the listing to this dispatch, the identity
+    fields that make its row checkable, and the absence of the truncation that
+    hid a second eligible run."""
+    command = run_selection_command(text)
+    if command is None:
+        return list(NO_SELECTION_COMMAND_GAPS)
+    gaps = [
+        name
+        for name, pattern in RUN_SELECTION_FILTERS.items()
+        if not pattern.search(command)
+    ]
+    requested = requested_json_fields(command)
+    gaps += [
+        f"field:{field}" for field in RUN_SELECTION_FIELDS if field not in requested
+    ]
+    if LIMIT_FLAG_RE.search(command):
+        gaps.append("no-limit-selection")
+    return sorted(gaps)
+
+
+def rehearsal_procedure_gaps(text):
+    """The instructions that read the listing that command returns: wait for a
+    row rather than dispatching again, stop on two rows, reject a row that
+    fails a correlation check, and record which run was watched and why it was
+    this rehearsal's. The redispatch remediation is a gap when it is present
+    rather than when it is absent."""
+    body = normalized(section(text, REHEARSAL_HEADING))
+    gaps = missing_rules(body, REHEARSAL_PROCEDURE_RULES)
+    if REDISPATCH_ON_MISMATCH_RE.search(body):
+        gaps.append("no-mismatch-redispatch")
+    return sorted(gaps)
+
+
 def version_literals(text):
     """Dotted numeric runs the runbook must not contain (requirement 2)."""
     return sorted(set(VERSION_LITERAL_RE.findall(text)))
@@ -326,6 +515,20 @@ def checklist_items(text):
             continue
         collecting = None
     return [(checked, normalized(" ".join(body))) for checked, body in found]
+
+
+def template_rehearsal_gaps(text):
+    """The rehearsal item names the run it recorded and what that run was
+    correlated on, so the release issue says which run was watched rather than
+    that one was."""
+    items = [
+        body
+        for _, body in checklist_items(text)
+        if "rehearsal dispatched" in body
+    ]
+    if len(items) != 1:
+        return sorted(["rehearsal-item"] + list(TEMPLATE_REHEARSAL_RULES))
+    return missing_rules(items[0], TEMPLATE_REHEARSAL_RULES)
 
 
 def template_authorization_gaps(text):
@@ -409,6 +612,12 @@ class ReleaseRunbookTests(unittest.TestCase):
     def test_the_dependency_review_is_specified_and_recorded(self):
         self.assertEqual(dependency_review_gaps(self.text), [])
 
+    def test_the_rehearsal_selects_the_run_its_own_dispatch_created(self):
+        self.assertEqual(run_selection_gaps(self.text), [])
+
+    def test_the_rehearsal_waits_for_its_run_instead_of_dispatching_again(self):
+        self.assertEqual(rehearsal_procedure_gaps(self.text), [])
+
 
 class RunbookRuleControlTests(unittest.TestCase):
     """The negative controls. Each removes or inverts exactly the sentence its
@@ -437,6 +646,15 @@ class RunbookRuleControlTests(unittest.TestCase):
             replaced, 1, f"the passage this control removes moved: {phrase!r}"
         )
         return planted
+
+    def replacing(self, block, replacement):
+        """The runbook with one literal block substituted, asserting the block
+        was there. Literal rather than `without`'s whitespace-tolerant match,
+        because these blocks are fenced commands: their line breaks and
+        continuations are the thing being changed, and a `\\` in one is an
+        escape to `re.sub`'s replacement template rather than a character."""
+        self.assertIn(block, self.text, "the block this control replaces moved")
+        return self.text.replace(block, replacement)
 
     def test_deleting_a_tag_prohibition_is_reported(self):
         planted = self.without("- **Do not delete the tag.**", "- Fix it.")
@@ -530,6 +748,99 @@ class RunbookRuleControlTests(unittest.TestCase):
         planted = self.without("dependency-review issue", "conversation")
         self.assertEqual(dependency_review_gaps(planted), ["record-off-cycle"])
 
+    def test_dropping_a_correlation_filter_is_reported(self):
+        # One control per filter, each naming the filter it dropped: a rule
+        # that reported "correlated" as one bit could not do this.
+        for name, phrase in FILTER_CONTROL_PHRASES.items():
+            with self.subTest(filter=name):
+                self.assertIn(phrase, SELECTION_COMMAND)
+                weakened = SELECTION_COMMAND.replace(phrase, "")
+                planted = self.replacing(
+                    SELECTION_FENCE, f"```console\n{weakened}\n```"
+                )
+                self.assertEqual(run_selection_gaps(planted), [name])
+
+    def test_a_selection_command_missing_an_identity_field_is_reported(self):
+        planted = self.without(
+            "--json databaseId,headBranch,headSha,createdAt,status,conclusion,url",
+            "--json databaseId,headSha,createdAt,status,conclusion,url",
+        )
+        self.assertEqual(run_selection_gaps(planted), ["field:headBranch"])
+
+    def test_the_repository_wide_newest_first_selection_is_reported(self):
+        # The defect itself, restored: a `Release` dispatch chosen by recency
+        # across the whole repository, checked for its commit only afterwards.
+        self.assertEqual(
+            run_selection_gaps(self.replacing(SELECTION_FENCE, UNCORRELATED_FENCE)),
+            UNCORRELATED_SELECTION_GAPS,
+        )
+
+    def test_naming_the_filters_in_prose_alone_is_reported(self):
+        # The failure the fence extraction exists for: the paragraph says
+        # everything the rule asks for, and the command an operator runs still
+        # selects whichever run is newest.
+        planted = self.replacing(SELECTION_FENCE, UNCORRELATED_FENCE).replace(
+            "Read that listing before watching anything:",
+            "Scope it with `--branch release-candidate-<n>`, `--commit <commit>`, "
+            'and `--created ">=<dispatched-after>"`, requesting `databaseId`, '
+            "`headBranch`, `headSha`, `createdAt`, and `url`.\n\n"
+            "Read that listing before watching anything:",
+        )
+        self.assertEqual(run_selection_gaps(planted), UNCORRELATED_SELECTION_GAPS)
+
+    def test_a_rehearsal_with_no_fenced_selection_command_is_reported(self):
+        # The command deleted outright: prose describing a query nobody can
+        # run satisfies nothing.
+        self.assertEqual(
+            run_selection_gaps(self.replacing(SELECTION_FENCE, "")),
+            NO_SELECTION_COMMAND_GAPS,
+        )
+
+    def test_two_fenced_selection_commands_are_reported(self):
+        # Two discovery commands are two answers to one question, and no rule
+        # can say which of them the operator ran.
+        planted = self.replacing(
+            SELECTION_FENCE,
+            f"```console\n{SELECTION_COMMAND}\n{SELECTION_COMMAND}\n```",
+        )
+        self.assertEqual(run_selection_gaps(planted), NO_SELECTION_COMMAND_GAPS)
+
+    def test_dispatching_again_on_a_listing_that_has_not_caught_up_is_reported(self):
+        planted = self.without("Do not dispatch again", "Dispatch it again")
+        self.assertEqual(rehearsal_procedure_gaps(planted), ["wait-not-redispatch"])
+
+    def test_a_mismatch_that_sends_the_operator_back_to_dispatch_is_reported(self):
+        # The remediation this step replaced: a row that fails a correlation
+        # check used to mean re-push and dispatch again, which is how ordinary
+        # listing lag produced a duplicate run.
+        planted = self.without(
+            "Reject it and keep querying rather than watching it.",
+            "Anything else is a rehearsal of some other tree: delete the "
+            "scratch branch, re-push it at the candidate, and dispatch again.",
+        )
+        self.assertEqual(
+            rehearsal_procedure_gaps(planted),
+            ["keep-querying", "no-mismatch-redispatch"],
+        )
+
+    def test_a_rehearsal_record_naming_no_run_is_reported(self):
+        planted = self.without("its `url` or `databaseId`,", "it,")
+        self.assertEqual(rehearsal_procedure_gaps(planted), ["record-run-identity"])
+
+    def test_a_rehearsal_record_naming_no_correlation_is_reported(self):
+        planted = self.without(
+            "together with the scratch branch and the candidate commit it was "
+            "correlated on,",
+            "",
+        )
+        self.assertEqual(rehearsal_procedure_gaps(planted), ["record-correlation"])
+
+    def test_a_listing_with_two_rows_that_picks_one_is_reported(self):
+        planted = self.without(
+            "and newest-first is not a tiebreak", "so take the newest"
+        )
+        self.assertEqual(rehearsal_procedure_gaps(planted), ["ambiguous-listing"])
+
     def test_a_rule_set_is_not_vacuous_against_an_empty_document(self):
         # The blanket control: every rule reports every gap when there is no
         # document at all, so none of them can pass by finding nothing.
@@ -538,6 +849,7 @@ class RunbookRuleControlTests(unittest.TestCase):
             (candidate_identity_gaps(""), CANDIDATE_RULES),
             (upgrade_coverage_gaps(""), UPGRADE_ITEMS),
             (dependency_review_gaps(""), DEPENDENCY_RULES),
+            (rehearsal_procedure_gaps(""), REHEARSAL_PROCEDURE_RULES),
         ):
             with self.subTest(rules=sorted(rules)):
                 self.assertEqual(gaps, sorted(rules))
@@ -552,11 +864,13 @@ class RunbookRuleControlTests(unittest.TestCase):
             ["description", "empty-homepage"]
             + [f"topic:{topic}" for topic in REPOSITORY_TOPICS]
         ))
+        self.assertEqual(run_selection_gaps(""), NO_SELECTION_COMMAND_GAPS)
 
 
 class MaintainerReleaseTemplateTests(unittest.TestCase):
-    """The template's authorization gate: unchecked, its own item, naming the
-    comment that satisfies it, and ahead of the tag item."""
+    """The template's authorization gate -- unchecked, its own item, naming the
+    comment that satisfies it, and ahead of the tag item -- and its rehearsal
+    item, which records which run was watched."""
 
     @classmethod
     def setUpClass(cls):
@@ -621,6 +935,23 @@ class MaintainerReleaseTemplateTests(unittest.TestCase):
         )
         self.assertNotEqual(planted, self.text, "the authorization comment moved")
         self.assertEqual(template_authorization_gaps(planted), ["names-the-comment"])
+
+    def test_the_rehearsal_item_records_the_run_it_was_correlated_on(self):
+        self.assertEqual(template_rehearsal_gaps(self.text), [])
+
+    def test_a_rehearsal_item_recording_no_correlation_is_reported(self):
+        planted = self.text.replace(
+            "together\n      with the branch and commit it was correlated on;", ";"
+        )
+        self.assertNotEqual(planted, self.text, "the rehearsal item moved")
+        self.assertEqual(template_rehearsal_gaps(planted), ["correlation"])
+
+    def test_a_missing_rehearsal_item_is_reported(self):
+        # The blanket control for this rule: no item, every gap.
+        self.assertEqual(
+            template_rehearsal_gaps(""),
+            sorted(["rehearsal-item"] + list(TEMPLATE_REHEARSAL_RULES)),
+        )
 
     def test_the_template_points_at_the_runbook_for_the_procedure(self):
         # Requirement 7's boundary: the template drives the procedure, it does
