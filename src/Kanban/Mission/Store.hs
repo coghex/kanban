@@ -63,14 +63,12 @@ where
 
 import Control.Exception (IOException, try)
 import Control.Monad (filterM)
-import Data.List (isInfixOf, nub, sort)
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Mission.Digest (sha256Hex)
-import Kanban.Mission.Control (MissionCommandFile (..))
-import Kanban.Mission.Invocation (unattributableMissionInvocations)
-import Kanban.Mission.Journal (MissionJournalLine (..), appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
+import Kanban.Mission.Journal (MissionJournalLine (MissionJournalUnknownVersion), appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
 import Kanban.Mission.Session (missionSessionTreeErrorMessage, validateMissionSessionTree)
 import Kanban.Mission.Paths
   ( MissionRead (..),
@@ -81,14 +79,7 @@ import Kanban.Mission.Paths
     ignoreFileOperation,
     isPlainDirectory,
     listMissionEntries,
-    MissionEntry (..),
-    missionControlRequestDirectory,
-    missionEntryAt,
-    missionLeaseReleasedMarker,
-    missionLeaseRetiredMarker,
     missionRoot,
-    missionStagingMarker,
-    readMissionRecord,
     withMissionRoot,
     missionArchiveDirectory,
     openMissionStore,
@@ -96,9 +87,7 @@ import Kanban.Mission.Paths
     commitNoReplace,
     missionArchivePath,
     missionDirectory,
-    missionInvocationPath,
     missionJournalPath,
-    missionLeaseOwnerPath,
     missionSealPath,
     missionSnapshotPath,
     missionSpecificationPath,
@@ -116,7 +105,6 @@ import Kanban.Mission.Types
     MissionSessionId (..),
     MissionSessionNode (..),
     MissionSnapshot (..),
-    MissionLeaseOwner (..),
     MissionSpecification (..),
     MissionStepId (..),
     MissionRepository (..),
@@ -124,8 +112,6 @@ import Kanban.Mission.Types
     MissionStepRecord (..),
     MissionWorktreeDisposition (..),
     MissionWorktreeState (MissionWorktreeRetained),
-    missionCommandSchemaVersion,
-    missionLeaseSchemaVersion,
     missionLifecycleIsTerminal,
     missionLifecycleTag,
     missionLogKindTag,
@@ -648,10 +634,11 @@ data MissionDispositionRefusal
   | MissionDispositionUnverifiableSession MissionSessionId
   | MissionDispositionOutcomeUnknownStep MissionStepId
   | MissionDispositionSoleRecoveryRecord FilePath
-  | -- | A durable record in the mission's own directory cannot be proven to be
-    -- this repository's and this mission's: it names another, or it will not
-    -- read at all. Removing the directory would destroy it.
-    MissionDispositionUnprovenRecord Text
+  | -- | This mission's records are still under the ambiguous root every
+    -- repository whose owner and name fall the same way shared before #615.
+    -- Nothing there can be proven to be this repository's alone, so nothing
+    -- there is removed.
+    MissionDispositionAmbiguousRoot FilePath
   deriving stock (Eq, Show)
 
 missionDispositionRefusalMessage :: MissionDispositionRefusal -> Text
@@ -666,8 +653,11 @@ missionDispositionRefusalMessage refusal = case refusal of
     "step " <> step.unMissionStepId <> " never learned its outcome"
   MissionDispositionSoleRecoveryRecord path ->
     "this is the only record of the retained worktree " <> Text.pack path
-  MissionDispositionUnprovenRecord detail ->
-    "a record in this mission's directory cannot be proven to be this repository's: " <> detail
+  MissionDispositionAmbiguousRoot root ->
+    "its records are under "
+      <> Text.pack root
+      <> ", the root every repository whose owner and name fall the same way shared before #615,"
+      <> " and nothing there can be proven to be this repository's alone"
 
 -- | Moves a terminal mission out of the active presentation, keeping its whole
 -- history readable.
@@ -705,208 +695,41 @@ archived now snapshot =
 -- Every refusal that applies is reported, not the first: a caller told only
 -- about the nonterminal lifecycle would finish the mission, retry, and be
 -- refused again for a session it was never told about.
+--
+-- A mission still living under the ambiguous pre-#615 root is refused outright,
+-- and that refusal comes before every other gate because it is not about this
+-- mission's state. That root is shared by every repository whose owner and name
+-- fall the same way, and a delete removes a /directory/ — not the records this
+-- store checked the identity of on the way in. Nothing in a shared directory
+-- can be proven to be this repository's alone: the journal, the invocation log
+-- and the sealed archives are only ever read record by record, a submitted
+-- command and the control token name no repository at all, a record written
+-- under a schema version this release does not recognize says nothing about who
+-- wrote it, an unterminated tail is a record that was never decoded, and a
+-- subdirectory that cannot be listed is not a subdirectory that is empty. Each
+-- of those is a way to mistake \"I could not tell\" for \"it is mine\", and the
+-- only answer that cannot be got wrong is to remove nothing there. That is also
+-- the strongest reading of #615's requirement that history which cannot be
+-- attributed be preserved rather than discarded.
+--
+-- The mission stays readable, writable and enumerable exactly as before; it is
+-- removal, and only removal, that this refuses. Clearing one out is an
+-- operator's decision about a directory two repositories may have written to,
+-- which is a judgement this release has no evidence to make.
 deleteMission :: MissionStore -> MissionId -> IO (Either [MissionDispositionRefusal] ())
 deleteMission store mission =
-  withMissionRoot store mission (Left . pure . MissionDispositionUnreadable) $ \root -> do
-    snapshotResult <- readMissionSnapshot store mission
-    case snapshotResult of
-      MissionPresent snapshot -> do
-        unproven <- unprovenRecordRefusals store mission root
-        case terminalRefusals snapshot <> sessionRefusals snapshot <> stepRefusals snapshot <> worktreeRefusals snapshot <> unproven of
-          refusal : rest -> pure (Left (refusal : rest))
-          [] -> case missionDirectory root mission of
-            Left message -> pure (Left [MissionDispositionUnreadable message])
-            Right directory -> removeMissionDirectory store directory
-      other -> pure (Left [unreadableRefusal mission other])
-
--- | Everything in a mission's directory this repository cannot prove is its
--- own, gathered before the directory is removed.
---
--- The gate exists because a delete removes a /directory/, not a record. Where
--- a mission lives is decided from three fixed-path records — 'missionRoot''s
--- attribution — and that is right for a read or a write, each of which
--- addresses one file the identity check already guards. It is not enough for
--- the one operation that destroys everything beside those three: under the
--- ambiguous pre-#615 root the directory is shared, so a mission this
--- repository's specification, snapshot and lease owner all claim can still
--- hold another repository's journal events, invocation openings, or sealed
--- archives, and removing it would discard the evidence a recovery reads.
---
--- Every record this store writes into a mission's directory is accounted for,
--- and the list is the whole of it: the specification, the snapshot, the lease
--- owner record, every journal event, every invocation record, every sealed
--- archive record, and every submitted control command. Each must be absent, or
--- present and provably this repository's and this mission's. Three files carry
--- no record of their own and are covered rather than skipped: an archived
--- @.log@ copy is described by the seal beside it, so a copy with no seal is
--- reported here; the control token is a per-run secret rather than history;
--- and a staging file or a lease directory moved aside is an interrupted
--- write's litter, which is why 'removeMissionDirectory' may take it.
---
--- \"Absent\" is asked of the filesystem rather than of a successful decode, and
--- that is the difference between this gate and every read in the module.
--- §16's rule makes a record written under an unrecognized schema version read
--- as absent, which is right for a reader that must go on to read the records
--- around it and wrong for a caller about to remove the file: the record it
--- cannot decode may be another repository's, and under a shared root it may
--- well be. So a file that is there and says nothing this release understands
--- is unproven, exactly as one that names somebody else is.
-unprovenRecordRefusals :: MissionStore -> MissionId -> FilePath -> IO [MissionDispositionRefusal]
-unprovenRecordRefusals store mission root = do
-  specification <- fixedRecord (missionSpecificationPath root mission) readSpecification
-  snapshot <- fixedRecord (missionSnapshotPath root mission) readSnapshot
-  owner <- fixedRecord (missionLeaseOwnerPath root mission) readOwner
-  journal <- journalRefusals (missionJournalPath root mission)
-  invocations <- invocationRefusals (missionInvocationPath root mission)
-  archive <- archiveRefusals (missionArchiveDirectory root mission)
-  commands <- commandRefusals (missionControlRequestDirectory root mission)
-  pure (specification <> snapshot <> owner <> journal <> invocations <> archive <> commands)
-  where
-    unproven = MissionDispositionUnprovenRecord
-
-    readSpecification =
-      readMissionRecordFor
-        mission
-        [missionSpecificationSchemaVersion]
-        store.missionStoreRepository
-        missionSpecificationId
-        missionSpecificationRepository
-    readSnapshot =
-      readMissionRecordFor
-        mission
-        [missionSnapshotSchemaVersion]
-        store.missionStoreRepository
-        missionSnapshotId
-        missionSnapshotRepository
-    readOwner =
-      readMissionRecordFor
-        mission
-        [missionLeaseSchemaVersion]
-        store.missionStoreRepository
-        missionLeaseOwnerMission
-        missionLeaseOwnerRepository
-
-    -- One record at a fixed path: absent is fine, anything the reader will not
-    -- vouch for is not, and a file the reader called absent while the
-    -- filesystem says something is there is a record under a version this
-    -- release cannot decide about.
-    fixedRecord :: Either Text FilePath -> (FilePath -> IO (MissionRead value)) -> IO [MissionDispositionRefusal]
-    fixedRecord resolved read' = withPath resolved $ \path -> do
-      result <- read' path
-      case result of
-        MissionRefused detail -> pure [unproven detail]
-        MissionUnreadable detail -> pure [unproven detail]
-        MissionPresent _ -> pure []
-        MissionAbsent -> map unproven <$> presentButSilent path
-
-    journalRefusals resolved = withPath resolved $ \path -> do
-      undecided <- presenceRefusals path
-      read' <- readMissionJournalSince path 0
-      pure $ case read' of
-        Left message -> [unproven message]
-        Right (lines', _) ->
-          map unproven undecided
-            <> [ unproven detail
-                 | line <- lines',
-                   Just detail <- [unattributableJournalLine path (decodeMissionJournalLine mission store.missionStoreRepository path line)]
-               ]
-
-    invocationRefusals resolved = withPath resolved $ \path -> do
-      undecided <- presenceRefusals path
-      read' <- unattributableMissionInvocations mission store.missionStoreRepository path
-      pure (map unproven (undecided <> either pure id read'))
-
-    -- Every seal record must read, and every file in the archive must be one
-    -- this store wrote: a seal accounted for by a record, or a copy that seal
-    -- describes. A `.log` with no seal beside it is a copy nothing vouches
-    -- for, which under a shared root is exactly the case this gate exists for.
-    archiveRefusals resolved = withPath resolved $ \directory -> do
-      sealed <- readMissionSealedArchives store mission
-      case sealed of
-        Left message -> pure [unproven message]
-        Right entries -> do
-          names <- listMissionEntries directory
-          let accounted = [takeFileName path | Right path <- map (sealPathOf directory) entries]
-              copies = [takeFileName path | Right path <- map (archivePathOf directory) entries]
-          pure
-            [ unproven ("nothing this store wrote is named " <> Text.pack (directory </> name))
-              | name <- sort names,
-                not (isLitter name),
-                name `notElem` accounted,
-                name `notElem` copies
-            ]
-
-    sealPathOf _ entry = missionSealPath root mission entry.missionSealedSession entry.missionSealedKind
-    archivePathOf _ entry = missionArchivePath root mission entry.missionSealedSession entry.missionSealedKind
-
-    -- A submitted command names the mission it addresses but no repository:
-    -- it is a request awaiting an answer rather than a record of one. What can
-    -- be proven of it is that it addresses this mission, and that this release
-    -- can read it at all.
-    commandRefusals resolved = withPath resolved $ \directory -> do
-      names <- listMissionEntries directory
-      concat <$> mapM (commandRefusal directory) (sort (filter (not . isLitter) names))
-
-    commandRefusal directory name = do
-      let path = directory </> name
-      result <- readMissionRecord mission [missionCommandSchemaVersion] path
-      case result :: MissionRead MissionCommandFile of
-        MissionPresent command
-          | command.missionCommandFileMission /= mission ->
-              pure [unproven (Text.pack path <> " is a command addressed to mission " <> command.missionCommandFileMission.unMissionId)]
-          | otherwise -> pure []
-        MissionRefused detail -> pure [unproven detail]
-        MissionUnreadable detail -> pure [unproven detail]
-        MissionAbsent -> map unproven <$> presentButSilent path
-
-    -- A path a reader called absent, asked of the filesystem instead.
-    presentButSilent path = do
-      entry <- missionEntryAt path
-      pure $ case entry of
-        MissionEntryAbsent -> []
-        MissionEntryUndecidable reason -> [undecidedAt path reason]
-        _ ->
-          [ Text.pack path
-              <> " was written under a schema version this release does not recognize,"
-              <> " so whose record it is cannot be established"
-          ]
-
-    -- For a file a reader reports nothing about when it is missing: only the
-    -- question it could not answer has to be reported here.
-    presenceRefusals path = do
-      entry <- missionEntryAt path
-      pure $ case entry of
-        MissionEntryUndecidable reason -> [undecidedAt path reason]
-        _ -> []
-
-    undecidedAt path reason =
-      "whether " <> Text.pack path <> " is there could not be established (" <> reason <> ")"
-
-    withPath resolved act = either (pure . pure . unproven) act resolved
-
-    isLitter name =
-      missionStagingMarker `isInfixOf` name
-        || missionLeaseReleasedMarker `isInfixOf` name
-        || missionLeaseRetiredMarker `isInfixOf` name
-
--- | Why a journal line's owner cannot be established, if it cannot.
---
--- The unknown-version case is the one that differs from an ordinary read: a
--- reader passes over a line a later release wrote and reads the ones around
--- it, and a delete may not take that silence for permission.
-unattributableJournalLine :: FilePath -> MissionJournalLine -> Maybe Text
-unattributableJournalLine path line = case line of
-  MissionJournalEvent _ -> Nothing
-  MissionJournalRefused detail -> Just detail
-  MissionJournalMalformed detail -> Just detail
-  MissionJournalUnknownVersion version ->
-    Just
-      ( "a record in "
-          <> Text.pack path
-          <> " was written under schema version "
-          <> Text.pack (show version)
-          <> ", which this release does not recognize, so whose record it is cannot be established"
-      )
+  withMissionRoot store mission (Left . pure . MissionDispositionUnreadable) $ \root ->
+    if root == store.missionStoreLegacyDirectory
+      then pure (Left [MissionDispositionAmbiguousRoot root])
+      else do
+        snapshotResult <- readMissionSnapshot store mission
+        case snapshotResult of
+          MissionPresent snapshot -> case terminalRefusals snapshot <> sessionRefusals snapshot <> stepRefusals snapshot <> worktreeRefusals snapshot of
+            refusal : rest -> pure (Left (refusal : rest))
+            [] -> case missionDirectory root mission of
+              Left message -> pure (Left [MissionDispositionUnreadable message])
+              Right directory -> removeMissionDirectory store directory
+          other -> pure (Left [unreadableRefusal mission other])
 
 -- | Takes a mission out of the store in one move, and then clears up.
 --

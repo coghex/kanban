@@ -3483,13 +3483,27 @@ Defaults:
   refused, and not a byte of it is read as one repository's or replaced. The
   same refusal covers a mission that has records under both roots. Enumeration
   goes through that one resolution too, so an identifier it refuses is listed
-  by neither repository: reporting one would name a mission nothing can read,
-  write, or delete. `repositories/` and `.deleted` are the two
+  by neither repository: reporting one would name a mission nothing can read or
+  write. `repositories/` and `.deleted` are the two
   names the old spelling could never produce — every key it produced carries
   the hyphen it joined owner to name with — which is what keeps the two
   namespaces from aliasing, and what lets the holding area a delete moves a
   mission through sit at the missions root where no repository's store can be
   it.
+- A mission still living under that ambiguous root is never deleted. Every
+  other operation works on it exactly as on any other — it reads, it writes, it
+  enumerates, it holds one lease — but a delete removes a *directory* rather
+  than the records whose identity was checked on the way in, and a shared
+  directory holds nothing that can be proven to be one repository's alone. The
+  journal, the invocation log and the sealed archives are only ever read record
+  by record; a submitted command and the control token name no repository at
+  all; a record under a schema version this release does not recognize says
+  nothing about who wrote it; an unterminated tail is a record that was never
+  decoded; and a subdirectory that cannot be listed is not a subdirectory that
+  is empty. Each is a way to mistake "I could not tell" for "it is mine", and
+  the only answer that cannot be got wrong is to remove nothing there. Clearing
+  such a directory out is an operator's decision about history two repositories
+  may have written, and this release has no evidence to make it.
 - A mission a controller advances holds two further records, and each answers
   a question the four above cannot. `invocations.jsonl` is written *before*
   every external effect and flushed to the disk before that effect is

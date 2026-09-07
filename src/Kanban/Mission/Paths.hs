@@ -71,9 +71,6 @@ module Kanban.Mission.Paths
     isPlainDirectory,
     MissionEntry (..),
     missionEntryAt,
-    missionStagingMarker,
-    missionLeaseReleasedMarker,
-    missionLeaseRetiredMarker,
     ignoreFileOperation,
   )
 where
@@ -612,19 +609,6 @@ missionEntryAt path = do
 isPlainDirectory :: FilePath -> IO Bool
 isPlainDirectory path = (== MissionEntryDirectory) <$> missionEntryAt path
 
--- | The three names this store writes that are not records: a file staged for
--- a write interrupted before its commit, and a lease directory moved aside on
--- its way out by a release or a retirement.
---
--- Declared here, with every other path shape, because two modules produce them
--- and a third has to recognize them: "Kanban.Mission.Store"'s delete accounts
--- for every entry in a mission's directory, and a marker spelled twice would
--- make an entry one module wrote another one's stray.
-missionStagingMarker, missionLeaseReleasedMarker, missionLeaseRetiredMarker :: String
-missionStagingMarker = ".staged-"
-missionLeaseReleasedMarker = ".released-"
-missionLeaseRetiredMarker = ".retired-"
-
 -- | Creates a mission's directory with @0700@ on every level below the XDG
 -- state root, whatever the umask and whichever writer created it first.
 ensureMissionDirectory :: FilePath -> IO (Either Text ())
@@ -789,7 +773,7 @@ openPrivateStagingFile :: FilePath -> IO (FilePath, Handle)
 openPrivateStagingFile path = do
   processId <- getProcessID
   now <- getCurrentTime
-  attempt (path <> missionStagingMarker <> show processId <> "-" <> stamp now) (0 :: Int)
+  attempt (path <> ".staged-" <> show processId <> "-" <> stamp now) (0 :: Int)
   where
     stamp = filter (`notElem` ("-:. TZ" :: String)) . show
     attempt base attemptsMade = do

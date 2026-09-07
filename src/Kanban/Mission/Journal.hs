@@ -133,18 +133,13 @@ data MissionJournalLine
     -- for a journal rather than a snapshot — absent for this line only: the
     -- lines after it are still examined.
     --
-    -- No /reader/ ever sees one. @readMissionJournal@ drops these before it
+    -- No caller ever sees one. @readMissionJournal@ drops these before it
     -- returns, keeping the byte offset it advanced, because \"absent,
     -- silently\" means absent: a reader told about a record it cannot
     -- understand would have to decide what to do about it, and there is
-    -- nothing to decide. The one caller that does see them decodes lines
-    -- itself and is not reading them:
-    -- @Kanban.Mission.Store.unprovenRecordRefusals@ is about to /remove/ the
-    -- file, and silence is not permission to destroy a record a later release
-    -- — or, under the ambiguous pre-#615 root, another repository — wrote. The
-    -- case exists here because this is where the decision is made, and because
-    -- it is what separates a line another release wrote from a line that is
-    -- broken.
+    -- nothing to decide. The case exists here because this is where the
+    -- decision is made, and because it is what separates a line another
+    -- release wrote from a line that is broken.
     MissionJournalUnknownVersion Int
   | -- | Malformed JSON, no integer @schemaVersion@, or a payload that will
     -- not decode under a version this release does recognize. Names the

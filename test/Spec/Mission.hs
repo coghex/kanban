@@ -43,16 +43,12 @@ import Kanban.Mission
   ( MissionArchiveState (..),
     MissionAttention (..),
     MissionAutonomy (MissionConfirmOnAmbiguity),
-    MissionCommandPayload (MissionResumeCommand),
     MissionCreation (..),
     MissionDecisionPolicy (..),
     MissionDispositionRefusal (..),
     MissionEvent (..),
     MissionHolderPresence (..),
     MissionId (..),
-    MissionIntendedEffect (MissionEffectDispatch),
-    MissionInvocation (..),
-    MissionInvocationId (..),
     MissionJournalLine (..),
     MissionLeaseAcquisition (..),
     MissionLifecycle (..),
@@ -94,7 +90,6 @@ import Kanban.Mission
     listMissions,
     missionDispositionRefusalMessage,
     missionHolderPresence,
-    missionInvocationPath,
     missionLifecycleIsTerminal,
     missionLifecycleTag,
     missionLifecycles,
@@ -103,8 +98,6 @@ import Kanban.Mission
     missionSessionDisposition,
     missionSessionTreeErrorMessage,
     missionStepLifecycleIsTerminal,
-    openMissionControl,
-    submitMissionCommand,
     missionStepLifecycleTag,
     missionStepLifecycles,
     missionStoreRoot,
@@ -115,7 +108,6 @@ import Kanban.Mission
     readMissionSnapshot,
     readMissionSpecification,
     recordMissionEvent,
-    recordMissionInvocation,
     releaseMissionLease,
     sealMissionLog,
     validateMissionSessionTree,
@@ -704,35 +696,34 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
       -- from the list, and the mission beside it is untouched.
       listMissions owner `shouldReturn` [MissionId "mission-owner"]
 
-  it "refuses to delete a mission whose directory holds a record it cannot prove is its own" $
-    forM_ unprovenRecords $ \(what, stage) ->
-      withCollidingStores $ \root owner name -> do
-        let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
-            directory = ambiguous </> "mission-0001"
-        writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
-        void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
-        stage root directory (rerootedStore ambiguous owner) (rerootedStore ambiguous name)
-        -- Attribution still reads this mission as this repository's: its
-        -- specification, snapshot and lease owner all say so, which is exactly
-        -- why the delete has to look further than they do.
-        void (expectPresent =<< readMissionSpecification owner theMission)
-        beforehand <- inventoryOf directory
-        refused <- deleteMission owner theMission
-        case refused of
-          Right () -> expectationFailure (what <> ": expected the delete to be refused")
-          Left refusals ->
-            (what, unwords (map (Text.unpack . missionDispositionRefusalMessage) refusals))
-              `shouldSatisfy` (isInfixOf "cannot be proven to be this repository's" . snd)
-        afterwards <- inventoryOf directory
-        (what, afterwards) `shouldBe` (what, beforehand)
-
-  it "deletes the same mission once nothing in its directory is unproven" $
-    withCollidingStores $ \root owner _ -> do
+  it "is never deleted, however plainly this repository's its records are" $
+    withCollidingStores $ \root owner name -> do
       let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      -- A mission with nothing wrong with it: every record is this
+      -- repository's, and every gate a delete has decides in its favour.
       writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      writeWholeMission (rerootedStore ambiguous name) splitName (MissionId "mission-name") "the other repository's"
       void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
-      void (expectRight =<< deleteMission owner theMission)
-      doesDirectoryExist (ambiguous </> "mission-0001") `shouldReturn` False
+      beforehand <- inventoryOf ambiguous
+      refused <- deleteMission owner theMission
+      refusalKinds refused `shouldBe` ["ambiguous-root"]
+      case refused of
+        Left refusals ->
+          unwords (map (Text.unpack . missionDispositionRefusalMessage) refusals)
+            `shouldSatisfy` isInfixOf ambiguous
+        Right () -> expectationFailure "expected the delete to be refused"
+      -- Nothing moved: not this mission, and not the other repository's beside
+      -- it in the same shared directory.
+      afterwards <- inventoryOf ambiguous
+      afterwards `shouldBe` beforehand
+      listMissions owner `shouldReturn` [theMission]
+      listMissions name `shouldReturn` [MissionId "mission-name"]
+      -- Refusing to remove it is the only thing refused: it still reads, still
+      -- writes, and is still this repository's mission.
+      kept <- expectPresent =<< readMissionSpecification owner theMission
+      kept.missionSpecificationRequest `shouldBe` "under the ambiguous root"
+      void (expectRight =<< recordMissionEvent owner (eventIn splitOwner theMission "still writable"))
+      journalKinds owner theMission `shouldReturn` ["planned", "still writable"]
 
   it "is refused when the legacy entry is present without being a directory this store could have written" $
     withCollidingStores $ \root owner _ -> do
@@ -809,25 +800,6 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
       afterwards <- inventoryOf (root </> "kanban" </> "missions")
       afterwards `shouldBe` beforehand
 
-  it "deletes where its records are, and the identifier is free for a new mission under the new root" $
-    withCollidingStores $ \root owner name -> do
-      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
-      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
-      writeWholeMission (rerootedStore ambiguous name) splitName (MissionId "mission-name") "the other repository's"
-      void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
-      void (expectRight =<< deleteMission owner theMission)
-      doesDirectoryExist (ambiguous </> "mission-0001") `shouldReturn` False
-      listMissions owner `shouldReturn` []
-      -- The other repository's legacy mission, in the same shared directory,
-      -- is untouched by that delete.
-      listMissions name `shouldReturn` [MissionId "mission-name"]
-      kept <- expectPresent =<< readMissionSpecification name (MissionId "mission-name")
-      kept.missionSpecificationRequest `shouldBe` "the other repository's"
-      -- With no legacy history left, the identifier resolves to the new root.
-      created <- expectRight =<< createMissionSpecification owner (specificationFor splitOwner theMission "after the delete")
-      created `shouldBe` MissionCreated
-      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` True
-
   it "keeps one lease for one mission, wherever that mission's records are" $
     withCollidingStores $ \root owner _ -> do
       let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
@@ -844,90 +816,6 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
             other -> expectationFailure ("expected the lease to be held, got " <> show other)
           releaseMissionLease lease
         refused -> expectationFailure ("expected a lease, got " <> show refused)
-
--- | Every way a mission directory can hold a record that its specification,
--- its snapshot and its lease owner record do not account for.
---
--- One entry per durable record kind that names an owner and is not itself part
--- of that attribution — the journal, the invocation log, and the sealed
--- archive — plus the one way a record of any of them can be present and say
--- nothing at all. Each foreign record is written by the writer that owns it,
--- through a store rooted at the shared directory for the other repository,
--- which is exactly how the release before #615 produced one.
---
--- Each entry is given the scratch root, the mission's own directory, this
--- repository's store rooted at the shared directory, and the other
--- repository's store rooted there.
-unprovenRecords :: [(String, FilePath -> FilePath -> MissionStore -> MissionStore -> IO ())]
-unprovenRecords =
-  [ ( "another repository's journal event",
-      \_ _ _ foreignStore ->
-        void (expectRight =<< recordMissionEvent foreignStore (eventIn splitName theMission "the other repository's"))
-    ),
-    ( "another repository's sealed archive",
-      \root _ _ foreignStore -> do
-        let source = root </> "the-other-repository.log"
-        ByteString.writeFile source (ByteStringChar.pack "the other repository's stream\n")
-        void (expectRight =<< sealMissionLog foreignStore theMission (MissionSessionId "session-b") MissionEventStreamLog source)
-    ),
-    ( "another repository's invocation opening",
-      \_ _ _ foreignStore -> do
-        path <- expectRight (missionInvocationPath foreignStore.missionStoreDirectory theMission)
-        void (expectRight =<< recordMissionInvocation path (invocationIn splitName theMission))
-    ),
-    ( "a journal line that will not decode",
-      \_ directory _ _ ->
-        ByteString.appendFile (directory </> "events.jsonl") (ByteStringChar.pack "not a record at all\n")
-    ),
-    -- Everything below is a record a later release wrote, or one this store
-    -- left in a shape it cannot vouch for. A read passes over each of them in
-    -- silence, which is §16's rule and right; a delete may not take that
-    -- silence for permission to destroy it.
-    ( "a journal record written under a schema version this release does not recognize",
-      \_ directory _ _ -> laterRelease (directory </> "events.jsonl")
-    ),
-    ( "an invocation record written under a schema version this release does not recognize",
-      \_ directory ownStore _ -> do
-        path <- expectRight (missionInvocationPath ownStore.missionStoreDirectory theMission)
-        void (expectRight =<< recordMissionInvocation path (invocationIn splitOwner theMission))
-        laterRelease (directory </> "invocations.jsonl")
-    ),
-    ( "a seal record written under a schema version this release does not recognize",
-      \root directory ownStore _ -> do
-        let source = root </> "sealed-by-a-later-release.log"
-        ByteString.writeFile source (ByteStringChar.pack "a child's stream\n")
-        sealed <- expectRight =<< sealMissionLog ownStore theMission (MissionSessionId "session-a") MissionEventStreamLog source
-        laterRelease (directory </> "archive" </> Text.unpack (Text.replace ".log" ".seal.json" (Text.pack sealed.missionSealedName)))
-    ),
-    ( "an archived copy with no seal beside it",
-      \root directory ownStore _ -> do
-        let source = root </> "interrupted.log"
-        ByteString.writeFile source (ByteStringChar.pack "a child's stream\n")
-        sealed <- expectRight =<< sealMissionLog ownStore theMission (MissionSessionId "session-a") MissionEventStreamLog source
-        removeFile (directory </> "archive" </> Text.unpack (Text.replace ".log" ".seal.json" (Text.pack sealed.missionSealedName)))
-    ),
-    ( "a submitted command written under a schema version this release does not recognize",
-      \_ directory ownStore _ -> do
-        submitCommand ownStore "resume-0001"
-        laterRelease (directory </> "control" </> "requests" </> "resume-0001.json")
-    ),
-    ( "a submitted command addressed to another mission",
-      \_ directory _ foreignStore -> do
-        elsewhere <- expectRight =<< openMissionControl foreignStore (MissionId "mission-elsewhere")
-        void (expectRight =<< submitMissionCommand elsewhere "resume-0002" MissionResumeCommand)
-        createDirectoryIfMissing True (directory </> "control" </> "requests")
-        renameFile
-          (foreignStore.missionStoreDirectory </> "mission-elsewhere" </> "control" </> "requests" </> "resume-0002.json")
-          (directory </> "control" </> "requests" </> "resume-0002.json")
-    )
-  ]
-
--- | Submits one ordinary command to a mission, through the endpoint a run
--- opens for it.
-submitCommand :: MissionStore -> Text -> IO ()
-submitCommand store commandId = do
-  endpoint <- expectRight =<< openMissionControl store theMission
-  void (expectRight =<< submitMissionCommand endpoint commandId MissionResumeCommand)
 
 -- | Runs @action@ with @path@ at @mode@, restoring a private mode afterwards
 -- so the temporary tree can still be cleared up.
@@ -948,22 +836,6 @@ laterRelease path = do
     ( TextEncoding.encodeUtf8
         (Text.replace "\"schemaVersion\":1" "\"schemaVersion\":9999" (TextEncoding.decodeUtf8 existing))
     )
-
--- | One opening invocation record, for whichever repository and mission.
-invocationIn :: MissionRepository -> MissionId -> MissionInvocation
-invocationIn repository mission =
-  MissionInvocation
-    { missionInvocationId = MissionInvocationId "invocation-0001",
-      missionInvocationMission = mission,
-      missionInvocationRepository = repository,
-      missionInvocationStep = MissionStepId "solve-592",
-      missionInvocationAction = "solve_issue",
-      missionInvocationTarget = Nothing,
-      missionInvocationVersion = Nothing,
-      missionInvocationEffect = MissionEffectDispatch "solve_issue",
-      missionInvocationParent = Nothing,
-      missionInvocationAt = fixedTime
-    }
 
 -- * Identity
 
@@ -2041,7 +1913,7 @@ refusalKinds result = case result of
       MissionDispositionUnverifiableSession _ -> "unverifiable-session"
       MissionDispositionOutcomeUnknownStep _ -> "outcome-unknown-step"
       MissionDispositionSoleRecoveryRecord _ -> "sole-recovery-record"
-      MissionDispositionUnprovenRecord _ -> "unproven-record"
+      MissionDispositionAmbiguousRoot _ -> "ambiguous-root"
 
 -- * Enumeration
 
@@ -2252,8 +2124,10 @@ vocabularySpec = describe "the durable lifecycle vocabularies" $ do
       `shouldBe` "step solve-592 never learned its outcome"
     missionDispositionRefusalMessage (MissionDispositionSoleRecoveryRecord "/worktrees/issue-592")
       `shouldBe` "this is the only record of the retained worktree /worktrees/issue-592"
-    missionDispositionRefusalMessage (MissionDispositionUnprovenRecord "the detail the reader gave")
-      `shouldBe` "a record in this mission's directory cannot be proven to be this repository's: the detail the reader gave"
+    missionDispositionRefusalMessage (MissionDispositionAmbiguousRoot "/state/kanban/missions/data-science-tools")
+      `shouldBe` "its records are under /state/kanban/missions/data-science-tools,\
+                 \ the root every repository whose owner and name fall the same way shared before #615,\
+                 \ and nothing there can be proven to be this repository's alone"
 
   it "says why a seal was refused, naming the session and the log kind" $
     missionSealFailureMessage (MissionSealAlreadySealed (MissionSessionId "session-a") MissionRawProviderLog)
