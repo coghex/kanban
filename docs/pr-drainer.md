@@ -631,7 +631,7 @@ vocabulary:
 | `merged` | The pull request was merged. |
 | `would_merge` | Dry run only: every gate passed, so a real run would merge it. |
 | `not_approved` | The approval label is missing. |
-| `changes_requested` | The changes-requested label is attached. It takes precedence when both labels are. |
+| `changes_requested` | Changes were requested on this head: the changes-requested label is attached, which takes precedence when both labels are, or a review marker naming the current head requested changes, as [above](#which-review-verdict-wins). The message names which. |
 | `checks_pending` | A required check has not reported a result yet. The message names each configured check and its state, including `missing` for one that has not run at all. |
 | `checks_failed` | A required check failed. |
 | `merge_conflict` | The pull request conflicts with the default branch. It was recorded as an incident and left alone. |
@@ -713,6 +713,98 @@ A repository can change or disable those check names with `.drain-prs.json`:
 
 A value of `null` disables that status-check requirement. It does not remove the approval-label requirement.
 
+### Which review verdict wins
+
+The labels are not the whole verdict. Every review the pipeline runs also
+publishes a head-bound marker comment — `pr-review:v2` from the canonical
+coordinator the `$pr-review`, `$pr-rereview`, `$fix` and `$pr-revise`
+workflows drive, `pr-review:v1` from the drainer's own stale-head rereviewer,
+and the legacy `codex-review` spelling — and the drainer reads the whole
+paginated comment feed before it merges.
+
+**Only the authenticated account's markers count.** A marker is a claim of
+review authority written in a comment body, and a comment body is something
+anyone who can see the pull request can write — so the drainer resolves its own
+login with `gh api user` and ignores every marker published by anybody else,
+exactly as `$finalize` does. Without that, any passer-by could block an
+eligible pull request. A login it cannot resolve refuses the merge rather than
+being read as "nobody rejected this head", and an installation whose drainer
+authenticates as an account other than the one its reviewers publish under sees
+a pull request with no markers at all.
+
+**A `CHANGES_REQUESTED` marker naming a pull request's current head refuses the
+merge, and nothing at that same head lifts it.** Not a later approval from
+another reviewer, not a later approval from the same one, and not the
+`reviewed:approve` label that was written beside it. Pushing a new commit is
+what clears it, which is what a reviewer asking for changes was asking for. A
+rejection of some earlier head imposes nothing: that verdict is about work the
+pull request has since replaced.
+
+Newest-wins was the rule and it was the wrong one. One push could start two
+rereviews — the drainer's own and the canonical one a workflow handed off —
+and the merge gate simply believed whichever published last. On pull request
+#625 that was a `medium`-effort `pr-review:v1` approval landing 21 seconds
+after the canonical `xhigh` review had requested changes on the same commit,
+and the defect the superseded review named merged.
+
+Rank does not decide it either. Preferring the canonical verdict outright would
+mean merging a pull request whose `reviewed:changes` label the drainer's own
+reviewer had just applied, because that label and that marker are written
+together — the gate would have to fail *open* against a signal it already
+treats as blocking. A rejection is therefore a veto whoever published it, which
+is what makes the outcome the same in either arrival order.
+
+Two consequences worth knowing before you meet them:
+
+- **Re-running a review on an unchanged head cannot un-block it.** If a review
+  requested changes and you believe it was wrong, the pull request needs a
+  commit — an empty one is enough — before any approval of it counts.
+- **This is the drainer's merge policy.** `$finalize` / `/finalize` is the
+  documented manual fallback for merging one named pull request when the
+  drainer cannot be used, and it keeps its own separate gate.
+
+A feed that cannot be read refuses the merge rather than reporting that nothing
+rejected the head, exactly as an unreadable pull request does. Every marker in
+a comment counts, not just the first, so a rejection published underneath an
+approval in one comment body is not hidden by it.
+
+### One rereview per push
+
+**The drainer rereviews only the pull requests the canonical gate will not.**
+When a head changes, it asks one question — would the canonical coordinator
+accept a rereview of this pull request? — and if the answer is yes it **waits**
+for that verdict instead of spawning its own reviewer. It publishes no marker
+and switches no label while it waits, so canonical work that is unfinished, or
+that failed outright, can never be overtaken into merge permission.
+
+The question is the coordinator's own admission rule, not a guess about what is
+running: `$pr-rereview` rereviews any pull request already carrying a
+`pr-review:v2` or `pr-review:v1` comment from the publishing account, at any
+head. "Is a canonical review running right now?" cannot be answered from here
+at all — the coordinator publishes only once its reviewers return, so between
+the push and that publication there is nothing to observe. Splitting the work
+by the admission rule instead makes the two reviewers disjoint by construction
+rather than by timing, which is what the incident above needed and what
+`$fix` and `$pr-revise` exercise every time they push and hand off a rereview.
+
+The waiting is visible in the log:
+
+```text
+PR #42: head changed from 5f5c5e355510 to c944c8160781, and the canonical gate
+can rereview it; waiting for that verdict rather than running a second review
+```
+
+What is left for the drainer's own reviewer is the pull request the coordinator
+refuses: one carrying only the legacy `codex-review` marker, or no marker at
+all. For those it still spawns the provider its roster's `drain_rereview` cell
+selects, which publishes a `pr-review:v1` marker and switches the verdict label
+itself — and the moment that marker exists, every later push to that pull
+request belongs to the canonical gate too.
+
+So a push to a pull request the canonical gate can rereview waits indefinitely
+if no canonical rereview is ever run for it. Run `$pr-rereview` /
+`/pr-rereview` for it; the drainer will not decide it for you.
+
 ## Queue order
 
 Each polling pass walks the approved queue in ascending pull-request number and
@@ -727,8 +819,9 @@ A candidate's turn ends in one of three ways.
 - **A skip continues the pass.** The next-lowest candidate gets its turn in the
   same pass. A candidate is skipped when nothing the drainer can do would
   advance it and that says nothing about the pull requests behind it: it is
-  closed, a draft, targets another branch, lost its approval or gained
-  `reviewed:changes`, conflicts with the default branch (recorded as an
+  closed, a draft, targets another branch, lost its approval, gained
+  `reviewed:changes` or carries a review marker requesting changes on its
+  current head (as above), conflicts with the default branch (recorded as an
   incident, as below), has a required check that failed with every automatic
   rerun of that head already spent, has moved to a head no review has cleared,
   or is still cooling down after a failed attempt.

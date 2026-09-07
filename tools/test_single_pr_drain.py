@@ -38,6 +38,12 @@ import fake_cli
 
 TOOLS_DIR = Path(__file__).resolve().parent
 SCRIPT = TOOLS_DIR / "drain_prs.py"
+# The paginated comment feed `review_markers` reads, spelled exactly as
+# drain_prs.py builds it for this fixture's repository and pull request.
+COMMENTS_ENDPOINT = "repos/acme/widgets/issues/42/comments?per_page=100"
+# The account this fixture's drainer authenticates as, and therefore the
+# only one whose published review markers it believes.
+PUBLISHER = "widget-maintainer"
 # Everything drain_prs.py imports, for the fixture that runs a copy of the
 # script from inside the repository under test.
 SCRIPT_MODULES = (
@@ -260,6 +266,38 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             payload.update(override)
             self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(payload))
 
+    def script_authenticated_login(self, login=PUBLISHER, **kwargs):
+        """Script `gh api user`, which names the publisher markers must match."""
+        self.fake.script("gh", ["api", "user"], stdout=f"{login}\n", **kwargs)
+
+    def script_review_comments(self, *pages):
+        """Queue the pull request's paginated comment feed.
+
+        Every merge path reads it -- the drainer refuses to land a head some
+        review marker rejected (issue #628) -- so the default is an empty feed
+        carrying no marker at all, which is what "nothing rejected this head"
+        looks like. `run_cli` supplies it for the scenarios that are about
+        something else, and never displaces one a scenario scripted itself.
+        """
+        self.fake.script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout=json.dumps(list(pages) or [[]]),
+        )
+
+    def review_marker_comment(
+        self, marker, *, comment_id, created_at, author=PUBLISHER
+    ):
+        return {
+            "id": comment_id,
+            "user": {"login": author},
+            "html_url": (
+                f"https://github.com/acme/widgets/pull/42#issuecomment-{comment_id}"
+            ),
+            "created_at": created_at,
+            "body": f"A review.\n\n{marker}",
+        }
+
     def script_merge_and_cleanup(self):
         self.fake.script("gh", ["pr", "merge", "42"], stdout="")
         self.fake.script(
@@ -293,7 +331,21 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
 
     # -- driving the CLI --------------------------------------------------
 
+    def ensure_marker_reads(self):
+        """The two reads every run makes, unless the scenario scripted them.
+
+        A rejection naming the current head vetoes the merge (issue #628), so
+        every run resolves the trusted publisher and pages the comment feed.
+        """
+        self.fake.ensure_script("gh", ["api", "user"], stdout=f"{PUBLISHER}\n")
+        self.fake.ensure_script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout=json.dumps([[]]),
+        )
+
     def run_cli(self, *extra, script=None, log_dir=True):
+        self.ensure_marker_reads()
         env = dict(os.environ)
         env.update(self.fake.environ_overrides())
         env["KANBAN_DRAINER_INSTALL_DIR"] = str(self.install_dir)
@@ -462,6 +514,47 @@ class SinglePrOutcomeTests(SinglePrCliFixture):
         result, _ = self.run_single()
 
         self.assertEqual(result["reason"], "changes_requested")
+
+    def test_a_canonical_rejection_of_the_current_head_refuses_the_merge(self):
+        # Issue #628 at the entry point Kanban's own `m` key drives. The pull
+        # request is approved, labelled and green; only the markers refuse it,
+        # and a newer `pr-review:v1` approval of the same commit does not
+        # release the canonical rejection underneath.
+        self.script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.script_review_comments(
+            [
+                self.review_marker_comment(
+                    f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                    f"head={self.head_sha} verdict=CHANGES_REQUESTED -->",
+                    comment_id=100,
+                    created_at="2026-09-06T09:46:39Z",
+                ),
+                self.review_marker_comment(
+                    f"<!-- pr-review:v1 reviewer=codex "
+                    f"head={self.head_sha} verdict=APPROVE -->",
+                    comment_id=101,
+                    created_at="2026-09-06T09:47:00Z",
+                ),
+            ]
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assert_result(
+            result,
+            outcome="no_action",
+            reason="changes_requested",
+            merged=False,
+            would_merge=False,
+            dry_run=False,
+        )
+        self.assertIn(drain_prs.MARKER_CANONICAL, result["message"])
+        self.assertIn("100", result["message"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        # The drainer reads verdicts and writes none, here as everywhere.
+        self.assertEqual(self.label_edits(), [])
 
     def test_a_pending_required_check_names_every_configured_check(self):
         rollup = self.base_pr_json()["statusCheckRollup"]
@@ -1258,6 +1351,9 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
 
     def run_main(self, *argv_extra):
         """Drive main() in-process, so an interrupt can be placed exactly."""
+        cached = mock.patch.object(drain_prs, "AUTHENTICATED_LOGIN", None)
+        cached.start()
+        self.addCleanup(cached.stop)
         saved = (
             drain_prs.LOG_DIR,
             drain_prs.LOG_TO_STDERR,
@@ -1274,6 +1370,7 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
             ) = saved
 
         self.addCleanup(restore)
+        self.ensure_marker_reads()
         argv = [
             "drain_prs.py",
             "--path",

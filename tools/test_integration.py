@@ -16,6 +16,7 @@ from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import kanban_models
 import fake_cli
 import git_fixture
 import service_manager
@@ -24,6 +25,9 @@ import service_manager
 # The paginated comment feed drain_prs reads for pr-review markers, for the
 # `acme/widgets` slug every fixture here installs.
 COMMENTS_ENDPOINT = "repos/acme/widgets/issues/42/comments?per_page=100"
+# The account this fixture's drainer authenticates as, and therefore the
+# only one whose published review markers it believes.
+PUBLISHER = "widget-maintainer"
 
 
 def run_git(args, *, cwd):
@@ -148,6 +152,11 @@ class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
 
         self.fake = fake_cli.FakeCli(self.root / "fake-cli")
         self.fake.install("gh")
+        # drain_prs resolves the trusted publisher once per process, so a case
+        # that left one behind would decide the next one's answer.
+        cached = mock.patch.object(drain_prs, "AUTHENTICATED_LOGIN", None)
+        cached.start()
+        self.addCleanup(cached.stop)
 
     def _base_pr_json(self):
         return {
@@ -198,6 +207,50 @@ class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             pr_json.update(override)
             self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
 
+    def _script_comment_pages(self, pages=None, **kwargs):
+        """Script the paginated comment feed `review_markers` reads."""
+        self.fake.script(
+            "gh",
+            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            stdout="" if pages is None else json.dumps(pages),
+            **kwargs,
+        )
+
+    def _review_marker_comment(
+        self, marker, *, comment_id, created_at, author=PUBLISHER
+    ):
+        return {
+            "id": comment_id,
+            "user": {"login": author},
+            "html_url": (
+                f"https://github.com/acme/widgets/pull/42#issuecomment-{comment_id}"
+            ),
+            "created_at": created_at,
+            "body": f"A review.\n\n{marker}",
+        }
+
+    def _script_authenticated_login(self, login=PUBLISHER, **kwargs):
+        """Script `gh api user`, which names the publisher markers must match."""
+        self.fake.script("gh", ["api", "user"], stdout=f"{login}\n", **kwargs)
+
+    def _ensure_marker_reads(self):
+        """The default answers for the two reads every merge path now makes.
+
+        A rejection naming the current head vetoes the merge (issue #628), so
+        every merge path resolves the trusted publisher and pages the comment
+        feed. Scenarios about something else still have to answer both calls,
+        and several drive more than one pull request, so the feed is matched by
+        endpoint prefix rather than by naming one number. fake_cli prefers the
+        longest-standing matching entry, so an answer a scenario scripted for
+        itself keeps answering and this only covers the rest.
+        """
+        self.fake.ensure_script("gh", ["api", "user"], stdout=f"{PUBLISHER}\n")
+        self.fake.ensure_script(
+            "gh",
+            ["api", "--paginate", "--slurp"],
+            stdout=json.dumps([[]]),
+        )
+
     def _pr_view_calls(self):
         return [
             call for call in self.fake.calls("gh") if call["args"][:2] == ["pr", "view"]
@@ -229,6 +282,7 @@ class ProcessPrFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
                 required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
                 required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
             )
+        self._ensure_marker_reads()
         env_overrides = self.fake.environ_overrides()
         with mock.patch.dict(os.environ, env_overrides):
             result = drain_prs.process_pr(
@@ -484,6 +538,7 @@ class FinalGateAndPostMergeAuditTest(ProcessPrFixture):
             required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
         )
 
+        self._ensure_marker_reads()
         env_overrides = self.fake.environ_overrides()
         with mock.patch.dict(os.environ, env_overrides):
             with self.assertRaises(drain_prs.PostMergeAuditError):
@@ -769,6 +824,44 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(state["prs"]["42"]["approved_head"], "c" * 40)
 
     # -- the exception itself --------------------------------------------
+
+    def test_a_rejection_published_during_the_build_refuses_the_swap(self):
+        # Issue #628's second merge boundary. This path writes to the default
+        # branch's reference directly, so a rejection that arrives while the
+        # staging merge is being built has to stop it here -- the pull-request
+        # merge endpoint that guards the ordinary path is never called.
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        # Clean when the candidate was admitted and clean again at the
+        # ordinary path's own re-check, so the refusal can only come from the
+        # third read: the one immediately before the swap, once the merge
+        # commit already exists.
+        self._script_comment_pages([[]])
+        self._script_comment_pages([[]])
+        self._script_comment_pages(
+            [
+                [
+                    self._review_marker_comment(
+                        f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                        f"head={self.head_sha} verdict=CHANGES_REQUESTED -->",
+                        comment_id=101,
+                        created_at="2026-09-06T09:46:39Z",
+                    )
+                ]
+            ]
+        )
+
+        result, state, report = self._run()
+
+        self.assertTrue(result)
+        self.assertFalse(self._swapped())
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertFalse(report["merged"])
+        self.assertIn("101", report["message"])
+        # The staging reference is cleaned up on the refusal like any other.
+        self.assertEqual(len(self._staging_ref_deletions()), 2)
 
     def test_a_coordination_only_advance_merges_without_a_branch_update(self):
         self._script_pr_view(
@@ -1483,17 +1576,10 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
     bounded window `gh pr view --json comments` happens to return.
     """
 
-    def _script_comment_pages(self, pages=None, **kwargs):
-        self.fake.script(
-            "gh",
-            ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
-            stdout="" if pages is None else json.dumps(pages),
-            **kwargs,
-        )
-
     def _ordinary(self, index, created_at):
         return {
             "id": index,
+            "user": {"login": PUBLISHER},
             "created_at": created_at,
             "body": f"ordinary comment {index}",
         }
@@ -1507,6 +1593,7 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
         first_page.append(
             {
                 "id": 99,
+                "user": {"login": PUBLISHER},
                 "created_at": "2026-07-01T23:00:00Z",
                 "body": (
                     "<!-- pr-review:v1 reviewer=codex "
@@ -1517,6 +1604,7 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
         second_page = [
             {
                 "id": 100,
+                "user": {"login": PUBLISHER},
                 "created_at": "2026-07-20T00:00:00Z",
                 "body": (
                     "<!-- pr-review:v1 reviewer=codex "
@@ -1525,6 +1613,7 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
             }
         ]
         self._script_comment_pages([first_page, second_page])
+        self._script_authenticated_login()
 
         with mock.patch.dict(os.environ, self.fake.environ_overrides()):
             details = drain_prs.latest_review_details(self.ctx, 42)
@@ -1540,6 +1629,7 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
                 [self._ordinary(100, "2026-07-20T00:00:00Z")],
             ]
         )
+        self._script_authenticated_login()
 
         with mock.patch.dict(os.environ, self.fake.environ_overrides()):
             details = drain_prs.latest_review_details(self.ctx, 42)
@@ -1566,6 +1656,620 @@ class MarkerLookupPaginationTests(ProcessPrFixture):
                         drain_prs.latest_review_details(self.ctx, 42)
 
                 self.assertIn("Unexpected comments", str(caught.exception))
+
+
+class CanonicalVerdictPrecedenceTests(ProcessPrFixture):
+    """Issue #628: a rejection naming the current head refuses the merge.
+
+    One push starts two rereviews -- the drainer's own, and the canonical one
+    `$fix` and `$pr-revise` hand off -- and the merge gate preferred whichever
+    published last. On PR #625 that was a `medium` `pr-review:v1` approval
+    arriving 21 seconds after the canonical `xhigh` review had requested
+    changes on the very same commit, and the defect the superseded review named
+    merged.
+
+    Every case here holds the ordinary eligibility gates equal -- approved
+    label, green required checks, clean merge state -- so the only thing
+    deciding the outcome is the markers, and both arrival orders of every pair
+    are covered.
+    """
+
+    def _v2(self, verdict, *, head=None, reviewers="codex", models=None):
+        models = models or ",".join("unspecified" for _ in reviewers.split(","))
+        return (
+            f"<!-- pr-review:v2 reviewers={reviewers} models={models} "
+            f"head={head or self.head_sha} verdict={verdict} -->"
+        )
+
+    def _v1(self, verdict, *, head=None, reviewer="codex"):
+        return (
+            f"<!-- pr-review:v1 reviewer={reviewer} "
+            f"head={head or self.head_sha} verdict={verdict} -->"
+        )
+
+    def _feed(self, *markers, pages=False):
+        """The comment feed, markers given oldest first.
+
+        `pages=True` puts the oldest marker on its own earlier page, which is
+        the shape a long pull request actually has and the one a reader that
+        stopped at the first page would miss.
+        """
+        comments = [
+            self._review_marker_comment(
+                marker,
+                comment_id=100 + index,
+                created_at=f"2026-09-06T09:{40 + index:02d}:00Z",
+            )
+            for index, marker in enumerate(markers)
+        ]
+        if pages and len(comments) > 1:
+            self._script_comment_pages([comments[:1], comments[1:]])
+        else:
+            self._script_comment_pages([comments])
+
+    def _refused(self, *markers, **kwargs):
+        """Drive one merge attempt over these markers and report what happened."""
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        # Scripted for the cases that are meant to merge, so a case whose
+        # markers veto nothing is a complete merge rather than a cleanup
+        # failure standing in for one.
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._feed(*markers, **kwargs)
+        report = drain_prs.new_single_pr_report(42)
+        result, state = self._run_process_pr(report=report)
+        return result, state, report
+
+    def _assert_vetoed(self, report, *, version, comment="100"):
+        self.assertEqual(self._pr_merge_calls(), [])
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertFalse(report["merged"])
+        # The refusal has to be actionable: which reviewer published it, on
+        # which commit, and the comment an operator has to go and read.
+        self.assertIn(version, report["message"])
+        self.assertIn(self.head_sha[:12], report["message"])
+        self.assertIn(comment, report["message"])
+        # A per-candidate skip, not a drainer failure: every other approved
+        # pull request keeps draining in the same pass.
+        self.assertEqual(
+            drain_prs.classify_pass_outcome(report["reason"], raised=False),
+            drain_prs.PASS_SKIP,
+        )
+
+    # -- the incident's own shape, in both arrival orders ------------------
+
+    def test_a_newer_v1_approval_does_not_release_a_canonical_rejection(self):
+        _, _, report = self._refused(
+            self._v2("CHANGES_REQUESTED"), self._v1("APPROVE")
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_the_opposite_arrival_order_refuses_identically(self):
+        _, _, report = self._refused(
+            self._v1("APPROVE"), self._v2("CHANGES_REQUESTED")
+        )
+        self.assertEqual(self._pr_merge_calls(), [])
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertIn(drain_prs.MARKER_CANONICAL, report["message"])
+
+    def test_a_later_canonical_approval_of_the_same_head_does_not_release_it(self):
+        # The literal verdict lifetime issue #628's review fixed: only a new
+        # commit clears a rejection, not a second opinion on the same one.
+        _, _, report = self._refused(
+            self._v2("CHANGES_REQUESTED"), self._v2("APPROVE")
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_a_v1_rejection_blocks_a_canonical_approval_in_both_orders(self):
+        for markers in (
+            (self._v1("CHANGES_REQUESTED"), self._v2("APPROVE")),
+            (self._v2("APPROVE"), self._v1("CHANGES_REQUESTED")),
+        ):
+            with self.subTest(newest=markers[-1][:24]):
+                self._build_fixture()
+                _, _, report = self._refused(*markers)
+                self.assertEqual(self._pr_merge_calls(), [])
+                self.assertEqual(report["reason"], "changes_requested")
+
+    def test_the_label_the_losing_reviewer_wrote_changes_nothing(self):
+        # The two producers write labels as well as markers, so the pull
+        # request wears whichever one published last. Neither spelling may
+        # decide the merge: `reviewed:changes` refuses on the label the drainer
+        # already had, and `reviewed:approve` refuses on the marker underneath.
+        for labels in (
+            [{"name": drain_prs.APPROVE_LABEL}],
+            [{"name": drain_prs.CHANGES_LABEL}],
+        ):
+            with self.subTest(labels=labels[0]["name"]):
+                self._build_fixture()
+                self._script_pr_view({"labels": labels})
+                self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+                self._feed(self._v1("CHANGES_REQUESTED"), self._v2("APPROVE"))
+                report = drain_prs.new_single_pr_report(42)
+                self._run_process_pr(report=report)
+                self.assertEqual(self._pr_merge_calls(), [])
+                self.assertEqual(report["reason"], "changes_requested")
+
+    # -- the canonical publisher's real marker shape ----------------------
+
+    def test_a_dual_reviewer_rejection_blocks(self):
+        # `review_pr.py` publishes `reviewers=claude,codex` for a pull request
+        # routed to both brands. A parser that accepted one token could not see
+        # this marker, and an unreadable rejection does not block.
+        _, _, report = self._refused(
+            self._v2("CHANGES_REQUESTED", reviewers="claude,codex")
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+        self.assertIn("claude,codex", report["message"])
+
+    def test_a_blocking_marker_on_an_earlier_page_still_blocks(self):
+        _, _, report = self._refused(
+            self._v2("CHANGES_REQUESTED"), self._v1("APPROVE"), pages=True
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_an_unreadable_feed_refuses_rather_than_reporting_no_rejection(self):
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_comment_pages(stderr="boom", exit_code=1)
+        report = drain_prs.new_single_pr_report(42)
+        with self.assertRaises(drain_prs.DrainError):
+            self._run_process_pr(report=report)
+        self.assertEqual(self._pr_merge_calls(), [])
+
+    # -- what the veto deliberately does not reach ------------------------
+
+    def test_a_rejection_of_an_earlier_head_does_not_block(self):
+        # The reviewer asked for a commit and got one. Vetoing on a superseded
+        # head would leave every revised pull request permanently unmergeable.
+        _, _, report = self._refused(
+            self._v2("CHANGES_REQUESTED", head="d" * 40), self._v2("APPROVE")
+        )
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(report["reason"], "merged")
+
+    def test_a_current_head_v1_approval_alone_still_merges(self):
+        # The legacy lineage keeps working: an installation whose only reviewer
+        # is the drainer's own has no canonical marker to wait for.
+        _, _, report = self._refused(self._v1("APPROVE"))
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(report["reason"], "merged")
+
+    # -- the entry points a recovery-only change could bypass -------------
+
+    def test_a_fresh_queue_entry_is_vetoed_before_it_is_ever_remembered(self):
+        # A pull request the drainer has never seen is admitted on its label
+        # alone and its head remembered as approved. The veto has to reach that
+        # path too, or a restarted drainer would merge what a running one
+        # refused.
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh",
+            ["pr", "list"],
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                        "isDraft": False,
+                        "headRefOid": self.head_sha,
+                    }
+                ]
+            ),
+        )
+        self._feed(self._v2("CHANGES_REQUESTED"), self._v1("APPROVE"))
+        state_path = drain_prs.drain_state_path(self.ctx)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()):
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=False,
+                gates=drain_prs.GateConfig(
+                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                ),
+            )
+
+        self.assertEqual(self._pr_merge_calls(), [])
+
+    def test_nothing_mutating_runs_for_a_vetoed_candidate(self):
+        # The refusal comes before the branch update, the CI rerun and the
+        # conflict incident, all of which act on a pull request this pass has
+        # already established it may not land.
+        self._script_pr_view({"mergeStateStatus": "BEHIND"})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._feed(self._v2("CHANGES_REQUESTED"))
+        report = drain_prs.new_single_pr_report(42)
+        self._run_process_pr(report=report)
+
+        self.assertEqual(report["reason"], "changes_requested")
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if any("update-branch" in arg for arg in call["args"])
+            ],
+            [],
+        )
+
+
+class MarkerPublisherTrustTests(ProcessPrFixture):
+    """Only the authenticated publisher's markers carry review authority.
+
+    A marker is a claim of review authority written in a comment body, and a
+    comment body is something anyone who can see the pull request can write.
+    Without this filter the merge veto would hand every passer-by a way to
+    block an eligible pull request until a new commit was pushed, and a forged
+    canonical marker would make the stale-approval recovery wait for a rereview
+    nobody is running. §2.10's manual finalization gate draws the same
+    boundary, from the same `gh api user`.
+
+    Every case here pairs a foreign author against the identical marker from
+    the publisher, so a fixture that simply failed to produce a marker at all
+    could not pass.
+    """
+
+    STRANGER = "passer-by"
+    APPROVED_HEAD = "d" * 40
+
+    def _marker(self, spelling, verdict, head=None):
+        head = head or self.head_sha
+        if spelling == drain_prs.MARKER_CANONICAL:
+            return (
+                f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                f"head={head} verdict={verdict} -->"
+            )
+        if spelling == drain_prs.MARKER_DRAINER:
+            return f"<!-- pr-review:v1 reviewer=codex head={head} verdict={verdict} -->"
+        return f"<!-- codex-review head={head} verdict={verdict} -->"
+
+    def _feed(self, marker, *, author, comment_id=100, user=True):
+        comment = self._review_marker_comment(
+            marker,
+            comment_id=comment_id,
+            created_at="2026-09-06T09:46:39Z",
+            author=author,
+        )
+        if not user:
+            del comment["user"]
+        self._script_comment_pages([[comment]])
+
+    def _attempt_merge(self, marker, *, author, login=PUBLISHER, user=True):
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._feed(marker, author=author, user=user)
+        self._script_authenticated_login(login)
+        report = drain_prs.new_single_pr_report(42)
+        self._run_process_pr(report=report)
+        return report
+
+    def test_a_foreign_rejection_blocks_nothing_in_any_spelling(self):
+        for spelling in (
+            drain_prs.MARKER_CANONICAL,
+            drain_prs.MARKER_DRAINER,
+            drain_prs.MARKER_LEGACY,
+        ):
+            with self.subTest(spelling=spelling, author="stranger"):
+                self._build_fixture()
+                report = self._attempt_merge(
+                    self._marker(spelling, "CHANGES_REQUESTED"),
+                    author=self.STRANGER,
+                )
+                self.assertEqual(len(self._pr_merge_calls()), 1)
+                self.assertEqual(report["reason"], "merged")
+            # The control: the identical marker from the publisher does block,
+            # so the case above is not passing on a marker nobody could read.
+            with self.subTest(spelling=spelling, author="publisher"):
+                self._build_fixture()
+                report = self._attempt_merge(
+                    self._marker(spelling, "CHANGES_REQUESTED"),
+                    author=PUBLISHER,
+                )
+                self.assertEqual(self._pr_merge_calls(), [])
+                self.assertEqual(report["reason"], "changes_requested")
+
+    def test_a_comment_naming_no_author_carries_no_marker(self):
+        report = self._attempt_merge(
+            self._marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+            author=PUBLISHER,
+            user=False,
+        )
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(report["reason"], "merged")
+
+    def test_the_publisher_is_matched_with_case_folded(self):
+        # GitHub renders a login in the case its owner chose, and `gh api user`
+        # need not agree with a comment payload character for character.
+        report = self._attempt_merge(
+            self._marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+            author=PUBLISHER.upper(),
+        )
+        self.assertEqual(self._pr_merge_calls(), [])
+        self.assertEqual(report["reason"], "changes_requested")
+
+    def test_an_unresolvable_publisher_refuses_the_merge(self):
+        # Fail closed: "nobody is trusted" must never read as "nobody rejected
+        # this head".
+        for label, kwargs in (
+            ("gh api user failed", {"stderr": "boom", "exit_code": 1}),
+            ("gh api user named nobody", {"stdout": "\n"}),
+        ):
+            with self.subTest(case=label):
+                self._build_fixture()
+                self._script_pr_view()
+                self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+                self._feed(
+                    self._marker(drain_prs.MARKER_CANONICAL, "APPROVE"),
+                    author=PUBLISHER,
+                )
+                self.fake.script("gh", ["api", "user"], **kwargs)
+
+                with self.assertRaises(drain_prs.DrainError):
+                    self._run_process_pr(report=drain_prs.new_single_pr_report(42))
+
+                self.assertEqual(self._pr_merge_calls(), [])
+
+    # -- the same boundary on the rereview decisions ----------------------
+
+    def _stale_head_state(self):
+        return {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 0,
+            "prs": {
+                "42": {
+                    "approved_head": self.APPROVED_HEAD,
+                    "last_rereviewed_head": None,
+                    "consecutive_failures": 0,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 0,
+                    "last_error": None,
+                    "cleanup": None,
+                }
+            },
+        }
+
+    def _recover(self, marker, *, author, labels):
+        """Drive recovery over a pull request whose head moved."""
+        pr_json = self._base_pr_json()
+        pr_json["labels"] = labels
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self._feed(marker, author=author)
+        self._script_authenticated_login()
+        state = self._stale_head_state()
+        assignment = kanban_models.DEFAULT_ROSTER.assignment_for(
+            "drain_rereview", "codex"
+        )
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()), \
+                mock.patch.object(drain_prs, "FINALIZE_ASSIGNMENT", assignment), \
+                mock.patch.object(drain_prs, "FINALIZE_PROVIDER", "codex"), \
+                mock.patch.object(
+                    drain_prs, "FINALIZE_LOADED_PROVIDERS", ("codex",)
+                ), \
+                mock.patch.object(drain_prs, "rereview_pr_with_model") as spawn:
+            recovered = drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False
+            )
+        return spawn, recovered, state
+
+    def test_a_foreign_canonical_marker_does_not_make_the_drainer_defer(self):
+        # A forged `pr-review:v2` at the approved head would otherwise buy an
+        # indefinite wait for a canonical rereview nobody is running.
+        spawn, _, state = self._recover(
+            self._marker(drain_prs.MARKER_CANONICAL, "APPROVE", self.APPROVED_HEAD),
+            author=self.STRANGER,
+            labels=[],
+        )
+        spawn.assert_called_once()
+        self.assertEqual(state["prs"]["42"]["last_rereviewed_head"], self.head_sha)
+
+    def test_the_publishers_canonical_marker_still_defers(self):
+        spawn, recovered, state = self._recover(
+            self._marker(drain_prs.MARKER_CANONICAL, "APPROVE", self.APPROVED_HEAD),
+            author=PUBLISHER,
+            labels=[],
+        )
+        spawn.assert_not_called()
+        self.assertFalse(recovered)
+        self.assertIsNone(state["prs"]["42"]["last_rereviewed_head"])
+
+    def test_a_foreign_approval_does_not_recover_a_stale_approval(self):
+        # The pull request still carries its approval label on a head nothing
+        # reviewed; only the publisher's own current-head marker may carry it.
+        _, recovered, state = self._recover(
+            self._marker(drain_prs.MARKER_CANONICAL, "APPROVE"),
+            author=self.STRANGER,
+            labels=[{"name": drain_prs.APPROVE_LABEL}],
+        )
+        self.assertFalse(recovered)
+        self.assertEqual(state["prs"]["42"]["approved_head"], self.APPROVED_HEAD)
+
+    def test_the_publishers_approval_does_recover_it(self):
+        _, recovered, state = self._recover(
+            self._marker(drain_prs.MARKER_CANONICAL, "APPROVE"),
+            author=PUBLISHER,
+            labels=[{"name": drain_prs.APPROVE_LABEL}],
+        )
+        self.assertTrue(recovered)
+        self.assertEqual(state["prs"]["42"]["approved_head"], self.head_sha)
+
+
+class PausedCanonicalRereviewTests(ProcessPrFixture):
+    """A whole drain pass over the push whose canonical rereview has not landed.
+
+    Round 2 of pull request #632's review named the lineage the first attempt
+    missed. The canonical coordinator accepts a prior `pr-review:v1` marker for
+    `--rereview`, so `$fix` can push a pull request this drainer's own reviewer
+    approved and then hand off a canonical rereview. While that publication is
+    paused there is no current-head `pr-review:v2` result to veto anything, so
+    a drainer that reviewed the push itself would restore `reviewed:approve`
+    with its own `pr-review:v1` approval and merge before the canonical verdict
+    ever arrived.
+
+    These drive `loop(once=True)`: recovery and the queue pass in one turn,
+    which is what a real poll does, so the assertion is that nothing at all
+    reaches the merge rather than that one function declined to run.
+    """
+
+    STALE_HEAD = "d" * 40
+
+    def _push_arrived(self, marker_version):
+        """A pull request pushed past its approval, its old verdict published.
+
+        The push has landed and `dismiss-stale-approval` has removed the
+        approval label; the canonical rereview has been handed off but has
+        published nothing yet.
+        """
+        pr_json = self._base_pr_json()
+        pr_json["labels"] = []
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        spelling = {
+            drain_prs.MARKER_CANONICAL: (
+                f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                f"head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+            drain_prs.MARKER_DRAINER: (
+                f"<!-- pr-review:v1 reviewer=codex "
+                f"head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+            drain_prs.MARKER_LEGACY: (
+                f"<!-- codex-review head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+        }[marker_version]
+        self._script_comment_pages(
+            [
+                [
+                    self._review_marker_comment(
+                        spelling, comment_id=100, created_at="2026-09-06T09:40:00Z"
+                    )
+                ]
+            ]
+        )
+        self._script_authenticated_login()
+        drain_prs.drain_state_path(self.ctx).write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {
+                        "42": {
+                            "approved_head": self.STALE_HEAD,
+                            "last_rereviewed_head": None,
+                            "consecutive_failures": 0,
+                            "retry_after_attempt": 0,
+                            "last_attempt": 0,
+                            "last_error": None,
+                            "cleanup": None,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _one_pass(self):
+        assignment = kanban_models.DEFAULT_ROSTER.assignment_for(
+            "drain_rereview", "codex"
+        )
+        # A provider really is loaded and a rereview really could be spawned,
+        # so "nothing was reviewed" is a decision rather than a roster that
+        # had nobody to spawn.
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()), \
+                mock.patch.object(drain_prs, "FINALIZE_ASSIGNMENT", assignment), \
+                mock.patch.object(drain_prs, "FINALIZE_PROVIDER", "codex"), \
+                mock.patch.object(
+                    drain_prs, "FINALIZE_LOADED_PROVIDERS", ("codex",)
+                ), \
+                mock.patch.object(
+                    drain_prs,
+                    "rereview_pr_with_model",
+                    return_value=self._base_pr_json(),
+                ) as spawn:
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=False,
+                gates=drain_prs.GateConfig(
+                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                ),
+            )
+        return spawn
+
+    def _label_edits(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:2] == ["pr", "edit"]
+            and {"--add-label", "--remove-label"} & set(call["args"])
+        ]
+
+    def test_a_paused_canonical_rereview_leaves_a_v1_approved_push_unmerged(self):
+        self._push_arrived(drain_prs.MARKER_DRAINER)
+
+        spawn = self._one_pass()
+
+        spawn.assert_not_called()
+        self.assertEqual(self._pr_merge_calls(), [])
+        # Nothing restored the approval the push invalidated, by label or by
+        # marker, so there is no merge permission for the canonical verdict to
+        # race against.
+        self.assertEqual(self._label_edits(), [])
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if call["args"][:2] == ["pr", "comment"]
+            ],
+            [],
+        )
+        entry = json.loads(
+            drain_prs.drain_state_path(self.ctx).read_text(encoding="utf-8")
+        )["prs"]["42"]
+        self.assertEqual(entry["approved_head"], self.STALE_HEAD)
+        self.assertIsNone(entry["last_rereviewed_head"])
+
+    def test_the_canonical_lineage_behaves_the_same_way(self):
+        self._push_arrived(drain_prs.MARKER_CANONICAL)
+
+        spawn = self._one_pass()
+
+        spawn.assert_not_called()
+        self.assertEqual(self._pr_merge_calls(), [])
+
+    def test_the_control_a_legacy_only_push_is_still_rereviewed(self):
+        # The negative control this family needs: the same pass, the same
+        # loaded provider, and a lineage the coordinator refuses to rereview.
+        # A spawn is observable here, so the two cases above are refusals
+        # rather than a fixture that could never have spawned anything.
+        self._push_arrived(drain_prs.MARKER_LEGACY)
+
+        spawn = self._one_pass()
+
+        spawn.assert_called_once()
+        self.assertEqual(self._pr_merge_calls(), [])
 
 
 class OneCycleStaleEntryCleanupTests(ProcessPrFixture):
@@ -1639,6 +2343,7 @@ class OneCycleStaleEntryCleanupTests(ProcessPrFixture):
             required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
             required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
         )
+        self._ensure_marker_reads()
         with mock.patch.dict(os.environ, self.fake.environ_overrides()):
             drain_prs.loop(
                 self.ctx,
@@ -1916,6 +2621,7 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
     def _script_approving_rereview(self):
         pr_json = dict(self.pr, labels=[{"name": drain_prs.APPROVE_LABEL}])
         self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script("gh", ["api", "user"], stdout=f"{PUBLISHER}\n")
         # latest_review_details() pages the comment feed through the REST API
         # rather than the bounded `gh pr view --json comments` window.
         self.fake.script(
@@ -1926,6 +2632,7 @@ class StaleHeadRereviewIsolationTests(WorktreeFixture):
                     [
                         {
                             "id": 1,
+                            "user": {"login": PUBLISHER},
                             "created_at": "2026-07-20T00:00:00Z",
                             "body": (
                                 "<!-- pr-review:v1 reviewer=codex "
@@ -2115,6 +2822,7 @@ class MergeConflictIncidentTests(ProcessPrFixture):
 
     @contextlib.contextmanager
     def _drainer(self):
+        self._ensure_marker_reads()
         with (
             mock.patch.dict(os.environ, self.fake.environ_overrides()),
             mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
@@ -2487,6 +3195,7 @@ class PostMergeCleanupFixture(ProcessPrFixture):
 
     @contextlib.contextmanager
     def _drainer(self):
+        self._ensure_marker_reads()
         with (
             mock.patch.dict(os.environ, self.fake.environ_overrides()),
             mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
@@ -3670,6 +4379,7 @@ class QueueOrderTests(ProcessPrFixture):
 
     @contextlib.contextmanager
     def _drainer(self):
+        self._ensure_marker_reads()
         with (
             mock.patch.dict(os.environ, self.fake.environ_overrides()),
             mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),

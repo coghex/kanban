@@ -756,6 +756,306 @@ class ParseReviewMarkerDetailsTests(unittest.TestCase):
         )
 
 
+V2_DUAL = (
+    "<!-- pr-review:v2 reviewers=claude,codex "
+    "models=unspecified,unspecified "
+    "head=abc123abc123abc123abc123abc123abc123abcd "
+    "verdict=CHANGES_REQUESTED -->"
+)
+
+
+class ParseDualReviewerMarkerTests(unittest.TestCase):
+    """The canonical coordinator publishes a reviewer SET, not one brand.
+
+    `review_pr.py` writes `reviewers=claude,codex models=...,...` whenever it
+    routes a pull request to both brands, and a pattern that accepted only a
+    single token could not see that marker at all -- a rejection the drainer
+    cannot read is a rejection that does not block.
+    """
+
+    def test_a_dual_reviewer_marker_keeps_the_whole_set(self):
+        self.assertEqual(
+            drain_prs.parse_review_marker_details(V2_DUAL),
+            (
+                "claude,codex",
+                "abc123abc123abc123abc123abc123abc123abcd",
+                "CHANGES_REQUESTED",
+            ),
+        )
+
+    def test_a_reviewer_token_that_is_not_a_known_brand_is_not_a_marker(self):
+        body = V2_DUAL.replace("claude,codex", "claude,someone-else")
+        self.assertIsNone(drain_prs.parse_review_marker_details(body))
+
+    def test_each_spelling_reports_its_own_version(self):
+        v1 = (
+            "<!-- pr-review:v1 reviewer=codex "
+            "head=abc123abc123abc123abc123abc123abc123abcd verdict=APPROVE -->"
+        )
+        legacy = (
+            "<!-- codex-review head=abc123abc123abc123abc123abc123abc123abcd "
+            "verdict=APPROVE -->"
+        )
+        self.assertEqual(
+            [
+                drain_prs.parse_review_marker_record(body).version
+                for body in (V2_DUAL, v1, legacy)
+            ],
+            [
+                drain_prs.MARKER_CANONICAL,
+                drain_prs.MARKER_DRAINER,
+                drain_prs.MARKER_LEGACY,
+            ],
+        )
+
+
+class MultiMarkerCommentTests(unittest.TestCase):
+    """A rejection hidden behind an approval in one comment still counts.
+
+    §2.10's manual finalization gate refuses a comment carrying more than one
+    marker outright, for exactly this reason: reading only the first would take
+    an `APPROVE` followed by a `CHANGES_REQUESTED` as the approval alone. The
+    drainer keeps every marker instead, so the veto sees the rejection.
+    """
+
+    HEAD = "abc123abc123abc123abc123abc123abc123abcd"
+
+    def body(self, *markers):
+        return "A review.\n\n" + "\n".join(markers)
+
+    def v1(self, verdict):
+        return (
+            f"<!-- pr-review:v1 reviewer=codex head={self.HEAD} "
+            f"verdict={verdict} -->"
+        )
+
+    def v2(self, verdict):
+        return (
+            f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+            f"head={self.HEAD} verdict={verdict} -->"
+        )
+
+    def test_both_markers_are_kept(self):
+        records = drain_prs.parse_review_marker_records(
+            self.body(self.v2("APPROVE"), self.v2("CHANGES_REQUESTED"))
+        )
+        self.assertEqual(
+            [record.verdict for record in records], ["APPROVE", "CHANGES_REQUESTED"]
+        )
+
+    def test_the_hidden_rejection_still_vetoes(self):
+        records = drain_prs.parse_review_marker_records(
+            self.body(self.v2("APPROVE"), self.v1("CHANGES_REQUESTED"))
+        )
+        blocking = drain_prs.blocking_marker_in(records, self.HEAD)
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.version, drain_prs.MARKER_DRAINER)
+
+    def test_the_single_record_readers_pick_what_they_always_picked(self):
+        # The drainer's own spelling first, then the canonical one, then the
+        # legacy one -- the pattern order this module resolved a body by
+        # before every marker was kept.
+        body = self.body(self.v2("APPROVE"), self.v1("CHANGES_REQUESTED"))
+        self.assertEqual(
+            drain_prs.parse_review_marker_details(body),
+            ("codex", self.HEAD, "CHANGES_REQUESTED"),
+        )
+
+    def test_a_body_with_no_marker_yields_nothing(self):
+        self.assertEqual(drain_prs.parse_review_marker_records("just a comment"), [])
+
+
+class MarkerProviderAcceptedTests(unittest.TestCase):
+    """One loaded brand in a marker's reviewer set is enough (issue #628)."""
+
+    def accepted(self, reviewers, loaded):
+        with mock.patch.object(drain_prs, "FINALIZE_LOADED_PROVIDERS", loaded):
+            return drain_prs.marker_provider_accepted(reviewers)
+
+    def test_a_dual_marker_counts_for_an_installation_loading_either_brand(self):
+        self.assertTrue(self.accepted("claude,codex", ("codex",)))
+        self.assertTrue(self.accepted("claude,codex", ("claude",)))
+
+    def test_a_single_brand_marker_still_needs_that_brand_loaded(self):
+        self.assertTrue(self.accepted("codex", ("codex",)))
+        self.assertFalse(self.accepted("claude", ("codex",)))
+
+    def test_a_no_agent_roster_accepts_every_marker(self):
+        self.assertTrue(self.accepted("claude", ()))
+
+
+class BlockingReviewMarkerTests(unittest.TestCase):
+    """The precedence policy of issue #628, decided over one head's markers.
+
+    A `CHANGES_REQUESTED` marker naming the current head is a veto, no later
+    marker at that head lifts it, and a rejection of some other head imposes
+    nothing. Newest-wins is exactly what these deny: on PR #625 a `medium`
+    `pr-review:v1` approval landing 21 seconds after the canonical `xhigh`
+    review had requested changes on the same commit is what merged the defect.
+    """
+
+    HEAD = "a" * 40
+    OTHER = "b" * 40
+
+    def marker(self, version, verdict, head=None, *, reviewers="codex", comment_id="1"):
+        return drain_prs.ReviewMarker(
+            version, reviewers, (head or self.HEAD).lower(), verdict, comment_id, ""
+        )
+
+    def blocking(self, *markers, head=None):
+        """Markers newest first, as `review_markers` returns them."""
+        return drain_prs.blocking_marker_in(list(markers), head or self.HEAD)
+
+    def test_a_newer_v1_approval_does_not_lift_a_canonical_rejection(self):
+        # PR #625's exact shape: the drainer's own approval arrived last.
+        blocking = self.blocking(
+            self.marker(drain_prs.MARKER_DRAINER, "APPROVE", comment_id="2"),
+            self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.version, drain_prs.MARKER_CANONICAL)
+
+    def test_the_opposite_arrival_order_refuses_identically(self):
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", comment_id="2"
+            ),
+            self.marker(drain_prs.MARKER_DRAINER, "APPROVE"),
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.version, drain_prs.MARKER_CANONICAL)
+
+    def test_a_later_canonical_approval_does_not_lift_it_either(self):
+        # The literal verdict lifetime: only a new commit clears a rejection,
+        # not a second canonical opinion on the same one.
+        blocking = self.blocking(
+            self.marker(drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2"),
+            self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.verdict, "CHANGES_REQUESTED")
+
+    def test_a_v1_rejection_blocks_a_canonical_approval_in_either_order(self):
+        for markers in (
+            (
+                self.marker(drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2"),
+                self.marker(drain_prs.MARKER_DRAINER, "CHANGES_REQUESTED"),
+            ),
+            (
+                self.marker(
+                    drain_prs.MARKER_DRAINER, "CHANGES_REQUESTED", comment_id="2"
+                ),
+                self.marker(drain_prs.MARKER_CANONICAL, "APPROVE"),
+            ),
+        ):
+            with self.subTest(newest=markers[0].version):
+                # Rank does not decide it: preferring the canonical verdict
+                # would mean merging past a `reviewed:changes` label the v1
+                # reviewer wrote together with its marker.
+                self.assertIsNotNone(self.blocking(*markers))
+
+    def test_a_rejection_of_another_head_imposes_nothing(self):
+        self.assertIsNone(
+            self.blocking(
+                self.marker(drain_prs.MARKER_CANONICAL, "APPROVE"),
+                self.marker(
+                    drain_prs.MARKER_CANONICAL,
+                    "CHANGES_REQUESTED",
+                    self.OTHER,
+                    comment_id="0",
+                ),
+            )
+        )
+
+    def test_a_dual_reviewer_rejection_blocks(self):
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL,
+                "CHANGES_REQUESTED",
+                reviewers="claude,codex",
+            )
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.reviewers, "claude,codex")
+
+    def test_approvals_alone_block_nothing(self):
+        self.assertIsNone(
+            self.blocking(
+                self.marker(drain_prs.MARKER_DRAINER, "APPROVE"),
+                self.marker(drain_prs.MARKER_LEGACY, "APPROVE", comment_id="0"),
+            )
+        )
+
+    def test_a_head_that_is_not_known_blocks_nothing(self):
+        # A pull request payload with no head is one nothing can merge anyway,
+        # and inventing a match for it would veto every candidate at once.
+        self.assertIsNone(
+            drain_prs.blocking_marker_in(
+                [self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED")], None
+            )
+        )
+
+    def test_the_refusal_names_the_version_head_and_comment(self):
+        message = drain_prs.describe_blocking_marker(
+            42,
+            drain_prs.ReviewMarker(
+                drain_prs.MARKER_CANONICAL,
+                "codex",
+                self.HEAD,
+                "CHANGES_REQUESTED",
+                "5572103425",
+                "https://github.com/acme/widgets/pull/42#issuecomment-5572103425",
+            ),
+        )
+        self.assertIn(drain_prs.MARKER_CANONICAL, message)
+        self.assertIn(self.HEAD[:12], message)
+        self.assertIn("5572103425", message)
+
+
+class CanonicalRereviewAvailableTests(unittest.TestCase):
+    """Which pull requests belong to the canonical reviewer, not this one.
+
+    The line is the coordinator's own `require_prior_review`, mirrored so the
+    two producers are disjoint by construction rather than by timing: it
+    rereviews anything already carrying its own `pr-review:v2` or the drainer's
+    `pr-review:v1`, at any head, and refuses a pull request carrying only the
+    legacy spelling.
+    """
+
+    def marker(self, version, head="a" * 40):
+        return drain_prs.ReviewMarker(
+            version, "codex", head.lower(), "APPROVE", "1", ""
+        )
+
+    def test_either_spelling_the_coordinator_admits_defers_to_it(self):
+        for version in (drain_prs.MARKER_CANONICAL, drain_prs.MARKER_DRAINER):
+            with self.subTest(version=version):
+                self.assertTrue(
+                    drain_prs.canonical_rereview_available([self.marker(version)])
+                )
+
+    def test_the_head_a_marker_names_does_not_enter_it(self):
+        # `require_prior_review` reads the comment feed and never a head, so a
+        # marker for some older commit still admits a rereview.
+        self.assertTrue(
+            drain_prs.canonical_rereview_available(
+                [self.marker(drain_prs.MARKER_CANONICAL, "b" * 40)]
+            )
+        )
+
+    def test_a_legacy_only_pull_request_stays_this_drainer_s(self):
+        # The coordinator refuses to rereview it, so deferring would leave a
+        # stale head with no reviewer at all.
+        self.assertFalse(
+            drain_prs.canonical_rereview_available(
+                [self.marker(drain_prs.MARKER_LEGACY)]
+            )
+        )
+
+    def test_a_pull_request_with_no_marker_stays_this_drainer_s(self):
+        self.assertFalse(drain_prs.canonical_rereview_available([]))
+
+
 class MigrateDrainStateTests(unittest.TestCase):
     def test_v1_migrates_to_current_version_and_resets_counter(self):
         state = {"version": 1, "attempt_counter": 99, "prs": {}}

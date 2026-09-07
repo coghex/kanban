@@ -802,7 +802,8 @@ reimplement the removal, and `--check` remains read-only.
   `pr-review:v1` marker's `reviewer=` token come from the resolved assignment,
   and the drainer verifies the published marker's provider as well as its head
   and verdict; a current-head marker whose brand this installation does not
-  load cannot recover a stale approval either.
+  load cannot recover a stale approval either. That rereview runs for one
+  lineage only, per the review authority bullet below.
   Every executable these Python tools spawn is declared in the
   §4 manifest and reconciled against it the same way the Haskell and
   packaged-workflow surfaces are: every non-test module under `tools/` is a
@@ -847,6 +848,48 @@ reimplement the removal, and `--check` remains read-only.
   outcome, and no contradiction between the outcome, the merge flag, and the
   dry-run flag — since resolving a path means whatever is installed there
   answers, and a claimed merge is both shown to the user and acted on.
+- **Review authority and the verdict a merge obeys:** the drainer reads every
+  published review marker on a candidate — the canonical `pr-review:v2` §2.2's
+  coordinator publishes, its own `pr-review:v1`, and the legacy `codex-review`
+  spelling — from the whole paginated comment feed, counting only those
+  published by the login `gh api user` names, since a marker is a claim of
+  review authority written in a body anyone who can see the pull request can
+  write; that is §2.10's boundary drawn from the same source, and a login that
+  cannot be resolved refuses rather than being read as an absence of
+  rejections. It applies one precedence rule at both of its merge boundaries: the ordinary pull-request merge and the
+  default-branch swap of a merge past a coordination-only base advance. **A
+  `CHANGES_REQUESTED` marker naming a candidate's current head refuses the
+  merge, and no later marker at that same head lifts it** — not a second
+  canonical verdict, not an approval from the other producer, and not the
+  `reviewed:approve` label written beside it. Only a new head clears it; a
+  rejection naming any other head imposes nothing. A `reviewers=` token is a
+  set, since the coordinator publishes `reviewers=claude,codex` for a
+  dual-routed review; every marker in a comment body counts rather than only
+  the first, so a rejection published underneath an approval in one comment is
+  not hidden by it; and a feed that cannot be read refuses rather than
+  reporting that nothing rejected the head. Neither arrival order nor marker
+  version decides the outcome, deliberately: newest-wins let a `pr-review:v1`
+  approval published 21 seconds after a canonical rejection of the same commit
+  merge the defect that rejection named, and version rank alone would have to
+  merge past a `reviewed:changes` label the losing reviewer wrote together with
+  its own marker. Because two producers for one push is what created that race,
+  the drainer now rereviews only the pull requests the canonical gate will not:
+  when a head changes it applies that coordinator's own admission rule —
+  `require_prior_review`, which rereviews any pull request already carrying a
+  `pr-review:v2` or `pr-review:v1` comment from the publishing account, at any
+  head — and where the rule admits, it spawns no reviewer of its own,
+  publishing no marker and switching no label while it waits, so canonical work
+  that is incomplete or has failed cannot be overtaken into merge permission.
+  Whether such a review is *running* is deliberately not the question: the
+  coordinator publishes only after its reviewers return, so nothing between the
+  push and that publication is observable, and splitting the work by the
+  admission rule makes the two producers disjoint by construction rather than
+  by timing. The legacy `codex-review` spelling is outside that rule in both
+  files, so a pull request carrying only it — or no marker at all — keeps the
+  automatic stale-head rereview above, and a stale head is never left with no
+  reviewer. This is the drainer's merge policy, and §2.10's manual finalization
+  fallback keeps its own separate gate; `docs/pr-drainer.md` documents the
+  operator-visible consequences.
 - **Inputs:** repository path and repository identity; the repository's own
   service definition — a LaunchAgent plist under `~/Library/LaunchAgents` on
   macOS, a unit file under `~/.config/systemd/user` on Linux — each of which is
