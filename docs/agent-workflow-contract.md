@@ -873,15 +873,23 @@ reimplement the removal, and `--check` remains read-only.
   merge the defect that rejection named, and version rank alone would have to
   merge past a `reviewed:changes` label the losing reviewer wrote together with
   its own marker. Because two producers for one push is what created that race,
-  only one now runs for it: when the approval that just went stale carries a
-  canonical marker, the drainer spawns no rereview of its own and waits for the
-  canonical one, publishing no marker and switching no label meanwhile, so
-  incomplete or failed canonical work can never be overtaken into merge
-  permission. A pull request approved by the drainer's own reviewer, by the
-  legacy spelling, or by no marker at all keeps the automatic stale-head
-  rereview above. This is the drainer's merge policy, and §2.10's manual
-  finalization fallback keeps its own separate gate;
-  `docs/pr-drainer.md` documents the operator-visible consequences.
+  the drainer now rereviews only the pull requests the canonical gate will not:
+  when a head changes it applies that coordinator's own admission rule —
+  `require_prior_review`, which rereviews any pull request already carrying a
+  `pr-review:v2` or `pr-review:v1` comment from the publishing account, at any
+  head — and where the rule admits, it spawns no reviewer of its own,
+  publishing no marker and switching no label while it waits, so canonical work
+  that is incomplete or has failed cannot be overtaken into merge permission.
+  Whether such a review is *running* is deliberately not the question: the
+  coordinator publishes only after its reviewers return, so nothing between the
+  push and that publication is observable, and splitting the work by the
+  admission rule makes the two producers disjoint by construction rather than
+  by timing. The legacy `codex-review` spelling is outside that rule in both
+  files, so a pull request carrying only it — or no marker at all — keeps the
+  automatic stale-head rereview above, and a stale head is never left with no
+  reviewer. This is the drainer's merge policy, and §2.10's manual finalization
+  fallback keeps its own separate gate; `docs/pr-drainer.md` documents the
+  operator-visible consequences.
 - **Inputs:** repository path and repository identity; the repository's own
   service definition — a LaunchAgent plist under `~/Library/LaunchAgents` on
   macOS, a unit file under `~/.config/systemd/user` on Linux — each of which is

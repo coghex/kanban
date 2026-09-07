@@ -770,32 +770,40 @@ approval in one comment body is not hidden by it.
 
 ### One rereview per push
 
-A pull request whose stale approval was published by the canonical coordinator
-is one the canonical gate reviews. When such a head changes, the drainer
-**waits** for the canonical rereview instead of spawning its own: `$fix` and
-`$pr-revise` hand one off for the very push that invalidated the approval, and
-running a second reviewer alongside it is what produced two verdicts for one
-commit in the first place. The drainer publishes no marker and switches no
-label while it waits, so an unfinished or failed canonical review cannot be
-overtaken into merge permission.
+**The drainer rereviews only the pull requests the canonical gate will not.**
+When a head changes, it asks one question — would the canonical coordinator
+accept a rereview of this pull request? — and if the answer is yes it **waits**
+for that verdict instead of spawning its own reviewer. It publishes no marker
+and switches no label while it waits, so canonical work that is unfinished, or
+that failed outright, can never be overtaken into merge permission.
+
+The question is the coordinator's own admission rule, not a guess about what is
+running: `$pr-rereview` rereviews any pull request already carrying a
+`pr-review:v2` or `pr-review:v1` comment from the publishing account, at any
+head. "Is a canonical review running right now?" cannot be answered from here
+at all — the coordinator publishes only once its reviewers return, so between
+the push and that publication there is nothing to observe. Splitting the work
+by the admission rule instead makes the two reviewers disjoint by construction
+rather than by timing, which is what the incident above needed and what
+`$fix` and `$pr-revise` exercise every time they push and hand off a rereview.
 
 The waiting is visible in the log:
 
 ```text
-PR #42: head changed from 5f5c5e355510 to c944c8160781, and its approval came
-from a pr-review:v2 review; waiting for the canonical rereview rather than
-running a second one
+PR #42: head changed from 5f5c5e355510 to c944c8160781, and the canonical gate
+can rereview it; waiting for that verdict rather than running a second review
 ```
 
-A pull request whose approval came from the drainer's own reviewer, from the
-legacy spelling, or from no marker at all has no canonical producer to wait
-for, and keeps the automatic rereview the drainer has always run for a stale
-head: it spawns the provider its roster's `drain_rereview` cell selects, which
-publishes a `pr-review:v1` marker and switches the verdict label itself.
+What is left for the drainer's own reviewer is the pull request the coordinator
+refuses: one carrying only the legacy `codex-review` marker, or no marker at
+all. For those it still spawns the provider its roster's `drain_rereview` cell
+selects, which publishes a `pr-review:v1` marker and switches the verdict label
+itself — and the moment that marker exists, every later push to that pull
+request belongs to the canonical gate too.
 
-So a push to a canonically reviewed pull request that never gets a canonical
-rereview waits indefinitely. Run `$pr-rereview` / `/pr-rereview` for it; the
-drainer will not decide it for you.
+So a push to a pull request the canonical gate can rereview waits indefinitely
+if no canonical rereview is ever run for it. Run `$pr-rereview` /
+`/pr-rereview` for it; the drainer will not decide it for you.
 
 ## Queue order
 

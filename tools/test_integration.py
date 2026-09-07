@@ -2113,6 +2113,165 @@ class MarkerPublisherTrustTests(ProcessPrFixture):
         self.assertEqual(state["prs"]["42"]["approved_head"], self.head_sha)
 
 
+class PausedCanonicalRereviewTests(ProcessPrFixture):
+    """A whole drain pass over the push whose canonical rereview has not landed.
+
+    Round 2 of pull request #632's review named the lineage the first attempt
+    missed. The canonical coordinator accepts a prior `pr-review:v1` marker for
+    `--rereview`, so `$fix` can push a pull request this drainer's own reviewer
+    approved and then hand off a canonical rereview. While that publication is
+    paused there is no current-head `pr-review:v2` result to veto anything, so
+    a drainer that reviewed the push itself would restore `reviewed:approve`
+    with its own `pr-review:v1` approval and merge before the canonical verdict
+    ever arrived.
+
+    These drive `loop(once=True)`: recovery and the queue pass in one turn,
+    which is what a real poll does, so the assertion is that nothing at all
+    reaches the merge rather than that one function declined to run.
+    """
+
+    STALE_HEAD = "d" * 40
+
+    def _push_arrived(self, marker_version):
+        """A pull request pushed past its approval, its old verdict published.
+
+        The push has landed and `dismiss-stale-approval` has removed the
+        approval label; the canonical rereview has been handed off but has
+        published nothing yet.
+        """
+        pr_json = self._base_pr_json()
+        pr_json["labels"] = []
+        self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(pr_json))
+        self.fake.script("gh", ["pr", "list"], stdout=json.dumps([]))
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        spelling = {
+            drain_prs.MARKER_CANONICAL: (
+                f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+                f"head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+            drain_prs.MARKER_DRAINER: (
+                f"<!-- pr-review:v1 reviewer=codex "
+                f"head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+            drain_prs.MARKER_LEGACY: (
+                f"<!-- codex-review head={self.STALE_HEAD} verdict=APPROVE -->"
+            ),
+        }[marker_version]
+        self._script_comment_pages(
+            [
+                [
+                    self._review_marker_comment(
+                        spelling, comment_id=100, created_at="2026-09-06T09:40:00Z"
+                    )
+                ]
+            ]
+        )
+        self._script_authenticated_login()
+        drain_prs.drain_state_path(self.ctx).write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 0,
+                    "prs": {
+                        "42": {
+                            "approved_head": self.STALE_HEAD,
+                            "last_rereviewed_head": None,
+                            "consecutive_failures": 0,
+                            "retry_after_attempt": 0,
+                            "last_attempt": 0,
+                            "last_error": None,
+                            "cleanup": None,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _one_pass(self):
+        assignment = kanban_models.DEFAULT_ROSTER.assignment_for(
+            "drain_rereview", "codex"
+        )
+        # A provider really is loaded and a rereview really could be spawned,
+        # so "nothing was reviewed" is a decision rather than a roster that
+        # had nobody to spawn.
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()), \
+                mock.patch.object(drain_prs, "FINALIZE_ASSIGNMENT", assignment), \
+                mock.patch.object(drain_prs, "FINALIZE_PROVIDER", "codex"), \
+                mock.patch.object(
+                    drain_prs, "FINALIZE_LOADED_PROVIDERS", ("codex",)
+                ), \
+                mock.patch.object(
+                    drain_prs,
+                    "rereview_pr_with_model",
+                    return_value=self._base_pr_json(),
+                ) as spawn:
+            drain_prs.loop(
+                self.ctx,
+                interval=0,
+                once=True,
+                dry_run=False,
+                gates=drain_prs.GateConfig(
+                    required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                    required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                ),
+            )
+        return spawn
+
+    def _label_edits(self):
+        return [
+            call
+            for call in self.fake.calls("gh")
+            if call["args"][:2] == ["pr", "edit"]
+            and {"--add-label", "--remove-label"} & set(call["args"])
+        ]
+
+    def test_a_paused_canonical_rereview_leaves_a_v1_approved_push_unmerged(self):
+        self._push_arrived(drain_prs.MARKER_DRAINER)
+
+        spawn = self._one_pass()
+
+        spawn.assert_not_called()
+        self.assertEqual(self._pr_merge_calls(), [])
+        # Nothing restored the approval the push invalidated, by label or by
+        # marker, so there is no merge permission for the canonical verdict to
+        # race against.
+        self.assertEqual(self._label_edits(), [])
+        self.assertEqual(
+            [
+                call
+                for call in self.fake.calls("gh")
+                if call["args"][:2] == ["pr", "comment"]
+            ],
+            [],
+        )
+        entry = json.loads(
+            drain_prs.drain_state_path(self.ctx).read_text(encoding="utf-8")
+        )["prs"]["42"]
+        self.assertEqual(entry["approved_head"], self.STALE_HEAD)
+        self.assertIsNone(entry["last_rereviewed_head"])
+
+    def test_the_canonical_lineage_behaves_the_same_way(self):
+        self._push_arrived(drain_prs.MARKER_CANONICAL)
+
+        spawn = self._one_pass()
+
+        spawn.assert_not_called()
+        self.assertEqual(self._pr_merge_calls(), [])
+
+    def test_the_control_a_legacy_only_push_is_still_rereviewed(self):
+        # The negative control this family needs: the same pass, the same
+        # loaded provider, and a lineage the coordinator refuses to rereview.
+        # A spawn is observable here, so the two cases above are refusals
+        # rather than a fixture that could never have spawned anything.
+        self._push_arrived(drain_prs.MARKER_LEGACY)
+
+        spawn = self._one_pass()
+
+        spawn.assert_called_once()
+        self.assertEqual(self._pr_merge_calls(), [])
+
+
 class OneCycleStaleEntryCleanupTests(ProcessPrFixture):
     """Regression coverage for issue #27: forgetting departed PRs must cost
     one cycle in total rather than one cycle per entry, and must not suppress

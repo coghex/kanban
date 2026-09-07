@@ -1012,43 +1012,48 @@ class BlockingReviewMarkerTests(unittest.TestCase):
         self.assertIn("5572103425", message)
 
 
-class CanonicalMarkerInTests(unittest.TestCase):
-    """Which reviewer owns a pull request's verdicts, read off the evidence."""
+class CanonicalRereviewAvailableTests(unittest.TestCase):
+    """Which pull requests belong to the canonical reviewer, not this one.
 
-    HEAD = "a" * 40
+    The line is the coordinator's own `require_prior_review`, mirrored so the
+    two producers are disjoint by construction rather than by timing: it
+    rereviews anything already carrying its own `pr-review:v2` or the drainer's
+    `pr-review:v1`, at any head, and refuses a pull request carrying only the
+    legacy spelling.
+    """
 
-    def marker(self, version, head=None):
+    def marker(self, version, head="a" * 40):
         return drain_prs.ReviewMarker(
-            version, "codex", (head or self.HEAD).lower(), "APPROVE", "1", ""
+            version, "codex", head.lower(), "APPROVE", "1", ""
         )
 
-    def test_a_canonical_marker_at_that_head_is_found(self):
-        found = drain_prs.canonical_marker_in(
-            [
-                self.marker(drain_prs.MARKER_DRAINER),
-                self.marker(drain_prs.MARKER_CANONICAL),
-            ],
-            self.HEAD,
-        )
-        self.assertIsNotNone(found)
+    def test_either_spelling_the_coordinator_admits_defers_to_it(self):
+        for version in (drain_prs.MARKER_CANONICAL, drain_prs.MARKER_DRAINER):
+            with self.subTest(version=version):
+                self.assertTrue(
+                    drain_prs.canonical_rereview_available([self.marker(version)])
+                )
 
-    def test_a_drainer_or_legacy_lineage_is_not_canonical(self):
-        self.assertIsNone(
-            drain_prs.canonical_marker_in(
-                [
-                    self.marker(drain_prs.MARKER_DRAINER),
-                    self.marker(drain_prs.MARKER_LEGACY),
-                ],
-                self.HEAD,
+    def test_the_head_a_marker_names_does_not_enter_it(self):
+        # `require_prior_review` reads the comment feed and never a head, so a
+        # marker for some older commit still admits a rereview.
+        self.assertTrue(
+            drain_prs.canonical_rereview_available(
+                [self.marker(drain_prs.MARKER_CANONICAL, "b" * 40)]
             )
         )
 
-    def test_a_canonical_marker_at_another_head_is_not_this_head_s(self):
-        self.assertIsNone(
-            drain_prs.canonical_marker_in(
-                [self.marker(drain_prs.MARKER_CANONICAL, "b" * 40)], self.HEAD
+    def test_a_legacy_only_pull_request_stays_this_drainer_s(self):
+        # The coordinator refuses to rereview it, so deferring would leave a
+        # stale head with no reviewer at all.
+        self.assertFalse(
+            drain_prs.canonical_rereview_available(
+                [self.marker(drain_prs.MARKER_LEGACY)]
             )
         )
+
+    def test_a_pull_request_with_no_marker_stays_this_drainer_s(self):
+        self.assertFalse(drain_prs.canonical_rereview_available([]))
 
 
 class MigrateDrainStateTests(unittest.TestCase):

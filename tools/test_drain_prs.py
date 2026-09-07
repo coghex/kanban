@@ -209,9 +209,18 @@ class ReviewAuthorityIsDocumentedTests(unittest.TestCase):
         )
 
     def test_the_contract_states_that_one_producer_runs_per_push(self):
+        section = self.section()
         self.assertIn(
-            "the drainer spawns no rereview of its own and waits for the",
-            self.section(),
+            "the drainer now rereviews only the pull requests the canonical "
+            "gate will not",
+            section,
+        )
+        # The rule it splits on, named as the coordinator's own.
+        self.assertIn("`require_prior_review`", section)
+        self.assertIn(
+            "**The drainer rereviews only the pull requests the canonical gate "
+            "will not.**",
+            self.OPERATOR_GUIDE.read_text(encoding="utf-8"),
         )
 
     def test_both_documents_name_every_marker_spelling_this_module_reads(self):
@@ -235,18 +244,72 @@ class ReviewAuthorityIsDocumentedTests(unittest.TestCase):
         self.assertIn("Pushing a new commit is", guide)
 
 
+class CoordinatorAdmissionRuleTests(unittest.TestCase):
+    """The partition is one line drawn in two files, so it is pinned in both.
+
+    `canonical_rereview_available` mirrors the coordinator's
+    `require_prior_review`. If that rule is ever widened -- to accept the
+    legacy spelling, say -- the drainer would keep reviewing pull requests the
+    coordinator had started rereviewing, and issue #628's race would be back
+    with nothing failing to say so.
+    """
+
+    COORDINATOR = (
+        REPO_ROOT
+        / "claude-plugin"
+        / "plugins"
+        / "kanban"
+        / "scripts"
+        / "review_pr.py"
+    )
+
+    def rule(self):
+        source = self.COORDINATOR.read_text(encoding="utf-8")
+        start = source.index("def require_prior_review(")
+        return source[start : source.index("\ndef ", start + 1)]
+
+    def test_the_coordinator_admits_exactly_the_spellings_this_module_defers_on(self):
+        rule = self.rule()
+        # Its own marker, read through the shared owned-marker helper, and the
+        # drainer's own spelling matched literally.
+        self.assertIn("latest_owned_review_marker", rule)
+        self.assertIn('"<!-- pr-review:v1 "', rule)
+        # And not the legacy spelling, which is why a legacy-only pull request
+        # stays this drainer's to rereview.
+        self.assertNotIn("codex-review", rule)
+
+    def test_the_admission_rule_reads_no_head(self):
+        # A head in that rule would mean the coordinator admits only some
+        # pushes, and a head-blind deferral here would then refuse work.
+        self.assertNotIn("headRefOid", self.rule())
+
+    def test_the_deferral_follows_that_rule(self):
+        def marker(version):
+            return drain_prs.ReviewMarker(version, "codex", "a" * 40, "APPROVE")
+
+        self.assertTrue(
+            drain_prs.canonical_rereview_available([marker(drain_prs.MARKER_CANONICAL)])
+        )
+        self.assertTrue(
+            drain_prs.canonical_rereview_available([marker(drain_prs.MARKER_DRAINER)])
+        )
+        self.assertFalse(
+            drain_prs.canonical_rereview_available([marker(drain_prs.MARKER_LEGACY)])
+        )
+
+
 class OneRereviewPerPushTests(unittest.TestCase):
     """Issue #628, requirement 3: one push starts one rereview, not two.
 
-    `$fix` and `$pr-revise` push a fix and hand off a canonical `pr-review:v2`
-    rereview for that very push. The drainer used to spawn its own reviewer for
-    the same commit, at a different effort, and whichever finished last decided
-    the merge. A pull request whose stale approval was canonical now waits for
-    the canonical verdict instead, so there is no second producer to overtake
-    an unfinished or failed canonical review into merge permission.
+    `$fix` and `$pr-revise` push a fix and hand off a canonical rereview for
+    that very push. The drainer used to spawn its own reviewer for the same
+    commit, at a different effort, and whichever finished last decided the
+    merge.
 
-    A pull request the drainer's own reviewer approved has no canonical
-    producer to wait for and keeps the rereview it has always had.
+    It now reviews only what the canonical coordinator will not, so the two
+    producers are disjoint by construction: a pull request the coordinator
+    would accept a rereview of waits for that verdict, and nothing here
+    publishes a marker, switches a label or restores an approval meanwhile.
     """
 
     APPROVED_HEAD = "a" * 40
@@ -344,24 +407,37 @@ class OneRereviewPerPushTests(unittest.TestCase):
             )
             spawn.assert_not_called()
 
-    def test_the_drainer_s_own_lineage_still_gets_its_rereview(self):
-        for version in (drain_prs.MARKER_DRAINER, drain_prs.MARKER_LEGACY):
-            with self.subTest(version=version):
-                spawn, _, _ = self.recover(self.marker(version, self.APPROVED_HEAD))
-                spawn.assert_called_once()
+    def test_a_drainer_approved_pull_request_also_launches_no_second_review(self):
+        # The lineage round 2 of #632's review named: the coordinator accepts a
+        # prior `pr-review:v1` for `--rereview`, so `$fix` can push a
+        # v1-approved pull request and hand one off. A drainer that reviewed
+        # this one would restore the approval label and merge before that
+        # canonical verdict arrived.
+        spawn, recovered, state = self.recover(
+            self.marker(drain_prs.MARKER_DRAINER, self.APPROVED_HEAD)
+        )
+
+        spawn.assert_not_called()
+        self.assertFalse(recovered)
+        self.assertIsNone(state["prs"]["42"]["last_rereviewed_head"])
+
+    def test_a_legacy_only_pull_request_still_gets_its_rereview(self):
+        # The coordinator refuses to rereview it, so deferring would leave this
+        # stale head with no reviewer at all.
+        spawn, _, _ = self.recover(
+            self.marker(drain_prs.MARKER_LEGACY, self.APPROVED_HEAD)
+        )
+        spawn.assert_called_once()
 
     def test_a_pull_request_with_no_marker_at_all_still_gets_its_rereview(self):
         spawn, _, _ = self.recover()
         spawn.assert_called_once()
 
-    def test_a_canonical_marker_at_some_other_head_does_not_defer(self):
-        # Only the approval that just went stale decides whose rereview this
-        # is. A canonical review of an unrelated commit says nothing about it.
-        spawn, _, _ = self.recover(
-            self.marker(drain_prs.MARKER_CANONICAL, "c" * 40),
-            self.marker(drain_prs.MARKER_DRAINER, self.APPROVED_HEAD),
-        )
-        spawn.assert_called_once()
+    def test_a_marker_for_some_other_head_defers_just_the_same(self):
+        # `require_prior_review` reads the comment feed and never a head, so a
+        # marker for an older commit still admits a canonical rereview.
+        spawn, _, _ = self.recover(self.marker(drain_prs.MARKER_CANONICAL, "c" * 40))
+        spawn.assert_not_called()
 
 
 class NoAgentStaleHeadIncidentTests(unittest.TestCase):

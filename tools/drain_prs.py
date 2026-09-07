@@ -1377,24 +1377,44 @@ def blocking_marker_in(
     return None
 
 
-def canonical_marker_in(
-    markers: list[ReviewMarker], head: str | None
-) -> ReviewMarker | None:
-    """The newest canonical review naming `head`, or None if there is none.
+# The marker spellings the canonical coordinator accepts as the prior review a
+# rereview builds on -- `require_prior_review` in
+# `<bundle>/scripts/review_pr.py`, which takes its own `pr-review:v2` or the
+# drainer's `pr-review:v1` and does NOT take the legacy `codex-review`
+# spelling. Mirrored rather than approximated, because this is the line that
+# divides the two reviewers' territory, and a drainer that drew it anywhere
+# else would either race the coordinator or refuse work nobody else can do.
+CANONICALLY_REREVIEWABLE_MARKERS = frozenset({MARKER_CANONICAL, MARKER_DRAINER})
 
-    "Which reviewer owns this pull request's verdicts" is answered by evidence
-    on the pull request rather than by configuration: a canonical marker at the
-    head whose approval just went stale means the packaged coordinator reviewed
-    this pull request, so the rereview for the push that invalidated it is that
-    coordinator's to run and not this drainer's.
+
+def canonical_rereview_available(markers: list[ReviewMarker]) -> bool:
+    """Whether the canonical coordinator would accept a rereview of this one.
+
+    "Whose rereview is this push?" is answered by the other reviewer's own
+    admission rule rather than by a guess about what is running. The
+    coordinator rereviews any pull request already carrying a prior
+    `pr-review:v2` or `pr-review:v1` comment from the authenticated publisher,
+    at any head -- `$fix` and `$pr-revise` hand one off for the very push that
+    invalidated an approval -- so a pull request that satisfies that rule is
+    one the canonical gate can decide and this drainer must not.
+
+    Deciding it this way makes the two producers disjoint by construction
+    rather than by timing. Asking instead whether a canonical review is
+    *currently running* cannot be answered from here at all: the coordinator
+    publishes only after its reviewers return, so between the push and that
+    publication there is nothing to observe, and a drainer that reviewed into
+    that window would still be racing -- its `pr-review:v1` approval restoring
+    the approval label, and the merge landing before the canonical verdict.
+
+    Note which spellings are in the set and which is not. A pull request whose
+    only marker is the legacy `codex-review` one is a pull request the
+    coordinator refuses to rereview, so this drainer keeps reviewing it; the
+    partition has to hold in both directions or a stale head ends up with no
+    reviewer at all.
     """
-    if not head:
-        return None
-    wanted = head.lower()
-    for marker in markers:
-        if marker.head == wanted and marker.version == MARKER_CANONICAL:
-            return marker
-    return None
+    return any(
+        marker.version in CANONICALLY_REREVIEWABLE_MARKERS for marker in markers
+    )
 
 
 def describe_blocking_marker(number: int, marker: ReviewMarker) -> str:
@@ -3047,34 +3067,24 @@ def recover_stale_approval(
         if entry.get("last_rereviewed_head") == current_head:
             continue
 
-        # One push, one rereview (issue #628). A pull request whose stale
-        # approval was published by the canonical coordinator is one the
-        # canonical gate reviews: `$fix` and `$pr-revise` hand off a
-        # `pr-review:v2` rereview for the very push that invalidated it, and
-        # spawning this drainer's own reviewer alongside it produced two
-        # verdicts for one commit at two different efforts, with whichever
-        # published last deciding the merge.
+        # One push, one rereview (issue #628). Two producers for one push is
+        # what let a `medium`-effort `pr-review:v1` approval land 21 seconds
+        # after the canonical `xhigh` review had requested changes on the same
+        # commit and merge the defect it named, so this drainer reviews only
+        # the pull requests the canonical coordinator will not.
         #
-        # Deferring rather than racing is what makes that outcome independent
-        # of completion order: nothing here publishes a marker, switches a
-        # label, or restores an approval, so an unfinished or failed canonical
-        # review cannot be overtaken into merge permission by a second opinion
-        # this drainer produced meanwhile. The pull request waits for the
-        # canonical verdict, exactly as it waits above for a stale approval to
-        # be dismissed.
-        #
-        # Scoped by evidence and not by configuration: only the lineage that
-        # actually carries a canonical marker defers. A pull request approved
-        # by this drainer's own reviewer, or by the legacy spelling, has no
-        # canonical producer to wait for and keeps the rereview it has always
-        # had.
-        canonical = canonical_marker_in(review_markers(ctx, number), approved_head)
-        if canonical is not None:
+        # Deferring rather than racing is what makes the outcome independent of
+        # completion order: nothing here publishes a marker, switches a label,
+        # or restores an approval, so canonical work that is unfinished or has
+        # failed outright cannot be overtaken into merge permission by a second
+        # opinion this drainer produced meanwhile. The pull request waits for
+        # the canonical verdict, exactly as it waits above for a stale approval
+        # to be dismissed.
+        if canonical_rereview_available(review_markers(ctx, number)):
             log(
                 f"PR #{number}: head changed from {approved_head[:12]} to "
-                f"{current_head[:12]}, and its approval came from a "
-                f"{canonical.version} review; waiting for the canonical "
-                "rereview rather than running a second one"
+                f"{current_head[:12]}, and the canonical gate can rereview it; "
+                "waiting for that verdict rather than running a second review"
             )
             continue
 
