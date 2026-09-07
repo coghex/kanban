@@ -47,12 +47,14 @@ look like a regression to a reader:
   `SUPPORT.md` told a reporter the same false thing, which is why it is a
   subject of this module rather than of one of its own: the claim is one rule,
   and a second module would be a second place for it to drift. What the rule
-  reads is the claim itself -- "reports X" parsed out and held to naming
-  AI-action readiness and nothing wider -- rather than whether the right words
-  appear near `--doctor`. Asking the looser question is how the first attempt
-  at this rule accepted "AI-action readiness and all optional-component
-  readiness": every required phrase was present, and the sentence still handed
-  a managed service back.
+  reads is the claim itself -- "reports X" parsed out of the sentence -- and
+  what it asks of it is positive: is this the scope `--doctor` has? Asking the
+  negative question instead is how two earlier attempts failed. Requiring the
+  right words to appear near `--doctor` accepted "AI-action readiness and all
+  optional-component readiness"; adding a rule for quantified paraphrases
+  accepted the unquantified "AI-action readiness and managed-component
+  readiness". A claim can always name a superset in words nobody thought to
+  forbid, so the accepted claim is enumerated and everything else is reported.
 
 The runbook is also version-neutral, which is what makes it reusable at all: a
 release's own numbers belong to that release's issue.
@@ -186,21 +188,25 @@ UPGRADE_ITEMS = {
 # the sentence still handed a managed service back to doctor.
 DOCTOR_CLAIM_RE = re.compile(r"--doctor[^;.]*?\breport(?:s|ing)?\b (?P<claim>[^;.]*)")
 
-# The scope a claim has to carry.
-DOCTOR_SCOPE_RULE = "ai-action readiness"
-
-# A managed service named inside a claim, in the word either is recognizable
-# by once the claim is normalized.
-CLAIMED_SERVICE_WORDS = ("drainer", "approval service")
-
-# The other way a claim reaches a managed service: quantifying over the
-# components instead of naming one. This is what makes the rule a rule rather
-# than a list of forbidden sentences -- "every advertised component ready",
-# "all optional-component readiness", and the anaphoric "which of them are
-# ready" are one defect written three ways, and every one of them quantifies.
-COMPONENT_QUANTIFIER_RE = re.compile(
-    r"\b(?:every|all|each|both|any|which)\b[^;.]*"
-    r"\b(?:component|components|them|three|service|services|job|jobs)\b"
+# The whole of what a claim may say -- a whitelist, matched against the entire
+# claim, rather than a list of forbidden words.
+#
+# Two rounds of canonical review found a blacklist incomplete, and each repair
+# only moved its boundary. Requiring `ai-action readiness` to be present and
+# forbidding two service names passed "AI-action readiness and all
+# optional-component readiness"; adding a quantifier rule for that passed the
+# unquantified "AI-action readiness and managed-component readiness". There is
+# no bottom to that list: a claim can always name a superset in words nobody
+# thought to forbid. So the question asked here is the positive one -- is this
+# claim the scope `--doctor` actually has? -- and every claim that is not is
+# reported, whatever it says instead.
+#
+# The alternatives are spelling, not scope: `README.md` says "readiness per AI
+# action" for the same boundary, and a claim is free to state its exclusivity
+# out loud. Anything further is a wider claim, which is the defect.
+ALLOWED_DOCTOR_CLAIM_RE = re.compile(
+    r"(?:(?:per[ -])?ai[ -]action readiness|readiness per ai[ -]action)"
+    r"(?: alone| only| and nothing else)?"
 )
 
 # --- The runbook's manual upgrade gate ---
@@ -544,21 +550,17 @@ def upgrade_coverage_gaps(text):
 
 
 def doctor_claim_gaps(claim):
-    """What one `kanban --doctor` claim gets wrong, if anything.
+    """Whether one `kanban --doctor` claim states the scope doctor has.
 
-    Shared by both documents because it is one rule stated twice. A claim is
-    sound when it says AI-action readiness, names no managed service, and
-    quantifies over no set of components -- the third being what a claim
-    reaches a managed service through when it declines to name one."""
-    gaps = []
-    if DOCTOR_SCOPE_RULE not in claim:
-        gaps.append("doctor-scope")
-    gaps += [
-        f"doctor-covers:{word}" for word in CLAIMED_SERVICE_WORDS if word in claim
-    ]
-    if COMPONENT_QUANTIFIER_RE.search(claim):
-        gaps.append("doctor-covers-every-component")
-    return gaps
+    Shared by both documents because it is one rule stated twice, and a single
+    gap because it is a single question: the claim either is AI-action
+    readiness, or it is wider. Naming a managed service, quantifying over the
+    components, and aliasing them as "managed-component readiness" are three
+    ways of being wider, and this reports all three without having to have
+    anticipated any of them."""
+    if ALLOWED_DOCTOR_CLAIM_RE.fullmatch(claim.strip()):
+        return []
+    return ["doctor-claim-scope"]
 
 
 def doctor_claims(body):
@@ -984,38 +986,47 @@ class RunbookRuleControlTests(unittest.TestCase):
             upgrade_service_readiness_gaps(planted), ["absent-managed-service"]
         )
 
-    def test_a_doctor_item_claiming_every_component_is_reported(self):
-        # The false claim, in the wording the gate carried and in two that mean
-        # the same thing. Each is planted into an item that still says
+    def test_a_doctor_item_claiming_more_than_ai_actions_is_reported(self):
+        # Every way of claiming wider that has actually been written or
+        # proposed for this item: the gate's own historical sentence, the
+        # quantified paraphrase, the anaphora, the unquantified alias, and a
+        # service named outright. Each is planted into an item that still says
         # `AI-action readiness` and still denies substituting, so what is
-        # reported is the claim alone -- and a rule keyed to the one historical
-        # sentence would pass the other two, which is how the first attempt at
-        # this rule failed its canonical review.
-        equivalents = (
+        # reported is the claim alone. A rule keyed to forbidden words passed
+        # the third and then the fourth of these in successive review rounds;
+        # the positive rule reports all five without having anticipated any.
+        wider = (
             "every advertised component ready",
             "all optional-component readiness",
             "which of them are ready",
+            "managed-component readiness",
+            "the PR drainer's",
         )
-        for claim in equivalents:
+        for claim in wider:
             with self.subTest(claim=claim):
                 planted = self.without(
                     "reporting AI-action readiness;",
                     f"reporting AI-action readiness and {claim};",
                 )
                 self.assertEqual(
-                    upgrade_service_readiness_gaps(planted),
-                    ["doctor-covers-every-component"],
+                    upgrade_service_readiness_gaps(planted), ["doctor-claim-scope"]
                 )
 
-    def test_a_doctor_item_naming_a_managed_service_is_reported(self):
-        # The other way a claim reaches a managed job: naming one outright.
-        planted = self.without(
-            "reporting AI-action readiness;",
-            "reporting AI-action readiness and the PR drainer's;",
-        )
-        self.assertEqual(
-            upgrade_service_readiness_gaps(planted), ["doctor-covers:drainer"]
-        )
+    def test_a_doctor_item_may_state_the_same_scope_another_way(self):
+        # The other side of the whitelist: it constrains scope, not spelling,
+        # so `README.md`'s own wording for this boundary passes, as does a
+        # claim that says its exclusivity out loud. A rule nothing can be
+        # rewritten past is one an editor routes around.
+        for claim in (
+            "readiness per AI action",
+            "AI-action readiness alone",
+            "AI-action readiness and nothing else",
+        ):
+            with self.subTest(claim=claim):
+                planted = self.without(
+                    "reporting AI-action readiness;", f"reporting {claim};"
+                )
+                self.assertEqual(upgrade_service_readiness_gaps(planted), [])
 
     def test_a_doctor_item_with_no_readable_claim_is_reported(self):
         # The rule reads a claim rather than a sentence containing the right
@@ -1031,7 +1042,9 @@ class RunbookRuleControlTests(unittest.TestCase):
         planted = self.without(
             "reporting AI-action readiness;", "reporting what it reports;"
         )
-        self.assertEqual(upgrade_service_readiness_gaps(planted), ["doctor-scope"])
+        self.assertEqual(
+            upgrade_service_readiness_gaps(planted), ["doctor-claim-scope"]
+        )
 
     def test_a_doctor_item_that_may_substitute_for_a_service_is_reported(self):
         planted = self.without(
@@ -1385,43 +1398,31 @@ class SupportDocumentTests(unittest.TestCase):
         )
         self.assertEqual(
             support_doctor_scope_gaps(planted),
-            [
-                "approval-controller",
-                "doctor-covers-every-component",
-                "doctor-scope",
-                "drainer-controller",
-            ],
+            ["approval-controller", "doctor-claim-scope", "drainer-controller"],
         )
 
-    def test_a_doctor_claim_naming_a_managed_service_is_reported(self):
-        # The explicit form of the same defect, with the controller directions
-        # left standing: only the claim is wrong, and only the claim is
-        # reported -- once per service it names.
-        planted = self.without(
-            "`kanban --doctor` reports AI-action readiness and\n  nothing else.",
-            "`kanban --doctor` reports whether the PR drainer and the issue "
-            "approval service are ready.",
+    def test_a_doctor_claim_wider_than_ai_actions_is_reported(self):
+        # The same five wider claims, in the bullet's own voice, with the
+        # controller directions left standing: only the claim is wrong, and
+        # only the claim is reported. "managed-component readiness" is the one
+        # that named no service and quantified over nothing, and passed the
+        # blacklist this rule replaced.
+        wider = (
+            "whether the PR drainer and the issue approval service are ready",
+            "AI-action readiness and managed-component readiness",
+            "AI-action readiness and which of them are ready",
+            "AI-action readiness and all optional-component readiness",
+            "which of them are ready on your machine",
         )
-        self.assertEqual(
-            support_doctor_scope_gaps(planted),
-            [
-                "doctor-covers:approval service",
-                "doctor-covers:drainer",
-                "doctor-scope",
-            ],
-        )
-
-    def test_a_doctor_claim_that_quantifies_over_the_components_is_reported(self):
-        # The scope words kept, a quantifier added: the bullet still says
-        # AI-action readiness and still names both controllers, and the claim
-        # still hands the other two components back.
-        planted = self.without(
-            "reports AI-action readiness and\n  nothing else.",
-            "reports AI-action readiness and which of them are ready.",
-        )
-        self.assertEqual(
-            support_doctor_scope_gaps(planted), ["doctor-covers-every-component"]
-        )
+        for claim in wider:
+            with self.subTest(claim=claim):
+                planted = self.without(
+                    "reports AI-action readiness and\n  nothing else.",
+                    f"reports {claim}.",
+                )
+                self.assertEqual(
+                    support_doctor_scope_gaps(planted), ["doctor-claim-scope"]
+                )
 
     def test_a_later_sentence_reassigning_readiness_is_reported(self):
         # The hole a clause-level rule cannot see: the doctor sentence is left
