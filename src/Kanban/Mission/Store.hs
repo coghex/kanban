@@ -68,7 +68,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Mission.Digest (sha256Hex)
-import Kanban.Mission.Journal (MissionJournalLine (MissionJournalUnknownVersion), appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
+import Kanban.Mission.Invocation (readMissionInvocations)
+import Kanban.Mission.Journal (MissionJournalLine (..), appendMissionEvent, decodeMissionJournalLine, readMissionJournalSince)
 import Kanban.Mission.Session (missionSessionTreeErrorMessage, validateMissionSessionTree)
 import Kanban.Mission.Paths
   ( MissionRead (..),
@@ -79,6 +80,7 @@ import Kanban.Mission.Paths
     ignoreFileOperation,
     isPlainDirectory,
     listMissionEntries,
+    missionRoot,
     withMissionRoot,
     missionArchiveDirectory,
     openMissionStore,
@@ -86,7 +88,9 @@ import Kanban.Mission.Paths
     commitNoReplace,
     missionArchivePath,
     missionDirectory,
+    missionInvocationPath,
     missionJournalPath,
+    missionLeaseOwnerPath,
     missionSealPath,
     missionSnapshotPath,
     missionSpecificationPath,
@@ -104,6 +108,7 @@ import Kanban.Mission.Types
     MissionSessionId (..),
     MissionSessionNode (..),
     MissionSnapshot (..),
+    MissionLeaseOwner (..),
     MissionSpecification (..),
     MissionStepId (..),
     MissionRepository (..),
@@ -111,6 +116,7 @@ import Kanban.Mission.Types
     MissionStepRecord (..),
     MissionWorktreeDisposition (..),
     MissionWorktreeState (MissionWorktreeRetained),
+    missionLeaseSchemaVersion,
     missionLifecycleIsTerminal,
     missionLifecycleTag,
     missionLogKindTag,
@@ -137,9 +143,14 @@ import System.Posix.Process (getProcessID)
 -- owner and name fall the same way and only a mission's own records say whose
 -- it is. That read is bounded by the three fixed-path records
 -- 'adoptedLegacyMissions' consults, so it is one cost per legacy mission
--- rather than one per event. A legacy mission attributable to another
--- repository, or to nobody, is not listed here: it is not this repository's
--- mission, and addressing it reports why.
+-- rather than one per event.
+--
+-- Every candidate is then put through 'missionRoot', the same decision every
+-- read and write goes through, and an identifier that decision refuses is not
+-- listed. Enumerating one would be reporting a mission nothing can read, write
+-- or delete: a legacy directory attributable to nobody, or one identifier with
+-- records under both roots, is history to be repaired rather than a mission of
+-- this repository, and addressing it reports its path and the reason.
 --
 -- Every entry is checked with a /non-following/ stat and must be a real
 -- directory. A symbolic link pointing at somewhere else on the filesystem, a
@@ -151,7 +162,10 @@ listMissions store = do
   entries <- listMissionEntries store.missionStoreDirectory
   directories <- filterM (isPlainDirectory . (store.missionStoreDirectory </>)) entries
   legacy <- adoptedLegacyMissions store
-  pure (sort (nub (map (MissionId . Text.pack . takeFileName) directories <> legacy)))
+  let candidates = sort (nub (map (MissionId . Text.pack . takeFileName) directories <> legacy))
+  filterM resolves candidates
+  where
+    resolves mission = either (const False) (const True) <$> missionRoot store mission
 
 -- | Whether a specification was written, or one was already there.
 data MissionCreation
@@ -625,6 +639,10 @@ data MissionDispositionRefusal
   | MissionDispositionUnverifiableSession MissionSessionId
   | MissionDispositionOutcomeUnknownStep MissionStepId
   | MissionDispositionSoleRecoveryRecord FilePath
+  | -- | A durable record in the mission's own directory cannot be proven to be
+    -- this repository's and this mission's: it names another, or it will not
+    -- read at all. Removing the directory would destroy it.
+    MissionDispositionUnprovenRecord Text
   deriving stock (Eq, Show)
 
 missionDispositionRefusalMessage :: MissionDispositionRefusal -> Text
@@ -639,6 +657,8 @@ missionDispositionRefusalMessage refusal = case refusal of
     "step " <> step.unMissionStepId <> " never learned its outcome"
   MissionDispositionSoleRecoveryRecord path ->
     "this is the only record of the retained worktree " <> Text.pack path
+  MissionDispositionUnprovenRecord detail ->
+    "a record in this mission's directory cannot be proven to be this repository's: " <> detail
 
 -- | Moves a terminal mission out of the active presentation, keeping its whole
 -- history readable.
@@ -677,16 +697,97 @@ archived now snapshot =
 -- about the nonterminal lifecycle would finish the mission, retry, and be
 -- refused again for a session it was never told about.
 deleteMission :: MissionStore -> MissionId -> IO (Either [MissionDispositionRefusal] ())
-deleteMission store mission = do
-  snapshotResult <- readMissionSnapshot store mission
-  case snapshotResult of
-    MissionPresent snapshot -> case terminalRefusals snapshot <> sessionRefusals snapshot <> stepRefusals snapshot <> worktreeRefusals snapshot of
-      refusal : rest -> pure (Left (refusal : rest))
-      [] -> withMissionRoot store mission (Left . pure . MissionDispositionUnreadable) $ \root ->
-        case missionDirectory root mission of
-          Left message -> pure (Left [MissionDispositionUnreadable message])
-          Right directory -> removeMissionDirectory store directory
-    other -> pure (Left [unreadableRefusal mission other])
+deleteMission store mission =
+  withMissionRoot store mission (Left . pure . MissionDispositionUnreadable) $ \root -> do
+    snapshotResult <- readMissionSnapshot store mission
+    case snapshotResult of
+      MissionPresent snapshot -> do
+        unproven <- unprovenRecordRefusals store mission root
+        case terminalRefusals snapshot <> sessionRefusals snapshot <> stepRefusals snapshot <> worktreeRefusals snapshot <> unproven of
+          refusal : rest -> pure (Left (refusal : rest))
+          [] -> case missionDirectory root mission of
+            Left message -> pure (Left [MissionDispositionUnreadable message])
+            Right directory -> removeMissionDirectory store directory
+      other -> pure (Left [unreadableRefusal mission other])
+
+-- | Every durable record in the mission's directory that names an owner and
+-- does not name this one, or that cannot be read to find out.
+--
+-- The gate exists because a delete removes a /directory/, not a record. Where
+-- a mission lives is decided from three fixed-path records — 'missionRoot''s
+-- attribution — and that is right for a read or a write, each of which
+-- addresses one file the identity check already guards. It is not enough for
+-- the one operation that destroys everything beside those three: under the
+-- ambiguous pre-#615 root the directory is shared, so a mission this
+-- repository's specification, snapshot and lease owner all claim can still
+-- hold another repository's journal events, invocation openings, or sealed
+-- archives, and removing it would discard the evidence a recovery reads.
+--
+-- Every record kind a mission directory can hold is asked, and the list is the
+-- whole of it. Six name an owner and are checked here: the specification, the
+-- snapshot (already proven present and this repository's before this runs, so
+-- it is not re-read), the journal, the invocation log, the lease owner record,
+-- and every sealed archive record. Three name none and are covered instead:
+-- an archived @.log@ copy is described by the seal beside it, the control
+-- token is a per-run secret rather than history, and a control request carries
+-- the mission it addresses but no repository — it is a command awaiting an
+-- answer rather than a record of one, and a run that reads it refuses one
+-- addressed elsewhere.
+--
+-- Unreadable counts as unproven, deliberately and in both directions: a record
+-- that will not decode cannot be shown to be this repository's, and a delete
+-- that treated "cannot tell" as "mine" is exactly the fail-open this store
+-- refuses everywhere else. A record written under a schema version this
+-- release does not recognize is silent, as §16 makes it everywhere: it is a
+-- later release's own record of this mission, not another repository's claim
+-- on it.
+unprovenRecordRefusals :: MissionStore -> MissionId -> FilePath -> IO [MissionDispositionRefusal]
+unprovenRecordRefusals store mission root = do
+  specification <- recordRefusals (missionSpecificationPath root mission) readSpecification
+  owner <- recordRefusals (missionLeaseOwnerPath root mission) readOwner
+  journal <- journalRefusals
+  invocations <- eitherRefusals (missionInvocationPath root mission) (readMissionInvocations mission store.missionStoreRepository)
+  seals <- (map MissionDispositionUnprovenRecord . either pure (const [])) <$> readMissionSealedArchives store mission
+  pure (specification <> owner <> journal <> invocations <> seals)
+  where
+    readSpecification =
+      readMissionRecordFor
+        mission
+        [missionSpecificationSchemaVersion]
+        store.missionStoreRepository
+        missionSpecificationId
+        missionSpecificationRepository
+    readOwner =
+      readMissionRecordFor
+        mission
+        [missionLeaseSchemaVersion]
+        store.missionStoreRepository
+        missionLeaseOwnerMission
+        missionLeaseOwnerRepository
+
+    recordRefusals :: Either Text FilePath -> (FilePath -> IO (MissionRead value)) -> IO [MissionDispositionRefusal]
+    recordRefusals resolved read' = case resolved of
+      Left message -> pure [MissionDispositionUnprovenRecord message]
+      Right path -> do
+        result <- read' path
+        pure $ case result of
+          MissionRefused detail -> [MissionDispositionUnprovenRecord detail]
+          MissionUnreadable detail -> [MissionDispositionUnprovenRecord detail]
+          _ -> []
+
+    eitherRefusals :: Either Text FilePath -> (FilePath -> IO (Either Text value)) -> IO [MissionDispositionRefusal]
+    eitherRefusals resolved read' = case resolved of
+      Left message -> pure [MissionDispositionUnprovenRecord message]
+      Right path -> map MissionDispositionUnprovenRecord . either pure (const []) <$> read' path
+
+    journalRefusals = do
+      result <- readMissionJournal store mission 0
+      pure $ case result of
+        Left message -> [MissionDispositionUnprovenRecord message]
+        Right (records, _) ->
+          map
+            MissionDispositionUnprovenRecord
+            ([detail | MissionJournalRefused detail <- records] <> [detail | MissionJournalMalformed detail <- records])
 
 -- | Takes a mission out of the store in one move, and then clears up.
 --

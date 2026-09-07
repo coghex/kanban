@@ -3420,7 +3420,20 @@ Defaults:
   one step and clearing up afterwards — a released or retired lease, a deleted
   mission — so an interruption leaves either the whole record or none of it,
   never a lease standing without its owner record or a mission with only part
-  of itself. Every one of
+  of itself. Deleting one is the single operation that destroys records no read
+  ever examined, so it first requires every durable record in the mission's
+  directory that names an owner — the specification, the snapshot, the journal,
+  the invocation log, the lease owner record, and each sealed archive record —
+  to name this repository and this mission, and to be readable at all. A record
+  that names another or that will not decode refuses the delete and is
+  reported: under the ambiguous root a directory this repository's three
+  attribution records all claim can still hold another's journal events,
+  invocation openings, or sealed archives, and history that cannot be proven to
+  be yours is not history you may remove. The three files that name no owner
+  are covered rather than skipped — an archived log copy is described by the
+  seal beside it, the control token is a per-run secret, and a control request
+  is a command awaiting an answer that a run refuses if it is addressed
+  elsewhere. Every one of
   those records carries its own `schemaVersion` outside its payload, so the
   unknown-version rule below applies to each independently, a journal line
   included; and no write ever treats that silence as permission, so
@@ -3453,10 +3466,12 @@ Defaults:
   never from the ambiguous root as a whole, which belongs to no repository in
   particular. Records that disagree with one another, that name another
   mission, that will not read, or that name no repository at all leave the
-  mission attributed to nobody: it is enumerated by neither repository,
-  addressing it reports its path and why it was refused, and not a byte of it
-  is read as one repository's or replaced. The same refusal covers a mission
-  that has records under both roots. `repositories/` and `.deleted` are the two
+  mission attributed to nobody: addressing it reports its path and why it was
+  refused, and not a byte of it is read as one repository's or replaced. The
+  same refusal covers a mission that has records under both roots. Enumeration
+  goes through that one resolution too, so an identifier it refuses is listed
+  by neither repository: reporting one would name a mission nothing can read,
+  write, or delete. `repositories/` and `.deleted` are the two
   names the old spelling could never produce — every key it produced carries
   the hyphen it joined owner to name with — which is what keeps the two
   namespaces from aliasing, and what lets the holding area a delete moves a
