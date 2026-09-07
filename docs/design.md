@@ -3420,25 +3420,7 @@ Defaults:
   one step and clearing up afterwards — a released or retired lease, a deleted
   mission — so an interruption leaves either the whole record or none of it,
   never a lease standing without its owner record or a mission with only part
-  of itself. Deleting one is the single operation that destroys records no read
-  ever examined, so it first requires every record this store writes into a
-  mission's directory — the specification, the snapshot, the lease owner
-  record, every journal event, every invocation record, every sealed archive
-  record, and every submitted command — to be absent, or present and provably
-  this repository's and this mission's. A record that names another, that will
-  not decode, or whose file cannot even be looked at refuses the delete and is
-  reported: under the ambiguous root a directory this repository's three
-  attribution records all claim can still hold another's journal events,
-  invocation openings, or sealed archives, and history that cannot be proven to
-  be yours is not history you may remove. "Absent" is asked of the filesystem
-  rather than of a successful decode, which is the one place the unknown-version
-  rule below is deliberately not applied: silence is right for a reader that
-  goes on to read the records around it, and is not permission to destroy a
-  record a later release — or another repository — wrote. Three files carry no
-  record of their own and are covered rather than skipped: an archived log copy
-  is described by the seal beside it, so a copy with no seal is reported; the
-  control token is a per-run secret; and a staging file or a lease directory
-  moved aside is an interrupted write's litter rather than history. Every one of
+  of itself. Every one of
   those records carries its own `schemaVersion` outside its payload, so the
   unknown-version rule below applies to each independently, a journal line
   included; and no write ever treats that silence as permission, so

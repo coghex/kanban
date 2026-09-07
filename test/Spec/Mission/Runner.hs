@@ -29,7 +29,7 @@ module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (forM_, join)
+import Control.Monad (forM_, join, void)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
 import Data.Text (Text)
@@ -103,7 +103,7 @@ import Kanban.Preflight (IssueOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolverBrand (..), SolveOutcome (..))
 import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec)
-import System.Directory (doesFileExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
 import System.Posix.Files (setFileMode)
@@ -119,6 +119,7 @@ spec = describe "the foreground mission runner" $ do
   launchModeSpec
   selectionSpec
   startupSpec
+  legacyRootSpec
   leaseSpec
   reconciliationSpec
   crashRecoverySpec
@@ -401,18 +402,79 @@ stagedDriver stage _ _ =
 -- | A store, a specification, and a snapshot, under a state root nothing else
 -- can see.
 withMission :: MissionSnapshot -> (MissionStore -> Stage -> IO result) -> IO result
-withMission snapshot action = withTemporaryCacheRoot $ \root ->
+withMission snapshot action = withStateRoot $ \_ store stage -> do
+  created <- createMissionSpecification store theSpecification
+  created `shouldBe` Right MissionCreated
+  written <- writeMissionSnapshot store snapshot
+  written `shouldBe` Right ()
+  action store stage
+
+-- | The same, with this mission's records written where a release before #615
+-- put them: the ambiguous root shared by every repository whose owner and name
+-- fall the same way.
+--
+-- The records are written by the writers that own them, through a store rooted
+-- at that directory, which is how that release wrote one. The store handed to
+-- @action@ is the one a run opens today, so what the example exercises is the
+-- resolution rather than a store that was told where to look.
+withLegacyMission :: MissionSnapshot -> (FilePath -> MissionStore -> Stage -> IO result) -> IO result
+withLegacyMission snapshot action = withStateRoot $ \root store stage -> do
+  let ambiguous = root </> "kanban" </> "missions" </> "coghex-kanban"
+      before615 =
+        store
+          { missionStoreDirectory = ambiguous,
+            -- Its own legacy root is a name that does not exist, so this
+            -- fixture writes at @ambiguous@ rather than resolving away from it.
+            missionStoreLegacyDirectory = ambiguous </> "no-legacy-root-here"
+          }
+  created <- createMissionSpecification before615 theSpecification
+  created `shouldBe` Right MissionCreated
+  written <- writeMissionSnapshot before615 snapshot
+  written `shouldBe` Right ()
+  action ambiguous store stage
+
+withStateRoot :: (FilePath -> MissionStore -> Stage -> IO result) -> IO result
+withStateRoot action = withTemporaryCacheRoot $ \root ->
   withEnvironmentValue "XDG_STATE_HOME" root $ do
     opened <- openMissionStore boardRepository
     case opened of
       Left message -> fail ("could not open the mission store: " <> Text.unpack message)
       Right store -> do
-        created <- createMissionSpecification store theSpecification
-        created `shouldBe` Right MissionCreated
-        written <- writeMissionSnapshot store snapshot
-        written `shouldBe` Right ()
         stage <- newStage
-        action store stage
+        action root store stage
+
+-- | Issue #615's requirement 4, at the two records only a controller writes.
+--
+-- The store spec covers the specification, the snapshot, the journal, the
+-- sealed archives, the lease and enumeration; @invocations.jsonl@ and the
+-- control endpoint are resolved here, by 'startMissionController', and a
+-- mission whose history is under the ambiguous root must find both of them
+-- beside that history rather than start a second copy of itself under the
+-- repository-qualified root.
+legacyRootSpec :: Spec
+legacyRootSpec = describe "a mission whose records are under the ambiguous pre-#615 root" $
+  it "keeps its invocation log and its control endpoint beside that history" $
+    withLegacyMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \ambiguous store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure ("the controller refused to start: " <> Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          controller.missionControllerInvocations
+            `shouldBe` (ambiguous </> missionName </> "invocations.jsonl")
+          controller.missionControllerControl.missionControlRequests
+            `shouldBe` (ambiguous </> missionName </> "control" </> "requests")
+          -- One iteration, so the records are written rather than merely
+          -- addressed.
+          void (missionControllerIteration controller)
+          stopMissionController controller
+      doesFileExist (ambiguous </> missionName </> "invocations.jsonl") `shouldReturn` True
+      doesDirectoryExist (ambiguous </> missionName </> "control") `shouldReturn` True
+      -- And nothing of this mission was started under the repository-qualified
+      -- root, where a resolution that reached for the store's own directory
+      -- would have put it.
+      doesDirectoryExist (store.missionStoreDirectory </> missionName) `shouldReturn` False
+  where
+    missionName = Text.unpack theMission.unMissionId
 
 -- | Iterations until one satisfies the predicate, or the bound is reached.
 --

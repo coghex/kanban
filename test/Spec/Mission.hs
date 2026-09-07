@@ -43,6 +43,8 @@ import Kanban.Mission
   ( MissionArchiveState (..),
     MissionAttention (..),
     MissionAutonomy (MissionConfirmOnAmbiguity),
+    MissionControlEndpoint (..),
+    MissionCommandPayload (MissionResumeCommand),
     MissionCreation (..),
     MissionDecisionPolicy (..),
     MissionDispositionRefusal (..),
@@ -98,6 +100,8 @@ import Kanban.Mission
     missionSessionDisposition,
     missionSessionTreeErrorMessage,
     missionStepLifecycleIsTerminal,
+    openMissionControl,
+    submitMissionCommand,
     missionStepLifecycleTag,
     missionStepLifecycles,
     missionStoreRoot,
@@ -695,6 +699,32 @@ legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" 
       -- Enumeration and the operations agree: the shadowed identifier is gone
       -- from the list, and the mission beside it is untouched.
       listMissions owner `shouldReturn` [MissionId "mission-owner"]
+
+  it "seals and reads back an archive where its history already is" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+          source = root </> "child.log"
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      ByteString.writeFile source (ByteStringChar.pack "a child's stream\n")
+      sealed <- expectRight =<< sealMissionLog owner theMission (MissionSessionId "session-a") MissionEventStreamLog source
+      void (expectRight =<< verifyMissionSealedArchive owner theMission sealed)
+      entries <- expectRight =<< readMissionSealedArchives owner theMission
+      map missionSealedSession entries `shouldBe` [MissionSessionId "session-a"]
+      -- The archive is beside the history it belongs to, and the new root has
+      -- no second copy of this mission for it to have gone to instead.
+      doesFileExist (ambiguous </> "mission-0001" </> "archive" </> sealed.missionSealedName) `shouldReturn` True
+      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` False
+
+  it "opens its control endpoint and takes submitted commands where its history already is" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      endpoint <- expectRight =<< openMissionControl owner theMission
+      endpoint.missionControlDirectoryPath `shouldBe` (ambiguous </> "mission-0001" </> "control")
+      endpoint.missionControlRequests `shouldBe` (ambiguous </> "mission-0001" </> "control" </> "requests")
+      void (expectRight =<< submitMissionCommand endpoint "resume-0001" MissionResumeCommand)
+      doesFileExist (endpoint.missionControlRequests </> "resume-0001.json") `shouldReturn` True
+      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` False
 
   it "is never deleted, however plainly this repository's its records are" $
     withCollidingStores $ \root owner name -> do
