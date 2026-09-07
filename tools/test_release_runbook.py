@@ -46,17 +46,31 @@ look like a regression to a reader:
   service, each observed through its own controller's returned `status` state.
   `SUPPORT.md` told a reporter the same false thing, which is why it is a
   subject of this module rather than of one of its own: the claim is one rule,
-  and a second module would be a second place for it to drift. What the rule
-  reads is every clause that mentions `--doctor`, and what it asks of each is
-  positive: subtract the one attribution doctor is allowed to make, and no
-  readiness may remain. Asking a negative question instead failed three times.
-  Requiring the right words to appear near `--doctor` accepted "AI-action
-  readiness and all optional-component readiness"; adding a rule for quantified
-  paraphrases accepted the unquantified "AI-action readiness and
-  managed-component readiness"; whitelisting the text after "reports" accepted
-  a wider assertion placed before it, and read no clause phrased with "checks"
-  at all. A document can always name a superset in words nobody thought to
-  forbid, and put them where nobody thought to look.
+  and a second module would be a second place for it to drift.
+
+  The rule partitions the block rather than hunting for defects in it. Every
+  unit either names `--doctor`, in which case both what it claims and what
+  remains after subtracting that claim are whitelisted, or it does not, in
+  which case it may not say "ready" at all. No unit falls outside the two, and
+  that is the whole of why this holds: there is nowhere for a sentence to sit
+  unexamined.
+
+  Four narrower rules were walked past first, each asking a negative question
+  or a question about subjects. Requiring the right words near `--doctor`
+  accepted "AI-action readiness and all optional-component readiness"; adding a
+  rule for quantified paraphrases accepted the unquantified "managed-component
+  readiness"; whitelisting the text after "reports" accepted a wider assertion
+  placed before it and read no clause phrased with "checks"; judging only
+  clauses that name doctor accepted "It also reports whether the two managed
+  services are ready", and a version demanding an observer accepted the same
+  sentence with "controller status" mentioned later in it. A document can
+  always name a superset in words nobody thought to forbid, put it where nobody
+  thought to look, and decline to say who it is about.
+
+  The boundary is an attribution phrased without the word -- "confirms both
+  managed services are working". Widening the vocabulary reports the runbook's
+  own "working directory" and "a healthy job", so the word is the boundary and
+  this says so rather than pretending otherwise.
 
 The runbook is also version-neutral, which is what makes it reusable at all: a
 release's own numbers belong to that release's issue.
@@ -436,18 +450,29 @@ SUPPORT_CONTROLLER_RULES = {
     "approval-controller": "the issue approval service's controller status",
 }
 
-# A readiness attribution anywhere in that bullet, and the two things allowed
-# to carry one. The clause rule above judges every clause naming `--doctor`;
-# this covers the other half, a sentence that hands the same readiness back
-# while naming no observer at all -- "It also reports whether the PR drainer
-# and the issue approval service are ready" recreates the defect without ever
-# mentioning doctor. So every readiness attribution in the bullet has to name
-# what observes it, and the only two observers are `--doctor` and a
-# controller's status. Deliberately strict, and deliberately confined to this
-# one bullet: the repair for a sentence it reports is to say what observes the
-# readiness it claims, never to loosen the rule.
-READINESS_RE = re.compile(r"\bread(?:y|iness)\b|\breport(?:s|ed|ing)?\b")
-CONTROLLER_OBSERVER = "controller status"
+# The other half of the partition: every unit of a doctor block that is *not* a
+# doctor clause may not attribute readiness at all.
+#
+# This is what closes the class the four rules before it kept leaving open. Each
+# of those asked who a statement was about, and a statement can always decline
+# to say: "It also reports whether the two managed services are ready" names no
+# subject, and an earlier version that demanded an observer accepted "..., are
+# ready, although controller status remains the authoritative check" because the
+# observer's name appeared somewhere in the sentence. Anaphora cannot be
+# resolved by a text rule, so this one does not try -- outside the one clause
+# where doctor states its own scope, the word does not belong here whatever its
+# subject.
+#
+# That is a positive property of the block rather than a restriction on it: the
+# checks it lists observe a returned `state`, and only doctor claims readiness.
+# The repair for a sentence this reports is to name the state the check returns,
+# never to loosen the rule.
+#
+# What it does not reach is an attribution phrased without the word -- "confirms
+# both managed services are working". Widening the vocabulary was tried and
+# rejected: this section legitimately says "working directory", "a healthy job",
+# and "clean up", so a synonym list reports the document it is meant to protect.
+READINESS_NOUN_RE = re.compile(r"\bread(?:y|iness)\b")
 
 HEADING_RE = re.compile(r"^(?P<hashes>#+)\s+(?P<heading>.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<text>[^\]\n]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
@@ -605,6 +630,33 @@ def doctor_attribution_gaps(clause):
     return []
 
 
+def doctor_block_gaps(body):
+    """Every unit of an already-normalized doctor block, judged.
+
+    The partition is the point, and it is what makes this a rule about the
+    class rather than about the shapes found so far: a unit either names
+    `--doctor`, in which case both halves of what it says are whitelisted, or
+    it does not, in which case it may not attribute readiness at all. No unit
+    falls outside the two, so there is no unexamined place for a follow-on
+    sentence to sit -- which is exactly where the previous rule was walked
+    past, twice.
+
+    `doctor-claim` is the gap when no unit mentions doctor at all, which is
+    also how an emptied block reaches this."""
+    gaps = []
+    clauses = doctor_clauses(body)
+    if not clauses:
+        gaps.append("doctor-claim")
+    for clause in clauses:
+        gaps += doctor_attribution_gaps(clause)
+    for unit in units(body):
+        if "--doctor" in unit:
+            continue
+        if READINESS_NOUN_RE.search(unit):
+            gaps.append("readiness-outside-the-doctor-claim")
+    return gaps
+
+
 def upgrade_service_readiness_gaps(text):
     """What the gate says about the managed jobs and about `--doctor`.
 
@@ -626,11 +678,7 @@ def upgrade_service_readiness_gaps(text):
         gaps.append("not-an-exit-code")
     if DOCTOR_SUBSTITUTION_RULE not in body:
         gaps.append("doctor-not-a-substitute")
-    clauses = doctor_clauses(body)
-    if not clauses:
-        gaps.append("doctor-claim")
-    for clause in clauses:
-        gaps += doctor_attribution_gaps(clause)
+    gaps += doctor_block_gaps(body)
     if ABSENT_MANAGED_SERVICE in normalized(text):
         gaps.append("absent-managed-service")
     return sorted(set(gaps))
@@ -646,17 +694,7 @@ def support_doctor_scope_gaps(text):
     all, which is also how a deleted bullet reaches this rule."""
     body = normalized(bullet(text, SUPPORT_HEADING, SUPPORT_BULLET_OPENING))
     gaps = missing_rules(body, SUPPORT_CONTROLLER_RULES)
-    clauses = doctor_clauses(body)
-    if not clauses:
-        gaps.append("doctor-claim")
-    for clause in clauses:
-        gaps += doctor_attribution_gaps(clause)
-    for said in units(body):
-        if "--doctor" in said or not READINESS_RE.search(said):
-            continue
-        if CONTROLLER_OBSERVER in said:
-            continue
-        gaps.append("unattributed-readiness")
+    gaps += doctor_block_gaps(body)
     return sorted(set(gaps))
 
 
@@ -1146,6 +1184,47 @@ class RunbookRuleControlTests(unittest.TestCase):
             ["approval-status", "drainer-status"],
         )
 
+    def test_a_gate_item_reassigning_readiness_is_reported(self):
+        # The runbook's half of the same class, which had no rule at all: the
+        # doctor item is left exactly as it stands and a later item hands the
+        # managed services back. None of these names doctor, so every rule
+        # keyed to the doctor clause looked straight past them -- the first is
+        # the one round 5 found.
+        for item in (
+            "- it also reports whether the two managed services are ready;",
+            "- confirmation that the drainer and the approval job are ready;",
+            "- whichever of the optional components are ready;",
+        ):
+            with self.subTest(item=item):
+                planted = self.without(
+                    "- an interactive board run against a real repository;",
+                    f"{item}\n- an interactive board run against a real "
+                    "repository;",
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted),
+                    ["readiness-outside-the-doctor-claim"],
+                )
+
+    def test_every_unit_of_the_gate_is_judged_by_one_of_the_two_rules(self):
+        # The property that makes this a rule about the class: the two halves
+        # partition the block, so no unit is unexamined. Stated as a check
+        # rather than as a comment, because "we also look at the other units"
+        # is exactly the claim four earlier versions made and did not keep.
+        body = normalized(section(self.text, UPGRADE_HEADING))
+        every = units(body)
+        self.assertTrue(every, "the gate section is empty")
+        doctor = doctor_clauses(body)
+        self.assertTrue(doctor, "the gate states no doctor claim")
+        self.assertEqual(
+            [unit for unit in every if unit not in doctor and "--doctor" in unit],
+            [],
+            "a unit naming --doctor escaped the clause rule",
+        )
+        for unit in every:
+            judged = unit in doctor or not READINESS_NOUN_RE.search(unit)
+            self.assertTrue(judged, f"unit judged by neither rule: {unit!r}")
+
     def test_a_status_result_read_as_an_exit_code_is_reported(self):
         planted = self.without(
             "not that the\ncommand exited zero", "and the command exited zero"
@@ -1481,24 +1560,49 @@ class SupportDocumentTests(unittest.TestCase):
 
     def test_a_later_sentence_reassigning_readiness_is_reported(self):
         # The correctly scoped doctor sentence is left exactly as it stands,
-        # and a sentence after it gives the two managed services back. The
-        # first names no observer at all, which the sweep reports; the second
-        # and third name doctor under a verb the rule does not depend on,
-        # which the clause rule reports -- a second `--doctor` sentence used to
-        # be exempted outright.
+        # and a sentence after it gives the two managed services back. Each
+        # names its subject differently, and the last two name none at all --
+        # which is the shape every earlier version of this rule was walked
+        # past, because each asked who the sentence was about.
+        #
+        # The one naming doctor outright is the clause rule's; the rest are
+        # reported for saying "ready" outside the one clause entitled to.
         later = {
-            "unattributed-readiness": "It also reports whether the PR drainer "
-            "and the issue approval service are ready.",
-            "doctor-claim-scope": "`--doctor` also checks whether the PR "
-            "drainer and the issue approval service are ready.",
+            "`--doctor` also checks whether the PR drainer and the issue "
+            "approval service are ready.": "doctor-claim-scope",
+            "It also reports whether the PR drainer and the issue approval "
+            "service are ready.": "readiness-outside-the-doctor-claim",
+            "The same command shows whether both services are ready.":
+            "readiness-outside-the-doctor-claim",
+            "It also reports whether the PR drainer and issue approval "
+            "service are ready, although controller status remains the "
+            "authoritative check.": "readiness-outside-the-doctor-claim",
         }
-        for gap, sentence in later.items():
+        for sentence, gap in later.items():
             with self.subTest(sentence=sentence):
                 planted = self.without(
                     "nothing else. For the other two,",
                     f"nothing else. {sentence} For the other two,",
                 )
                 self.assertEqual(support_doctor_scope_gaps(planted), [gap])
+
+    def test_naming_the_controller_does_not_excuse_a_doctor_attribution(self):
+        # The last sentence above, isolated: an earlier rule accepted it
+        # because `controller status` appeared somewhere in it, and took that
+        # as proof the controller was the observer. "It" still meant doctor.
+        # Binding an attribution to a name that merely co-occurs with it is
+        # not binding it to anything.
+        planted = self.without(
+            "nothing else. For the other two,",
+            "nothing else. It also reports whether the PR drainer and issue "
+            "approval service are ready, although controller status remains "
+            "the authoritative check. For the other two,",
+        )
+        self.assertIn("controller status", normalized(planted))
+        self.assertEqual(
+            support_doctor_scope_gaps(planted),
+            ["readiness-outside-the-doctor-claim"],
+        )
 
     def test_a_second_doctor_sentence_under_another_verb_is_reported(self):
         # The alias, under a third verb: no service named, nothing quantified,
