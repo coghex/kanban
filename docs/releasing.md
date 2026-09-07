@@ -100,24 +100,65 @@ on `master` pushes and pull requests only — and the dry-run tag is not a relea
 tag: it names no ref yet, it matches no `v*` pattern, and the rehearsal refuses
 outright under a tag that does.
 
+Each rehearsal attempt takes its own scratch-branch name and is dispatched once
+against it: the branch is how the run is found below, so a name reused across
+attempts makes two rehearsals indistinguishable. Capture a UTC creation floor
+before dispatching, so the search can reject a run that predates this attempt:
+
 ```console
+date -u +%Y-%m-%dT%H:%M:%SZ
 git push origin <commit>:refs/heads/release-candidate-<n>
 gh workflow run Release --ref release-candidate-<n> \
   --field dry_run_tag=release-dry-run-<n>
 ```
 
-`gh workflow run` reports no run id, so find the run it started and confirm it
-is the candidate's before reading anything else:
+The timestamp `date` printed is `<dispatched-after>`. Write it down: every
+repetition of the query below reuses that one value rather than a fresh
+reading, so a retry cannot widen the window it is searching.
+
+`gh workflow run` reports no run id, so find the run this dispatch created by
+the branch, the commit, and the window it was created in — never by taking
+whichever `Release` run is newest:
 
 ```console
-gh run list --workflow Release --event workflow_dispatch --limit 1 \
-  --json databaseId,headSha,status,conclusion
+gh run list --workflow Release --event workflow_dispatch \
+  --branch release-candidate-<n> --commit <commit> \
+  --created ">=<dispatched-after>" \
+  --json databaseId,headBranch,headSha,createdAt,status,conclusion,url
+```
+
+Read that listing before watching anything:
+
+- **No row.** The run is not visible yet. Repeat the same query, with the same
+  `<dispatched-after>`, until it appears. Do not dispatch again: a listing that
+  has not caught up is the ordinary state for the first seconds after a
+  dispatch, and a second dispatch creates a second run this step then cannot
+  tell apart from the first. A query that errors, or a listing still empty long
+  after a run would have appeared, is a fault to investigate — a dispatch that
+  was never accepted, a mistyped branch, a clock far from UTC — and not
+  evidence of lag.
+- **More than one row.** The correlation is ambiguous, and newest-first is not
+  a tiebreak. Stop, and establish where the second run came from, before
+  watching or recording either.
+- **Exactly one row.** Confirm its `headBranch` is that scratch branch, its
+  `headSha` is the candidate commit exactly, and its `createdAt` is at or after
+  `<dispatched-after>`. A run whose commit matches but whose branch or creation
+  time does not is some other dispatch's — another operator's, or an earlier
+  rehearsal of this same candidate — and is not this rehearsal's evidence.
+  Reject it and keep querying rather than watching it.
+
+The row that passes all three is this rehearsal's run. Watch it by the
+`databaseId` that row reported:
+
+```console
 gh run watch <databaseId>
 ```
 
-The run's `headSha` must be the candidate commit exactly. Anything else is a
-rehearsal of some other tree: delete the scratch branch, re-push it at the
-candidate, and dispatch again.
+Dispatching again is for an attempt that has actually failed — the run itself
+reports a failure, or the dispatch was never accepted — and it starts a fresh
+attempt rather than repairing this one: delete the scratch branch, push a new
+`release-candidate-<n>` name at the candidate, capture a new
+`<dispatched-after>`, and dispatch against that.
 
 Confirm from the run that `build-test` succeeded, that the payload carried
 exactly one archive named for the chosen version, that the candidate-install
@@ -139,7 +180,9 @@ is where a packaging gap surfaces. If the candidate fails here, it is not a
 candidate: fix the cause in the ordinary lane, and return to step 3 with a new
 commit.
 
-Record the rehearsal run on the release issue.
+Record the rehearsal run on the release issue: its `url` or `databaseId`,
+together with the scratch branch and the candidate commit it was correlated on,
+so the record says which run was watched and why it was this rehearsal's.
 
 ## 5. Review dependencies and maintenance assumptions
 

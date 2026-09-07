@@ -48,8 +48,10 @@ Check an item only once its step's result is recorded here.
       `### Unreleased` created above it.
 - [ ] 3. Candidate commit selected, with required `build-test` success on that
       exact commit.
-- [ ] 4. Rehearsal dispatched on the candidate, its run's head confirmed to
-      be that commit; draft created and kept for item 6.
+- [ ] 4. Rehearsal dispatched once on the candidate's own scratch branch, and
+      the run it created recorded here by its URL or database ID, together
+      with the branch and commit it was correlated on; draft created and kept
+      for item 6.
 - [ ] 5. Dependency and maintenance review performed; date and result recorded.
 - [ ] 6. Manual macOS upgrade performed, from the previous published release
       onto the candidate archive kept from item 4; each covered item's result
