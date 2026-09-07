@@ -722,6 +722,16 @@ workflows drive, `pr-review:v1` from the drainer's own stale-head rereviewer,
 and the legacy `codex-review` spelling — and the drainer reads the whole
 paginated comment feed before it merges.
 
+**Only the authenticated account's markers count.** A marker is a claim of
+review authority written in a comment body, and a comment body is something
+anyone who can see the pull request can write — so the drainer resolves its own
+login with `gh api user` and ignores every marker published by anybody else,
+exactly as `$finalize` does. Without that, any passer-by could block an
+eligible pull request. A login it cannot resolve refuses the merge rather than
+being read as "nobody rejected this head", and an installation whose drainer
+authenticates as an account other than the one its reviewers publish under sees
+a pull request with no markers at all.
+
 **A `CHANGES_REQUESTED` marker naming a pull request's current head refuses the
 merge, and nothing at that same head lifts it.** Not a later approval from
 another reviewer, not a later approval from the same one, and not the

@@ -117,6 +117,11 @@ FINALIZE_ASSIGNMENT: kanban_models.Assignment | None = None
 # still recognising a Claude review as one this installation performs. `None`
 # means "not resolved this cycle", which an empty tuple does not.
 FINALIZE_LOADED_PROVIDERS: tuple[str, ...] | None = None
+# The authenticated GitHub login, resolved once per process by
+# `authenticated_login()` and never re-read: it is the account whose published
+# review markers this drainer will believe, and `None` means "not resolved
+# yet" rather than "nobody".
+AUTHENTICATED_LOGIN: str | None = None
 NTFY_URL = os.environ.get("KANBAN_DRAINER_NTFY_URL")
 # The private namespace an autostash snapshot is anchored under, written down
 # once: the ref every anchor is created at, the pattern the startup sweep
@@ -1202,8 +1207,59 @@ def parse_review_marker(body: str) -> tuple[str, str] | None:
     return head, verdict
 
 
+def authenticated_login(ctx: RepoContext) -> str:
+    """The one GitHub login whose review markers this drainer believes.
+
+    A marker is a claim of review authority written in a comment body, and a
+    comment body is something anyone who can see the pull request can write.
+    Without this, a `CHANGES_REQUESTED` marker from any passer-by would veto a
+    merge until a new commit was pushed, and a forged canonical marker would
+    make the stale-approval recovery wait for a rereview nobody is running.
+
+    The same identity §2.10's manual finalization gate resolves, and for the
+    same reason: every marker this pipeline actually produces -- the canonical
+    coordinator's `pr-review:v2`, this drainer's own `pr-review:v1`, and the
+    legacy spelling -- is posted with `gh pr comment` under the authenticated
+    account. An installation whose drainer authenticates as somebody other than
+    the account its reviewers publish under is misconfigured, and reads as a
+    pull request with no markers at all.
+
+    Resolved once per process rather than per cycle. The answer changes only
+    when `gh`'s own credentials do, which does not happen under a running
+    service, and one call is what keeps a GitHub incident on `/user` from
+    stalling every later pass as well as the first. A resolution that fails or
+    comes back empty raises, so nothing downstream can read "no trusted
+    publisher" as "no rejection".
+    """
+    global AUTHENTICATED_LOGIN
+    if AUTHENTICATED_LOGIN is not None:
+        return AUTHENTICATED_LOGIN
+    proc = run(["gh", "api", "user", "--jq", ".login"], cwd=ctx.path)
+    login = (proc.stdout or "").strip()
+    if not login:
+        raise DrainError(
+            "`gh api user` named no authenticated login, so no review marker "
+            "can be attributed to the account this pipeline publishes under."
+        )
+    AUTHENTICATED_LOGIN = login
+    return login
+
+
+def comment_author(comment: dict[str, Any]) -> str | None:
+    """The login that wrote one comment, or None if the payload does not say."""
+    author = comment.get("user")
+    if not isinstance(author, dict):
+        return None
+    login = author.get("login")
+    return login if isinstance(login, str) and login else None
+
+
 def review_markers(ctx: RepoContext, number: int) -> list[ReviewMarker]:
     """Every published review marker on one pull request, newest first.
+
+    Markers written by the authenticated publisher and nobody else, so a
+    comment cannot grant itself review authority; see `authenticated_login`.
+    A comment whose payload names no author is not that publisher's either.
 
     `gh pr view --json comments` returns a bounded window, so on a long pull
     request the newest marker can fall outside it -- verification then fails,
@@ -1239,8 +1295,12 @@ def review_markers(ctx: RepoContext, number: int) -> list[ReviewMarker]:
         key=lambda comment: (comment.get("created_at") or "", comment.get("id") or 0),
         reverse=True,
     )
+    publisher = authenticated_login(ctx).casefold()
     markers: list[ReviewMarker] = []
     for comment in comments:
+        author = comment_author(comment)
+        if author is None or author.casefold() != publisher:
+            continue
         identity = (
             str(comment.get("id") or ""),
             str(comment.get("html_url") or ""),

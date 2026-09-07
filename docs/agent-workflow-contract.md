@@ -851,8 +851,12 @@ reimplement the removal, and `--check` remains read-only.
 - **Review authority and the verdict a merge obeys:** the drainer reads every
   published review marker on a candidate — the canonical `pr-review:v2` §2.2's
   coordinator publishes, its own `pr-review:v1`, and the legacy `codex-review`
-  spelling — from the whole paginated comment feed, and applies one precedence
-  rule at both of its merge boundaries: the ordinary pull-request merge and the
+  spelling — from the whole paginated comment feed, counting only those
+  published by the login `gh api user` names, since a marker is a claim of
+  review authority written in a body anyone who can see the pull request can
+  write; that is §2.10's boundary drawn from the same source, and a login that
+  cannot be resolved refuses rather than being read as an absence of
+  rejections. It applies one precedence rule at both of its merge boundaries: the ordinary pull-request merge and the
   default-branch swap of a merge past a coordination-only base advance. **A
   `CHANGES_REQUESTED` marker naming a candidate's current head refuses the
   merge, and no later marker at that same head lifts it** — not a second

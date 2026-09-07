@@ -199,6 +199,15 @@ class ReviewAuthorityIsDocumentedTests(unittest.TestCase):
         self.assertIn("no later marker at that same head lifts it", section)
         self.assertIn("Neither arrival order nor marker", section)
 
+    def test_both_documents_state_the_publisher_trust_boundary(self):
+        # The veto hands a marker the power to block a merge, so which markers
+        # count is part of the contract, not an implementation detail.
+        self.assertIn("`gh api user` names", self.section())
+        self.assertIn(
+            "**Only the authenticated account's markers count.**",
+            self.OPERATOR_GUIDE.read_text(encoding="utf-8"),
+        )
+
     def test_the_contract_states_that_one_producer_runs_per_push(self):
         self.assertIn(
             "the drainer spawns no rereview of its own and waits for the",

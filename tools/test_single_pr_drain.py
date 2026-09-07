@@ -41,6 +41,9 @@ SCRIPT = TOOLS_DIR / "drain_prs.py"
 # The paginated comment feed `review_markers` reads, spelled exactly as
 # drain_prs.py builds it for this fixture's repository and pull request.
 COMMENTS_ENDPOINT = "repos/acme/widgets/issues/42/comments?per_page=100"
+# The account this fixture's drainer authenticates as, and therefore the
+# only one whose published review markers it believes.
+PUBLISHER = "widget-maintainer"
 # Everything drain_prs.py imports, for the fixture that runs a copy of the
 # script from inside the repository under test.
 SCRIPT_MODULES = (
@@ -263,6 +266,10 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             payload.update(override)
             self.fake.script("gh", ["pr", "view", "42"], stdout=json.dumps(payload))
 
+    def script_authenticated_login(self, login=PUBLISHER, **kwargs):
+        """Script `gh api user`, which names the publisher markers must match."""
+        self.fake.script("gh", ["api", "user"], stdout=f"{login}\n", **kwargs)
+
     def script_review_comments(self, *pages):
         """Queue the pull request's paginated comment feed.
 
@@ -278,9 +285,12 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
             stdout=json.dumps(list(pages) or [[]]),
         )
 
-    def review_marker_comment(self, marker, *, comment_id, created_at):
+    def review_marker_comment(
+        self, marker, *, comment_id, created_at, author=PUBLISHER
+    ):
         return {
             "id": comment_id,
+            "user": {"login": author},
             "html_url": (
                 f"https://github.com/acme/widgets/pull/42#issuecomment-{comment_id}"
             ),
@@ -321,8 +331,13 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
 
     # -- driving the CLI --------------------------------------------------
 
-    def ensure_review_comments(self):
-        """The empty comment feed every run reads, unless one was scripted."""
+    def ensure_marker_reads(self):
+        """The two reads every run makes, unless the scenario scripted them.
+
+        A rejection naming the current head vetoes the merge (issue #628), so
+        every run resolves the trusted publisher and pages the comment feed.
+        """
+        self.fake.ensure_script("gh", ["api", "user"], stdout=f"{PUBLISHER}\n")
         self.fake.ensure_script(
             "gh",
             ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
@@ -330,7 +345,7 @@ class SinglePrCliFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
         )
 
     def run_cli(self, *extra, script=None, log_dir=True):
-        self.ensure_review_comments()
+        self.ensure_marker_reads()
         env = dict(os.environ)
         env.update(self.fake.environ_overrides())
         env["KANBAN_DRAINER_INSTALL_DIR"] = str(self.install_dir)
@@ -1336,6 +1351,9 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
 
     def run_main(self, *argv_extra):
         """Drive main() in-process, so an interrupt can be placed exactly."""
+        cached = mock.patch.object(drain_prs, "AUTHENTICATED_LOGIN", None)
+        cached.start()
+        self.addCleanup(cached.stop)
         saved = (
             drain_prs.LOG_DIR,
             drain_prs.LOG_TO_STDERR,
@@ -1352,7 +1370,7 @@ class SinglePrStartupAndInterruptTests(SinglePrCliFixture):
             ) = saved
 
         self.addCleanup(restore)
-        self.ensure_review_comments()
+        self.ensure_marker_reads()
         argv = [
             "drain_prs.py",
             "--path",
