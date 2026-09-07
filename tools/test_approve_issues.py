@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -1480,8 +1481,19 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
         install = self.root / "dry-run-install"
         install.mkdir(parents=True, exist_ok=True)
         ledger = install / "runtime" / "reviewer_ledger.json"
+        # A real repository: --path resolves through `git rev-parse`, and
+        # without one the run exits before it could record, which is how this
+        # case passed while proving nothing.
+        checkout = self.root / "dry-run-checkout"
+        checkout.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
         subprocess.run(
-            [sys.executable, str(script), "--path", str(self.root),
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/repo.git"],
+            check=True,
+        )
+        result = subprocess.run(
+            [sys.executable, str(script), "--path", str(checkout),
              "--dry-run", "--once"],
             capture_output=True,
             text=True,
@@ -1491,7 +1503,118 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
                 "XDG_CONFIG_HOME": str(self.config_home),
             },
         )
+        # The run is asserted to have travelled PAST the recording step, so
+        # the case cannot go vacuous: one that failed earlier would leave no
+        # ledger for a reason that has nothing to do with the dry-run guard.
+        # main() records immediately after binding LOG_DIR and before it
+        # resolves the repository, so reaching the `gh` call proves the guard
+        # was the thing that declined to write.
+        self.assertIn("gh repo view", result.stdout + result.stderr)
         self.assertFalse(ledger.exists(), "a dry run wrote the reviewer ledger")
+
+    def test_concurrent_writers_do_not_lose_a_transition(self):
+        # Unlocked, two writers each read [A], and whichever finishes last
+        # replaces the other's [A,B] with its own stale [A,C]. That does not
+        # merely lose B -- it leaves C looking newest, so A's window runs to
+        # C's timestamp and swallows the markers written while B was
+        # canonical, WIDENING acceptance.
+        #
+        # The window is narrow, so it is forced rather than raced for: the slow
+        # writer sleeps between reading the record and replacing it. The patch
+        # adds delay only -- it reads through the real reader and changes
+        # nothing about what is read -- and with the lock held that sleep
+        # happens INSIDE the critical section, which is exactly what the fast
+        # writer must be made to wait on.
+        module = self.backend()
+        path = self.ledger_path()
+        module.record_reviewer_assignment(
+            path, cells={"codex": "gpt-a@high", "claude": "claude-a@high"}
+        )
+        slow = textwrap.dedent(
+            f"""
+            import sys, time, pathlib
+            sys.path.insert(0, {str(REPO_ROOT / "tools")!r})
+            import approve_issues as a
+            real = a.read_reviewer_ledger
+            def paused(path=None):
+                answer = real(path)
+                time.sleep(3)
+                return answer
+            a.read_reviewer_ledger = paused
+            a.record_reviewer_assignment(
+                pathlib.Path({str(path)!r}),
+                cells={{"codex": "gpt-c@high", "claude": "claude-c@high"}},
+            )
+            """
+        )
+        fast = textwrap.dedent(
+            f"""
+            import sys, time, pathlib
+            sys.path.insert(0, {str(REPO_ROOT / "tools")!r})
+            import approve_issues as a
+            time.sleep(1)
+            a.record_reviewer_assignment(
+                pathlib.Path({str(path)!r}),
+                cells={{"codex": "gpt-b@high", "claude": "claude-b@high"}},
+            )
+            """
+        )
+        runners = []
+        for name, source in (("slow", slow), ("fast", fast)):
+            runner = self.root / f"append_{name}.py"
+            runner.write_text(source, encoding="utf-8")
+            runners.append(runner)
+        workers = [
+            subprocess.Popen([sys.executable, str(runner)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for runner in runners
+        ]
+        for worker in workers:
+            worker.wait(timeout=90)
+            self.assertEqual(worker.returncode, 0, worker.stderr.read())
+
+        status, entries = module.read_reviewer_ledger(path)
+        self.assertEqual(status, module.LEDGER_INTACT)
+        recorded = [entry["assignments"]["codex"] for entry in entries]
+        self.assertEqual(recorded[0], "gpt-a@high")
+        # Both transitions survive. Unlocked, the fast writer's entry is gone.
+        self.assertIn("gpt-b@high", recorded)
+        self.assertIn("gpt-c@high", recorded)
+
+    def test_an_unloaded_provider_is_never_recorded_even_with_overrides(self):
+        # gate_model/gate_effort answer an APPROVE_ISSUES_* override BEFORE
+        # consulting the roster, so filtering on "did the cell resolve" is not
+        # enough: an operator with those variables set on a no-agent or
+        # single-agent install would record an assignment for a provider that
+        # cannot run a reviewer at all.
+        overrides = {
+            "APPROVE_ISSUES_CODEX_MODEL": "gpt-override",
+            "APPROVE_ISSUES_CODEX_EFFORT": "high",
+            "APPROVE_ISSUES_CLAUDE_MODEL": "claude-override",
+            "APPROVE_ISSUES_CLAUDE_EFFORT": "high",
+        }
+        for label, agents, expected in (
+            ("no-agent", "[]", {}),
+            ("single-agent", '["claude"]', {"claude": "claude-override@high"}),
+            ("dual", '["codex", "claude"]',
+             {"codex": "gpt-override@high", "claude": "claude-override@high"}),
+        ):
+            self.write_roster(
+                MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
+                    'agents = ["codex", "claude"]', f"agents = {agents}"
+                )
+            )
+            module = self.backend(**overrides)
+            with self.subTest(mode=label):
+                self.assertEqual(module.current_reviewer_cells(), expected)
+                path = self.root / f"cells-{label}.json"
+                module.record_reviewer_assignment(path)
+                if expected:
+                    self.assertTrue(path.exists())
+                else:
+                    self.assertFalse(
+                        path.exists(), "a no-agent install wrote a ledger entry"
+                    )
 
     def test_a_damaged_ledger_is_never_overwritten_by_the_next_append(self):
         # An append-only record must not lose its history to a reader that

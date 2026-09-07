@@ -948,9 +948,12 @@ Each `r` invocation advances exactly one durable label-driven stage:
    (`tools/approve_issues.py`, `--reviewer-ledger --json`). A marker inside its
    assignment's recorded window is a legacy decision and is carried forward; one
    outside every window is stale and rereviewed. Markers older than the ledger's
-   first entry fall back to the compiled prehistory — GPT-5.6-Sol, GPT-5.6-Terra,
-   GPT-5.5, Claude Opus 5, Claude Fable 5 — so a provider shipping a new model
-   cannot invalidate a backlog of approvals in one step. The retired reviewer
+   first entry fall back to the compiled prehistory — GPT-5.6-Sol,
+   GPT-5.6-Terra, GPT-5.5, Claude Opus 5, Claude Fable 5 — so a provider
+   shipping a new model cannot invalidate a backlog of approvals in one step.
+   A record that is present but unreadable is the exception: it refuses every
+   route but the current assignment rather than falling back at all
+   (contract §2.3.1). The retired reviewer
    personas stay readable in the other direction, since a historical review that
    predates the marker's `verdicts=` field has only its human-readable summary
    to recover a per-reviewer verdict from.

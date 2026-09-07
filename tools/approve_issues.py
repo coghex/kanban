@@ -934,15 +934,17 @@ def current_reviewer_cells() -> dict[str, str]:
         CODEX_REVIEWER.key: f"{PRIMARY_CODEX_MODEL}@{CODEX_EFFORT}",
         CLAUDE_REVIEWER.key: f"{PRIMARY_CLAUDE_MODEL}@{CLAUDE_EFFORT}",
     }
-    # A provider this install does not load resolves to
-    # UNRESOLVED_ASSIGNMENT_VALUE, which is a diagnostic string rather than an
-    # assignment. Recording it would write a cell no marker can ever name and
-    # print it as though it were one, so single- and no-agent installs record
-    # only what they actually run.
+    # Keyed on the LOADED provider set, not merely on whether the cell
+    # resolved. `gate_model`/`gate_effort` answer an APPROVE_ISSUES_* override
+    # BEFORE consulting the roster, so a no-agent or single-agent install whose
+    # operator has those variables set would otherwise report -- and record --
+    # an assignment for a provider that cannot run a reviewer at all, creating
+    # a window for something no marker could ever name. The unresolved-value
+    # filter stays behind it for the loaded-but-unvalued case.
     return {
         key: cell
         for key, cell in cells.items()
-        if UNRESOLVED_ASSIGNMENT_VALUE not in cell
+        if key in LOADED_PROVIDERS and UNRESOLVED_ASSIGNMENT_VALUE not in cell
     }
 
 
@@ -1115,11 +1117,19 @@ def record_reviewer_assignment(
     diagnostic the gate must not fail on, since the ledger only ever widens
     what the gate accepts.
 
-    The replace is atomic, so a concurrent writer can never leave a torn file;
-    what it can lose is one append, and losing one only ever narrows what the
-    gate accepts. An assignment that was canonical but went unrecorded has no
-    window, and a marker naming it is rereviewed rather than trusted -- the
-    safe direction for a record whose whole purpose is to widen acceptance.
+    The whole read-modify-replace runs under an exclusive lock on a sibling
+    file, and the record is re-read after the lock is held. Atomic replacement
+    alone is not enough: two unlocked writers can each read [A], and the second
+    to finish replaces the first's [A,B] with its own stale [A,C]. That does
+    not merely lose B's transition -- it leaves C looking like the newest
+    assignment, so A's window runs to C's timestamp and swallows the markers
+    written while B was canonical. Losing an append that way WIDENS acceptance,
+    which is the one direction this record must never fail in.
+
+    A lock this process cannot take is not fatal: the append is skipped, which
+    leaves the newest recorded assignment behind the running one, and the gate
+    reads that as a boundary it cannot place and refuses every non-current
+    route.
     """
     target = REVIEWER_LEDGER_PATH if path is None else path
     assignment = current_reviewer_cells() if cells is None else dict(cells)
@@ -1128,6 +1138,41 @@ def record_reviewer_assignment(
         # assignment would append an entry the reader then rejects, rewriting
         # an append-only file on every run to say nothing.
         return read_reviewer_ledger(target)[1]
+    with reviewer_ledger_lock(target) as locked:
+        if not locked:
+            return read_reviewer_ledger(target)[1]
+        return _record_reviewer_assignment_locked(target, assignment, now)
+
+
+@contextlib.contextmanager
+def reviewer_ledger_lock(target: Path):
+    """An exclusive lock on a sibling of the ledger, held across the whole
+    read-modify-replace. Yields False when it cannot be taken, which the caller
+    treats as "do not write" rather than as a failure."""
+    lock_path = target.parent / (target.name + ".lock")
+    handle = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "w", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        if handle is not None:
+            handle.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _record_reviewer_assignment_locked(
+    target: Path, assignment: dict[str, str], now: datetime | None
+) -> list[dict[str, Any]]:
+    # Re-read under the lock: whatever this process saw before taking it may
+    # already be stale.
     status, entries = read_reviewer_ledger(target)
     if status == LEDGER_DAMAGED:
         # Appending would REPLACE the file, destroying whatever an append-only

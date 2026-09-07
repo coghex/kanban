@@ -1874,7 +1874,8 @@ report did not name.
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
 CLI flags (`--path`, `--review ISSUE [ISSUE ...]`/`--rereview`/`--check`/
-`--review-queue`, `--legacy-policy dual`, `--json`), its JSON/comment/label
+`--review-queue`/`--reconcile-approvals`/`--reviewer-ledger`,
+`--legacy-policy dual`, `--json`), its JSON/comment/label
 output contract, its
 role as the
 sole source of truth for both the interactive review workflow and the solve
