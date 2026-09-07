@@ -431,6 +431,45 @@ spec = do
       refused `shouldNotMention` "install_drainer.py"
       refused `shouldNotMention` "/a/python3"
 
+    it "carries the systemd quoting and specifier refusals into this service's diagnostic" $ do
+      -- Requirement 7 over the shared reader's second consumer. The quoting
+      -- and specifier refusals are new, and they have to arrive here as this
+      -- service's own unreadable-definition message — its unit, its installer
+      -- — and leave no controller for a status, start, or stop to invoke.
+      let refusal contents =
+            either
+              id
+              (const "unexpectedly resolved a controller")
+              (systemdApprovalControllerFromUnit boardRepository approvalUnitPath contents)
+      systemdApprovalControllerFromUnit
+        boardRepository
+        approvalUnitPath
+        "[Service]\nType=exec\nExecStart='/install dir/python3' '/install dir/approve_issues_service.py' run\n"
+        `shouldBe` Right
+          ( ApprovalController
+              "/install dir/python3"
+              [ "/install dir/approve_issues_service.py",
+                "--path",
+                "/tmp/example-project",
+                "--repo",
+                "example/project"
+              ]
+              ApprovalSystemd
+          )
+      let unmatched =
+            refusal
+              "[Service]\nType=exec\nExecStart=\"/install dir/python3 /install dir/approve_issues_service.py run\n"
+      unmatched `shouldMention` ("could not read the issue approval service's systemd unit at " <> Text.pack approvalUnitPath)
+      unmatched `shouldMention` "quote unmatched"
+      unmatched `shouldMention` "install_issue_approval.py"
+      unmatched `shouldNotMention` "install_drainer.py"
+      unmatched `shouldNotMention` "/install dir/python3 /install"
+      let specifier =
+            refusal "[Service]\nType=exec\nExecStart=%h/kanban/python3 %h/kanban/approve_issues_service.py run\n"
+      specifier `shouldMention` "%h"
+      specifier `shouldMention` "install_issue_approval.py"
+      specifier `shouldNotMention` "/kanban/approve_issues_service.py"
+
   describe "issue approval status decoding" $ do
     it "gives every state the controller publishes its own distinct value" $ do
       -- Requirement 3. Six states, six activities, and no two collapsed
