@@ -1,4 +1,5 @@
-"""Safety-rule check for docs/releasing.md and the maintainer release template.
+"""Safety-rule check for docs/releasing.md, the maintainer release template, and
+SUPPORT.md's report-what-you-have-installed bullet.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 -m unittest tools.test_release_runbook
@@ -8,7 +9,7 @@ history. `docs/releasing.md` states it reusably, and `.github/ISSUE_TEMPLATE/`'s
 `release.md` is the per-release checklist that drives it. Both are prose, so
 most of what they say is not this module's business.
 
-Five things in them are, because each is a rule whose quiet removal would not
+Six things in them are, because each is a rule whose quiet removal would not
 look like a regression to a reader:
 
 * **Publication cannot happen without a recorded human authorization.** The
@@ -35,6 +36,41 @@ look like a regression to a reader:
   the release evidence. This rule reads the fenced command rather than the
   paragraph around it, because that is what an operator runs, and the
   template's item records which run the answer turned out to be.
+* **`kanban --doctor` reports AI-action readiness and nothing else.** Issue
+  #618: the manual upgrade gate required it "reporting every advertised
+  component ready" and named the managed components as "the issue-review
+  service and the PR drainer", so an operator could satisfy the written gate
+  without observing either managed job while trying to stop one that does not
+  exist -- `tools/install_issue_review.py` installs a backend and starts no
+  daemon. The two managed jobs are the PR drainer and the issue approval
+  service, each observed through its own controller's returned `status` state.
+  `SUPPORT.md` told a reporter the same false thing, which is why it is a
+  subject of this module rather than of one of its own: the claim is one rule,
+  and a second module would be a second place for it to drift.
+
+  The rule partitions the block rather than hunting for defects in it. Every
+  unit either names `--doctor`, in which case both what it claims and what
+  remains after subtracting that claim are whitelisted, or it does not, in
+  which case it may not say "ready" at all. No unit falls outside the two, and
+  that is the whole of why this holds: there is nowhere for a sentence to sit
+  unexamined.
+
+  Four narrower rules were walked past first, each asking a negative question
+  or a question about subjects. Requiring the right words near `--doctor`
+  accepted "AI-action readiness and all optional-component readiness"; adding a
+  rule for quantified paraphrases accepted the unquantified "managed-component
+  readiness"; whitelisting the text after "reports" accepted a wider assertion
+  placed before it and read no clause phrased with "checks"; judging only
+  clauses that name doctor accepted "It also reports whether the two managed
+  services are ready", and a version demanding an observer accepted the same
+  sentence with "controller status" mentioned later in it. A document can
+  always name a superset in words nobody thought to forbid, put it where nobody
+  thought to look, and decline to say who it is about.
+
+  The boundary is an attribution phrased without the word -- "confirms both
+  managed services are working". Widening the vocabulary reports the runbook's
+  own "working directory" and "a healthy job", so the word is the boundary and
+  this says so rather than pretending otherwise.
 
 The runbook is also version-neutral, which is what makes it reusable at all: a
 release's own numbers belong to that release's issue.
@@ -46,8 +82,8 @@ matched everything could not pass the second run while asserting nothing.
 
 `tools/` ships whole in the source distribution and `.github/ISSUE_TEMPLATE/`
 deliberately does not, so the template class skips on the missing directory the
-way `tools/test_issue_templates.py` does. The runbook itself is a packaged
-document, so its rules run in an unpacked release too.
+way `tools/test_issue_templates.py` does. The runbook and `SUPPORT.md` are both
+packaged documents, so their rules run in an unpacked release too.
 """
 
 from __future__ import annotations
@@ -60,6 +96,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNBOOK = REPO_ROOT / "docs" / "releasing.md"
 TEMPLATE_DIR = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
 RELEASE_TEMPLATE = TEMPLATE_DIR / "release.md"
+SUPPORT = REPO_ROOT / "SUPPORT.md"
 
 # The runbook's ordered procedure, by `##` heading. Requirement 1's sequence:
 # version, changelog, candidate, rehearsal, dependencies, upgrade, settings,
@@ -147,6 +184,109 @@ UPGRADE_ITEMS = {
     "board-run": "interactive board run",
     "state": "preservation of supported configuration and durable state",
 }
+
+# Issue #618's half of the same gate, kept separate from UPGRADE_ITEMS because
+# that mapping asks only whether each subject is mentioned. `--doctor` is
+# mentioned by a gate that credits it with the whole upgrade, which is how the
+# false claim survived a passing suite: what has to be checked is what the gate
+# *says* about each of these, not that the words appear.
+
+# --- What a `kanban --doctor` claim may say, in either document ---
+#
+# `--doctor` is a read-only report on AI-action readiness
+# (src/Kanban/Preflight/Readiness.hs). Both documents credited it with more,
+# and the claim is one rule, so one vocabulary serves both.
+#
+# What is judged is the whole clause that mentions `--doctor`, not the part of
+# it that follows a verb. Reading only what came after "reports" left the rest
+# of the sentence unconstrained, and an assertion can be made before the verb
+# as easily as after it: "--doctor, checking PR drainer and issue approval
+# service readiness and reporting AI-action readiness" carried a whitelisted
+# claim and still assigned both managed services. Binding the rule to that one
+# verb was also a bypass of its own -- "checks" and "confirms" are as natural
+# in this sentence, and neither was read at all. So the unit of judgement is
+# the clause, split on the punctuation that ends one.
+UNIT_SPLIT_RE = re.compile(r"[;.]")
+
+# What may remain in a doctor clause once its permitted claim is subtracted:
+# the command, a verb of reporting, and the words that join them. Nothing here
+# names a subject, which is the point -- a residue word outside this set is
+# there to name or quantify something, and that something is not AI actions.
+#
+# A whitelist on this half too, for the reason the claim itself needs one.
+# Forbidding readiness nouns and the two service names left "verifying every
+# optional component and reporting AI-action readiness" reported by nothing:
+# no readiness noun, no service named, a whitelisted claim intact, and the
+# whole roster assigned to doctor anyway. The repair for a clause this reports
+# is to keep the clause to its one assertion, not to widen the set.
+PERMITTED_RESIDUE_WORDS = frozenset(
+    """
+    a an and as by for in is it its kanban doctor of on s that the to which
+    report reports reported reporting state states stated say says said
+    alone only nothing else
+    """.split()
+)
+RESIDUE_WORD_RE = re.compile(r"[a-z]+")
+
+# The whole of what a claim may say -- a whitelist, matched against the entire
+# claim, rather than a list of forbidden words.
+#
+# Two rounds of canonical review found a blacklist incomplete, and each repair
+# only moved its boundary. Requiring `ai-action readiness` to be present and
+# forbidding two service names passed "AI-action readiness and all
+# optional-component readiness"; adding a quantifier rule for that passed the
+# unquantified "AI-action readiness and managed-component readiness". There is
+# no bottom to that list: a claim can always name a superset in words nobody
+# thought to forbid. So the question asked here is the positive one -- is this
+# claim the scope `--doctor` actually has? -- and every claim that is not is
+# reported, whatever it says instead.
+#
+# The alternatives are spelling, not scope: `README.md` says "readiness per AI
+# action" for the same boundary, and a claim is free to state its exclusivity
+# out loud. Anything further is a wider claim, which is the defect.
+ALLOWED_DOCTOR_CLAIM_RE = re.compile(
+    r"(?:(?:per[ -])?ai[ -]action readiness|readiness per ai[ -]action)"
+    r"(?: alone| only| and nothing else)?"
+)
+
+# --- The runbook's manual upgrade gate ---
+#
+# The two managed jobs, named as they are installed --
+# `tools/install_drainer.py`'s and `tools/install_issue_approval.py`'s.
+MANAGED_SERVICE_NAMES = {
+    "drainer": "pr drainer",
+    "approval": "issue approval service",
+}
+
+# The managed component that does not exist. `tools/install_issue_review.py`
+# installs a backend and starts no daemon, so a gate naming an "issue-review
+# service" sends the operator to stop something nothing installed. Checked over
+# the whole runbook rather than the gate alone: the name is wrong wherever it
+# appears, and a mention that migrated into another step is the same defect.
+ABSENT_MANAGED_SERVICE = "issue-review service"
+
+# That the doctor item denies substituting for the two service checks, which
+# is the sentence a reader acts on when deciding whether to run them.
+DOCTOR_SUBSTITUTION_RULE = "does not stand in for"
+
+# Each managed job is observed through its own controller, and the two rules
+# are separate so a control can drop one check while the other stands. The
+# gate carries `--doctor` either way, which is the point: a gate merely
+# mentioning `--doctor` satisfies UPGRADE_ITEMS and still leaves both of these
+# reported.
+SERVICE_STATUS_RULES = {
+    "drainer-status": "the pr drainer's controller status",
+    "approval-status": "the issue approval service's controller status",
+}
+
+# How a status result is recorded, in both halves. The positive half is the
+# one the canonical review asked for: `status` exits zero for a repository
+# whose job was never installed (docs/issue-approval.md, "Reading status"), so
+# the returned `state` is the evidence. Stating only the prohibition would let
+# the instruction to read the state disappear while the gate still forbade the
+# exit code -- which leaves an operator told what not to do and not what to do.
+RETURNED_STATE_RULE = "the state the controller returned"
+NOT_AN_EXIT_CODE_RULE = "not that the command exited zero"
 
 # The repository metadata the settings step checks, exactly as the decision
 # that fixed it states. Restated here so drift in either direction fails.
@@ -292,6 +432,48 @@ REDISPATCH_ON_MISMATCH_RE = re.compile(
 # both.
 VERSION_LITERAL_RE = re.compile(r"(?<![.\d])\d+(?:\.\d+){2,}(?![.\d])")
 
+# SUPPORT.md's report-what-you-have-installed bullet, which told a reporter
+# `kanban --doctor` reports which of the three optional components are ready.
+# A support report could therefore cite a clean doctor run as evidence that the
+# drainer or the approval job was healthy when neither was observed. Scoped to
+# the one bullet rather than to the section: the neighbouring "Read the guides"
+# bullet ends on "why one might not be ready", which is a true sentence about
+# the components and no claim about anything that observes them.
+SUPPORT_HEADING = "Before opening an issue"
+SUPPORT_BULLET_OPENING = "Say what you have installed"
+
+# Where the bullet sends a reporter for the other two components. The same
+# phrases the runbook's gate uses, because it is the same instruction: observe
+# each managed job through its own controller's status.
+SUPPORT_CONTROLLER_RULES = {
+    "drainer-controller": "the pr drainer's controller status",
+    "approval-controller": "the issue approval service's controller status",
+}
+
+# The other half of the partition: every unit of a doctor block that is *not* a
+# doctor clause may not attribute readiness at all.
+#
+# This is what closes the class the four rules before it kept leaving open. Each
+# of those asked who a statement was about, and a statement can always decline
+# to say: "It also reports whether the two managed services are ready" names no
+# subject, and an earlier version that demanded an observer accepted "..., are
+# ready, although controller status remains the authoritative check" because the
+# observer's name appeared somewhere in the sentence. Anaphora cannot be
+# resolved by a text rule, so this one does not try -- outside the one clause
+# where doctor states its own scope, the word does not belong here whatever its
+# subject.
+#
+# That is a positive property of the block rather than a restriction on it: the
+# checks it lists observe a returned `state`, and only doctor claims readiness.
+# The repair for a sentence this reports is to name the state the check returns,
+# never to loosen the rule.
+#
+# What it does not reach is an attribution phrased without the word -- "confirms
+# both managed services are working". Widening the vocabulary was tried and
+# rejected: this section legitimately says "working directory", "a healthy job",
+# and "clean up", so a synonym list reports the document it is meant to protect.
+READINESS_NOUN_RE = re.compile(r"\bread(?:y|iness)\b")
+
 HEADING_RE = re.compile(r"^(?P<hashes>#+)\s+(?P<heading>.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<text>[^\]\n]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
 # `- [ ] 8. ...` / `- [x] 8. ...`: a checklist item and whether it is checked.
@@ -336,6 +518,24 @@ def section(text, wanted, level=2):
             if active and depth <= level:
                 break
             continue
+        if active:
+            collected.append(line)
+    return "\n".join(collected)
+
+
+def bullet(text, heading, opening):
+    """The one `- ` list item beneath `heading` whose first line contains
+    `opening`, with its continuation lines joined. Empty when absent, which is
+    how a deleted bullet reaches the rules above."""
+    collected = []
+    active = False
+    for line in section(text, heading).splitlines():
+        if line.startswith("- "):
+            if active:
+                break
+            active = opening in line
+            if not active:
+                continue
         if active:
             collected.append(line)
     return "\n".join(collected)
@@ -391,6 +591,111 @@ def candidate_identity_gaps(text):
 def upgrade_coverage_gaps(text):
     """What the single manual supported-host gate has to cover."""
     return missing_rules(normalized(section(text, UPGRADE_HEADING)), UPGRADE_ITEMS)
+
+
+def units(body):
+    """Already-normalized `body` split into clauses, on the punctuation that
+    ends one. A bullet whose parts are separated by semicolons makes several
+    assertions, and each is judged on its own."""
+    return [unit.strip() for unit in UNIT_SPLIT_RE.split(body) if unit.strip()]
+
+
+def doctor_clauses(body):
+    """Every clause of `body` that says something about `--doctor`. All of them
+    are judged: a document is free to mention doctor twice, and the second
+    mention is exactly where a corrected first one grows its scope back --
+    under any verb, since nothing here depends on which one."""
+    return [unit for unit in units(body) if "--doctor" in unit]
+
+
+def doctor_attribution_gaps(clause):
+    """Whether one `--doctor` clause attributes only the scope doctor has.
+
+    Shared by both documents because it is one rule stated twice, and a single
+    gap because it is a single question. The clause has to carry a whitelisted
+    AI-action claim, and what remains once that claim is removed has to
+    attribute no further readiness and name no managed service.
+
+    Both halves are whitelists, and subtracting the permitted claim first is
+    what lets the second one be: whatever remains is by construction not the
+    permitted attribution, so it may name no subject at all. That reports a
+    wider assertion however it is worded, under whatever verb, and wherever in
+    the clause it sits -- including ahead of the claim, which is where the
+    third attempt at this rule was walked past."""
+    if ALLOWED_DOCTOR_CLAIM_RE.search(clause) is None:
+        return ["doctor-claim-scope"]
+    residue = ALLOWED_DOCTOR_CLAIM_RE.sub(" ", clause)
+    if set(RESIDUE_WORD_RE.findall(residue)) - PERMITTED_RESIDUE_WORDS:
+        return ["doctor-claim-scope"]
+    return []
+
+
+def doctor_block_gaps(body):
+    """Every unit of an already-normalized doctor block, judged.
+
+    The partition is the point, and it is what makes this a rule about the
+    class rather than about the shapes found so far: a unit either names
+    `--doctor`, in which case both halves of what it says are whitelisted, or
+    it does not, in which case it may not attribute readiness at all. No unit
+    falls outside the two, so there is no unexamined place for a follow-on
+    sentence to sit -- which is exactly where the previous rule was walked
+    past, twice.
+
+    `doctor-claim` is the gap when no unit mentions doctor at all, which is
+    also how an emptied block reaches this."""
+    gaps = []
+    clauses = doctor_clauses(body)
+    if not clauses:
+        gaps.append("doctor-claim")
+    for clause in clauses:
+        gaps += doctor_attribution_gaps(clause)
+    for unit in units(body):
+        if "--doctor" in unit:
+            continue
+        if READINESS_NOUN_RE.search(unit):
+            gaps.append("readiness-outside-the-doctor-claim")
+    return gaps
+
+
+def upgrade_service_readiness_gaps(text):
+    """What the gate says about the managed jobs and about `--doctor`.
+
+    Issue #618, in one predicate because the halves are one rule: the gate
+    names the two managed jobs that exist, requires each one's own controller
+    `status` and the `state` that status returned, and scopes every `--doctor`
+    claim it makes. Drop any of those and a clean doctor run stands in for a
+    service nothing observed.
+
+    `absent-managed-service` reports a defect being present rather than a rule
+    being absent, so it does not fire against an empty document. Its teeth are
+    the control that plants the wrong name back."""
+    body = normalized(section(text, UPGRADE_HEADING))
+    gaps = missing_rules(body, MANAGED_SERVICE_NAMES)
+    gaps += missing_rules(body, SERVICE_STATUS_RULES)
+    if RETURNED_STATE_RULE not in body:
+        gaps.append("returned-state")
+    if NOT_AN_EXIT_CODE_RULE not in body:
+        gaps.append("not-an-exit-code")
+    if DOCTOR_SUBSTITUTION_RULE not in body:
+        gaps.append("doctor-not-a-substitute")
+    gaps += doctor_block_gaps(body)
+    if ABSENT_MANAGED_SERVICE in normalized(text):
+        gaps.append("absent-managed-service")
+    return sorted(set(gaps))
+
+
+def support_doctor_scope_gaps(text):
+    """What SUPPORT.md tells a reporter `kanban --doctor` covers.
+
+    The bullet has to claim AI-action readiness, claim it for nothing else,
+    attribute every other readiness it mentions to a controller's status, and
+    send the reporter to each managed service's own controller for the other
+    two. `doctor-claim` is the gap when the bullet makes no doctor claim at
+    all, which is also how a deleted bullet reaches this rule."""
+    body = normalized(bullet(text, SUPPORT_HEADING, SUPPORT_BULLET_OPENING))
+    gaps = missing_rules(body, SUPPORT_CONTROLLER_RULES)
+    gaps += doctor_block_gaps(body)
+    return sorted(set(gaps))
 
 
 def repository_setting_gaps(text):
@@ -597,6 +902,9 @@ class ReleaseRunbookTests(unittest.TestCase):
     def test_the_manual_upgrade_gate_states_what_it_covers(self):
         self.assertEqual(upgrade_coverage_gaps(self.text), [])
 
+    def test_the_manual_upgrade_gate_observes_both_managed_services(self):
+        self.assertEqual(upgrade_service_readiness_gaps(self.text), [])
+
     def test_the_settings_step_names_the_exact_repository_state(self):
         self.assertEqual(repository_setting_gaps(self.text), [])
 
@@ -727,8 +1035,210 @@ class RunbookRuleControlTests(unittest.TestCase):
         self.assertEqual(candidate_identity_gaps(planted), ["required-check"])
 
     def test_an_upgrade_gate_missing_a_covered_item_is_reported(self):
-        planted = self.without("- `kanban --doctor`, reporting every advertised component ready;\n")
+        # Re-anchored to the corrected doctor item (issue #618): the control
+        # that used to remove the false "every advertised component ready"
+        # sentence was coupled to wording the gate no longer carries, so it
+        # would have gone vacuous the moment the claim was fixed.
+        planted = self.without(
+            "- `kanban --doctor`, reporting AI-action readiness; that is the "
+            "whole of what it reports, so it does not stand in for either "
+            "service check below;\n"
+        )
         self.assertEqual(upgrade_coverage_gaps(planted), ["doctor"])
+
+    def test_a_gate_naming_a_managed_service_that_does_not_exist_is_reported(self):
+        # The incorrect service name on its own: both real jobs are still
+        # named by the two status items below, so nothing but the wrong name
+        # is reported.
+        planted = self.without(
+            "the PR drainer and the issue approval service",
+            "the issue-review service and the PR drainer",
+        )
+        self.assertEqual(
+            upgrade_service_readiness_gaps(planted), ["absent-managed-service"]
+        )
+
+    def test_a_doctor_item_claiming_more_than_ai_actions_is_reported(self):
+        # Every way of claiming wider that has actually been written or
+        # proposed for this item: the gate's own historical sentence, the
+        # quantified paraphrase, the anaphora, the unquantified alias, and a
+        # service named outright. Each is planted into an item that still says
+        # `AI-action readiness` and still denies substituting, so what is
+        # reported is the claim alone. A rule keyed to forbidden words passed
+        # the third and then the fourth of these in successive review rounds;
+        # the positive rule reports all five without having anticipated any.
+        wider = (
+            "every advertised component ready",
+            "all optional-component readiness",
+            "which of them are ready",
+            "managed-component readiness",
+            "the PR drainer's",
+        )
+        for claim in wider:
+            with self.subTest(claim=claim):
+                planted = self.without(
+                    "reporting AI-action readiness;",
+                    f"reporting AI-action readiness and {claim};",
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted), ["doctor-claim-scope"]
+                )
+
+    def test_a_doctor_item_may_state_the_same_scope_another_way(self):
+        # The other side of the whitelist: it constrains scope, not spelling,
+        # so `README.md`'s own wording for this boundary passes, as does a
+        # claim that says its exclusivity out loud. A rule nothing can be
+        # rewritten past is one an editor routes around.
+        for item in (
+            "reporting readiness per AI action",
+            "reporting AI-action readiness alone",
+            "reporting AI-action readiness and nothing else",
+            "which reports AI-action readiness only",
+        ):
+            with self.subTest(item=item):
+                planted = self.without(
+                    "reporting AI-action readiness;", f"{item};"
+                )
+                self.assertEqual(upgrade_service_readiness_gaps(planted), [])
+
+    def test_a_doctor_item_that_states_no_readable_claim_is_reported(self):
+        # An item is judged on what it says, so one that carries no whitelisted
+        # claim is reported rather than passing for lack of anything to
+        # disagree with.
+        for item in (
+            "`kanban --doctor`, which covers what it covers;",
+            "`kanban --doctor`, reporting what it reports;",
+        ):
+            with self.subTest(item=item):
+                planted = self.without(
+                    "`kanban --doctor`, reporting AI-action readiness;", item
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted), ["doctor-claim-scope"]
+                )
+
+    def test_a_doctor_item_asserting_more_before_its_claim_is_reported(self):
+        # The bypass a rule reading only the text after the verb could not
+        # see: the whitelisted claim is left intact and untouched, and a wider
+        # assertion is made ahead of it. Two verbs, because binding the rule
+        # to "reports" was the other half of that bypass -- "checks" and
+        # "confirms" are as natural here and were not read at all.
+        for item in (
+            "`kanban --doctor`, checking PR drainer and issue approval service "
+            "readiness and reporting AI-action readiness;",
+            "`kanban --doctor`, which confirms managed-component readiness and "
+            "reports AI-action readiness;",
+            "`kanban --doctor`, verifying every optional component and "
+            "reporting AI-action readiness;",
+        ):
+            with self.subTest(item=item):
+                planted = self.without(
+                    "`kanban --doctor`, reporting AI-action readiness;", item
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted), ["doctor-claim-scope"]
+                )
+
+    def test_a_doctor_item_that_may_substitute_for_a_service_is_reported(self):
+        planted = self.without(
+            "so it does not stand in for either service check below",
+            "so read it alongside the checks below",
+        )
+        self.assertEqual(
+            upgrade_service_readiness_gaps(planted), ["doctor-not-a-substitute"]
+        )
+
+    def test_dropping_one_service_status_check_is_reported(self):
+        # One control per managed job, each keeping the other check and the
+        # correctly scoped doctor item: a rule reporting "the services are
+        # covered" as one bit could not name which one went.
+        controls = {
+            "drainer-status": "- the PR drainer's controller `status`, for every "
+            "repository the drainer's own\n  record named;\n",
+            "approval-status": "- the issue approval service's controller `status`, "
+            "for every repository its own\n  record named;\n",
+        }
+        for gap, item in controls.items():
+            with self.subTest(check=gap):
+                planted = self.without(item)
+                self.assertEqual(upgrade_service_readiness_gaps(planted), [gap])
+
+    def test_a_gate_that_only_mentions_doctor_is_reported(self):
+        # Requirement 4's headline control: with both service checks gone the
+        # gate still contains `--doctor`, still scopes it correctly, and still
+        # names both managed jobs -- so upgrade_coverage_gaps is satisfied and
+        # nothing about a substring of the gate says either service was
+        # observed.
+        planted = self.without(
+            "- the PR drainer's controller `status`, for every repository the "
+            "drainer's own\n  record named;\n"
+        )
+        planted = planted.replace(
+            "- the issue approval service's controller `status`, for every "
+            "repository its own\n  record named;\n",
+            "",
+        )
+        self.assertEqual(upgrade_coverage_gaps(planted), [])
+        self.assertEqual(
+            upgrade_service_readiness_gaps(planted),
+            ["approval-status", "drainer-status"],
+        )
+
+    def test_a_gate_item_reassigning_readiness_is_reported(self):
+        # The runbook's half of the same class, which had no rule at all: the
+        # doctor item is left exactly as it stands and a later item hands the
+        # managed services back. None of these names doctor, so every rule
+        # keyed to the doctor clause looked straight past them -- the first is
+        # the one round 5 found.
+        for item in (
+            "- it also reports whether the two managed services are ready;",
+            "- confirmation that the drainer and the approval job are ready;",
+            "- whichever of the optional components are ready;",
+        ):
+            with self.subTest(item=item):
+                planted = self.without(
+                    "- an interactive board run against a real repository;",
+                    f"{item}\n- an interactive board run against a real "
+                    "repository;",
+                )
+                self.assertEqual(
+                    upgrade_service_readiness_gaps(planted),
+                    ["readiness-outside-the-doctor-claim"],
+                )
+
+    def test_every_unit_of_the_gate_is_judged_by_one_of_the_two_rules(self):
+        # The property that makes this a rule about the class: the two halves
+        # partition the block, so no unit is unexamined. Stated as a check
+        # rather than as a comment, because "we also look at the other units"
+        # is exactly the claim four earlier versions made and did not keep.
+        body = normalized(section(self.text, UPGRADE_HEADING))
+        every = units(body)
+        self.assertTrue(every, "the gate section is empty")
+        doctor = doctor_clauses(body)
+        self.assertTrue(doctor, "the gate states no doctor claim")
+        self.assertEqual(
+            [unit for unit in every if unit not in doctor and "--doctor" in unit],
+            [],
+            "a unit naming --doctor escaped the clause rule",
+        )
+        for unit in every:
+            judged = unit in doctor or not READINESS_NOUN_RE.search(unit)
+            self.assertTrue(judged, f"unit judged by neither rule: {unit!r}")
+
+    def test_a_status_result_read_as_an_exit_code_is_reported(self):
+        planted = self.without(
+            "not that the\ncommand exited zero", "and the command exited zero"
+        )
+        self.assertEqual(upgrade_service_readiness_gaps(planted), ["not-an-exit-code"])
+
+    def test_a_gate_that_never_asks_for_the_returned_state_is_reported(self):
+        # The positive half, dropped while the prohibition stands: an operator
+        # told only what a result is *not* has been told nothing to record.
+        planted = self.without(
+            "is the `state` the controller returned, not that the",
+            "is not that the",
+        )
+        self.assertEqual(upgrade_service_readiness_gaps(planted), ["returned-state"])
 
     def test_a_drifted_repository_description_is_reported(self):
         planted = self.without(
@@ -865,6 +1375,23 @@ class RunbookRuleControlTests(unittest.TestCase):
             + [f"topic:{topic}" for topic in REPOSITORY_TOPICS]
         ))
         self.assertEqual(run_selection_gaps(""), NO_SELECTION_COMMAND_GAPS)
+        # `absent-managed-service` reports a defect being present, so an empty
+        # document leaves it silent by construction -- its control above is
+        # what shows it non-vacuous. The claim rules report `doctor-claim`
+        # here for the same reason: there is no claim to read.
+        self.assertEqual(
+            upgrade_service_readiness_gaps(""),
+            sorted(
+                list(MANAGED_SERVICE_NAMES)
+                + list(SERVICE_STATUS_RULES)
+                + [
+                    "doctor-claim",
+                    "doctor-not-a-substitute",
+                    "not-an-exit-code",
+                    "returned-state",
+                ]
+            ),
+        )
 
 
 class MaintainerReleaseTemplateTests(unittest.TestCase):
@@ -957,6 +1484,162 @@ class MaintainerReleaseTemplateTests(unittest.TestCase):
         # Requirement 7's boundary: the template drives the procedure, it does
         # not restate it. A second copy of the steps is what would drift.
         self.assertIn("docs/releasing.md", self.text)
+
+
+class SupportDocumentTests(unittest.TestCase):
+    """SUPPORT.md's report-what-you-have-installed bullet, and the controls
+    that show its rules are not vacuous.
+
+    `SUPPORT.md` is a packaged root document, so this class needs no skip: it
+    is present in a Git checkout and in an unpacked release alike."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SUPPORT.read_text(encoding="utf-8")
+
+    def without(self, phrase, replacement=""):
+        """SUPPORT.md with one passage replaced, asserting exactly one passage
+        was there to replace. The runbook class's helper, over this
+        document."""
+        pattern = re.compile(
+            r"\s+".join(re.escape(word) for word in phrase.split()), re.IGNORECASE
+        )
+        planted, replaced = pattern.subn(replacement, self.text)
+        self.assertEqual(
+            replaced, 1, f"the passage this control removes moved: {phrase!r}"
+        )
+        return planted
+
+    def test_the_installed_components_bullet_scopes_doctor_correctly(self):
+        self.assertEqual(support_doctor_scope_gaps(self.text), [])
+
+    def test_the_bullet_that_gave_doctor_the_whole_roster_is_reported(self):
+        # The wording this document actually carried, planted back verbatim.
+        # The claim is anaphoric -- "which of them" is the three-component list
+        # in the clause before it -- so what catches it is that it quantifies
+        # over the components instead of naming one, and the controller
+        # directions go with it.
+        planted = self.without(
+            "installed separately, and no single\n  check covers all three. "
+            "`kanban --doctor` reports AI-action readiness and\n  nothing else. "
+            "For the other two, run each managed service's own controller\n"
+            "  `status` and say what state it returned — the\n"
+            "  [PR drainer's controller status](docs/pr-drainer.md#manual-status) "
+            "and the\n  [issue approval service's controller "
+            "status](docs/issue-approval.md#reading-status).",
+            "installed separately;\n  `kanban --doctor` reports which of them "
+            "are ready on your machine.",
+        )
+        self.assertEqual(
+            support_doctor_scope_gaps(planted),
+            ["approval-controller", "doctor-claim-scope", "drainer-controller"],
+        )
+
+    def test_a_doctor_claim_wider_than_ai_actions_is_reported(self):
+        # The same five wider claims, in the bullet's own voice, with the
+        # controller directions left standing: only the claim is wrong, and
+        # only the claim is reported. "managed-component readiness" is the one
+        # that named no service and quantified over nothing, and passed the
+        # blacklist this rule replaced.
+        wider = (
+            "whether the PR drainer and the issue approval service are ready",
+            "AI-action readiness and managed-component readiness",
+            "AI-action readiness and which of them are ready",
+            "AI-action readiness and all optional-component readiness",
+            "which of them are ready on your machine",
+        )
+        for claim in wider:
+            with self.subTest(claim=claim):
+                planted = self.without(
+                    "reports AI-action readiness and\n  nothing else.",
+                    f"reports {claim}.",
+                )
+                self.assertEqual(
+                    support_doctor_scope_gaps(planted), ["doctor-claim-scope"]
+                )
+
+    def test_a_later_sentence_reassigning_readiness_is_reported(self):
+        # The correctly scoped doctor sentence is left exactly as it stands,
+        # and a sentence after it gives the two managed services back. Each
+        # names its subject differently, and the last two name none at all --
+        # which is the shape every earlier version of this rule was walked
+        # past, because each asked who the sentence was about.
+        #
+        # The one naming doctor outright is the clause rule's; the rest are
+        # reported for saying "ready" outside the one clause entitled to.
+        later = {
+            "`--doctor` also checks whether the PR drainer and the issue "
+            "approval service are ready.": "doctor-claim-scope",
+            "It also reports whether the PR drainer and the issue approval "
+            "service are ready.": "readiness-outside-the-doctor-claim",
+            "The same command shows whether both services are ready.":
+            "readiness-outside-the-doctor-claim",
+            "It also reports whether the PR drainer and issue approval "
+            "service are ready, although controller status remains the "
+            "authoritative check.": "readiness-outside-the-doctor-claim",
+        }
+        for sentence, gap in later.items():
+            with self.subTest(sentence=sentence):
+                planted = self.without(
+                    "nothing else. For the other two,",
+                    f"nothing else. {sentence} For the other two,",
+                )
+                self.assertEqual(support_doctor_scope_gaps(planted), [gap])
+
+    def test_naming_the_controller_does_not_excuse_a_doctor_attribution(self):
+        # The last sentence above, isolated: an earlier rule accepted it
+        # because `controller status` appeared somewhere in it, and took that
+        # as proof the controller was the observer. "It" still meant doctor.
+        # Binding an attribution to a name that merely co-occurs with it is
+        # not binding it to anything.
+        planted = self.without(
+            "nothing else. For the other two,",
+            "nothing else. It also reports whether the PR drainer and issue "
+            "approval service are ready, although controller status remains "
+            "the authoritative check. For the other two,",
+        )
+        self.assertIn("controller status", normalized(planted))
+        self.assertEqual(
+            support_doctor_scope_gaps(planted),
+            ["readiness-outside-the-doctor-claim"],
+        )
+
+    def test_a_second_doctor_sentence_under_another_verb_is_reported(self):
+        # The alias, under a third verb: no service named, nothing quantified,
+        # and the scoped first sentence untouched.
+        planted = self.without(
+            "nothing else. For the other two,",
+            "nothing else. `kanban --doctor` confirms managed-component "
+            "readiness too. For the other two,",
+        )
+        self.assertEqual(support_doctor_scope_gaps(planted), ["doctor-claim-scope"])
+
+    def test_dropping_one_controller_direction_is_reported(self):
+        controls = {
+            "drainer-controller": (
+                "the\n  [PR drainer's controller "
+                "status](docs/pr-drainer.md#manual-status) and ",
+                "",
+            ),
+            "approval-controller": (
+                " and the\n  [issue approval service's controller "
+                "status](docs/issue-approval.md#reading-status)",
+                "",
+            ),
+        }
+        for gap, (phrase, replacement) in controls.items():
+            with self.subTest(direction=gap):
+                planted = self.without(phrase, replacement)
+                self.assertEqual(support_doctor_scope_gaps(planted), [gap])
+
+    def test_a_bullet_that_says_nothing_about_doctor_is_reported(self):
+        # The blanket control: no bullet, no claim to read, every gap. The
+        # readiness sweep reports a defect being present, so it is silent
+        # here -- the control above is what shows it non-vacuous.
+        self.assertEqual(
+            support_doctor_scope_gaps(""),
+            sorted(list(SUPPORT_CONTROLLER_RULES) + ["doctor-claim"]),
+        )
 
 
 if __name__ == "__main__":
