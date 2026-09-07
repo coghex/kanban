@@ -141,8 +141,11 @@ data MissionProbeAction
 -- staged.
 data MissionProbe = MissionProbe
   { missionProbeName :: String,
-    missionProbeStore :: FilePath,
-    missionProbeRepository :: MissionRepository,
+    -- | The whole store rather than its own directory: a probe reads and
+    -- writes through the same resolution the suite's process does, and a
+    -- reconstruction missing the roots that resolution consults would be a
+    -- different store wearing the same name.
+    missionProbeStore :: MissionStore,
     missionProbeMission :: MissionId,
     missionProbeAction :: MissionProbeAction,
     missionProbeGate :: String
@@ -194,6 +197,8 @@ data MissionProbeReport
 -- | What one probe is to do, and where to leave each of its answers.
 data MissionProbePlan = MissionProbePlan
   { probePlanStore :: FilePath,
+    probePlanLegacyStore :: FilePath,
+    probePlanHolding :: FilePath,
     probePlanRepository :: MissionRepository,
     probePlanMission :: MissionId,
     probePlanAction :: MissionProbeAction,
@@ -338,7 +343,7 @@ runMissionProbe planPath = do
           readback <- readMissionBack plan
           report plan (MissionProbeReadbackReport readback)
         MissionProbeAppendEvents prefix count payload -> do
-          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          let store = probeStore plan
           now <- getCurrentTime
           refused <- forM [0 .. count - 1] $ \index ->
             recordMissionEvent
@@ -354,13 +359,13 @@ runMissionProbe planPath = do
                 }
           report plan (MissionProbeAppendReport [message | Left message <- refused])
         MissionProbeSealLog source session kind -> do
-          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          let store = probeStore plan
           sealed <- sealMissionLog store plan.probePlanMission session kind source
           report plan . MissionProbeSealReport $ case sealed of
             Right entry -> MissionProbeSealed entry.missionSealedDigest
             Left failure -> MissionProbeSealRefused (missionSealFailureMessage failure)
         MissionProbeLease -> do
-          let store = MissionStore plan.probePlanStore plan.probePlanRepository
+          let store = probeStore plan
           acquisition <- acquireMissionLease store plan.probePlanMission
           case acquisition of
             MissionLeaseAcquired lease -> do
@@ -372,11 +377,22 @@ runMissionProbe planPath = do
             MissionLeaseHeld reason -> report plan (MissionProbeLeaseReport (MissionProbeHeld reason))
             MissionLeaseUnusable detail -> report plan (MissionProbeLeaseReport (MissionProbeUnusable detail))
 
+-- | The store this probe acts on, rebuilt from the plan that crossed the
+-- process boundary.
+probeStore :: MissionProbePlan -> MissionStore
+probeStore plan =
+  MissionStore
+    { missionStoreDirectory = plan.probePlanStore,
+      missionStoreLegacyDirectory = plan.probePlanLegacyStore,
+      missionStoreHoldingDirectory = plan.probePlanHolding,
+      missionStoreRepository = plan.probePlanRepository
+    }
+
 -- | Reads one mission's three durable parts with nothing carried over from the
 -- process that wrote them.
 readMissionBack :: MissionProbePlan -> IO MissionProbeReadback
 readMissionBack plan = do
-  let store = MissionStore plan.probePlanStore plan.probePlanRepository
+  let store = probeStore plan
   specificationResult <- readMissionSpecification store plan.probePlanMission
   snapshotResult <- readMissionSnapshot store plan.probePlanMission
   journalResult <- readMissionJournal store plan.probePlanMission 0
@@ -462,8 +478,10 @@ writePlan probeRoot probe = do
     planPath
     ( encode
         ( MissionProbePlan
-            probe.missionProbeStore
-            probe.missionProbeRepository
+            probe.missionProbeStore.missionStoreDirectory
+            probe.missionProbeStore.missionStoreLegacyDirectory
+            probe.missionProbeStore.missionStoreHoldingDirectory
+            probe.missionProbeStore.missionStoreRepository
             probe.missionProbeMission
             probe.missionProbeAction
             (startedPath probeRoot probe)

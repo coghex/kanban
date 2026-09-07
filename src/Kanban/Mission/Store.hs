@@ -63,7 +63,7 @@ where
 
 import Control.Exception (IOException, try)
 import Control.Monad (filterM)
-import Data.List (sort)
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
@@ -72,11 +72,14 @@ import Kanban.Mission.Journal (MissionJournalLine (MissionJournalUnknownVersion)
 import Kanban.Mission.Session (missionSessionTreeErrorMessage, validateMissionSessionTree)
 import Kanban.Mission.Paths
   ( MissionRead (..),
+    adoptedLegacyMissions,
     createMissionRecord,
     ensureMissionDirectory,
     MissionStore (..),
     ignoreFileOperation,
+    isPlainDirectory,
     listMissionEntries,
+    withMissionRoot,
     missionArchiveDirectory,
     openMissionStore,
     withStagedContent,
@@ -120,8 +123,7 @@ import Kanban.Mission.Types
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import System.Directory (doesFileExist, removePathForcibly, renameDirectory)
-import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.Posix.Files (getSymbolicLinkStatus, isDirectory)
+import System.FilePath (takeFileName, (</>))
 import System.Posix.Process (getProcessID)
 
 -- | Every mission of this repository, sorted.
@@ -129,6 +131,15 @@ import System.Posix.Process (getProcessID)
 -- Reads the store's own directory and nothing inside a mission: no
 -- specification, no snapshot, and above all no journal, so enumeration costs
 -- the same whether a mission recorded three events or thirty thousand.
+--
+-- The ambiguous legacy root is enumerated too, and there the identity records
+-- do have to be read, because that root is shared with every repository whose
+-- owner and name fall the same way and only a mission's own records say whose
+-- it is. That read is bounded by the three fixed-path records
+-- 'adoptedLegacyMissions' consults, so it is one cost per legacy mission
+-- rather than one per event. A legacy mission attributable to another
+-- repository, or to nobody, is not listed here: it is not this repository's
+-- mission, and addressing it reports why.
 --
 -- Every entry is checked with a /non-following/ stat and must be a real
 -- directory. A symbolic link pointing at somewhere else on the filesystem, a
@@ -139,12 +150,8 @@ listMissions :: MissionStore -> IO [MissionId]
 listMissions store = do
   entries <- listMissionEntries store.missionStoreDirectory
   directories <- filterM (isPlainDirectory . (store.missionStoreDirectory </>)) entries
-  pure (sort (map (MissionId . Text.pack . takeFileName) directories))
-
-isPlainDirectory :: FilePath -> IO Bool
-isPlainDirectory path = do
-  status <- try @IOException (getSymbolicLinkStatus path)
-  pure (either (const False) isDirectory status)
+  legacy <- adoptedLegacyMissions store
+  pure (sort (nub (map (MissionId . Text.pack . takeFileName) directories <> legacy)))
 
 -- | Whether a specification was written, or one was already there.
 data MissionCreation
@@ -160,18 +167,20 @@ data MissionCreation
 -- so two processes racing one identifier cannot both succeed and neither an
 -- interruption nor a retry can rewrite a specification that is already there.
 createMissionSpecification :: MissionStore -> MissionSpecification -> IO (Either Text MissionCreation)
-createMissionSpecification store specification = do
-  let mission = specification.missionSpecificationId
-  case (,) <$> missionDirectory store.missionStoreDirectory mission <*> missionSpecificationPath store.missionStoreDirectory mission
-    <* belongsHere store mission specification.missionSpecificationRepository of
-    Left message -> pure (Left message)
-    Right (directory, path) -> do
-      prepared <- ensureMissionDirectory directory
-      case prepared of
-        Left message -> pure (Left message)
-        Right () -> do
-          created <- createMissionRecord path missionSpecificationSchemaVersion specification
-          pure (fmap (\wrote -> if wrote then MissionCreated else MissionSpecificationExists) created)
+createMissionSpecification store specification =
+  withMissionRoot store mission Left $ \root ->
+    case (,) <$> missionDirectory root mission <*> missionSpecificationPath root mission
+      <* belongsHere store mission specification.missionSpecificationRepository of
+      Left message -> pure (Left message)
+      Right (directory, path) -> do
+        prepared <- ensureMissionDirectory directory
+        case prepared of
+          Left message -> pure (Left message)
+          Right () -> do
+            created <- createMissionRecord path missionSpecificationSchemaVersion specification
+            pure (fmap (\wrote -> if wrote then MissionCreated else MissionSpecificationExists) created)
+  where
+    mission = specification.missionSpecificationId
 
 -- | Refuses to write a record this store would then refuse to read.
 --
@@ -217,16 +226,18 @@ sessionTreeFailure snapshot =
     (validateMissionSessionTree snapshot.missionSnapshotId snapshot.missionSnapshotSessions)
 
 readMissionSpecification :: MissionStore -> MissionId -> IO (MissionRead MissionSpecification)
-readMissionSpecification store mission = case missionSpecificationPath store.missionStoreDirectory mission of
-  Left message -> pure (MissionUnreadable message)
-  Right path ->
-    readMissionRecordFor
-      mission
-      [missionSpecificationSchemaVersion]
-      store.missionStoreRepository
-      missionSpecificationId
-      missionSpecificationRepository
-      path
+readMissionSpecification store mission =
+  withMissionRoot store mission MissionUnreadable $ \root ->
+    case missionSpecificationPath root mission of
+      Left message -> pure (MissionUnreadable message)
+      Right path ->
+        readMissionRecordFor
+          mission
+          [missionSpecificationSchemaVersion]
+          store.missionStoreRepository
+          missionSpecificationId
+          missionSpecificationRepository
+          path
 
 -- | Replaces a mission's snapshot atomically.
 --
@@ -234,17 +245,19 @@ readMissionSpecification store mission = case missionSpecificationPath store.mis
 -- snapshot exactly as it was and still current, rather than a half-written one
 -- a reader would report as corruption.
 writeMissionSnapshot :: MissionStore -> MissionSnapshot -> IO (Either Text ())
-writeMissionSnapshot store snapshot = do
-  let mission = snapshot.missionSnapshotId
-  case (,) <$> missionDirectory store.missionStoreDirectory mission <*> missionSnapshotPath store.missionStoreDirectory mission
-    <* belongsHere store mission snapshot.missionSnapshotRepository
-    <* wellFormedSessions snapshot of
-    Left message -> pure (Left message)
-    Right (directory, path) -> do
-      prepared <- ensureMissionDirectory directory
-      case prepared of
-        Left message -> pure (Left message)
-        Right () -> writeMissionRecord path missionSnapshotSchemaVersion snapshot
+writeMissionSnapshot store snapshot =
+  withMissionRoot store mission Left $ \root ->
+    case (,) <$> missionDirectory root mission <*> missionSnapshotPath root mission
+      <* belongsHere store mission snapshot.missionSnapshotRepository
+      <* wellFormedSessions snapshot of
+      Left message -> pure (Left message)
+      Right (directory, path) -> do
+        prepared <- ensureMissionDirectory directory
+        case prepared of
+          Left message -> pure (Left message)
+          Right () -> writeMissionRecord path missionSnapshotSchemaVersion snapshot
+  where
+    mission = snapshot.missionSnapshotId
 
 -- | Reads a mission's snapshot, and will not hand back one whose sessions are
 -- not a tree.
@@ -260,42 +273,46 @@ writeMissionSnapshot store snapshot = do
 -- read as absent, because a file that is there and does not cohere is a
 -- repair someone has to make.
 readMissionSnapshot :: MissionStore -> MissionId -> IO (MissionRead MissionSnapshot)
-readMissionSnapshot store mission = case missionSnapshotPath store.missionStoreDirectory mission of
-  Left message -> pure (MissionUnreadable message)
-  Right path -> do
-    result <-
-      readMissionRecordFor
-        mission
-        [missionSnapshotSchemaVersion]
-        store.missionStoreRepository
-        missionSnapshotId
-        missionSnapshotRepository
-        path
-    pure $ case result of
-      MissionPresent snapshot
-        | Just reason <- sessionTreeFailure snapshot ->
-            MissionUnreadable
-              ( "mission "
-                  <> mission.unMissionId
-                  <> ": "
-                  <> Text.pack path
-                  <> " records sessions that are not a tree: "
-                  <> reason
-              )
-      other -> other
+readMissionSnapshot store mission =
+  withMissionRoot store mission MissionUnreadable $ \root ->
+    case missionSnapshotPath root mission of
+      Left message -> pure (MissionUnreadable message)
+      Right path -> do
+        result <-
+          readMissionRecordFor
+            mission
+            [missionSnapshotSchemaVersion]
+            store.missionStoreRepository
+            missionSnapshotId
+            missionSnapshotRepository
+            path
+        pure $ case result of
+          MissionPresent snapshot
+            | Just reason <- sessionTreeFailure snapshot ->
+                MissionUnreadable
+                  ( "mission "
+                      <> mission.unMissionId
+                      <> ": "
+                      <> Text.pack path
+                      <> " records sessions that are not a tree: "
+                      <> reason
+                  )
+          other -> other
 
 -- | Appends one event to a mission's journal.
 recordMissionEvent :: MissionStore -> MissionEvent -> IO (Either Text ())
-recordMissionEvent store event = do
-  let mission = event.missionEventMission
-  case (,) <$> missionDirectory store.missionStoreDirectory mission <*> missionJournalPath store.missionStoreDirectory mission
-    <* belongsHere store mission event.missionEventRepository of
-    Left message -> pure (Left message)
-    Right (directory, path) -> do
-      prepared <- ensureMissionDirectory directory
-      case prepared of
-        Left message -> pure (Left message)
-        Right () -> appendMissionEvent path event
+recordMissionEvent store event =
+  withMissionRoot store mission Left $ \root ->
+    case (,) <$> missionDirectory root mission <*> missionJournalPath root mission
+      <* belongsHere store mission event.missionEventRepository of
+      Left message -> pure (Left message)
+      Right (directory, path) -> do
+        prepared <- ensureMissionDirectory directory
+        case prepared of
+          Left message -> pure (Left message)
+          Right () -> appendMissionEvent path event
+  where
+    mission = event.missionEventMission
 
 -- | The complete journal records appended since @consumedBytes@, and the new
 -- offset.
@@ -305,11 +322,12 @@ recordMissionEvent store event = do
 -- the very next read sees that record whole, once, rather than a truncated
 -- version of it now and a duplicate later.
 readMissionJournal :: MissionStore -> MissionId -> Int -> IO (Either Text ([MissionJournalLine], Int))
-readMissionJournal store mission consumedBytes = case missionJournalPath store.missionStoreDirectory mission of
-  Left message -> pure (Left message)
-  Right path -> do
-    result <- readMissionJournalSince path consumedBytes
-    pure (fmap (\(lines', offset) -> (readable (map (decodeMissionJournalLine mission store.missionStoreRepository path) lines'), offset)) result)
+readMissionJournal store mission consumedBytes =
+  withMissionRoot store mission Left $ \root -> case missionJournalPath root mission of
+    Left message -> pure (Left message)
+    Right path -> do
+      result <- readMissionJournalSince path consumedBytes
+      pure (fmap (\(lines', offset) -> (readable (map (decodeMissionJournalLine mission store.missionStoreRepository path) lines'), offset)) result)
   where
     -- A record written under a schema version this release does not
     -- recognize is absent (§16), and absent means the caller is not told
@@ -363,33 +381,34 @@ sealMissionLog ::
   FilePath ->
   IO (Either MissionSealFailure MissionSealedArchive)
 sealMissionLog store mission session kind source =
-  case (,,) <$> missionArchiveDirectory store.missionStoreDirectory mission
-    <*> missionArchivePath store.missionStoreDirectory mission session kind
-    <*> missionSealPath store.missionStoreDirectory mission session kind of
-    Left message -> pure (Left (MissionSealPathRefused message))
-    Right (archiveDirectory, archivePath, sealPath) -> do
-      -- Existence, not a successful decode: a seal record written under a
-      -- schema version this release does not recognize reads as absent, and
-      -- resealing over it would destroy an archive entry a later release
-      -- still owns. This is a fast refusal rather than the guarantee — the
-      -- guarantee is the no-replace commit below, which is what settles a
-      -- race this check cannot see.
-      alreadySealed <- doesFileExist sealPath
-      if alreadySealed
-        then pure (Left (MissionSealAlreadySealed session kind))
-        else do
-          prepared <- ensureMissionDirectory archiveDirectory
-          case prepared of
-            Left message -> pure (Left (MissionSealNotWritten message))
-            Right () -> do
-              bytesResult <- try @IOException (ByteString.readFile source)
-              case bytesResult of
-                Left exception -> pure (Left (MissionSealSourceUnreadable source (Text.pack (show exception))))
-                Right bytes -> do
-                  published <- publishArchive archivePath bytes
-                  case published of
-                    Left message -> pure (Left (MissionSealNotWritten message))
-                    Right _ -> commitSeal mission store.missionStoreRepository session kind source archivePath sealPath
+  withMissionRoot store mission (Left . MissionSealPathRefused) $ \root ->
+    case (,,) <$> missionArchiveDirectory root mission
+      <*> missionArchivePath root mission session kind
+      <*> missionSealPath root mission session kind of
+      Left message -> pure (Left (MissionSealPathRefused message))
+      Right (archiveDirectory, archivePath, sealPath) -> do
+        -- Existence, not a successful decode: a seal record written under a
+        -- schema version this release does not recognize reads as absent, and
+        -- resealing over it would destroy an archive entry a later release
+        -- still owns. This is a fast refusal rather than the guarantee — the
+        -- guarantee is the no-replace commit below, which is what settles a
+        -- race this check cannot see.
+        alreadySealed <- doesFileExist sealPath
+        if alreadySealed
+          then pure (Left (MissionSealAlreadySealed session kind))
+          else do
+            prepared <- ensureMissionDirectory archiveDirectory
+            case prepared of
+              Left message -> pure (Left (MissionSealNotWritten message))
+              Right () -> do
+                bytesResult <- try @IOException (ByteString.readFile source)
+                case bytesResult of
+                  Left exception -> pure (Left (MissionSealSourceUnreadable source (Text.pack (show exception))))
+                  Right bytes -> do
+                    published <- publishArchive archivePath bytes
+                    case published of
+                      Left message -> pure (Left (MissionSealNotWritten message))
+                      Right _ -> commitSeal mission store.missionStoreRepository session kind source archivePath sealPath
 
 -- | Puts the bytes in the archive under a commit that cannot replace what is
 -- already there.
@@ -455,16 +474,17 @@ commitSeal mission repository session kind source archivePath sealPath = do
 -- collector deciding what may be removed must not be told an archive is empty
 -- because its index was damaged.
 readMissionSealedArchives :: MissionStore -> MissionId -> IO (Either Text [MissionSealedArchive])
-readMissionSealedArchives store mission = case missionArchiveDirectory store.missionStoreDirectory mission of
-  Left message -> pure (Left message)
-  Right archiveDirectory -> do
-    entries <- listMissionEntries archiveDirectory
-    let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
-    results <- mapM (readSeal archiveDirectory) sealNames
-    pure (collect (zip sealNames results))
+readMissionSealedArchives store mission =
+  withMissionRoot store mission Left $ \root -> case missionArchiveDirectory root mission of
+    Left message -> pure (Left message)
+    Right archiveDirectory -> do
+      entries <- listMissionEntries archiveDirectory
+      let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
+      results <- mapM (readSeal root archiveDirectory) sealNames
+      pure (collect (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
-    readSeal archiveDirectory name = do
+    readSeal root archiveDirectory name = do
       result <-
         readMissionRecordFor
           mission
@@ -475,7 +495,7 @@ readMissionSealedArchives store mission = case missionArchiveDirectory store.mis
           (archiveDirectory </> name)
       pure $ case result of
         MissionPresent sealed
-          | Just reason <- sealSubjectFailure store mission name sealed -> MissionUnreadable reason
+          | Just reason <- sealSubjectFailure root mission name sealed -> MissionUnreadable reason
         other -> other
 
     collect pairs = case [message | (_, MissionUnreadable message) <- pairs] of
@@ -494,8 +514,8 @@ readMissionSealedArchives store mission = case missionArchiveDirectory store.mis
 -- file a record merely names, but a record handed back to a collector is data
 -- that collector will act on, so an entry that does not describe itself is
 -- reported here rather than returned for something else to be misled by.
-sealSubjectFailure :: MissionStore -> MissionId -> FilePath -> MissionSealedArchive -> Maybe Text
-sealSubjectFailure store mission name sealed = case (,) <$> sealPath <*> archivePath of
+sealSubjectFailure :: FilePath -> MissionId -> FilePath -> MissionSealedArchive -> Maybe Text
+sealSubjectFailure root mission name sealed = case (,) <$> sealPath <*> archivePath of
   Left message -> Just message
   Right (canonicalSeal, canonicalArchive)
     | takeFileName canonicalSeal /= name ->
@@ -504,8 +524,8 @@ sealSubjectFailure store mission name sealed = case (,) <$> sealPath <*> archive
         Just (disagrees ("it names the archived file " <> Text.pack (show sealed.missionSealedName)))
     | otherwise -> Nothing
   where
-    sealPath = missionSealPath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind
-    archivePath = missionArchivePath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind
+    sealPath = missionSealPath root mission sealed.missionSealedSession sealed.missionSealedKind
+    archivePath = missionArchivePath root mission sealed.missionSealedSession sealed.missionSealedKind
     disagrees detail =
       "mission "
         <> mission.unMissionId
@@ -520,79 +540,80 @@ sealSubjectFailure store mission name sealed = case (,) <$> sealPath <*> archive
 -- point of a seal is to outlive.
 verifyMissionSealedArchive :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ())
 verifyMissionSealedArchive store mission sealed =
-  case missionArchivePath store.missionStoreDirectory mission sealed.missionSealedSession sealed.missionSealedKind of
-    Left message -> pure (Left message)
-    Right path
-      -- Both identities, for the reason every read here checks both: a seal
-      -- is what a collector trusts before it removes a source, and one
-      -- carried in from another mission or another repository would have it
-      -- verify a file it knows nothing about.
-      | sealed.missionSealedMission /= mission ->
-          pure (Left (foreign' ("mission " <> sealed.missionSealedMission.unMissionId)))
-      | sealed.missionSealedRepository /= store.missionStoreRepository ->
-          pure (Left (foreign' "another repository"))
-      -- The path is recomputed from the session and log kind this record is
-      -- *about*, never joined from the name it carries. A record is durable
-      -- data: one that has been edited could name `../../elsewhere` or some
-      -- other mission's archive, and a verification that read that file would
-      -- hash whatever was there and report success against the forged digest
-      -- beside it. The recorded name is still compared, so a record that
-      -- disagrees with its own subject is reported rather than quietly
-      -- verified against the right file.
-      | sealed.missionSealedName /= takeFileName path ->
-          pure
-            ( Left
-                ( "mission "
-                    <> mission.unMissionId
-                    <> ": the seal of session "
-                    <> sealed.missionSealedSession.unMissionSessionId
-                    <> " names the archived file "
-                    <> Text.pack (show sealed.missionSealedName)
-                    <> " rather than "
-                    <> Text.pack (show (takeFileName path))
-                    <> ", and was not verified against it"
-                )
-            )
-      | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
-          pure
-            ( Left
-                ( "the archive of session "
-                    <> sealed.missionSealedSession.unMissionSessionId
-                    <> " records the digest algorithm "
-                    <> sealed.missionSealedDigestAlgorithm
-                    <> ", which this release cannot verify"
-                )
-            )
-      | otherwise -> do
-          bytesResult <- try @IOException (ByteString.readFile path)
-          pure $ case bytesResult of
-            Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
-            Right bytes
-              | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
-                  Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
-              | sha256Hex bytes /= sealed.missionSealedDigest ->
-                  Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
-              | otherwise -> Right ()
-      where
-        mismatch path' what expected found =
-          "mission "
-            <> mission.unMissionId
-            <> ": "
-            <> Text.pack path'
-            <> " has "
-            <> what
-            <> " "
-            <> found
-            <> " but its seal records "
-            <> expected
-        foreign' subject =
-          "the seal of session "
-            <> sealed.missionSealedSession.unMissionSessionId
-            <> " belongs to "
-            <> subject
-            <> " rather than mission "
-            <> mission.unMissionId
-            <> ", and was not verified"
+  withMissionRoot store mission Left $ \root ->
+    case missionArchivePath root mission sealed.missionSealedSession sealed.missionSealedKind of
+      Left message -> pure (Left message)
+      Right path
+        -- Both identities, for the reason every read here checks both: a seal
+        -- is what a collector trusts before it removes a source, and one
+        -- carried in from another mission or another repository would have it
+        -- verify a file it knows nothing about.
+        | sealed.missionSealedMission /= mission ->
+            pure (Left (foreign' ("mission " <> sealed.missionSealedMission.unMissionId)))
+        | sealed.missionSealedRepository /= store.missionStoreRepository ->
+            pure (Left (foreign' "another repository"))
+        -- The path is recomputed from the session and log kind this record is
+        -- *about*, never joined from the name it carries. A record is durable
+        -- data: one that has been edited could name `../../elsewhere` or some
+        -- other mission's archive, and a verification that read that file would
+        -- hash whatever was there and report success against the forged digest
+        -- beside it. The recorded name is still compared, so a record that
+        -- disagrees with its own subject is reported rather than quietly
+        -- verified against the right file.
+        | sealed.missionSealedName /= takeFileName path ->
+            pure
+              ( Left
+                  ( "mission "
+                      <> mission.unMissionId
+                      <> ": the seal of session "
+                      <> sealed.missionSealedSession.unMissionSessionId
+                      <> " names the archived file "
+                      <> Text.pack (show sealed.missionSealedName)
+                      <> " rather than "
+                      <> Text.pack (show (takeFileName path))
+                      <> ", and was not verified against it"
+                  )
+              )
+        | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
+            pure
+              ( Left
+                  ( "the archive of session "
+                      <> sealed.missionSealedSession.unMissionSessionId
+                      <> " records the digest algorithm "
+                      <> sealed.missionSealedDigestAlgorithm
+                      <> ", which this release cannot verify"
+                  )
+              )
+        | otherwise -> do
+            bytesResult <- try @IOException (ByteString.readFile path)
+            pure $ case bytesResult of
+              Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
+              Right bytes
+                | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
+                    Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
+                | sha256Hex bytes /= sealed.missionSealedDigest ->
+                    Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
+                | otherwise -> Right ()
+        where
+          mismatch path' what expected found =
+            "mission "
+              <> mission.unMissionId
+              <> ": "
+              <> Text.pack path'
+              <> " has "
+              <> what
+              <> " "
+              <> found
+              <> " but its seal records "
+              <> expected
+          foreign' subject =
+            "the seal of session "
+              <> sealed.missionSealedSession.unMissionSessionId
+              <> " belongs to "
+              <> subject
+              <> " rather than mission "
+              <> mission.unMissionId
+              <> ", and was not verified"
 
 -- | Why a mission may not be archived or deleted.
 data MissionDispositionRefusal
@@ -661,9 +682,10 @@ deleteMission store mission = do
   case snapshotResult of
     MissionPresent snapshot -> case terminalRefusals snapshot <> sessionRefusals snapshot <> stepRefusals snapshot <> worktreeRefusals snapshot of
       refusal : rest -> pure (Left (refusal : rest))
-      [] -> case missionDirectory store.missionStoreDirectory mission of
-        Left message -> pure (Left [MissionDispositionUnreadable message])
-        Right directory -> removeMissionDirectory store directory
+      [] -> withMissionRoot store mission (Left . pure . MissionDispositionUnreadable) $ \root ->
+        case missionDirectory root mission of
+          Left message -> pure (Left [MissionDispositionUnreadable message])
+          Right directory -> removeMissionDirectory store directory
     other -> pure (Left [unreadableRefusal mission other])
 
 -- | Takes a mission out of the store in one move, and then clears up.
@@ -676,14 +698,15 @@ deleteMission store mission = do
 -- half-deleted: it still enumerates, its snapshot no longer reads, and every
 -- gate that would let it be deleted again decides from that snapshot.
 --
--- The holding area is a sibling of the repository's store rather than a name
--- inside it, so a mission on its way out is never enumerated as one that is
--- still there. Nothing reads it, and a removal that fails leaves it as inert
--- litter rather than as a mission.
+-- The holding area is the missions root's own, outside every repository's
+-- namespace rather than inside or beside one, so a mission on its way out is
+-- never enumerated as one that is still there and no repository can be named
+-- such that its store /is/ the holding area. Nothing reads it, and a removal
+-- that fails leaves it as inert litter rather than as a mission.
 removeMissionDirectory :: MissionStore -> FilePath -> IO (Either [MissionDispositionRefusal] ())
 removeMissionDirectory store directory = do
   token <- deletionToken
-  let holding = takeDirectory store.missionStoreDirectory </> ".deleted"
+  let holding = store.missionStoreHoldingDirectory
       aside = holding </> token
   prepared <- ensureMissionDirectory holding
   case prepared of

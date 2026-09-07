@@ -3327,14 +3327,15 @@ Suggested paths:
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/specification.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/snapshot.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/events.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/invocations.jsonl
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/control/requests/<id>.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/lease/owner.json
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.log
-~/.local/state/kanban/missions/<owner>-<repo>/<mission>/archive/<session>-<kind>.seal.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/specification.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/snapshot.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/events.jsonl
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/invocations.jsonl
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/control/requests/<id>.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/lease/owner.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
+~/.local/state/kanban/missions/.deleted/<token>/
 ```
 
 Defaults:
@@ -3425,6 +3426,42 @@ Defaults:
   included; and no write ever treats that silence as permission, so
   "is one already there?" is always a question for the filesystem rather than
   for a successful decode.
+- A repository's mission root spells the owner and the name as separate path
+  components under `repositories/`, and that spelling is **injective**: each
+  component is refused unless it is a single plain name, so it carries no
+  separator, so the path recovers the identity that produced it and two
+  identities share a root only when they are the same identity. An owner or a
+  name that cannot name such a component is reported with its reason rather
+  than mapped onto some other repository's root, and nothing is created for it.
+  The spelling this replaced joined the two with the same hyphen it substituted
+  for separators, which is not injective at all — `data-science/tools` and
+  `data/science-tools` both wrote `data-science-tools`, so one repository's
+  snapshot replaced the other's, one repository's specification made the
+  other's mission report that it already existed, and one repository's lease
+  blocked the other's unrelated mission.
+- Missions written under that ambiguous root stay readable there; nothing is
+  migrated. This is the recorded choice, and migration is the rejected
+  alternative: the advancement lease is a directory inside the mission's own
+  directory, so moving a mission moves its lease, and a holder still running
+  against the old path would go on writing there while a third process — finding
+  no lease where the holder believes it left one — acquired that mission's lease
+  a second time. Reading in place resolves one mission to one directory for
+  every release, so there is exactly one lease per repository-qualified mission
+  whichever one opened it. Ownership of a legacy mission is established per
+  mission from the durable records it carries — its specification, its
+  snapshot, and its lease owner record, each of which names a repository — and
+  never from the ambiguous root as a whole, which belongs to no repository in
+  particular. Records that disagree with one another, that name another
+  mission, that will not read, or that name no repository at all leave the
+  mission attributed to nobody: it is enumerated by neither repository,
+  addressing it reports its path and why it was refused, and not a byte of it
+  is read as one repository's or replaced. The same refusal covers a mission
+  that has records under both roots. `repositories/` and `.deleted` are the two
+  names the old spelling could never produce — every key it produced carries
+  the hyphen it joined owner to name with — which is what keeps the two
+  namespaces from aliasing, and what lets the holding area a delete moves a
+  mission through sit at the missions root where no repository's store can be
+  it.
 - A mission a controller advances holds two further records, and each answers
   a question the four above cannot. `invocations.jsonl` is written *before*
   every external effect and flushed to the disk before that effect is

@@ -146,6 +146,8 @@ import Test.Hspec
 spec :: Spec
 spec = describe "the durable mission store" $ do
   storeLocationSpec
+  collidingRepositorySpec
+  legacyRootSpec
   identitySpec
   roundTripSpec
   journalSpec
@@ -169,6 +171,23 @@ boardRepository = Repository {repositoryRoot = "/tmp/board", repositoryOwner = "
 otherRepository :: Repository
 otherRepository = Repository {repositoryRoot = "/tmp/other", repositoryOwner = "coghex", repositoryName = "elsewhere"}
 
+-- | Two ordinary GitHub identities that the spelling before #615 mapped onto
+-- one directory: the hyphen falls in the owner for one and in the name for the
+-- other, and joining them with a hyphen loses which.
+splitOwnerRepository, splitNameRepository :: Repository
+splitOwnerRepository = Repository {repositoryRoot = "/tmp/split-owner", repositoryOwner = "data-science", repositoryName = "tools"}
+splitNameRepository = Repository {repositoryRoot = "/tmp/split-name", repositoryOwner = "data", repositoryName = "science-tools"}
+
+-- | The one directory both of the above used to write to, spelled out rather
+-- than derived: what this pins is the path a release before #615 chose, and a
+-- derivation would only restate whatever the current one chooses.
+collidingLegacyKey :: FilePath
+collidingLegacyKey = "data-science-tools"
+
+splitOwner, splitName :: MissionRepository
+splitOwner = MissionRepository "data-science" "tools"
+splitName = MissionRepository "data" "science-tools"
+
 theMission :: MissionId
 theMission = MissionId "mission-0001"
 
@@ -184,6 +203,20 @@ withStore action = withTemporaryCacheRoot $ \root ->
     case opened of
       Left message -> fail ("could not open the mission store: " <> Text.unpack message)
       Right store -> action root store
+
+-- | The same repository's store rooted at @directory@.
+--
+-- For a fixture that has to put durable bytes somewhere this release would not
+-- choose them — the staging file an interruption leaves behind, or the
+-- ambiguous root a release before #615 wrote to. The legacy root is pointed at
+-- a name that does not exist, so this store resolves every mission to
+-- @directory@ itself and the fixture stages exactly where it says it does.
+rerootedStore :: FilePath -> MissionStore -> MissionStore
+rerootedStore directory store =
+  store
+    { missionStoreDirectory = directory,
+      missionStoreLegacyDirectory = directory </> "no-legacy-root-here"
+    }
 
 specificationFor :: MissionRepository -> MissionId -> Text -> MissionSpecification
 specificationFor repository mission request =
@@ -280,6 +313,37 @@ sessionNode identity parent observation =
 settled :: Maybe MissionTerminalObservation
 settled = Just MissionTerminalObservation {missionObservationAt = fixedTime, missionObservationOutcome = MissionObservedExit 0, missionObservationDetail = Nothing}
 
+-- | 'runningSnapshot' for another repository and another mission.
+snapshotIn :: MissionRepository -> MissionId -> MissionSnapshot
+snapshotIn repository mission =
+  runningSnapshot {missionSnapshotId = mission, missionSnapshotRepository = repository}
+
+-- | A terminal snapshot for another repository and another mission, so a
+-- delete has something to decide from.
+completedIn :: MissionRepository -> MissionId -> MissionSnapshot
+completedIn repository mission =
+  (snapshotWith MissionCompleted [] [] []) {missionSnapshotId = mission, missionSnapshotRepository = repository}
+
+-- | 'eventNamed' for another repository and another mission.
+eventIn :: MissionRepository -> MissionId -> Text -> MissionEvent
+eventIn repository mission kind =
+  (eventNamed kind) {missionEventMission = mission, missionEventRepository = repository}
+
+-- | A specification, a snapshot and one journal event, all this repository's
+-- own, written through the writers that own them.
+writeWholeMission :: MissionStore -> MissionRepository -> MissionId -> Text -> IO ()
+writeWholeMission store repository mission request = do
+  created <- expectRight =<< createMissionSpecification store (specificationFor repository mission request)
+  created `shouldBe` MissionCreated
+  void (expectRight =<< writeMissionSnapshot store (snapshotIn repository mission))
+  void (expectRight =<< recordMissionEvent store (eventIn repository mission "planned"))
+
+-- | The kinds of every journal event a mission holds for this store.
+journalKinds :: MissionStore -> MissionId -> IO [Text]
+journalKinds store mission = do
+  (records, _) <- expectRight =<< readMissionJournal store mission 0
+  pure [event.missionEventKind | MissionJournalEvent event <- records]
+
 -- | A session recorded as owning a process and never observed to end.
 liveSession :: MissionSessionNode
 liveSession =
@@ -331,18 +395,54 @@ storeLocationSpec = describe "where a repository's missions live" $ do
   it "is the repository-qualified directory under the XDG state root, not the cache" $
     withTemporaryCacheRoot $ \root ->
       withEnvironmentValue "XDG_STATE_HOME" root $ do
-        resolved <- missionStoreRoot boardRepository
-        resolved `shouldBe` root </> "kanban" </> "missions" </> "coghex-kanban"
+        resolved <- expectRight =<< missionStoreRoot boardRepository
+        resolved `shouldBe` root </> "kanban" </> "missions" </> "repositories" </> "coghex" </> "kanban"
 
   it "keeps two repositories apart" $
     withTemporaryCacheRoot $ \root ->
       withEnvironmentValue "XDG_STATE_HOME" root $ do
-        board <- missionStoreRoot boardRepository
-        other <- missionStoreRoot otherRepository
+        board <- expectRight =<< missionStoreRoot boardRepository
+        other <- expectRight =<< missionStoreRoot otherRepository
         board `shouldNotBe` other
 
+  -- Requirement 1 of issue #615. The identities differ only in which side of
+  -- the delimiter the hyphen falls on, which is exactly what the spelling this
+  -- replaced could not tell apart.
+  it "gives two identities that differ only in where the delimiter falls different roots" $
+    withTemporaryCacheRoot $ \root ->
+      withEnvironmentValue "XDG_STATE_HOME" root $ do
+        owner <- expectRight =<< missionStoreRoot splitOwnerRepository
+        name <- expectRight =<< missionStoreRoot splitNameRepository
+        owner `shouldNotBe` name
+        -- And neither is the one directory they used to share.
+        let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+        owner `shouldNotBe` ambiguous
+        name `shouldNotBe` ambiguous
+
+  -- Requirement 2. An identity that cannot name a plain component is reported
+  -- rather than mapped onto some other repository's root, and reporting it
+  -- leaves the missions tree exactly as it was — including a mission another
+  -- repository had already written.
+  it "refuses a repository whose owner or name is not a single plain name, without creating or changing anything" $
+    withStore $ \root store -> do
+      writeWholeMission store (MissionRepository "coghex" "kanban") theMission "the existing mission"
+      beforehand <- inventoryOf (root </> "kanban" </> "missions")
+      forM_ [("..", "tools"), ("a/b", "tools"), ("", "tools"), ("coghex", ".."), ("coghex", "a/b"), ("coghex", "")] $
+        \(owner, name) -> do
+          let unusable = Repository {repositoryRoot = "/tmp/unusable", repositoryOwner = owner, repositoryName = name}
+          resolved <- missionStoreRoot unusable
+          case resolved of
+            Right path -> expectationFailure ("expected a refusal for " <> show (owner, name) <> ", got " <> path)
+            Left message -> Text.unpack message `shouldSatisfy` isInfixOf "single plain name"
+          opened <- openMissionStore unusable
+          case opened of
+            Right opening -> expectationFailure ("expected a refusal for " <> show (owner, name) <> ", got " <> show opening)
+            Left message -> Text.unpack message `shouldSatisfy` isInfixOf "single plain name"
+      afterwards <- inventoryOf (root </> "kanban" </> "missions")
+      afterwards `shouldBe` beforehand
+
   it "refuses a mission identifier that is not a single plain name, rather than writing outside the store" $
-    withStore $ \_ store -> do
+    withStore $ \root store -> do
       forM_ ["../escape", "with/separator", "", "."] $ \name -> do
         created <- createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") (MissionId (Text.pack name)) "escape")
         case created of
@@ -351,8 +451,281 @@ storeLocationSpec = describe "where a repository's missions live" $ do
       -- Nothing was written anywhere, inside the store or above it.
       entries <- listDirectory store.missionStoreDirectory
       entries `shouldBe` []
-      above <- listDirectory (takeDirectory (takeDirectory store.missionStoreDirectory))
+      above <- listDirectory (root </> "kanban")
       sort above `shouldBe` ["missions"]
+
+-- | Every path under @directory@, with the bytes of every file, sorted.
+--
+-- The whole subtree rather than its top level: what a refusal must leave alone
+-- is the durable records, and a comparison of directory names alone would pass
+-- while a snapshot inside one of them was replaced.
+inventoryOf :: FilePath -> IO [(FilePath, Maybe ByteString.ByteString)]
+inventoryOf directory = sort <$> walk directory
+  where
+    walk path = do
+      isDirectory <- doesDirectoryExist path
+      if isDirectory
+        then do
+          entries <- listDirectory path
+          nested <- mapM (walk . (path </>)) (sort entries)
+          pure ((path, Nothing) : concat nested)
+        else do
+          exists <- doesFileExist path
+          if exists
+            then do
+              bytes <- ByteString.readFile path
+              pure [(path, Just bytes)]
+            else pure []
+
+-- * Two repositories the old spelling could not tell apart
+
+-- | Requirement 3 of issue #615, one repository's record at a time.
+--
+-- Both stores are opened under one state root, at one mission identifier, so
+-- everything here would have been the /same file/ under the spelling this
+-- replaced. Each example asserts both halves: that this repository sees its
+-- own record, and that it does not see or disturb the other's.
+collidingRepositorySpec :: Spec
+collidingRepositorySpec = describe "two repositories the previous spelling mapped onto one directory" $ do
+  it "keeps their roots apart, and neither is the directory they used to share" $
+    withCollidingStores $ \root owner name -> do
+      owner.missionStoreDirectory `shouldNotBe` name.missionStoreDirectory
+      forM_ [owner, name] $ \store ->
+        store.missionStoreDirectory `shouldNotBe` (root </> "kanban" </> "missions" </> collidingLegacyKey)
+
+  it "reports the other's specification as absent rather than as one that already exists" $
+    withCollidingStores $ \_ owner name -> do
+      created <- expectRight =<< createMissionSpecification owner (specificationFor splitOwner theMission "the owner's mission")
+      created `shouldBe` MissionCreated
+      absent <- readMissionSpecification name theMission
+      absent `shouldBe` MissionAbsent
+      also <- expectRight =<< createMissionSpecification name (specificationFor splitName theMission "the name's mission")
+      also `shouldBe` MissionCreated
+      kept <- expectPresent =<< readMissionSpecification owner theMission
+      kept.missionSpecificationRequest `shouldBe` "the owner's mission"
+
+  it "does not let one's snapshot replace the other's" $
+    withCollidingStores $ \_ owner name -> do
+      void (expectRight =<< writeMissionSnapshot owner (snapshotIn splitOwner theMission))
+      void (expectRight =<< writeMissionSnapshot name (completedIn splitName theMission))
+      theirs <- expectPresent =<< readMissionSnapshot owner theMission
+      theirs.missionSnapshotLifecycle `shouldBe` MissionRunning
+      ours <- expectPresent =<< readMissionSnapshot name theMission
+      ours.missionSnapshotLifecycle `shouldBe` MissionCompleted
+
+  it "appends each one's journal on its own" $
+    withCollidingStores $ \_ owner name -> do
+      void (expectRight =<< recordMissionEvent owner (eventIn splitOwner theMission "owner-planned"))
+      void (expectRight =<< recordMissionEvent name (eventIn splitName theMission "name-planned"))
+      void (expectRight =<< recordMissionEvent owner (eventIn splitOwner theMission "owner-dispatched"))
+      journalKinds owner theMission `shouldReturn` ["owner-planned", "owner-dispatched"]
+      journalKinds name theMission `shouldReturn` ["name-planned"]
+
+  it "seals each one's archive on its own" $
+    withCollidingStores $ \root owner name -> do
+      let ownerSource = root </> "owner.log"
+          nameSource = root </> "name.log"
+      ByteString.writeFile ownerSource (ByteStringChar.pack "the owner's stream\n")
+      ByteString.writeFile nameSource (ByteStringChar.pack "the name's stream\n")
+      ownerSeal <- expectRight =<< sealMissionLog owner theMission (MissionSessionId "session-a") MissionEventStreamLog ownerSource
+      -- The same session and log kind: one archive entry name, two archives.
+      nameSeal <- expectRight =<< sealMissionLog name theMission (MissionSessionId "session-a") MissionEventStreamLog nameSource
+      ownerSeal.missionSealedDigest `shouldNotBe` nameSeal.missionSealedDigest
+      void (expectRight =<< verifyMissionSealedArchive owner theMission ownerSeal)
+      void (expectRight =<< verifyMissionSealedArchive name theMission nameSeal)
+      ownerEntries <- expectRight =<< readMissionSealedArchives owner theMission
+      map missionSealedDigest ownerEntries `shouldBe` [ownerSeal.missionSealedDigest]
+      nameEntries <- expectRight =<< readMissionSealedArchives name theMission
+      map missionSealedDigest nameEntries `shouldBe` [nameSeal.missionSealedDigest]
+
+  it "does not let one's lease block the other's mission" $
+    withCollidingStores $ \_ owner name -> do
+      held <- acquireMissionLeaseWith (const (pure MissionHolderPresent)) owner theMission
+      case held of
+        MissionLeaseAcquired lease -> do
+          other <- acquireMissionLeaseWith (const (pure MissionHolderPresent)) name theMission
+          case other of
+            MissionLeaseAcquired _ -> pure ()
+            refused -> expectationFailure ("expected the other repository's lease, got " <> show refused)
+          releaseMissionLease lease
+        refused -> expectationFailure ("expected a lease, got " <> show refused)
+
+  it "enumerates only its own missions, including the identifier they share" $
+    withCollidingStores $ \_ owner name -> do
+      writeWholeMission owner splitOwner theMission "the owner's shared identifier"
+      writeWholeMission owner splitOwner (MissionId "mission-owner") "the owner's own"
+      writeWholeMission name splitName theMission "the name's shared identifier"
+      writeWholeMission name splitName (MissionId "mission-name") "the name's own"
+      listMissions owner `shouldReturn` [MissionId "mission-0001", MissionId "mission-owner"]
+      listMissions name `shouldReturn` [MissionId "mission-0001", MissionId "mission-name"]
+
+  it "leaves the other's records intact when one is deleted" $
+    withCollidingStores $ \_ owner name -> do
+      writeWholeMission owner splitOwner theMission "the owner's mission"
+      writeWholeMission name splitName theMission "the name's mission"
+      void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
+      void (expectRight =<< deleteMission owner theMission)
+      listMissions owner `shouldReturn` []
+      listMissions name `shouldReturn` [theMission]
+      kept <- expectPresent =<< readMissionSpecification name theMission
+      kept.missionSpecificationRequest `shouldBe` "the name's mission"
+      journalKinds name theMission `shouldReturn` ["planned"]
+
+-- | Both colliding repositories' stores, under one temporary state root.
+withCollidingStores :: (FilePath -> MissionStore -> MissionStore -> IO result) -> IO result
+withCollidingStores action = withTemporaryCacheRoot $ \root ->
+  withEnvironmentValue "XDG_STATE_HOME" root $ do
+    owner <- expectRight =<< openMissionStore splitOwnerRepository
+    name <- expectRight =<< openMissionStore splitNameRepository
+    action root owner name
+
+-- * The ambiguous root a release before this one wrote to
+
+-- | Requirement 4 of issue #615: compatibility rather than migration, and what
+-- that costs at the edges.
+--
+-- Every legacy mission here is written by the ordinary writers through a store
+-- rooted at the ambiguous directory, which is exactly how the release before
+-- this one wrote one. Nothing is assembled by hand: what these examples are
+-- about is a reader deciding whose a record is, and a hand-built record would
+-- be asserting this file's idea of the format instead.
+legacyRootSpec :: Spec
+legacyRootSpec = describe "a mission written under the ambiguous pre-#615 root" $ do
+  it "is still read, and still written, where its history already is" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "written before the change"
+      specification <- expectPresent =<< readMissionSpecification owner theMission
+      specification.missionSpecificationRequest `shouldBe` "written before the change"
+      snapshot <- expectPresent =<< readMissionSnapshot owner theMission
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
+      journalKinds owner theMission `shouldReturn` ["planned"]
+      listMissions owner `shouldReturn` [theMission]
+      -- A write lands beside the history rather than starting a second copy of
+      -- the mission under the new root.
+      void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
+      void (expectRight =<< recordMissionEvent owner (eventIn splitOwner theMission "dispatched"))
+      journalKinds owner theMission `shouldReturn` ["planned", "dispatched"]
+      replaced <- expectPresent =<< readMissionSnapshot owner theMission
+      replaced.missionSnapshotLifecycle `shouldBe` MissionCompleted
+      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` False
+
+  it "belongs to whichever repository its own records name, never to whoever opened the root first" $
+    withCollidingStores $ \root owner name -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner (MissionId "mission-owner") "the owner's legacy mission"
+      writeWholeMission (rerootedStore ambiguous name) splitName (MissionId "mission-name") "the name's legacy mission"
+      listMissions owner `shouldReturn` [MissionId "mission-owner"]
+      listMissions name `shouldReturn` [MissionId "mission-name"]
+      readMissionSpecification owner (MissionId "mission-name") `shouldReturn` MissionAbsent
+      readMissionSpecification name (MissionId "mission-owner") `shouldReturn` MissionAbsent
+      -- The one it cannot see is not one it can overwrite either: creating the
+      -- same identifier writes under its own root and leaves the legacy record
+      -- exactly as it was.
+      beforehand <- ByteString.readFile (ambiguous </> "mission-name" </> "specification.json")
+      created <- expectRight =<< createMissionSpecification owner (specificationFor splitOwner (MissionId "mission-name") "the owner's new mission")
+      created `shouldBe` MissionCreated
+      afterwards <- ByteString.readFile (ambiguous </> "mission-name" </> "specification.json")
+      afterwards `shouldBe` beforehand
+
+  it "is refused, with its path and the reason, when its own records name different repositories" $
+    withCollidingStores $ \root owner name -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      void (expectRight =<< createMissionSpecification (rerootedStore ambiguous owner) (specificationFor splitOwner theMission "the owner's specification"))
+      void (expectRight =<< writeMissionSnapshot (rerootedStore ambiguous name) (snapshotIn splitName theMission))
+      beforehand <- inventoryOf ambiguous
+      forM_ [owner, name] $ \store -> do
+        specification <- readMissionSpecification store theMission
+        case specification of
+          MissionUnreadable message -> do
+            Text.unpack message `shouldSatisfy` isInfixOf (ambiguous </> "mission-0001")
+            Text.unpack message `shouldSatisfy` isInfixOf "data-science/tools"
+          other -> expectationFailure ("expected a refusal, got " <> show other)
+        written <- writeMissionSnapshot store (completedIn splitOwner theMission)
+        case written of
+          Left message -> Text.unpack message `shouldSatisfy` isInfixOf "neither adopted nor changed"
+          Right () -> expectationFailure "expected the write to be refused"
+      -- Neither repository listed it, and neither changed a byte of it.
+      listMissions owner `shouldReturn` []
+      listMissions name `shouldReturn` []
+      afterwards <- inventoryOf ambiguous
+      afterwards `shouldBe` beforehand
+
+  it "is refused when a record sitting there names another mission" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner (MissionId "mission-elsewhere") "recorded elsewhere"
+      createDirectoryIfMissing True (ambiguous </> "mission-0001")
+      renameFile
+        (ambiguous </> "mission-elsewhere" </> "specification.json")
+        (ambiguous </> "mission-0001" </> "specification.json")
+      specification <- readMissionSpecification owner theMission
+      case specification of
+        MissionUnreadable message ->
+          Text.unpack message `shouldSatisfy` isInfixOf "records the mission mission-elsewhere"
+        other -> expectationFailure ("expected a refusal, got " <> show other)
+
+  it "is refused when it holds no record naming a repository at all" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      createDirectoryIfMissing True (ambiguous </> "mission-0001" </> "archive")
+      specification <- readMissionSpecification owner theMission
+      case specification of
+        MissionUnreadable message ->
+          Text.unpack message `shouldSatisfy` isInfixOf "holds no durable record naming a repository"
+        other -> expectationFailure ("expected a refusal, got " <> show other)
+
+  it "is refused when the same mission has records under both roots, and neither copy is touched" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      writeWholeMission (rerootedStore owner.missionStoreDirectory owner) splitOwner theMission "under the new root"
+      beforehand <- inventoryOf (root </> "kanban" </> "missions")
+      specification <- readMissionSpecification owner theMission
+      case specification of
+        MissionUnreadable message -> do
+          Text.unpack message `shouldSatisfy` isInfixOf (owner.missionStoreDirectory </> "mission-0001")
+          Text.unpack message `shouldSatisfy` isInfixOf (ambiguous </> "mission-0001")
+          Text.unpack message `shouldSatisfy` isInfixOf "neither was read or replaced"
+        other -> expectationFailure ("expected a refusal, got " <> show other)
+      afterwards <- inventoryOf (root </> "kanban" </> "missions")
+      afterwards `shouldBe` beforehand
+
+  it "deletes where its records are, and the identifier is free for a new mission under the new root" $
+    withCollidingStores $ \root owner name -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      writeWholeMission (rerootedStore ambiguous name) splitName (MissionId "mission-name") "the other repository's"
+      void (expectRight =<< writeMissionSnapshot owner (completedIn splitOwner theMission))
+      void (expectRight =<< deleteMission owner theMission)
+      doesDirectoryExist (ambiguous </> "mission-0001") `shouldReturn` False
+      listMissions owner `shouldReturn` []
+      -- The other repository's legacy mission, in the same shared directory,
+      -- is untouched by that delete.
+      listMissions name `shouldReturn` [MissionId "mission-name"]
+      kept <- expectPresent =<< readMissionSpecification name (MissionId "mission-name")
+      kept.missionSpecificationRequest `shouldBe` "the other repository's"
+      -- With no legacy history left, the identifier resolves to the new root.
+      created <- expectRight =<< createMissionSpecification owner (specificationFor splitOwner theMission "after the delete")
+      created `shouldBe` MissionCreated
+      doesDirectoryExist (owner.missionStoreDirectory </> "mission-0001") `shouldReturn` True
+
+  it "keeps one lease for one mission, wherever that mission's records are" $
+    withCollidingStores $ \root owner _ -> do
+      let ambiguous = root </> "kanban" </> "missions" </> collidingLegacyKey
+      writeWholeMission (rerootedStore ambiguous owner) splitOwner theMission "under the ambiguous root"
+      -- The lease is taken through the store a real run opens, and it lands on
+      -- the legacy mission rather than on a second directory beside it.
+      held <- acquireMissionLeaseWith (const (pure MissionHolderPresent)) owner theMission
+      case held of
+        MissionLeaseAcquired lease -> do
+          lease.missionLeaseDirectory `shouldBe` (ambiguous </> "mission-0001" </> "lease")
+          again <- acquireMissionLeaseWith (const (pure MissionHolderPresent)) owner theMission
+          case again of
+            MissionLeaseHeld _ -> pure ()
+            other -> expectationFailure ("expected the lease to be held, got " <> show other)
+          releaseMissionLease lease
+        refused -> expectationFailure ("expected a lease, got " <> show refused)
 
 -- * Identity
 
@@ -471,8 +844,7 @@ roundTripSpec = describe "a mission read back by a process that never wrote it" 
       report <- withMissionProbes (root </> "probes")
         [ MissionProbe
             { missionProbeName = "reader",
-              missionProbeStore = store.missionStoreDirectory,
-              missionProbeRepository = store.missionStoreRepository,
+              missionProbeStore = store,
               missionProbeMission = theMission,
               missionProbeAction = MissionProbeReadBack,
               missionProbeGate = "read"
@@ -529,8 +901,7 @@ journalSpec = describe "the append-only event journal" $ do
         (root </> "probes")
         [ MissionProbe
             { missionProbeName = name,
-              missionProbeStore = store.missionStoreDirectory,
-              missionProbeRepository = store.missionStoreRepository,
+              missionProbeStore = store,
               missionProbeMission = theMission,
               missionProbeAction = MissionProbeAppendEvents (Text.pack name) perWriter payload,
               missionProbeGate = "both"
@@ -616,7 +987,7 @@ snapshotSpec = describe "replacing the snapshot" $ do
       -- The bytes of the replacement, produced by the writer itself, left
       -- where an interruption between the write and the rename leaves them.
       let elsewhere = root </> "interrupted.json"
-      void (expectRight =<< writeMissionSnapshot (MissionStore (takeDirectory elsewhere) store.missionStoreRepository) (snapshotWith MissionCompleted [] [] []))
+      void (expectRight =<< writeMissionSnapshot (rerootedStore (takeDirectory elsewhere) store) (snapshotWith MissionCompleted [] [] []))
       let snapshotFile = store.missionStoreDirectory </> "mission-0001" </> "snapshot.json"
       interrupted <- ByteString.readFile (takeDirectory elsewhere </> "mission-0001" </> "snapshot.json")
       ByteString.writeFile (snapshotFile <> ".staged-9999-interrupted") interrupted
@@ -703,6 +1074,11 @@ permissionSpec = describe "under a permissive umask" $
           forM_
             [ root </> "kanban",
               root </> "kanban" </> "missions",
+              -- The two levels the repository-qualified root added: an owner's
+              -- directory is as private as the store inside it, and a mode
+              -- checked only at the leaf would leave both of them readable.
+              root </> "kanban" </> "missions" </> "repositories",
+              root </> "kanban" </> "missions" </> "repositories" </> "coghex",
               store.missionStoreDirectory,
               missionRoot store,
               missionRoot store </> "archive"
@@ -962,8 +1338,7 @@ leaseProbe :: MissionStore -> String -> String -> MissionProbe
 leaseProbe store gate name =
   MissionProbe
     { missionProbeName = name,
-      missionProbeStore = store.missionStoreDirectory,
-      missionProbeRepository = store.missionStoreRepository,
+      missionProbeStore = store,
       missionProbeMission = theMission,
       missionProbeAction = MissionProbeLease,
       missionProbeGate = gate
@@ -1030,7 +1405,7 @@ schemaSpec = describe "a record this release did not write" $ do
       -- The same directory, read as the store of a repository it was not
       -- written for: a store copied, restored from a backup, or read after a
       -- repository was renamed.
-      let elsewhere = MissionStore store.missionStoreDirectory (MissionRepository "coghex" "elsewhere")
+      let elsewhere = store {missionStoreRepository = MissionRepository "coghex" "elsewhere"}
       specification <- readMissionSpecification elsewhere theMission
       case specification of
         MissionRefused message -> Text.unpack message `shouldSatisfy` isInfixOf "another repository"
@@ -1207,8 +1582,7 @@ sealSpec = describe "sealing a child's log" $ do
       outcomes <- withMissionProbes (root </> "probes")
         [ MissionProbe
             { missionProbeName = name,
-              missionProbeStore = store.missionStoreDirectory,
-              missionProbeRepository = store.missionStoreRepository,
+              missionProbeStore = store,
               missionProbeMission = theMission,
               missionProbeAction = MissionProbeSealLog (root </> name <> ".log") (MissionSessionId "session-a") MissionEventStreamLog,
               missionProbeGate = "both"
@@ -1276,7 +1650,7 @@ sealSpec = describe "sealing a child's log" $ do
       -- And one sitting in this mission's archive directory is refused on the
       -- way in rather than returned.
       void (expectRight =<< createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") (MissionId "mission-0002") "another mission"))
-      other <- expectRight =<< sealMissionLog (MissionStore store.missionStoreDirectory store.missionStoreRepository) (MissionId "mission-0002") (MissionSessionId "session-b") MissionEventStreamLog source
+      other <- expectRight =<< sealMissionLog store (MissionId "mission-0002") (MissionSessionId "session-b") MissionEventStreamLog source
       renameFile
         (store.missionStoreDirectory </> "mission-0002" </> "archive" </> "session-b-event_stream.seal.json")
         (missionRoot store </> "archive" </> "session-b-event_stream.seal.json")
@@ -1383,7 +1757,7 @@ dispositionSpec = describe "archiving and deleting a mission" $ do
       sort (refusalKinds result) `shouldBe` sort ["not-terminal", "unverifiable-session", "outcome-unknown-step", "sole-recovery-record"]
 
   it "moves the mission out of the store before clearing it up, to a holding area no repository enumerates" $
-    withStore $ \_ store -> do
+    withStore $ \root store -> do
       void (expectRight =<< createMissionSpecification store theSpecification)
       void (expectRight =<< writeMissionSnapshot store (snapshotWith MissionCompleted [] [] []))
       void (expectRight =<< recordMissionEvent store (eventNamed "finished"))
@@ -1393,12 +1767,16 @@ dispositionSpec = describe "archiving and deleting a mission" $ do
       -- which is stranded rather than half-deleted — it still enumerates, its
       -- snapshot no longer reads, and every gate that would let it be deleted
       -- again decides from that snapshot.
-      let holding = takeDirectory store.missionStoreDirectory </> ".deleted"
+      let holding = store.missionStoreHoldingDirectory
+      -- At the missions root rather than beside or inside a repository's own
+      -- store: a repository may legitimately be named `.deleted`, and a
+      -- holding area under its owner's directory would be that repository's
+      -- store.
+      holding `shouldBe` (root </> "kanban" </> "missions" </> ".deleted")
       staged <- doesDirectoryExist holding
       staged `shouldBe` True
-      -- And the holding area is a sibling of this repository's store rather
-      -- than a name inside it, so nothing on its way out can be reported as a
-      -- mission that is still there.
+      -- And nothing on its way out can be reported as a mission that is still
+      -- there.
       createDirectoryIfMissing True (holding </> "an-interrupted-clearing-up" </> "archive")
       missions <- listMissions store
       missions `shouldBe` []
