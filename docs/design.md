@@ -851,7 +851,8 @@ both solvers on GPT-5.6-Terra high and Sonnet 5 high.
 Single-agent mode moves that column rather than the roles. Every pull-request
 action — review, rereview, revision, repair — runs on the one loaded provider
 whatever the pull request's origin marker says, including a pull request whose
-origin is unknown or external; the embedded issue review starts that
+origin is unknown or external, except grok-origin revision and repair, which
+still have no spawned provider to collapse onto; the embedded issue review starts that
 provider's own backend, the Codex app-server in a Codex-only install and the
 `claude` stream-json session in a Claude-only one; a fresh solve starts on it
 without opening the chooser, because there is nothing to choose between; and
