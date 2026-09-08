@@ -16,7 +16,7 @@ Effort estimates are relative and preliminary.
 
 ## Status
 
-- [ ] BQ-1. Card excerpts display template headings instead of descriptions
+- [x] BQ-1. Card excerpts display template headings instead of descriptions — [#646]
 - [ ] BQ-2. Filtering hides known PR relationships from issue details
 - [ ] BQ-3. Search misses canonically equivalent Unicode text
 - [ ] BQ-4. Focused search reserves ordinary letters as commands
@@ -26,7 +26,7 @@ Effort estimates are relative and preliminary.
 
 ## Small correctness bugs
 
-### BQ-1. Card excerpts display template headings instead of descriptions
+### [#646] BQ-1. Card excerpts display template headings instead of descriptions
 
 **Priority: first. Estimated effort: easy.**
 
