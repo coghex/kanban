@@ -907,7 +907,7 @@ spec = do
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high".
       reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
-        `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra xhigh."
+        `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; kimi-origin amendment content is authored by you as GPT-6-Astra xhigh since Kimi is not a spawned provider; unmarked issues default to you as GPT-6-Astra xhigh."
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 
