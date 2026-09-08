@@ -3411,10 +3411,11 @@ docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
 docs/workflow_command_vendoring_design.md | coordination | audit-report
+grok-plugin/ | pr-atomic | test-parsed;release-document
 tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The twelve `test-parsed` rows name what actually parses them:
+The thirteen `test-parsed` rows name what actually parses them:
 `tools/test_issue_templates.py` reads the frontmatter, headings, and
 preselected labels of every template under `.github/ISSUE_TEMPLATE/`, the
 `Children` checklist of the epic one, and the blank-issue switch and contact
@@ -3432,9 +3433,9 @@ pull request to both brands,
 `tools/test_drafting_workflow_contract.py` read their own contracts' §2 asset
 tables, `tools/test_board_screenshot.py` reconciles the regeneration procedure
 in `docs/media/README.md` against the renderer's own constants,
-`tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` read
-the frontmatter and body of every packaged workflow under `claude-plugin/` and
-`codex-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
+`tools/test_claude_plugin.py`, `tools/test_codex_plugin.py`, and
+`tools/test_grok_plugin.py` read the frontmatter and body of every packaged
+workflow under `claude-plugin/`, `codex-plugin/`, and `grok-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
 `docs/releasing.md` and the safety rules inside them — the recorded
 authorization gate ahead of the tag push, the prohibitions that keep a pushed
 tag immutable, where a release's evidence lives, what the dependency review
