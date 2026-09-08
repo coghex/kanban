@@ -17,7 +17,7 @@ Effort estimates are relative and preliminary.
 ## Status
 
 - [x] BQ-1. Card excerpts display template headings instead of descriptions — [#646]
-- [ ] BQ-2. Filtering hides known PR relationships from issue details
+- [x] BQ-2. Filtering hides known PR relationships from issue details — [#647]
 - [ ] BQ-3. Search misses canonically equivalent Unicode text
 - [ ] BQ-4. Focused search reserves ordinary letters as commands
 - [ ] BQ-5. Filtering unfinished children increases displayed epic completion
@@ -42,7 +42,7 @@ Standard issue bodies can produce cards whose entire preview is `## Background`.
 
 **Handoff context:** Select useful descriptive content through common heading/comment prefixes while preserving terminal sanitization and existing line limits. Keep the full body available in details. Cover heading-first, comment-first, ordinary prose, and empty bodies. Treatment of lists and code-first bodies needs a small explicit policy; a complete Markdown renderer is unnecessary.
 
-### BQ-2. Filtering hides known PR relationships from issue details
+### [#647] BQ-2. Filtering hides known PR relationships from issue details
 
 **Priority: second. Estimated effort: easy–medium.**
 
