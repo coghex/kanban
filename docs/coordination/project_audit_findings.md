@@ -34,7 +34,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 - [x] KA-1. Rendering cost grows with offscreen cards — [#640]
 - [x] KA-2. Concurrent mission and board reads conflict over process bookkeeping — [#642]
 - [x] KA-3. Precondition reads do not bind the selected repository — [#643]
-- [ ] KA-4. Failed command persistence can lose a pause request
+- [x] KA-4. Failed command persistence can lose a pause request — [#644]
 - [ ] KA-5. Precondition reads bypass the configured GitHub timeout
 
 ## Board responsiveness
@@ -98,7 +98,7 @@ The working directory remains the Kanban checkout. Additionally, a fake response
 
 **Remaining uncertainty:** The argument, directory, and identity-validation defects are reproduced; no wrong-repository mutation was attempted.
 
-### KA-4. Failed command persistence can lose a pause request
+### [#644] KA-4. Failed command persistence can lose a pause request
 
 **Priority: high.**
 
