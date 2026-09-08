@@ -3973,6 +3973,20 @@ def _self_test_body() -> None:
     }
     assert issue_origin(issue["body"]) == "claude"
     assert issue_origin("Body\n\n<!-- issue-origin:kimi -->") == "kimi"
+    assert issue_origin("Body\n\n<!--  ISSUE-ORIGIN:KIMI  -->") == "kimi"
+    assert issue_origin(
+        "<!-- issue-origin:kimi -->\n<!-- ISSUE-ORIGIN:KIMI -->"
+    ) == "kimi"
+    for conflicting in (
+        "<!-- issue-origin:kimi -->\n<!-- issue-origin:codex -->",
+        "<!-- issue-origin:kimi -->\n<!-- issue-origin:claude -->",
+    ):
+        try:
+            issue_origin(conflicting)
+        except ApproveError as error:
+            assert str(error) == "Issue body contains conflicting origin markers"
+        else:
+            raise AssertionError("conflicting kimi origin markers were accepted")
     assert reviewers_for_origin("claude", "dual") == [CODEX_REVIEWER]
     assert reviewers_for_origin("codex", "dual") == [CLAUDE_REVIEWER]
     assert reviewers_for_origin("kimi", "dual") == [CODEX_REVIEWER]

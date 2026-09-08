@@ -42,6 +42,7 @@ module Kanban.UI.Review
     reviewDigitActionFor,
     resolveReviewDigitAction,
     reviewSessionsNeedingArm,
+    issueReviewStartRefusal,
     startItemReview,
     startSelectedReview,
     submitReviewInput,
@@ -65,7 +66,12 @@ import Kanban.ApprovalService (approvalContentionNotice, approvalOwnsCanonicalRe
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Models (ProviderName, providerDisplayName, providerKey)
-import Kanban.Preflight (preflightDiagnosticDetail)
+import Kanban.Preflight
+  ( issueOriginFromBody,
+    issueRevisionUnsupported,
+    issueRevisionUnsupportedMessage,
+    preflightDiagnosticDetail
+  )
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     ReviewAnswer (..),
@@ -815,6 +821,7 @@ startIssueReview issue = do
     -- the backend's approval lock between this press and that spawn
     -- (requirement 7).
     _ | Just notice <- approvalServiceRefusal state requestedStage -> setNotice notice
+    _ | Just notice <- issueReviewStartRefusal issue requestedStage -> setNotice notice
     _ -> do
       let priorGeneration = priorTickGeneration issue.issueNumber state.appReviewSessions
           owed =
@@ -898,6 +905,20 @@ applyIssueActionRefused issueNumber notice = do
 
 issueReviewStage :: WorkflowConfig -> Issue -> ReviewStage
 issueReviewStage config issue = reviewStageForLabels config (map (.labelName) issue.issueLabels)
+
+-- | Refuse an issue revision before the board creates a session for it.
+--
+-- The registry repeats this at its own dispatch boundary, so a refresh or a
+-- headless caller cannot race past the press-time decision. Reattachment stays
+-- ahead of the refusal, matching pull-request sessions: a worker an older
+-- release already started remains observable, but no new Kimi worker launches.
+issueReviewStartRefusal :: Issue -> ReviewStage -> Maybe Text
+issueReviewStartRefusal issue stage
+  | stage == IssueRevision,
+    let origin = issueOriginFromBody issue.issueBody,
+    issueRevisionUnsupported origin =
+      Just ("Issue revision did not start: " <> issueRevisionUnsupportedMessage origin)
+  | otherwise = Nothing
 
 -- | A fresh review session. 'priorGeneration' must be 0 for an issue with no
 -- previous session, or the replaced session's 'sessionTickGeneration' when

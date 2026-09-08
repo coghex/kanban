@@ -613,7 +613,7 @@ def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
 def pr_origin(pr: dict[str, Any]) -> str | None:
     origin = origin_from_body(str(pr.get("body") or ""))
     if pr.get("isCrossRepository"):
-        return origin if origin == "grok" else None
+        return origin if origin in {"grok", "kimi"} else None
     return origin
 
 
@@ -2095,6 +2095,10 @@ def self_test() -> None:
     assert origin_from_body("body\n\n<!-- pr-origin:codex -->") == "codex"
     assert origin_from_body("body\n\n<!-- pr-origin:grok -->") == "grok"
     assert origin_from_body("body\n\n<!-- pr-origin:kimi -->") == "kimi"
+    assert origin_from_body("body\n\n<!-- pr-origin:kimi -->\n \t\n") == "kimi"
+    assert origin_from_body("<!-- pr-origin:kimi -->\ntext") is None
+    assert origin_from_body("<!-- pr-origin:kimi -->\n<!-- pr-origin:kimi -->") is None
+    assert origin_from_body("<!-- pr-origin:kimi -->\n<!-- pr-origin:codex -->") is None
     assert origin_from_body("external contribution") is None
     assert origin_from_body("<!-- pr-origin:codex -->\ntext") is None
     assert origin_from_body("<!-- pr-origin:codex -->\n<!-- pr-origin:codex -->") is None
@@ -2120,6 +2124,7 @@ def self_test() -> None:
     assert "no-agent" in refusal["error"]
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "APPROVE"}]) == "APPROVE"

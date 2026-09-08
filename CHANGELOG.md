@@ -35,7 +35,10 @@ created above it.
   take the origin.
 - `<!-- issue-origin:kimi -->` is a known issue origin: the canonical issue
   gate routes it to Codex only, instead of the legacy dual route an
-  unrecognized marker takes.
+  unrecognized marker takes. Single-agent mode collapses that review onto its
+  loaded provider, no-agent mode launches none, and board issue revision is
+  refused because Kimi is not a spawned provider; the Kimi session authors its
+  own amendment.
 - The tracked Grok plugin (`grok-plugin/`) packages `/solve` and `/autosolve`.
   A Grok session stamps `<!-- pr-origin:grok -->` and `/autosolve` obtains a
   Codex review without `--self-review`. It never invokes Claude. Grok is still

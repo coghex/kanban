@@ -176,7 +176,8 @@ This repository is developed by agents, and the board reads their state off GitH
 - Origin markers route work to an opposite-brand reviewer. An agent-filed issue body
   carries `<!-- issue-origin:codex -->`, `<!-- issue-origin:claude -->`, or
   `<!-- issue-origin:kimi -->` — a kimi-origin issue's canonical reviewer is Codex,
-  since Kimi is not a spawned provider. An issue
+  since Kimi is not a spawned provider. Board issue revision is refused for
+  that origin; the Kimi session authors its own amendment. An issue
   filed through GitHub's web UI carries neither by design — the templates under
   `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
   absence as legacy provenance, routing it to both reviewers under the default

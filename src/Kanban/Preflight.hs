@@ -44,6 +44,8 @@ module Kanban.Preflight
     blockingRemediation,
     canonicalReviewBrands,
     issueOriginFromBody,
+    issueRevisionUnsupported,
+    issueRevisionUnsupportedMessage,
     revisionAuthorBrand,
     classifyBundleListing,
     classifyClaudeAuth,

@@ -225,17 +225,23 @@ spec = do
         issueOriginFromBody "<!--  issue-origin:Kimi  -->" `shouldBe` IssueOriginKimi
         issueOriginFromBody "a <!-- issue-origin:codex --> b <!-- issue-origin:CODEX -->"
           `shouldBe` IssueOriginCodex
+        issueOriginFromBody "a <!-- issue-origin:kimi --> b <!-- ISSUE-ORIGIN:KIMI -->"
+          `shouldBe` IssueOriginKimi
       it "rejects text that only looks like a marker" $ do
         issueOriginFromBody "issue-origin:claude" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claudex -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:kimii -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin: claude -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claude" `shouldBe` IssueOriginUnmarked
-      -- The backend raises on a body declaring both, before reaching any
+      -- The backend raises on a body declaring conflicting origins before reaching any
       -- reviewer, so preflight must not demand a provider for it either.
       it "mirrors the backend's conflicting-marker case" $ do
-        let conflicting = "<!-- issue-origin:claude -->\n<!-- issue-origin:codex -->"
-        issueOriginFromBody conflicting `shouldBe` IssueOriginConflicting
+        let conflicts =
+              [ "<!-- issue-origin:claude -->\n<!-- issue-origin:codex -->",
+                "<!-- issue-origin:kimi -->\n<!-- issue-origin:codex -->",
+                "<!-- issue-origin:kimi -->\n<!-- issue-origin:claude -->"
+              ]
+        map issueOriginFromBody conflicts `shouldBe` replicate 3 IssueOriginConflicting
         canonicalReviewBrands IssueOriginConflicting `shouldBe` []
         blockedProblems readyPreflightEnvironment (ActionIssueReview IssueOriginConflicting)
           `shouldBe` []

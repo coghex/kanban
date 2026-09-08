@@ -462,11 +462,16 @@ arithmetic, which §2.3 owns.
     Codex reviewer it will never spawn.
     - **dual** — two providers loaded, which is what an absent roster file
       means. Every routing decision, published marker, and result document is
-      exactly what it was before this existed.
+      exactly what it was before this existed. Claude- and Codex-origin issues
+      route to the opposite provider, a Kimi-origin issue routes to Codex only,
+      and an unmarked issue follows the selected legacy policy.
     - **single-agent** — one provider loaded. `reviewers_for_origin` and the
       rereview route both collapse to that provider whatever the origin marker
-      says, and an unmarked issue's `--legacy-policy dual` route collapses with
-      them. `--legacy-policy hold` still holds: an unmarked issue's provenance
+      says, including a Kimi-origin issue, and an unmarked issue's
+      `--legacy-policy dual` route collapses with them. Kimi-origin issue
+      revision remains unavailable because Kimi is not a spawned provider;
+      the Kimi session authors its own amendment. `--legacy-policy hold` still
+      holds: an unmarked issue's provenance
       is unknown, and the collapse decides which reviewer a route names rather
       than creating one the policy withheld. A published rereview marker's
       `trigger=` field is *not* collapsed — it records the parent review's
@@ -1302,21 +1307,27 @@ reimplement the removal, and `--check` remains read-only.
   cannot interpret is reported as unknown and never blocks. Its per-action
   dependency set is exact and follows what each action spawns: the
   canonical gate needs both installed backend files, `gh`, and the reviewer
-  the backend itself invokes (the opposite brand from the issue's origin,
-  or both when unmarked under the dual policy Kanban passes); a revision
+  the backend itself invokes (the opposite brand from a Claude- or Codex-origin
+  issue, Codex for a Kimi-origin issue, or both when unmarked under the dual
+  policy Kanban passes); a supported revision
   needs the coordinator whose embedded-review backend this install starts
   and, where its amendment author is a different brand, that brand's CLI —
   the Claude one `kanban_run_claude` uses for a Claude-origin issue in dual
   mode; neither needs a packaged bundle, since both run their providers
-  directly. Auto-solve needs both brands, since it reviews its own pull
+  directly. Kimi-origin issue revision is refused before this dependency
+  boundary because Kimi is not a spawned provider. The embedded coordinator
+  repeats the refusal after reading the live issue, without commenting or
+  mutating labels, so a marker added after the board cached the issue cannot
+  reopen that path. Auto-solve needs both brands, since it reviews its own pull
   request with the opposite one, and so do `pr-revise` and `repair`: each
   runs on the PR's own brand and spawns the opposite one for its single
   nested canonical rereview (§2.2, §2.7), which is a direct provider call
   and therefore needs that brand's executable and sign-in but not its
   bundle. Single-agent mode narrows every one of those sets to the provider
   it loads (issue #589): the routed reviewer, the coordinator, the amendment
-  author, and both sides of each handoff are the same brand, so no action is
-  blocked on a CLI this install never spawns. `--doctor` is the exception and
+  author, and both sides of each supported handoff are the same brand, so no
+  action is blocked on a CLI this install never spawns. The Kimi revision
+  refusal remains in force. `--doctor` is the exception and
   stays on the whole dual matrix: it is answered before any configuration is
   read, so it has no roster to derive a mode from, and dual is the superset.
 - **Required authority:** setup needs write access to the user's own
