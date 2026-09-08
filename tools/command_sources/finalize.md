@@ -131,15 +131,17 @@ V2_RE = re.compile(
 MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
 # The origin markers, character for character as `originFromBody` spells
 # them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
-# these markers there and is not one here. Grok is a known origin Codex
-# reviews; it is not a spawned provider and never appears in `reviewers=`.
+# these markers there and is not one here. Grok and Kimi are known origins
+# Codex reviews; neither is a spawned provider and neither ever appears in
+# `reviewers=`.
 ORIGIN_MARKERS = {
     "claude": "<!-- pr-origin:claude -->",
     "codex": "<!-- pr-origin:codex -->",
     "grok": "<!-- pr-origin:grok -->",
+    "kimi": "<!-- pr-origin:kimi -->",
 }
 UNKNOWN_ORIGIN_REVIEWERS = {"claude", "codex"}
-GROK_ORIGIN_REVIEWERS = {"codex"}
+EXTERNAL_ORIGIN_REVIEWERS = {"grok": {"codex"}, "kimi": {"codex"}}
 
 repo = sys.argv[1].strip()
 viewer = sys.argv[2].strip()
@@ -339,8 +341,8 @@ reviewers = {
 if origin is None:
     # No declared origin is the dual route the coordinator takes: with no
     # brand to be opposite of, only a review carrying BOTH spawned providers
-    # is known to be independent of whoever wrote the code. Grok is not in
-    # that set: it is not a reviewer brand.
+    # is known to be independent of whoever wrote the code. Grok and Kimi are
+    # not in that set: they are not reviewer brands.
     if reviewers != UNKNOWN_ORIGIN_REVIEWERS:
         refuse(
             "this pull request declares no origin, so only a dual-brand review "
@@ -355,9 +357,11 @@ elif origin in reviewers:
         + ") as a reviewer, which is a self-review",
         True,
     )
-elif origin == "grok" and reviewers != GROK_ORIGIN_REVIEWERS:
+elif origin in EXTERNAL_ORIGIN_REVIEWERS and reviewers != EXTERNAL_ORIGIN_REVIEWERS[origin]:
     refuse(
-        "a grok-origin pull request is reviewed by Codex only; the newest "
+        "a "
+        + origin
+        + "-origin pull request is reviewed by Codex only; the newest "
         "marker names " + ",".join(sorted(reviewers)),
         True,
     )

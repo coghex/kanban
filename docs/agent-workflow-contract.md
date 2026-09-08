@@ -115,9 +115,10 @@ everything else.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
-  A pull request may also carry `<!-- pr-origin:grok -->` when Grok opened it
-  outside Kanban's spawned solvers; that marker is a known origin, not an
-  unknown one, and dual-mode review routes it to Codex only.
+  A pull request may also carry `<!-- pr-origin:grok -->` or
+  `<!-- pr-origin:kimi -->` when Grok or Kimi opened it
+  outside Kanban's spawned solvers; those markers are known origins, not
+  unknown ones, and dual-mode review routes them to Codex only.
 - **Failure semantics:** a missing executable surfaces
   `SolveFailed "<name> was not found on PATH"`; a session may pause with a
   trailing `KANBAN_NEEDS_INPUT: <question>` line and resumes with the same
@@ -160,13 +161,16 @@ arithmetic, which §2.3 owns.
   `adapterPullRequestProcess` — running the named canonical command:
   `pr-review` and `pr-rereview`
   run on the opposite brand from the PR's origin marker whenever the roster
-  loads both providers — except `pr-origin:grok`, which is a known origin
+  loads both providers — except `pr-origin:grok` and `pr-origin:kimi`, which
+  are known origins
   whose cross-brand reviewer is Codex, never Claude, and never both.
   `pr-revise`
   and `repair` run on the PR's own origin brand and each internally invokes
-  exactly one canonical `pr-rereview` after pushing a fix. Grok is not a
-  spawned provider, so board revision and repair of a grok-origin pull
-  request are refused in every operating mode; the Grok session that opened
+  exactly one canonical `pr-rereview` after pushing a fix. Neither Grok nor
+  Kimi is a
+  spawned provider, so board revision and repair of a grok-origin or
+  kimi-origin pull
+  request are refused in every operating mode; the session that opened
   the pull request revises it itself. All three bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
@@ -174,7 +178,8 @@ arithmetic, which §2.3 owns.
   no-agent mode, publishing nothing and changing no label (issue #572).
   Kanban's own dashboard collapses it on the same terms: `agentForAction`
   takes the operating mode, and single-agent routes all four actions to the
-  loaded provider (issue #589) except grok-origin revision and repair, which
+  loaded provider (issue #589) except grok-origin and kimi-origin revision
+  and repair, which
   still have no spawned provider to collapse onto. Which provider that is has one declaration
   site, `Kanban.Models.soleAgent`, as `agentsLoaded` beside it is the one site
   for whether any is loaded; the mode carries the provider rather than only a

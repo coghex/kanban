@@ -43,7 +43,7 @@ import Kanban.Preflight
     preflightDiagnostic,
   )
 import Kanban.ProviderAdapter (brandForProvider)
-import Kanban.PullRequestFlow (grokOwnBrandUnsupported, grokOwnBrandUnsupportedMessage, originFromBody)
+import Kanban.PullRequestFlow (externalOwnBrandUnsupported, externalOwnBrandUnsupportedMessage, originFromBody)
 import Kanban.Solve (SolverBrand)
 
 -- | Where one request's work goes.
@@ -92,8 +92,8 @@ actionRoute config kind solverBrand target = case kind of
         case originFromBody pullRequest.pullRequestBody of
           Left message -> Left (ActionRoutingUnavailable kind message)
           Right origin
-            | grokOwnBrandUnsupported origin action ->
-                Left (ActionRoutingUnavailable kind grokOwnBrandUnsupportedMessage)
+            | externalOwnBrandUnsupported origin action ->
+                Left (ActionRoutingUnavailable kind (externalOwnBrandUnsupportedMessage origin))
             | otherwise -> Right (RouteProvider (ActionPullRequestFlow origin action))
 
 -- | Whether this machine can run the action, from a definite local

@@ -212,7 +212,7 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
         "All questions requiring user input MUST use the kanban_prompt_user tool. Never ask a question in ordinary assistant prose.",
         "Use kind=choice with 2-5 concrete options when possible. Set multiple=false and ask one decision per tool call. Use kind=text only for genuinely free-form context.",
         "Read the live GitHub issue, all of its comments in chronological order, and its labels. The effective specification is the issue body plus canonical issue-comment amendments, with explicit later amendments superseding earlier conflicting text.",
-        "Find the hidden <!-- issue-origin:claude --> or <!-- issue-origin:codex --> marker in the issue body.",
+        "Find the hidden <!-- issue-origin:claude -->, <!-- issue-origin:codex -->, or <!-- issue-origin:kimi --> marker in the issue body.",
         "You MUST use kanban_github_issue for every GitHub issue read, comment, or review-label mutation. Never invoke gh, curl, or a GitHub API through a shell or command tool. The Kanban tool is already authenticated and its update operation is restricted to one issue comment and the three review workflow labels.",
         "Choose the one stage from live labels: reviewed:revised means REREVIEW; otherwise "
           <> workflowConfig.changesRequestedLabel
@@ -235,7 +235,9 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
               <> coordinatorName roster CodexProvider
               <> "; Claude-origin amendment content is authored by "
               <> claudeRevisionName roster
-              <> "; unmarked issues default to you as "
+              <> "; kimi-origin amendment content is authored by you as "
+              <> coordinatorName roster CodexProvider
+              <> " since Kimi is not a spawned provider; unmarked issues default to you as "
               <> coordinatorName roster CodexProvider
               <> "."
           ]

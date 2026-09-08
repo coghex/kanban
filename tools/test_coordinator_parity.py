@@ -519,7 +519,7 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        metavar="ORIGIN",
 +        help=(
 +            "Refuse before spawning if the live origin is not this value "
-+            "(unknown, claude, codex, or grok). Use with --expected-route to "
++            "(unknown, claude, codex, grok, or kimi). Use with --expected-route to "
 +            "fail closed when the pull request drifted after a dry run."
 +        ),
 +    )

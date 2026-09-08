@@ -41,7 +41,7 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
-    grokOwnBrandUnsupportedMessage,
+    externalOwnBrandUnsupportedMessage,
     pullRequestAssignment,
   )
 import Kanban.Solve
@@ -665,8 +665,19 @@ spec = do
       actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
         `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestGrok PullRequestReview))
       actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
-        `shouldSatisfy` either (Text.isInfixOf grokOwnBrandUnsupportedMessage . actionRefusalMessage) (const False)
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGrok) . actionRefusalMessage) (const False)
       agentForAction DualMode PullRequestGrok PullRequestReview `shouldBe` CodexSolver
+
+    it "routes kimi-origin review to Codex and refuses kimi-origin revision" $ do
+      let reviewTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestKimi PullRequestReview] emptyHistory) (TargetByNumber 60))
+          reviseTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestKimi PullRequestRevision] emptyHistory) (TargetByNumber 60))
+      actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
+        `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestKimi PullRequestReview))
+      actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi) . actionRefusalMessage) (const False)
+      agentForAction DualMode PullRequestKimi PullRequestReview `shouldBe` CodexSolver
 
     it "routes the approval queue to no provider at all" $ do
       actionRoute defaultWorkflowConfig ObserveApprovalQueue Nothing (ActionTargetRepositoryWide repositoryUnderTest)
@@ -1379,16 +1390,17 @@ capabilityFromReport environment action =
 
 everyPreflightAction :: [PreflightAction]
 everyPreflightAction =
-  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked, IssueOriginConflicting]]
-    <> [ActionIssueRevision origin | origin <- [IssueOriginCodex, IssueOriginClaude]]
+  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginUnmarked, IssueOriginConflicting]]
+    <> [ActionIssueRevision origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi]]
     <> [ActionSolve brand | brand <- [CodexSolver, ClaudeSolver]]
     <> [ActionAutoSolve brand | brand <- [CodexSolver, ClaudeSolver]]
     <> [ ActionPullRequestFlow origin action
        | origin <- [PullRequestCodex, PullRequestClaude],
          action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
        ]
-    <> [ ActionPullRequestFlow PullRequestGrok action
-       | action <- [PullRequestReview, PullRequestRereview]
+    <> [ ActionPullRequestFlow origin action
+       | origin <- [PullRequestGrok, PullRequestKimi],
+         action <- [PullRequestReview, PullRequestRereview]
        ]
 
 pullRequestFor :: PullRequestAction -> PullRequest
@@ -1413,6 +1425,7 @@ pullRequestForOrigin origin action =
       PullRequestCodex -> "<!-- pr-origin:codex -->"
       PullRequestClaude -> "<!-- pr-origin:claude -->"
       PullRequestGrok -> "<!-- pr-origin:grok -->"
+      PullRequestKimi -> "<!-- pr-origin:kimi -->"
 
 -- | A provider whose executable is definitely absent, which is the one
 -- observation that blocks rather than merely being unknown.

@@ -11,10 +11,10 @@ module Kanban.PullRequestFlow
     authoredOnOwnBrand,
     directPullRequestAction,
     expectedPullRequestOrigin,
+    externalOwnBrandUnsupported,
+    externalOwnBrandUnsupportedMessage,
     flowOutcome,
     labelPullRequestAction,
-    grokOwnBrandUnsupported,
-    grokOwnBrandUnsupportedMessage,
     originFromBody,
     pullRequestArguments,
     pullRequestAssignment,
@@ -63,7 +63,7 @@ import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process (ProcessHandle, createProcess, waitForProcess)
 
-data PullRequestOrigin = PullRequestCodex | PullRequestClaude | PullRequestGrok
+data PullRequestOrigin = PullRequestCodex | PullRequestClaude | PullRequestGrok | PullRequestKimi
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -84,7 +84,8 @@ originMarkers :: [(Text, PullRequestOrigin)]
 originMarkers =
   [ ("<!-- pr-origin:codex -->", PullRequestCodex),
     ("<!-- pr-origin:claude -->", PullRequestClaude),
-    ("<!-- pr-origin:grok -->", PullRequestGrok)
+    ("<!-- pr-origin:grok -->", PullRequestGrok),
+    ("<!-- pr-origin:kimi -->", PullRequestKimi)
   ]
 
 originFromBody :: Text -> Either Text PullRequestOrigin
@@ -222,25 +223,33 @@ crossBrandAgentForAction origin action
   | authoredOnOwnBrand action = case origin of
       PullRequestCodex -> CodexSolver
       PullRequestClaude -> ClaudeSolver
-      -- Grok is not a spawned provider. Own-brand board actions are refused
-      -- at the start boundary; this arm exists so the function stays total.
+      -- External origins are not spawned providers. Own-brand board actions
+      -- are refused at the start boundary; these arms exist so the function
+      -- stays total.
       PullRequestGrok -> CodexSolver
+      PullRequestKimi -> CodexSolver
   | otherwise = case origin of
       PullRequestCodex -> ClaudeSolver
       PullRequestClaude -> CodexSolver
       PullRequestGrok -> CodexSolver
+      PullRequestKimi -> CodexSolver
 
--- | Grok is a known origin Codex reviews, not a compiled provider Kanban can
--- spawn. Revision and repair of a grok-origin pull request therefore have no
--- board agent in any operating mode; the Grok session that opened the pull
--- request revises it itself.
-grokOwnBrandUnsupported :: PullRequestOrigin -> PullRequestAction -> Bool
-grokOwnBrandUnsupported PullRequestGrok action = authoredOnOwnBrand action
-grokOwnBrandUnsupported _ _ = False
+-- | Grok and Kimi are known origins Codex reviews, not compiled providers
+-- Kanban can spawn. Revision and repair of an external-origin pull request
+-- therefore have no board agent in any operating mode; the session that
+-- opened the pull request revises it itself.
+externalOwnBrandUnsupported :: PullRequestOrigin -> PullRequestAction -> Bool
+externalOwnBrandUnsupported PullRequestGrok action = authoredOnOwnBrand action
+externalOwnBrandUnsupported PullRequestKimi action = authoredOnOwnBrand action
+externalOwnBrandUnsupported _ _ = False
 
-grokOwnBrandUnsupportedMessage :: Text
-grokOwnBrandUnsupportedMessage =
+externalOwnBrandUnsupportedMessage :: PullRequestOrigin -> Text
+externalOwnBrandUnsupportedMessage PullRequestGrok =
   "grok-origin revision and repair are not a board action; Grok is not a spawned provider"
+externalOwnBrandUnsupportedMessage PullRequestKimi =
+  "kimi-origin revision and repair are not a board action; Kimi is not a spawned provider"
+externalOwnBrandUnsupportedMessage _ =
+  "external-origin revision and repair are not a board action; the origin is not a spawned provider"
 
 -- | The brand a pull-request worker that already exists is running on.
 --

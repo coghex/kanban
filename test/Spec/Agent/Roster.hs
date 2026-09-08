@@ -63,7 +63,7 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
-    grokOwnBrandUnsupportedMessage,
+    externalOwnBrandUnsupportedMessage,
     pullRequestAssignment,
     pullRequestRole,
   )
@@ -250,7 +250,10 @@ spec = do
       pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
       pullRequestStartRefusal rostered PullRequestGrok PullRequestReview `shouldBe` Nothing
       pullRequestStartRefusal rostered PullRequestGrok PullRequestRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf grokOwnBrandUnsupportedMessage)
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGrok))
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestReview `shouldBe` Nothing
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the

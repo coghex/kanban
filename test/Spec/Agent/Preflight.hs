@@ -211,6 +211,7 @@ spec = do
       it "reads an issue's origin from its marker" $ do
         issueOriginFromBody "Body\n\n<!-- issue-origin:claude -->" `shouldBe` IssueOriginClaude
         issueOriginFromBody "Body\n\n<!-- issue-origin:codex -->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "Body\n\n<!-- issue-origin:kimi -->" `shouldBe` IssueOriginKimi
         issueOriginFromBody "Body with no marker" `shouldBe` IssueOriginUnmarked
       -- The backend routes on ORIGIN_RE, which is case-insensitive and
       -- allows whitespace on both sides of the value. Reading it more
@@ -221,11 +222,13 @@ spec = do
         issueOriginFromBody "<!--issue-origin:codex-->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "<!--   issue-origin:codex   -->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "<!--\n  issue-origin:codex\n-->" `shouldBe` IssueOriginCodex
+        issueOriginFromBody "<!--  issue-origin:Kimi  -->" `shouldBe` IssueOriginKimi
         issueOriginFromBody "a <!-- issue-origin:codex --> b <!-- issue-origin:CODEX -->"
           `shouldBe` IssueOriginCodex
       it "rejects text that only looks like a marker" $ do
         issueOriginFromBody "issue-origin:claude" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claudex -->" `shouldBe` IssueOriginUnmarked
+        issueOriginFromBody "<!-- issue-origin:kimii -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin: claude -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claude" `shouldBe` IssueOriginUnmarked
       -- The backend raises on a body declaring both, before reaching any
@@ -243,6 +246,7 @@ spec = do
       it "routes the revision amendment author by that origin" $ do
         revisionAuthorBrand IssueOriginClaude `shouldBe` ClaudeSolver
         revisionAuthorBrand IssueOriginCodex `shouldBe` CodexSolver
+        revisionAuthorBrand IssueOriginKimi `shouldBe` CodexSolver
         revisionAuthorBrand IssueOriginUnmarked `shouldBe` CodexSolver
       -- approve_issues.py spawns the opposite brand itself, and both under
       -- the dual legacy policy Kanban always passes, so the canonical gate
@@ -250,15 +254,20 @@ spec = do
       it "routes the canonical reviewer to the opposite brand, or both when unmarked" $ do
         canonicalReviewBrands IssueOriginClaude `shouldBe` [CodexSolver]
         canonicalReviewBrands IssueOriginCodex `shouldBe` [ClaudeSolver]
+        -- Kimi is a known origin that is never a spawned reviewer: Codex
+        -- only, like a grok-origin pull request.
+        canonicalReviewBrands IssueOriginKimi `shouldBe` [CodexSolver]
         canonicalReviewBrands IssueOriginUnmarked `shouldBe` [CodexSolver, ClaudeSolver]
       it "requires the canonical reviewer's own CLI for a review" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ExecutableUnavailable]
         blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` []
+        blockedProblems environment (ActionIssueReview IssueOriginKimi) `shouldBe` []
         blockedProblems environment (ActionIssueReview IssueOriginUnmarked) `shouldBe` [ExecutableUnavailable]
       it "requires a signed-in canonical reviewer for a review" $ do
         let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeAuth = AuthNotAuthenticated "signed out"}
         blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
+        blockedProblems environment (ActionIssueReview IssueOriginKimi) `shouldBe` [ProviderUnauthenticated]
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
       -- pr-revise runs on the PR's own brand and then spawns the opposite
       -- one for its single nested canonical rereview, so a revision needs
@@ -517,6 +526,7 @@ spec = do
             (\action -> doctorActions `shouldSatisfy` elem action)
             [ ActionIssueReview IssueOriginCodex,
               ActionIssueReview IssueOriginClaude,
+              ActionIssueReview IssueOriginKimi,
               ActionIssueReview IssueOriginUnmarked,
               ActionIssueRevision IssueOriginCodex,
               ActionIssueRevision IssueOriginClaude,
@@ -527,9 +537,11 @@ spec = do
               ActionPullRequestFlow PullRequestCodex PullRequestReview,
               ActionPullRequestFlow PullRequestClaude PullRequestReview,
               ActionPullRequestFlow PullRequestGrok PullRequestReview,
+              ActionPullRequestFlow PullRequestKimi PullRequestReview,
               ActionPullRequestFlow PullRequestCodex PullRequestRereview,
               ActionPullRequestFlow PullRequestClaude PullRequestRereview,
               ActionPullRequestFlow PullRequestGrok PullRequestRereview,
+              ActionPullRequestFlow PullRequestKimi PullRequestRereview,
               ActionPullRequestFlow PullRequestCodex PullRequestRevision,
               ActionPullRequestFlow PullRequestClaude PullRequestRevision,
               ActionPullRequestFlow PullRequestCodex PullRequestRepair,
@@ -544,6 +556,9 @@ spec = do
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR review (r) · grok-origin"
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r) · grok-origin"
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "PR repair (r) · grok-origin")
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR review (r) · kimi-origin"
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r) · kimi-origin"
+          rendered `shouldSatisfy` (not . Data.Text.isInfixOf "PR repair (r) · kimi-origin")
           -- The drainer keeps its own dedicated install and status flow.
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
 

@@ -174,17 +174,20 @@ This repository is developed by agents, and the board reads their state off GitH
 - Workflow labels: `reviewed:approve` for approved work, `reviewed:changes` for changes
   requested, `reviewed:revised` for a revision handed back for rereview.
 - Origin markers route work to an opposite-brand reviewer. An agent-filed issue body
-  carries `<!-- issue-origin:codex -->` or `<!-- issue-origin:claude -->`. An issue
+  carries `<!-- issue-origin:codex -->`, `<!-- issue-origin:claude -->`, or
+  `<!-- issue-origin:kimi -->` — a kimi-origin issue's canonical reviewer is Codex,
+  since Kimi is not a spawned provider. An issue
   filed through GitHub's web UI carries neither by design — the templates under
   `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
   absence as legacy provenance, routing it to both reviewers under the default
   `--legacy-policy dual` rather than to one. A pull request body
   carries exactly one of `<!-- pr-origin:codex -->`, `<!-- pr-origin:claude -->`,
-  or `<!-- pr-origin:grok -->` as its
+  `<!-- pr-origin:grok -->`, or `<!-- pr-origin:kimi -->` as its
   final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
-  duplicated, mixed, or trailing-text marker. A grok-origin pull request is a
-  known origin Codex reviews; it is not a spawned Kanban provider, so board
-  revision and repair of that origin are refused.
+  duplicated, mixed, or trailing-text marker. A grok-origin or kimi-origin pull
+  request is a
+  known origin Codex reviews; neither is a spawned Kanban provider, so board
+  revision and repair of those origins are refused.
 - Never merge a pull request on your own initiative. Solve, review, and
   autonomous agents stop at the open PR; `tools/drain_prs.py` owns merging
   eligible PRs out of the Done column. The single exception is the packaged

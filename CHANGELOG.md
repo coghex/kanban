@@ -15,6 +15,17 @@ created above it.
 
 ### Unreleased
 
+- `<!-- pr-origin:kimi -->` is a known pull-request origin, on the same terms
+  as grok: dual-mode review and rereview route it to Codex only — not Claude,
+  and not both brands, which is what an unrecognized marker still does. Kimi
+  is not a spawned provider, so the board and the action registry refuse
+  revision and repair of that origin; the Kimi session that opened the pull
+  request revises it itself. The grok-only refusal helpers generalized into
+  `externalOwnBrandUnsupported`/`externalOwnBrandUnsupportedMessage`, which
+  take the origin.
+- `<!-- issue-origin:kimi -->` is a known issue origin: the canonical issue
+  gate routes it to Codex only, instead of the legacy dual route an
+  unrecognized marker takes.
 - The tracked Grok plugin (`grok-plugin/`) packages `/solve` and `/autosolve`.
   A Grok session stamps `<!-- pr-origin:grok -->` and `/autosolve` obtains a
   Codex review without `--self-review`. It never invokes Claude. Grok is still
