@@ -225,10 +225,10 @@ def imported_modules(path):
 
 
 def load_helper(brand: str):
-    """Import one vendored copy by file path. Neither lives under tools/, so
-    neither is ever on sys.path via `-s tools` discovery, and the two must be
-    loaded under distinct module names so importing one cannot serve the
-    other's assertions from sys.modules."""
+    """Import one vendored copy by file path. None of the three lives under
+    tools/, so none is ever on sys.path via `-s tools` discovery, and the
+    three must be loaded under distinct module names so importing one cannot
+    serve another's assertions from sys.modules."""
     path = HELPERS[brand]
     spec = importlib.util.spec_from_file_location(
         f"kanban_{brand}_plugin_trusted_issue_spec", path

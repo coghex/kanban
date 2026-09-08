@@ -76,10 +76,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_0_5(self):
+    def test_the_plugin_manifest_declares_version_1_0_6(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.5")
+        self.assertEqual(document["version"], "1.0.6")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -430,7 +430,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
 
         return wrapped
 
-    def pr(self, origin):
+    def pr(self, origin, *, cross_repository=False):
         body = "summary\n\n"
         if origin is not None:
             body += f"<!-- pr-origin:{origin} -->\n"
@@ -438,7 +438,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
             "url": "https://github.com/coghex/kanban/pull/7",
             "headRefOid": "a" * 40,
             "body": body,
-            "isCrossRepository": False,
+            "isCrossRepository": cross_repository,
             "closingIssuesReferences": [],
             "isDraft": False,
         }
@@ -573,6 +573,69 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                         expected_route="codex",
                     )
                 collect.assert_called()
+
+    def test_pr_origin_keeps_a_cross_repository_grok_marker(self):
+        self.assertEqual(
+            self.module.pr_origin(self.pr("grok", cross_repository=True)),
+            "grok",
+        )
+        self.assertIsNone(
+            self.module.pr_origin(self.pr("claude", cross_repository=True))
+        )
+        self.assertIsNone(
+            self.module.pr_origin(self.pr("codex", cross_repository=True))
+        )
+        self.assertEqual(
+            self.module.pr_origin(self.pr("grok", cross_repository=False)),
+            "grok",
+        )
+
+    def test_a_cross_repository_grok_origin_still_routes_to_codex(self):
+        # /solve opens a fork PR with --head <push-owner>:<branch>, which GitHub
+        # reports as isCrossRepository. That must not wipe a grok marker: the
+        # unknown dual-mode route is codex+claude, and /autosolve refuses it.
+        with mock.patch.object(
+            self.module,
+            "pr_view",
+            return_value=self.pr("grok", cross_repository=True),
+        ):
+            with mock.patch.object(self.module, "collect_context") as collect:
+                collect.side_effect = RuntimeError("stop after the binding check")
+                with self.assertRaises(RuntimeError):
+                    self.module.workflow(
+                        Path("/fake-repo"),
+                        7,
+                        rereview=False,
+                        dry_run=False,
+                        allow_no_issue=True,
+                        expected_origin="grok",
+                        expected_route="codex",
+                    )
+                collect.assert_called()
+                self.assertEqual(self.calls, [])
+
+    def test_a_cross_repository_non_grok_marker_stays_unknown(self):
+        code, result = self.run_workflow_cross(
+            origin="claude", expected_origin="grok", expected_route="codex"
+        )
+        self.assert_mismatch(code, result, "unknown", "codex+claude")
+        self.assertIn("no reviewer was spawned", result["error"])
+
+    def run_workflow_cross(self, origin, expected_origin, expected_route):
+        with mock.patch.object(
+            self.module,
+            "pr_view",
+            return_value=self.pr(origin, cross_repository=True),
+        ):
+            return self.module.workflow(
+                Path("/fake-repo"),
+                7,
+                rereview=False,
+                dry_run=False,
+                allow_no_issue=True,
+                expected_origin=expected_origin,
+                expected_route=expected_route,
+            )
 
 
 # The whole tracked Grok tree, not just plugins/kanban/: marketplace.json

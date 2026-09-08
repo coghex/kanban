@@ -885,7 +885,7 @@ class SourceDistributionTest(unittest.TestCase):
     def test_provider_bundle_manifests_ship(self):
         self.assert_present(
             PROVIDER_MANIFESTS,
-            "Both provider bundles must carry the manifests "
+            "All three provider bundles must carry the manifests "
             "`plugin marketplace add` reads.",
         )
 

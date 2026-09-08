@@ -156,7 +156,10 @@ The body's final non-whitespace content must be `<!-- pr-origin:grok -->`,
 and that marker is what routes the review to Codex. A body that carries none,
 or carries a duplicated or mixed marker, has an unknown origin and routes to
 both brands — including Claude — instead; stop and report it rather than
-reviewing anything yourself, and rather than letting a dual review start.
+reviewing anything yourself, and rather than letting a dual review start. A
+pull request /solve opened from a different push remote is still grok-origin:
+the bundled coordinator reads that marker even when GitHub reports
+`isCrossRepository`.
 
 ## 5. The review loop
 

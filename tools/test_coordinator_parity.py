@@ -336,6 +336,16 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
+ def pr_origin(pr: dict[str, Any]) -> str | None:
+-    if pr.get("isCrossRepository"):
+-        return None
+-    return origin_from_body(str(pr.get("body") or ""))
++    origin = origin_from_body(str(pr.get("body") or ""))
++    if pr.get("isCrossRepository"):
++        return origin if origin == "grok" else None
++    return origin
+ def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
+@@
     in docs/agent-workflow-contract.md §4 declaring this file, and that
 -    reconciliation matches a literal, not an expression. This bundle vendors a
 -    copy of kanban_config.py beside this module and still does not import it:
@@ -499,6 +509,11 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        expected_origin=expected_origin, expected_route=expected_route,
      )
 @@
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
+     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
+@@
          help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
 +        "--expected-origin",
 +        metavar="ORIGIN",
@@ -540,6 +555,7 @@ GROK_ROUTE_VOCABULARY = (
     "live_origin",
     "live_route",
     "kanban_config.py",
+    "isCrossRepository",
 )
 
 # What a failing gate has to tell an author. Issue #624's false failures were
@@ -967,8 +983,9 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
 
 
 class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
-    """The Grok coordinator differs from Claude in expected-origin/route
-    and in not vendoring kanban_config.py beside the coordinator."""
+    """The Grok coordinator differs from Claude in expected-origin/route,
+    in not vendoring kanban_config.py beside the coordinator, and in
+    reading a grok marker on a cross-repository pull request."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -980,8 +997,9 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         if report is not None:
             self.fail(
                 "The Grok coordinator diverges from the Claude copy outside "
-                "the --expected-origin/--expected-route extension and the "
-                "kanban_config.py vendor claim.\n\n"
+                "the --expected-origin/--expected-route extension, the "
+                "kanban_config.py vendor claim, and cross-repository grok "
+                "provenance.\n\n"
                 f"{report}"
             )
 

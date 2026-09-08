@@ -3765,7 +3765,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
             (
                 # Issue #444 gave the record its XDG sibling, and issue #445
-                # gave both rows the twelve packaged readers that probe them.
+                # gave both rows the fourteen packaged readers that probe them
+                # (eleven markdown resolvers plus three coordinators).
                 # Neither spelling is tools/kanban_config.py's: that module
                 # composes the record path from the install directory above
                 # and a separate file name, so it carries neither literal

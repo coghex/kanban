@@ -608,9 +608,10 @@ def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
 
 
 def pr_origin(pr: dict[str, Any]) -> str | None:
+    origin = origin_from_body(str(pr.get("body") or ""))
     if pr.get("isCrossRepository"):
-        return None
-    return origin_from_body(str(pr.get("body") or ""))
+        return origin if origin == "grok" else None
+    return origin
 
 
 def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
@@ -2113,6 +2114,8 @@ def self_test() -> None:
     assert refusal_code == 1 and refusal["status"] == NO_AGENT_STATUS
     assert "no-agent" in refusal["error"]
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "APPROVE"}]) == "APPROVE"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "CHANGES_REQUESTED"}]) == "CHANGES_REQUESTED"

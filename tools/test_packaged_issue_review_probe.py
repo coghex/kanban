@@ -88,8 +88,8 @@ def record_resolver_fence(relative_path):
 
 
 def load_coordinator(name, relative_path):
-    """Import a packaged coordinator by file path; neither lives under
-    tools/, so neither is importable by name."""
+    """Import a packaged coordinator by file path; none of the three live
+    under tools/, so none is importable by name."""
     module_name = f"kanban_{name}_plugin_review_pr_probe"
     spec = importlib.util.spec_from_file_location(module_name, REPO_ROOT / relative_path)
     module = importlib.util.module_from_spec(spec)
