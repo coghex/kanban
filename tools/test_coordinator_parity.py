@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the two tracked review coordinators.
+"""Bounded-divergence gate for the three tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -111,6 +111,9 @@ CODEX_COORDINATOR = (
     / "pr-review"
     / "scripts"
     / "review_pr.py"
+)
+GROK_COORDINATOR = (
+    REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
@@ -329,12 +332,92 @@ DOCUMENTED_DIVERGENCE = r'''@@
 +    assert pinned_match and pinned_match.group("models") == "gpt-5.6-sol@xhigh"
      print("self-test passed")'''
 
+# Claude vs Grok: the Grok copy is the Claude pinning coordinator plus
+# --expected-origin/--expected-route refuse-before-spawn. Compared the same
+# way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
+GROK_DOCUMENTED_DIVERGENCE = r'''@@
+     explicit_repo: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in reviewers)
++    if expected_origin is not None and live_origin != expected_origin:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
+     base = {
+@@
+         "head": pr["headRefOid"],
+-        "origin": origin or "unknown",
+-        "route": "+".join(item.key for item in reviewers),
++        "origin": live_origin,
++        "route": live_route,
+         "review_mode": "standalone" if allow_no_issue else "issue-gated",
+@@
+         help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
++        "--expected-origin",
++        metavar="ORIGIN",
++        help=(
++            "Refuse before spawning if the live origin is not this value "
++            "(unknown, claude, codex, or grok). Use with --expected-route to "
++            "fail closed when the pull request drifted after a dry run."
++        ),
++    )
++    parser.add_argument(
++        "--expected-route",
++        metavar="ROUTE",
++        help=(
++            "Refuse before spawning if the live reviewer route is not this "
++            "value (for example codex). Combined with --expected-origin this "
++            "is how a grok-origin autosolve refuses a Claude spawn."
++        ),
++    )
++    parser.add_argument(
+         "--repo",
+@@
+                 explicit_repo=args.repo,
++                expected_origin=args.expected_origin,
++                expected_route=args.expected_route,
+             )'''
+
 # The vocabulary §2.2's exception is written in. Used only as a backstop on
 # DOCUMENTED_DIVERGENCE itself: regenerating that constant to bless a fresh
 # divergence has to smuggle the new lines past this too, so a unit that has
 # nothing to do with model or effort pinning cannot be recorded as though it
 # were part of the pinning exception.
 PINNING_VOCABULARY = ("model", "effort")
+GROK_ROUTE_VOCABULARY = (
+    "expected-origin",
+    "expected-route",
+    "expected_origin",
+    "expected_route",
+    "route_mismatch",
+    "live_origin",
+    "live_route",
+)
 
 # What a failing gate has to tell an author. Issue #624's false failures were
 # expensive because the advice named only the one cause it was not -- the
@@ -447,6 +530,11 @@ def divergent_lines(unit: DivergentUnit) -> str:
 
 def belongs_to_the_pinning_exception(unit: DivergentUnit) -> bool:
     return any(word in divergent_lines(unit).lower() for word in PINNING_VOCABULARY)
+
+
+def belongs_to_the_route_binding_exception(unit: DivergentUnit) -> bool:
+    text = divergent_lines(unit)
+    return any(word in text for word in GROK_ROUTE_VOCABULARY)
 
 
 def mirror_units(units: list[DivergentUnit]) -> list[DivergentUnit]:
@@ -753,6 +841,43 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
                 self.assertIn("def url_names_a_pull_request(", source)
                 self.assertIn("def github_number_kind(", source)
                 self.assertIn("is an ISSUE, not a pull request", source)
+
+
+class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
+    """The Grok coordinator differs from Claude only in expected-origin/route."""
+
+    def setUp(self):
+        self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
+        self.grok_source = GROK_COORDINATOR.read_text(encoding="utf-8")
+        self.units = documented_units(GROK_DOCUMENTED_DIVERGENCE)
+
+    def test_grok_differs_from_claude_only_in_the_route_binding_extension(self):
+        report = divergence_report(self.claude_source, self.grok_source, self.units)
+        if report is not None:
+            self.fail(
+                "The Grok coordinator diverges from the Claude copy outside "
+                "the --expected-origin/--expected-route extension.\n\n"
+                f"{report}"
+            )
+
+    def test_every_recorded_grok_unit_belongs_to_the_route_binding_exception(self):
+        self.assertTrue(self.units, "GROK_DOCUMENTED_DIVERGENCE records no units")
+        for index, unit in enumerate(self.units):
+            with self.subTest(unit=index):
+                self.assertTrue(
+                    belongs_to_the_route_binding_exception(unit),
+                    f"Grok divergence unit {index} is not the route-binding "
+                    f"extension:\n{rendered_unit(unit)}",
+                )
+
+    def test_an_unrelated_grok_only_line_fails_the_gate(self):
+        drifted = self.grok_source.replace(
+            "REVIEW_TIMEOUT_SECONDS = 7200",
+            "REVIEW_TIMEOUT_SECONDS = 60",
+            1,
+        )
+        report = divergence_report(self.claude_source, drifted, self.units)
+        self.assertIsNotNone(report)
 
 
 class SharedEditStabilityTests(unittest.TestCase):

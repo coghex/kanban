@@ -10,12 +10,15 @@ reviewer, the vendored helpers, and the self-review prohibition.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import plugin_bundle_gate
 
@@ -35,8 +38,8 @@ CLAUDE_ORIGIN = "<!-- pr-origin:claude -->"
 CODEX_ORIGIN = "<!-- pr-origin:codex -->"
 
 COORDINATOR_LOOKUP = (
-    'find "${GROK_HOME:-$HOME/.grok}" -path \'*/kanban/scripts/review_pr.py\' '
-    "2>/dev/null | head -n1"
+    'find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" '
+    "-path '*/scripts/review_pr.py' 2>/dev/null | head -n1"
 )
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
@@ -49,10 +52,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_0_0(self):
+    def test_the_plugin_manifest_declares_version_1_0_1(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.0")
+        self.assertEqual(document["version"], "1.0.1")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -138,6 +141,145 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text)
         self.assertNotIn("$CODEX_HOME", text)
         self.assertIn("Never fall back to a\nClaude or Codex plugin path", text)
+        self.assertIn("installed-plugins/kanban-<hash>", text)
+        self.assertIn("$GROK_PLUGIN_ROOT", text)
+
+
+def load_grok_review_pr():
+    spec = importlib.util.spec_from_file_location(
+        "kanban_grok_plugin_review_pr", COORDINATOR
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ExpectedRouteBindingTests(unittest.TestCase):
+    """Behavioral coverage for --expected-origin/--expected-route.
+
+    A string search can pass while the flags are parsed and ignored. These
+    drive workflow() with a live origin/route that disagrees, and prove
+    collect_context, reviewer spawn (including Claude), and publication are
+    not reached.
+    """
+
+    def setUp(self):
+        self.module = load_grok_review_pr()
+        self.calls = []
+        dual = self.module.kanban_models().DUAL_MODE
+        self.operating = mock.patch.object(
+            self.module, "operating_mode", return_value=(dual, ("codex", "claude"))
+        )
+        self.operating.start()
+        self.addCleanup(self.operating.stop)
+        self.resolve = mock.patch.object(
+            self.module, "resolve_repository", return_value="coghex/kanban"
+        )
+        self.resolve.start()
+        self.addCleanup(self.resolve.stop)
+        self.gate = mock.patch.object(
+            self.module,
+            "gate_status",
+            return_value={
+                "allow_no_issue": True,
+                "approved": True,
+                "checks": [],
+                "invalid_links": [],
+                "issues": [],
+                "key": "deadbeef",
+                "overridden_issues": [],
+                "override_issue_gate": False,
+                "override_reason": None,
+            },
+        )
+        self.gate.start()
+        self.addCleanup(self.gate.stop)
+        for name in (
+            "collect_context",
+            "invoke_codex",
+            "invoke_claude",
+            "invoke_reviewer",
+            "run_reviews",
+            "publish_results",
+            "set_verdict_label",
+            "post_comment",
+        ):
+            if hasattr(self.module, name):
+                patched = mock.patch.object(
+                    self.module, name, side_effect=self._forbidden(name)
+                )
+                patched.start()
+                self.addCleanup(patched.stop)
+
+    def _forbidden(self, name):
+        def wrapped(*args, **kwargs):
+            self.calls.append(name)
+            raise AssertionError(f"{name} must not run on route_mismatch")
+
+        return wrapped
+
+    def pr(self, origin):
+        body = "summary\n\n"
+        if origin is not None:
+            body += f"<!-- pr-origin:{origin} -->\n"
+        return {
+            "url": "https://github.com/coghex/kanban/pull/7",
+            "headRefOid": "a" * 40,
+            "body": body,
+            "isCrossRepository": False,
+            "closingIssuesReferences": [],
+            "isDraft": False,
+        }
+
+    def run_workflow(self, origin, expected_origin, expected_route):
+        with mock.patch.object(self.module, "pr_view", return_value=self.pr(origin)):
+            return self.module.workflow(
+                Path("/fake-repo"),
+                7,
+                rereview=False,
+                dry_run=False,
+                allow_no_issue=True,
+                expected_origin=expected_origin,
+                expected_route=expected_route,
+            )
+
+    def assert_mismatch(self, code, result, origin, route):
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "route_mismatch")
+        self.assertEqual(result["origin"], origin)
+        self.assertEqual(result["route"], route)
+        self.assertEqual(self.calls, [])
+
+    def test_a_drifted_origin_refuses_before_spawning_claude(self):
+        code, result = self.run_workflow(
+            origin="claude", expected_origin="grok", expected_route="codex"
+        )
+        self.assert_mismatch(code, result, "claude", "codex")
+        self.assertIn("no reviewer was spawned", result["error"])
+
+    def test_an_unknown_origin_refuses_before_the_dual_route_can_spawn_claude(self):
+        code, result = self.run_workflow(
+            origin=None, expected_origin="grok", expected_route="codex"
+        )
+        self.assert_mismatch(code, result, "unknown", "codex+claude")
+        self.assertIn("no reviewer was spawned", result["error"])
+
+    def test_a_matching_grok_codex_binding_is_not_a_mismatch(self):
+        with mock.patch.object(self.module, "pr_view", return_value=self.pr("grok")):
+            with mock.patch.object(self.module, "collect_context") as collect:
+                collect.side_effect = RuntimeError("stop after the binding check")
+                with self.assertRaises(RuntimeError):
+                    self.module.workflow(
+                        Path("/fake-repo"),
+                        7,
+                        rereview=False,
+                        dry_run=False,
+                        allow_no_issue=True,
+                        expected_origin="grok",
+                        expected_route="codex",
+                    )
+                collect.assert_called()
 
 
 BUNDLE_PREFIX = "grok-plugin/plugins/kanban"

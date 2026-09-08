@@ -172,12 +172,15 @@ reviewed. Omitting the flag makes the coordinator spawn the real Codex
 reviewer, which is the whole point of this step. Passing `--self-review-as
 claude` or any other declaration is forbidden.
 
-Locate the coordinator under `$GROK_HOME` (default `~/.grok`), the same way
-/solve locates the trusted-comment helper, because the working directory is
-the repository being worked:
+Locate the coordinator the same way /solve locates the trusted-comment
+helper, because the working directory is the repository being worked.
+Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory
+this session loaded, whether a hashed install or a local marketplace source
+outside `$GROK_HOME`. Otherwise search the documented install layout
+`$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`):
 
 ```bash
-COORDINATOR="$(find "${GROK_HOME:-$HOME/.grok}" -path '*/kanban/scripts/review_pr.py' 2>/dev/null | head -n1)"
+COORDINATOR="$(find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" -path '*/scripts/review_pr.py' 2>/dev/null | head -n1)"
 ```
 
 If that leaves `$COORDINATOR` empty, stop and report it. Never fall back to a

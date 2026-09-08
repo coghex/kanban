@@ -10,8 +10,8 @@ each packaged resolver against a redirected `$HOME` and assert which record it
 selects, which backend it returns, and what its diagnostic says when it finds
 none.
 
-Twelve resolvers owe the same answers -- the ten markdown workflow assets whose
-`bash` fence resolves the backend, and both pull-request coordinators -- and
+Fourteen resolvers owe the same answers -- the eleven markdown workflow assets whose
+`bash` fence resolves the backend, and the three pull-request coordinators -- and
 each is exercised through its real surface: the fence by running it in `bash`,
 the coordinator by calling its `approver_path()`. Nothing here reimplements the
 probe, so these tests cannot agree with a resolver that is wrong.
@@ -42,9 +42,9 @@ LIBRARY_RECORD_DIR = "Library/Application Support/kanban/issue-review"
 RECORD_NAME = "config.json"
 BACKEND_NAME = "approve_issues.py"
 
-# Every markdown workflow asset whose bash fence resolves the backend. All ten
-# carry the same fence, which test_every_markdown_fence_is_the_same_probe pins;
-# that is what lets the full case matrix run against one of them.
+# Every markdown workflow asset whose bash fence resolves the backend. All
+# eleven carry the same fence, which test_every_markdown_fence_is_the_same_probe
+# pins; that is what lets the full case matrix run against one of them.
 MARKDOWN_RESOLVER_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
     "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
@@ -56,6 +56,7 @@ MARKDOWN_RESOLVER_ASSETS = (
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 REPRESENTATIVE_MARKDOWN_ASSET = "claude-plugin/plugins/kanban/commands/solve.md"
@@ -63,6 +64,7 @@ REPRESENTATIVE_MARKDOWN_ASSET = "claude-plugin/plugins/kanban/commands/solve.md"
 COORDINATORS = (
     ("claude", "claude-plugin/plugins/kanban/scripts/review_pr.py"),
     ("codex", "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py"),
+    ("grok", "grok-plugin/plugins/kanban/scripts/review_pr.py"),
 )
 
 BASH_FENCE_RE = re.compile(r"```bash\n(.*?)\n[ \t]*```", re.DOTALL)
@@ -166,7 +168,7 @@ def coordinator_resolvers():
 
 
 def every_resolver():
-    """The full twelve."""
+    """The full fourteen."""
     return [
         MarkdownFenceResolver(path) for path in MARKDOWN_RESOLVER_ASSETS
     ] + coordinator_resolvers()
@@ -194,7 +196,7 @@ class PackagedRecordProbeTests(unittest.TestCase):
 
     Run against both coordinators and one markdown fence standing in for the
     ten that are byte-identical to it; EveryPackagedResolverProbesTests below
-    pins that identity and drives all twelve through the ordering case.
+    pins that identity and drives all fourteen through the ordering case.
     """
 
     @classmethod
@@ -367,7 +369,7 @@ class PackagedRecordProbeTests(unittest.TestCase):
 
 class EveryPackagedResolverProbesTests(unittest.TestCase):
     """The matrix above runs against one markdown fence. These hold the other
-    nine to being the same program, and drive every one of the twelve through
+    ten to being the same program, and drive every one of the fourteen through
     the ordering case so none is covered by identity alone."""
 
     def test_every_markdown_fence_is_the_same_probe(self):
@@ -375,14 +377,14 @@ class EveryPackagedResolverProbesTests(unittest.TestCase):
             relative_path: record_resolver_fence(relative_path)
             for relative_path in MARKDOWN_RESOLVER_ASSETS
         }
-        self.assertEqual(len(fences), 10)
+        self.assertEqual(len(fences), 11)
         reference = fences[REPRESENTATIVE_MARKDOWN_ASSET]
         for relative_path, fence in fences.items():
             self.assertEqual(fence, reference, relative_path)
 
     def test_every_packaged_resolver_prefers_the_xdg_installation(self):
         resolvers = every_resolver()
-        self.assertEqual(len(resolvers), 12)
+        self.assertEqual(len(resolvers), 14)
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch) / "home"
             xdg_backend = install(home / XDG_RECORD_DIR)

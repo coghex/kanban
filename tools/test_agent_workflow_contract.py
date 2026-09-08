@@ -256,9 +256,9 @@ MANAGED_RECORD_TOKENS = {
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
-# issue-review backend out of the discovery record. All ten carry the same
-# probe, so all ten spell both record locations; `triage` and `retriage` reach
-# no other home-relative scan, which is why the pin below names the whole ten
+# issue-review backend out of the discovery record. All eleven carry the same
+# probe, so all eleven spell both record locations; `triage` and `retriage` reach
+# no other home-relative scan, which is why the pin below names the whole eleven
 # rather than the six that also sit in a scanned surface list.
 MARKDOWN_RECORD_RESOLVER_FILES = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -464,6 +464,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
     "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
+    "grok-plugin/plugins/kanban/scripts/kanban_models.py": set(),
 }
 
 # Both shipped copies of the janitor census, and the manifest rows each one
@@ -1911,6 +1912,29 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # installed; pin its command surface directly, the same way the
         # Codex copy is pinned above.
         content = (REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
+    def test_every_grok_plugin_bash_command_is_documented(self):
+        executable_tokens = {
+            row["token"] for row in self.manifest if row["kind"] == "executable"
+        }
+        for relative_path in GROK_PLUGIN_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_tokens,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+
+    def test_grok_review_pr_coordinator_command_invocations_are_documented(self):
+        # The Grok plugin bundles a third coordinator copy so /autosolve can
+        # spawn Codex without --self-review; pin its command surface the same
+        # way the Codex and Claude copies are pinned above.
+        content = (REPO_ROOT / "grok-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
@@ -3625,7 +3649,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and fourteen consumers across
+        # tools/install_issue_review.py writes it and fifteen consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -3634,7 +3658,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
         # it rather than spelling a location, so the count is unchanged.
         #
-        # Both platform rows are pinned to the *same* fourteen files, and
+        # Both platform rows are pinned to the *same* fifteen files, and
         # against the same list rather than against each other: since issue
         # #445 every one of these readers probes both locations, so each
         # spells both literals. Asserting one row alone would let the XDG
@@ -3645,6 +3669,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "src/Kanban/ManagedPaths.hs",
             "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
             "claude-plugin/plugins/kanban/scripts/review_pr.py",
+            "grok-plugin/plugins/kanban/scripts/review_pr.py",
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
             "claude-plugin/plugins/kanban/commands/issue-review.md",
             "codex-plugin/plugins/kanban/skills/solve/SKILL.md",

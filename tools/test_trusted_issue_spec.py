@@ -73,8 +73,8 @@ CODEX_HELPER_LOOKUP = (
 )
 CLAUDE_HELPER_REFERENCE = '"${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py"'
 GROK_HELPER_LOOKUP = (
-    'find "${GROK_HOME:-$HOME/.grok}" '
-    "-path '*/kanban/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
+    'find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" '
+    "-path '*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
 )
 
 # Every value GitHub documents for author_association. None of them grants a
@@ -724,11 +724,28 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertIn("self-test passed", proc.stdout)
 
     def install_grok_bundle(self, home: Path) -> Path:
+        # The documented `grok plugin marketplace add` / `grok plugin install`
+        # layout: $GROK_HOME/installed-plugins/kanban-<hash>/.
         installed = (
             home
             / ".grok"
+            / "installed-plugins"
+            / "kanban-b0441dc6"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(GROK_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def install_marketplace_source(self, root: Path) -> Path:
+        installed = (
+            root
+            / "marketplace"
             / "plugins"
-            / "user"
             / "kanban"
             / "skills"
             / "solve"
@@ -744,7 +761,7 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertIn(
             GROK_HELPER_LOOKUP,
             GROK_SOLVE.read_text(encoding="utf-8"),
-            "the Grok solve skill must locate the helper under $GROK_HOME",
+            "the Grok solve skill must prefer $GROK_PLUGIN_ROOT, else the hashed install",
         )
 
     def test_the_grok_lookup_resolves_from_an_explicit_grok_home(self):
@@ -795,6 +812,27 @@ class InstalledResolutionTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("self-test passed", proc.stdout)
+
+    def test_the_grok_lookup_uses_plugin_root_for_a_marketplace_source_outside_home(self):
+        home = self.root / "grok-empty-home"
+        home.mkdir()
+        expected = self.install_marketplace_source(self.root)
+        plugin_root = expected.parents[3]  # .../plugins/kanban
+        proc = subprocess.run(
+            ["bash", "-c", GROK_HELPER_LOOKUP],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env={
+                **os.environ,
+                "GROK_HOME": str(home / ".grok"),
+                "HOME": str(home),
+                "GROK_PLUGIN_ROOT": str(plugin_root),
+            },
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
 
 class SolveWorkflowContractTests(unittest.TestCase):

@@ -101,10 +101,12 @@ everything else.
   standalone `--self-test`, and declares its `gh` surface in §4. The Codex
   skill locates its copy under `$CODEX_HOME` the way its PR-flow skills locate
   their coordinator; the Claude command resolves its own at
-  `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`; the Grok skill locates
-  its copy under `$GROK_HOME` (default `~/.grok`). None resolves a
-  checkout-relative or personal-skill path, because the workflow runs with the
-  worked repository as the working directory. The packaged
+  `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`; the Grok skill
+  resolves `$GROK_PLUGIN_ROOT` when Grok set it (the loaded plugin directory,
+  including a local marketplace source outside `$GROK_HOME`) and otherwise
+  searches `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`).
+  None resolves a checkout-relative or personal-skill path, because the
+  workflow runs with the worked repository as the working directory. The packaged
   `issue-rereview` assets
   ([drafting-workflow-contract.md §3.6](drafting-workflow-contract.md#36-the-repair-loop-issue-rereview-and-issue-rereview))
   read the timeline through the Codex and Claude copies, resolved the same
@@ -290,26 +292,33 @@ arithmetic, which §2.3 owns.
   `models.toml.example` declare — the cells Kanban's own
   `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
   verified model in the published `pr-review:v2` marker instead of
-  `unspecified`. Since issue #483 the exception's *mechanism* is roster
+  `unspecified`. The tracked Grok coordinator
+  (`grok-plugin/plugins/kanban/scripts/review_pr.py`) is a third copy of that
+  same pinned nested-spawn behavior, plus a Grok-only `--expected-origin` /
+  `--expected-route` refuse-before-spawn so `/autosolve` cannot drift into a
+  Claude review. Since issue #483 the pinning exception's *mechanism* is roster
   resolution rather than a pinned constant, and the exception itself is
-  unchanged: that coordinator loads a byte-identical copy of
-  `tools/kanban_models.py` from beside itself -- never from `tools/`, which an
-  installed bundle has no sibling of -- and resolves those two cells through
-  it, keeping its four constants as the compiled fallbacks that reader is
+  unchanged: those coordinators load a byte-identical copy of
+  `tools/kanban_models.py` from beside themselves -- never from `tools/`, which an
+  installed bundle has no sibling of -- and resolve those two cells through
+  it, keeping their four constants as the compiled fallbacks that reader is
   handed on a host carrying no `~/.config/kanban/models.toml`. A roster file
   that is present and will not load refuses the nested review instead of
   spawning those fallbacks, because this coordinator publishes the model it
   spawned as verified fact. Since issue #572 the Codex bundle ships a copy of
   that reader too, at
   `codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py`,
-  because both coordinators read the roster's `agents` list to route. The
-  exception is unchanged and is now exactly this: only the Claude copy
-  resolves an assignment *cell* and pins its model and effort. The Codex copy
+  because every coordinator reads the roster's `agents` list to route; the
+  Grok bundle ships the fourth copy beside its coordinator. The pinning
+  exception is now exactly this: the Claude and Grok copies resolve an
+  assignment *cell* and pin its model and effort. The Codex copy
   resolves none and passes no model or effort at all, which
   `tools/test_codex_plugin.py` asserts rather than assumes.
   `tools/test_claude_plugin.py` holds the coordinator's
-  compiled fallbacks against those cells and all three copies of the reader
+  compiled fallbacks against those cells and all four copies of the reader
   byte-identical to each other, so the lanes still cannot silently diverge.
+  `tools/test_coordinator_parity.py` bounds Claude-vs-Codex to the pinning
+  exception and Claude-vs-Grok to the expected-origin/route extension.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
@@ -2127,8 +2136,8 @@ approve-issues-backend | personal-path | /Library/Application Support/kanban/iss
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
-issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
 drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
@@ -2180,10 +2189,10 @@ because that is where the record's own path is spelled whole:
 separate file name, so it carries neither literal, while the Haskell resolver
 spells each one for the same reason this manifest needs it spelled — a
 reconciliation matches a literal, not an expression. Both record rows also
-carry the same thirteen packaged assets, because since issue #445 each of them
+carry the same fourteen packaged assets, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
-naming the macOS one: the ten Markdown workflow assets whose `bash` fence
-resolves the backend, and both pull-request coordinators. An asset that spells
+naming the macOS one: the eleven Markdown workflow assets whose `bash` fence
+resolves the backend, and the three pull-request coordinators. An asset that spells
 both literals is declared against both rows, so neither spelling can be
 reverted in one asset while the other row still passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
@@ -2962,8 +2971,9 @@ brand's asset speaking a tool its declaration does not carry.
   the environment, never through the option it was installed with, and that
   is unchanged by the per-platform defaults.
   Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
-  `src/Kanban/Preflight.hs`, both packaged `review_pr.py` coordinators, and
-  the packaged Codex/Claude `issue-review` and `solve` workflows: a non-empty
+  `src/Kanban/Preflight.hs`, the three packaged `review_pr.py` coordinators, and
+  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok
+  `/solve`: a non-empty
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
   only when that field is absent, which is exactly how an installation
   predating the record reads — the directory holding the record. A selected
@@ -2978,12 +2988,12 @@ brand's asset speaking a tool its declaration does not carry.
   `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
   is where the Haskell side's record location is now resolved and the only
   place either platform's spelling of it is written down on that side. The
-  twelve vendored plugin assets listed above probe the same two record
+  fourteen vendored plugin assets listed above probe the same two record
   locations in the same order since issue #445, so an XDG-defaulted install is
   discovered on every host, but they reach that answer without importing
   either resolution point: neither a `bash` fence nor the Codex bundle's
   per-skill vendoring can, so each spells the two literals itself and §4's two
-  record rows declare all twelve against both. One difference from the
+  record rows declare all fourteen against both. One difference from the
   resolvers is deliberate: with *neither* record occupied a packaged asset
   resolves the XDG candidate on every platform and reports both locations as
   consulted, rather than branching to this platform's write default, because

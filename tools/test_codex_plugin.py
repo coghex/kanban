@@ -1639,7 +1639,7 @@ class ApproverPathResolutionTests(unittest.TestCase):
     issue #445 made this coordinator probe. Which of the two it selects, and
     what it reports when neither is occupied, is
     `tools/test_packaged_issue_review_probe.py`'s -- it asserts that against
-    both coordinators and the markdown fences together, because all twelve
+    both coordinators and the markdown fences together, because all fourteen
     owe the same answers."""
 
     def setUp(self):
