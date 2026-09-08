@@ -171,14 +171,39 @@ REQUIRED_PHRASES = {
         "metadata that name no\ncommit, so neither can say which head a "
         "reviewer accepted."
     ),
-    "an-unapproved-pull-request-stops-having-changed-nothing": (
-        "Stop, having changed nothing, when the pull request is not approved under the\n"
-        "resolved mode, or when it carries a configured changes-requested or blocking\n"
-        "label."
+    # A verdict label is a decision already taken, so 2b stops on it without
+    # reading any further evidence. The absence of a raw approval signal is
+    # not that: it is the question 2c answers, and stopping on it here is what
+    # sent a stale-approval dismissal to a first review (see the pair below).
+    "a-blocking-or-changes-requested-label-stops-having-changed-nothing": (
+        "Stop, having changed nothing, when the pull request carries a configured\n"
+        "changes-requested or blocking label"
+    ),
+    "that-label-stop-needs-no-further-evidence": (
+        "that stop needs no further evidence,\nsince the label itself is a "
+        "human's decision to reverse."
     ),
     "a-blocking-label-is-never-removed-to-proceed": (
-        "Never remove a\nblocking label to proceed: a blocking label is a human's "
-        "decision."
+        "Never remove a blocking label to proceed."
+    ),
+    # The defect these rules pin, observed live: review-gate dismissed a stale
+    # approval, and 2b could not tell the stripped label apart from a pull
+    # request nobody had ever reviewed, so both were sent to a first review.
+    "a-missing-raw-approval-signal-is-not-a-stop-at-2b": (
+        "A pull request that simply lacks the resolved mode's raw approval signal — no\n"
+        "configured label attached, no `reviewDecision == APPROVED` — is not a stop\n"
+        "here."
+    ),
+    "a-stripped-label-and-a-superseded-marker-both-mean-reviewed-before": (
+        "A label a legitimate stale-approval dismissal just stripped,\n"
+        "and a marker bound to a head this pull request has since moved past, both mean\n"
+        "it HAS been reviewed before; only a feed with no marker at all means it has\n"
+        "not."
+    ),
+    "the-remedy-turns-on-the-marker-not-the-surviving-label": (
+        "regardless of which\n"
+        "head it named, whether a later marker superseded it, or whether the configured\n"
+        "label is currently attached"
     ),
     # --- The head binding: a mutable signal is not authority over a commit. ---
     "head-bound-approval-is-required-before-anything-mutates": (
@@ -624,6 +649,9 @@ FIX_ONLY_REQUIREMENTS = (
     "approval-is-configured-not-a-fixed-string",
     "approval-modes-are-read-never-accepted-on-their-own",
     "an-unbound-signal-is-never-sufficient",
+    "a-missing-raw-approval-signal-is-not-a-stop-at-2b",
+    "a-stripped-label-and-a-superseded-marker-both-mean-reviewed-before",
+    "the-remedy-turns-on-the-marker-not-the-surviving-label",
     "head-bound-approval-is-required-before-anything-mutates",
     "why-an-unbound-approval-is-authority-over-unreviewed-code",
     "the-drainer-already-keys-on-the-approved-head",
@@ -1541,6 +1569,64 @@ class HeadBoundApprovalTests(unittest.TestCase):
             text = read(path)
             for mode in ("`label`", "`review`", "`either`"):
                 self.assertIn(mode, text, f"{path} no longer names {mode}")
+
+
+class ReviewRemedyRoutingTests(unittest.TestCase):
+    """Bind each review-history condition to its actual shipped command.
+
+    The descriptive phrases alone survive a wrong command choice. Exercise
+    the same assertions against wrong-route mutations and the repair assets,
+    which do not own fix's approval-refusal remedy.
+    """
+
+    ASSETS = ((CODEX_FIX, CODEX_REPAIR, "$"), (CLAUDE_FIX, CLAUDE_REPAIR, "/"))
+    ROUTES = (
+        (
+            "pr-rereview",
+            "cleared by a fresh canonical review of the current head: name "
+            "{sigil}pr-rereview when the comment feed already read for this step "
+            "contains any canonical `pr-review` marker for this pull request",
+        ),
+        (
+            "pr-review",
+            "and name {sigil}pr-review only when that feed contains none.",
+        ),
+    )
+
+    def assert_remedy_routes(self, text, sigil):
+        # Other sections also name these commands; only the refusal's
+        # condition-to-command mapping can satisfy this contract.
+        section = text.split("Then name the remedy without performing it.", 1)[1]
+        section = section.split("**This workflow manufactures neither.**", 1)[0]
+        for _, phrase in self.ROUTES:
+            self.assertIn(phrase.format(sigil=sigil), flat(section))
+
+    def test_both_assets_route_each_review_history_case(self):
+        for path, _, sigil in self.ASSETS:
+            with self.subTest(asset=path):
+                self.assert_remedy_routes(read(path), sigil)
+
+    def test_wrong_command_for_either_history_case_is_rejected(self):
+        for path, _, sigil in self.ASSETS:
+            text = flat(read(path))
+            for command, phrase in self.ROUTES:
+                with self.subTest(asset=path, command=command):
+                    expected = phrase.format(sigil=sigil)
+                    self.assertEqual(text.count(expected), 1)
+                    wrong_command = (
+                        "pr-review" if command == "pr-rereview" else "pr-rereview"
+                    )
+                    mutated = text.replace(
+                        expected, expected.replace(sigil + command, sigil + wrong_command)
+                    )
+                    with self.assertRaises(AssertionError):
+                        self.assert_remedy_routes(mutated, sigil)
+
+    def test_repair_assets_do_not_carry_the_fix_remedy_rules(self):
+        for _, path, sigil in self.ASSETS:
+            for command, phrase in self.ROUTES:
+                with self.subTest(asset=path, command=command):
+                    self.assertNotIn(phrase.format(sigil=sigil), flat(read(path)))
 
 
 class VacuousRuleControlTests(unittest.TestCase):
