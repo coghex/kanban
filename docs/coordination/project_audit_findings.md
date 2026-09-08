@@ -33,7 +33,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 
 - [x] KA-1. Rendering cost grows with offscreen cards — [#640]
 - [x] KA-2. Concurrent mission and board reads conflict over process bookkeeping — [#642]
-- [ ] KA-3. Precondition reads do not bind the selected repository
+- [x] KA-3. Precondition reads do not bind the selected repository — [#643]
 - [ ] KA-4. Failed command persistence can lose a pause request
 - [ ] KA-5. Precondition reads bypass the configured GitHub timeout
 
@@ -78,7 +78,7 @@ Missions are allowed to run beside a dashboard. However, each mission board read
 
 **Remaining uncertainty:** The false refusal is reproduced. This reproduction did not kill another reader or demonstrate lost record updates.
 
-### KA-3. Precondition reads do not bind the selected repository
+### [#643] KA-3. Precondition reads do not bind the selected repository
 
 **Priority: high.**
 
