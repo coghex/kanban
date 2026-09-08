@@ -5,10 +5,11 @@
 -- 'Kanban.GitHub.Warnings' (a snapshot's banner lines),
 -- 'Kanban.GitHub.Decode' (the GraphQL response), 'Kanban.GitHub.Group'
 -- (process-group facts), 'Kanban.GitHub.Guard' (the cleanup verdict and its
--- durable record), 'Kanban.GitHub.Run' (running @gh@), and
--- 'Kanban.GitHub.Fetch' (the snapshot fetch that composes them). This module
--- re-exports what the rest of the build and the suite use, so no call site
--- outside it names an implementation module.
+-- durable record), 'Kanban.GitHub.Run' (running @gh@),
+-- 'Kanban.GitHub.Fetch' (the snapshot fetch that composes them), and
+-- 'Kanban.GitHub.Precondition' (one item's live state, read on its own).
+-- This module re-exports what the rest of the build and the suite use, so no
+-- call site outside it names an implementation module.
 module Kanban.GitHub
   ( -- 'FetchState', 'advanceState', 'classifyFailure', 'compactError' and
     -- 'graphqlArguments' are internal, exported so the suite can assert the
@@ -44,6 +45,7 @@ module Kanban.GitHub
     newGhFetchGuard,
     newGhRecordLock,
     newGhRecordLockOwnedBy,
+    observeTargetPrecondition,
     paginationDecision,
     reclaimRecordedGhGroups,
     recordGhGroup,
@@ -154,6 +156,7 @@ import Kanban.GitHub.History
   )
 import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
+import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)
 import Kanban.GitHub.Run (GhFailurePhase (..), ghBehindBarrier, ghFailureKind)
 import Kanban.GitHub.Warnings (snapshotWarnings)

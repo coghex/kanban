@@ -48,6 +48,7 @@ import qualified Spec.Drainer as Drainer
 import qualified Spec.GitHub.BoardRefresh as BoardRefresh
 import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.History as GitHubHistory
+import qualified Spec.GitHub.Precondition as GitHubPrecondition
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
@@ -190,6 +191,11 @@ suiteGroups =
     SuiteGroup "Spec.GitHub.BoardRefresh" UsageLane BoardRefresh.spec, -- 38.7s
     SuiteGroup "Spec.GitHub.RefreshCoordinator" PingLane RefreshCoordinator.spec, -- 8.6s
     SuiteGroup "Spec.GitHub.History" DeadlineLane GitHubHistory.spec, -- 7.9s
+    -- A packing decision like the rest of these: one gh spawn per example,
+    -- settled the same way a page's is. It moves the working directory too,
+    -- which is process state -- but a lane is a process of its own running its
+    -- own examples one at a time, so that costs it no colocation.
+    SuiteGroup "Spec.GitHub.Precondition" DeadlineLane GitHubPrecondition.spec, -- 3.4s
     SuiteGroup "Spec.Agent.Capture" LifecycleLane Capture.spec, -- 10.5s
     SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
