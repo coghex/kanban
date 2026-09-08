@@ -293,6 +293,7 @@ test-suite kanban-test
     Spec.GitHub.BoardRefresh
     Spec.GitHub.Decoding
     Spec.GitHub.History
+    Spec.GitHub.Precondition
     Spec.GitHub.PullRequestStatus
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
