@@ -227,6 +227,7 @@ pullRequestActionLabel PullRequestRepair = "repair"
 pullRequestOriginLabel :: PullRequestOrigin -> Text
 pullRequestOriginLabel PullRequestCodex = "codex-origin"
 pullRequestOriginLabel PullRequestClaude = "claude-origin"
+pullRequestOriginLabel PullRequestGrok = "grok-origin"
 
 originLabel :: IssueOrigin -> Text
 originLabel IssueOriginCodex = "codex-origin"
@@ -499,8 +500,10 @@ doctorActions =
     -- readiness per action a user can select, not per distinct set.
     ActionPullRequestFlow PullRequestCodex PullRequestReview,
     ActionPullRequestFlow PullRequestClaude PullRequestReview,
+    ActionPullRequestFlow PullRequestGrok PullRequestReview,
     ActionPullRequestFlow PullRequestCodex PullRequestRereview,
     ActionPullRequestFlow PullRequestClaude PullRequestRereview,
+    ActionPullRequestFlow PullRequestGrok PullRequestRereview,
     ActionPullRequestFlow PullRequestCodex PullRequestRevision,
     ActionPullRequestFlow PullRequestClaude PullRequestRevision,
     ActionPullRequestFlow PullRequestCodex PullRequestRepair,

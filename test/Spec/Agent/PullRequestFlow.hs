@@ -20,6 +20,8 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
+    grokOwnBrandUnsupported,
+    grokOwnBrandUnsupportedMessage,
     originFromBody,
     pullRequestArguments,
     pullRequestAssignment,
@@ -72,7 +74,13 @@ spec = do
     it "requires one unambiguous PR origin marker" $ do
       originFromBody "body\n<!-- pr-origin:codex -->" `shouldBe` Right PullRequestCodex
       originFromBody "body\n<!-- pr-origin:claude -->" `shouldBe` Right PullRequestClaude
+      originFromBody "body\n<!-- pr-origin:grok -->" `shouldBe` Right PullRequestGrok
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
+      originFromBody "<!-- pr-origin:unknown -->" `shouldBe` Left "PR body has no valid pr-origin marker"
+      originFromBody "body\n<!-- pr-origin:grok -->\n<!-- pr-origin:claude -->"
+        `shouldBe` Left "PR body contains both pr-origin markers"
+      originFromBody "<!-- pr-origin:grok -->\ntext"
+        `shouldBe` Left "PR origin marker must be the final non-whitespace content"
 
     -- Issue #494. `originFromBody` counts each marker across the whole body
     -- with no awareness of HTML comments, so a marker pasted into the
@@ -115,6 +123,16 @@ spec = do
       -- the PR's own origin brand rather than the reviewer's.
       agentForAction DualMode PullRequestCodex PullRequestRepair `shouldBe` CodexSolver
       agentForAction DualMode PullRequestClaude PullRequestRepair `shouldBe` ClaudeSolver
+      -- Grok is a known origin, not a spawned provider. Codex is its
+      -- cross-brand reviewer; own-brand board actions are refused separately.
+      agentForAction DualMode PullRequestGrok PullRequestReview `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestGrok PullRequestRereview `shouldBe` CodexSolver
+      grokOwnBrandUnsupported PullRequestGrok PullRequestRevision `shouldBe` True
+      grokOwnBrandUnsupported PullRequestGrok PullRequestRepair `shouldBe` True
+      grokOwnBrandUnsupported PullRequestGrok PullRequestReview `shouldBe` False
+      grokOwnBrandUnsupported PullRequestClaude PullRequestRevision `shouldBe` False
+      grokOwnBrandUnsupportedMessage
+        `shouldBe` "grok-origin revision and repair are not a board action; Grok is not a spawned provider"
 
     -- The fourth derived meaning of r: a Done card whose status is a problem
     -- needs its own code worked on, not another review round. Both halves of

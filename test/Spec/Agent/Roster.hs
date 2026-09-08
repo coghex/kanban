@@ -63,6 +63,7 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
+    grokOwnBrandUnsupportedMessage,
     pullRequestAssignment,
     pullRequestRole,
   )
@@ -247,6 +248,9 @@ spec = do
       -- hole is only in the reviewer's cell, so the same press is allowed
       -- through.
       pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
+      pullRequestStartRefusal rostered PullRequestGrok PullRequestReview `shouldBe` Nothing
+      pullRequestStartRefusal rostered PullRequestGrok PullRequestRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf grokOwnBrandUnsupportedMessage)
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the

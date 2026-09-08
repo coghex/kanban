@@ -851,7 +851,8 @@ both solvers on GPT-5.6-Terra high and Sonnet 5 high.
 Single-agent mode moves that column rather than the roles. Every pull-request
 action — review, rereview, revision, repair — runs on the one loaded provider
 whatever the pull request's origin marker says, including a pull request whose
-origin is unknown or external; the embedded issue review starts that
+origin is unknown or external, except grok-origin revision and repair, which
+still have no spawned provider to collapse onto; the embedded issue review starts that
 provider's own backend, the Codex app-server in a Codex-only install and the
 `claude` stream-json session in a Claude-only one; a fresh solve starts on it
 without opening the chooser, because there is nothing to choose between; and
@@ -907,7 +908,11 @@ back to the compiled defaults; review prose, which cannot be dimmed, states
 the same thing in words.
 
 A missing or contradictory `pr-origin` marker fails visibly rather than
-guessing.
+guessing. `<!-- pr-origin:grok -->` is a known origin: dual-mode review and
+rereview run on Codex, and an unknown or external origin still falls through
+to both loaded providers. Grok is not a compiled adapter, so the board
+refuses revision and repair of a grok-origin pull request rather than
+spawning Codex or Claude to edit it.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
 Initial review and rereview synchronously invoke the vendored

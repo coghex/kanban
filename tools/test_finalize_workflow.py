@@ -135,11 +135,12 @@ PR_VIEW_FIELDS = (
     "mergeable,mergeStateStatus,closingIssuesReferences"
 )
 
-# The two origin markers, character for character as `originFromBody` spells
+# The origin markers, character for character as `originFromBody` spells
 # them, and as the gate has to.
 ORIGIN_MARKERS = {
     "claude": "<!-- pr-origin:claude -->",
     "codex": "<!-- pr-origin:codex -->",
+    "grok": "<!-- pr-origin:grok -->",
 }
 
 # The paginated issue-comment endpoint, embedding the resolved repository the
@@ -1072,6 +1073,47 @@ class GateDecisionTests(unittest.TestCase):
                         pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
                     ),
                     "names this pull request's own brand (codex)",
+                )
+
+    def test_a_grok_origin_pull_request_accepts_a_codex_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["grok"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    )
+                )
+
+    def test_a_grok_origin_pull_request_refuses_a_claude_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["claude"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["grok"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "reviewed by Codex only",
+                )
+
+    def test_a_grok_origin_pull_request_refuses_a_dual_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex", "claude"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["grok"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "reviewed by Codex only",
                 )
 
     def test_a_single_brand_marker_on_an_unknown_origin_pull_request_refuses(self):

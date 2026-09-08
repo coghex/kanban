@@ -13,6 +13,8 @@ module Kanban.PullRequestFlow
     expectedPullRequestOrigin,
     flowOutcome,
     labelPullRequestAction,
+    grokOwnBrandUnsupported,
+    grokOwnBrandUnsupportedMessage,
     originFromBody,
     pullRequestArguments,
     pullRequestAssignment,
@@ -61,7 +63,7 @@ import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process (ProcessHandle, createProcess, waitForProcess)
 
-data PullRequestOrigin = PullRequestCodex | PullRequestClaude
+data PullRequestOrigin = PullRequestCodex | PullRequestClaude | PullRequestGrok
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -78,20 +80,28 @@ data PullRequestFlowEvent
   | PullRequestFlowDiagnostic Int Text
   | PullRequestProcessFinished Int SolveOutcome
 
+originMarkers :: [(Text, PullRequestOrigin)]
+originMarkers =
+  [ ("<!-- pr-origin:codex -->", PullRequestCodex),
+    ("<!-- pr-origin:claude -->", PullRequestClaude),
+    ("<!-- pr-origin:grok -->", PullRequestGrok)
+  ]
+
 originFromBody :: Text -> Either Text PullRequestOrigin
-originFromBody body
-  | codexCount == 1 && claudeCount == 0 && codexMarker `Text.isSuffixOf` stripped = Right PullRequestCodex
-  | claudeCount == 1 && codexCount == 0 && claudeMarker `Text.isSuffixOf` stripped = Right PullRequestClaude
-  | codexCount > 0 && claudeCount > 0 = Left "PR body contains both pr-origin markers"
-  | codexCount > 1 || claudeCount > 1 = Left "PR body contains a duplicate pr-origin marker"
-  | codexCount == 1 || claudeCount == 1 = Left "PR origin marker must be the final non-whitespace content"
-  | otherwise = Left "PR body has no valid pr-origin marker"
+originFromBody body = case recognized of
+  [] -> Left "PR body has no valid pr-origin marker"
+  [(marker, origin)]
+    | occurrenceCount marker body > 1 -> Left "PR body contains a duplicate pr-origin marker"
+    | marker `Text.isSuffixOf` stripped -> Right origin
+    | otherwise -> Left "PR origin marker must be the final non-whitespace content"
+  _ -> Left "PR body contains both pr-origin markers"
   where
-    codexMarker = "<!-- pr-origin:codex -->"
-    claudeMarker = "<!-- pr-origin:claude -->"
-    codexCount = occurrenceCount codexMarker body
-    claudeCount = occurrenceCount claudeMarker body
     stripped = Text.stripEnd body
+    recognized =
+      [ (marker, origin)
+      | (marker, origin) <- originMarkers,
+        occurrenceCount marker body > 0
+      ]
 
 occurrenceCount :: Text -> Text -> Int
 occurrenceCount needle haystack = max 0 (length (Text.splitOn needle haystack) - 1)
@@ -208,10 +218,29 @@ agentForAction mode origin action = case soleAgent mode of
 -- opposite one. Unchanged, and separated out so the mode-aware routing above
 -- has one thing to fall back to rather than four arms to interleave.
 crossBrandAgentForAction :: PullRequestOrigin -> PullRequestAction -> SolverBrand
-crossBrandAgentForAction PullRequestCodex action | authoredOnOwnBrand action = CodexSolver
-crossBrandAgentForAction PullRequestClaude action | authoredOnOwnBrand action = ClaudeSolver
-crossBrandAgentForAction PullRequestCodex _ = ClaudeSolver
-crossBrandAgentForAction PullRequestClaude _ = CodexSolver
+crossBrandAgentForAction origin action
+  | authoredOnOwnBrand action = case origin of
+      PullRequestCodex -> CodexSolver
+      PullRequestClaude -> ClaudeSolver
+      -- Grok is not a spawned provider. Own-brand board actions are refused
+      -- at the start boundary; this arm exists so the function stays total.
+      PullRequestGrok -> CodexSolver
+  | otherwise = case origin of
+      PullRequestCodex -> ClaudeSolver
+      PullRequestClaude -> CodexSolver
+      PullRequestGrok -> CodexSolver
+
+-- | Grok is a known origin Codex reviews, not a compiled provider Kanban can
+-- spawn. Revision and repair of a grok-origin pull request therefore have no
+-- board agent in any operating mode; the Grok session that opened the pull
+-- request revises it itself.
+grokOwnBrandUnsupported :: PullRequestOrigin -> PullRequestAction -> Bool
+grokOwnBrandUnsupported PullRequestGrok action = authoredOnOwnBrand action
+grokOwnBrandUnsupported _ _ = False
+
+grokOwnBrandUnsupportedMessage :: Text
+grokOwnBrandUnsupportedMessage =
+  "grok-origin revision and repair are not a board action; Grok is not a spawned provider"
 
 -- | The brand a pull-request worker that already exists is running on.
 --

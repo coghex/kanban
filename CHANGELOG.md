@@ -15,6 +15,13 @@ created above it.
 
 ### Unreleased
 
+- `<!-- pr-origin:grok -->` is a known pull-request origin. Dual-mode review
+  and rereview route it to Codex only — not Claude, and not both brands, which
+  is what an unrecognized marker still does. Grok is not a spawned provider,
+  so the board and the action registry refuse revision and repair of that
+  origin; the Grok session that opened the pull request revises it itself.
+  `$finalize` / `/finalize` accept a Codex-only approval on that origin and
+  still require a dual-brand marker when no origin is declared.
 - `kanban --mission <id>` advances exactly one mission in the foreground and
   then exits. It operates only on the mission it was named — a missing,
   malformed, unknown, or repository-mismatched identifier is reported as

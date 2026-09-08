@@ -120,13 +120,17 @@ V2_RE = re.compile(
 # `<!-- PR-REVIEW:V2 ... -->` and let an older APPROVE win, which is the
 # fail-open the malformed-marker rule exists to close.
 MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
-# The two origin markers, character for character as `originFromBody` spells
+# The origin markers, character for character as `originFromBody` spells
 # them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
-# these markers there and is not one here.
+# these markers there and is not one here. Grok is a known origin Codex
+# reviews; it is not a spawned provider and never appears in `reviewers=`.
 ORIGIN_MARKERS = {
     "claude": "<!-- pr-origin:claude -->",
     "codex": "<!-- pr-origin:codex -->",
+    "grok": "<!-- pr-origin:grok -->",
 }
+UNKNOWN_ORIGIN_REVIEWERS = {"claude", "codex"}
+GROK_ORIGIN_REVIEWERS = {"codex"}
 
 repo = sys.argv[1].strip()
 viewer = sys.argv[2].strip()
@@ -308,9 +312,9 @@ present = [brand for brand, count in counts.items() if count]
 # Spelled without a greater-than comparison on purpose: one surrounded by
 # spaces in a fenced block reads as a shell redirect into the working tree to
 # the packaged-asset hygiene scan, which does not know this block is Python.
-# There are exactly two brands, so "both present" is "two present", and "more
-# than once" is "not zero or one".
-if len(present) == 2:
+# Mixed kinds, however many, are "both" in the existing refusal text; "more
+# than once" of one kind is "not zero or one".
+if len(present) not in (0, 1):
     refuse("the pull request body carries both pr-origin markers", True)
 if any(count not in (0, 1) for count in counts.values()):
     refuse("the pull request body carries a duplicate pr-origin marker", True)
@@ -325,9 +329,10 @@ reviewers = {
 }
 if origin is None:
     # No declared origin is the dual route the coordinator takes: with no
-    # brand to be opposite of, only a review carrying BOTH brands is known to
-    # be independent of whoever wrote the code.
-    if reviewers != set(ORIGIN_MARKERS):
+    # brand to be opposite of, only a review carrying BOTH spawned providers
+    # is known to be independent of whoever wrote the code. Grok is not in
+    # that set: it is not a reviewer brand.
+    if reviewers != UNKNOWN_ORIGIN_REVIEWERS:
         refuse(
             "this pull request declares no origin, so only a dual-brand review "
             "is known to be independent; the newest marker names "
@@ -339,6 +344,12 @@ elif origin in reviewers:
         "the newest marker names this pull request's own brand ("
         + origin
         + ") as a reviewer, which is a self-review",
+        True,
+    )
+elif origin == "grok" and reviewers != GROK_ORIGIN_REVIEWERS:
+    refuse(
+        "a grok-origin pull request is reviewed by Codex only; the newest "
+        "marker names " + ",".join(sorted(reviewers)),
         True,
     )
 

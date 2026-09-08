@@ -526,8 +526,10 @@ spec = do
               ActionAutoSolve ClaudeSolver,
               ActionPullRequestFlow PullRequestCodex PullRequestReview,
               ActionPullRequestFlow PullRequestClaude PullRequestReview,
+              ActionPullRequestFlow PullRequestGrok PullRequestReview,
               ActionPullRequestFlow PullRequestCodex PullRequestRereview,
               ActionPullRequestFlow PullRequestClaude PullRequestRereview,
+              ActionPullRequestFlow PullRequestGrok PullRequestRereview,
               ActionPullRequestFlow PullRequestCodex PullRequestRevision,
               ActionPullRequestFlow PullRequestClaude PullRequestRevision,
               ActionPullRequestFlow PullRequestCodex PullRequestRepair,
@@ -539,6 +541,9 @@ spec = do
           length (filter isRepairAction doctorActions) `shouldBe` 2
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR repair (r) · codex-origin"
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR repair (r) · claude-origin"
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR review (r) · grok-origin"
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r) · grok-origin"
+          rendered `shouldSatisfy` (not . Data.Text.isInfixOf "PR repair (r) · grok-origin")
           -- The drainer keeps its own dedicated install and status flow.
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
 

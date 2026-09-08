@@ -179,9 +179,12 @@ This repository is developed by agents, and the board reads their state off GitH
   `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
   absence as legacy provenance, routing it to both reviewers under the default
   `--legacy-policy dual` rather than to one. A pull request body
-  carries exactly one of `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->` as its
+  carries exactly one of `<!-- pr-origin:codex -->`, `<!-- pr-origin:claude -->`,
+  or `<!-- pr-origin:grok -->` as its
   final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
-  duplicated, mixed, or trailing-text marker.
+  duplicated, mixed, or trailing-text marker. A grok-origin pull request is a
+  known origin Codex reviews; it is not a spawned Kanban provider, so board
+  revision and repair of that origin are refused.
 - Never merge a pull request on your own initiative. Solve, review, and
   autonomous agents stop at the open PR; `tools/drain_prs.py` owns merging
   eligible PRs out of the Done column. The single exception is the packaged
