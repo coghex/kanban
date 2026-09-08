@@ -2298,7 +2298,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Refuse before spawning if the live reviewer route is not this "
             "value (for example codex). Combined with --expected-origin this "
-            "is how a grok-origin autosolve refuses a Claude spawn."
+            "is how an external-origin autosolve refuses a Claude spawn."
         ),
     )
     parser.add_argument(

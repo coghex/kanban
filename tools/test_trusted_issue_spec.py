@@ -113,16 +113,42 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.is_file():
+if settings.exists():
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
-        entry = document.get("extraKnownMarketplaces", {}).get("kanban-kimi", {})
-        source = entry.get("source", {})
-        if source.get("source") == "directory" and source.get("path"):
-            finish(Path(source["path"]) / "plugins" / "kanban" / relative)
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-matches = sorted((Path(copilot_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and "kanban-kimi" in marketplaces:
+        entry = marketplaces["kanban-kimi"]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed kanban-kimi entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name kanban-kimi as a directory source."
+            )
+        recorded = source.get("path")
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name an absolute kanban-kimi path: {recorded!r}."
+            )
+        finish(Path(recorded) / "plugins" / "kanban" / relative)
+matches = sorted(
+    candidate
+    for candidate in (Path(copilot_home) / "installed-plugins").glob(
+        "kanban-*/" + relative.as_posix()
+    )
+    if candidate.is_file()
+)
 if not matches:
     raise SystemExit("trusted helper was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
 if len(matches) != 1:
@@ -912,6 +938,64 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_kimi_settings_without_its_marketplace_fall_through_to_the_copy(self):
+        home = self.root / "kimi-unrelated-marketplace"
+        expected = self.install_kimi_bundle(home)
+        (home / ".copilot" / "settings.json").write_text(
+            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
+            encoding="utf-8",
+        )
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_malformed_kimi_settings_refuse_without_copy_fallback(self):
+        cases = {
+            "invalid-json": "{",
+            "non-object": json.dumps([]),
+            "marketplaces-not-object": json.dumps({"extraKnownMarketplaces": []}),
+            "entry-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-kimi": []}}
+            ),
+            "source-not-directory": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {"source": {"source": "github"}}
+                    }
+                }
+            ),
+            "relative-path": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "directory", "path": "relative"}
+                        }
+                    }
+                }
+            ),
+        }
+        for name, contents in cases.items():
+            with self.subTest(case=name):
+                home = self.root / f"kimi-malformed-{name}"
+                self.install_kimi_bundle(home)
+                settings = home / ".copilot" / "settings.json"
+                settings.write_text(contents + "\n", encoding="utf-8")
+                proc = self.run_kimi_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("Copilot settings", proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_kimi_marketplace_missing_the_helper_refuses_without_fallback(self):
+        home = self.root / "kimi-marketplace-missing-helper"
+        self.install_kimi_bundle(home)
+        marketplace = self.root / "empty-kimi-marketplace"
+        marketplace.mkdir()
+        self.register_kimi_local_marketplace(home, marketplace)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_the_kimi_lookup_uses_plugin_root_for_a_plugin_dir_launch(self):
         home = self.root / "kimi-empty-home"
         home.mkdir()
@@ -920,6 +1004,16 @@ class InstalledResolutionTests(unittest.TestCase):
         proc = self.run_kimi_locator(str(plugin_root), str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_missing_helper_under_kimi_plugin_root_refuses_without_fallback(self):
+        home = self.root / "kimi-plugin-root-missing"
+        self.install_kimi_bundle(home)
+        plugin_root = self.root / "empty-kimi-plugin"
+        plugin_root.mkdir()
+        proc = self.run_kimi_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
 
     def test_the_kimi_lookup_fails_closed_when_two_kanban_installs_match(self):
         home = self.root / "kimi-ambiguous"

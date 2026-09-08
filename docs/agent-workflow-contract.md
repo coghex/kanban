@@ -110,7 +110,13 @@ everything else.
   the Kimi skill resolves `$KIMI_PLUGIN_ROOT` when the launcher set it, then
   the `kanban-kimi` marketplace's recorded local path in
   `$COPILOT_HOME/settings.json` (how a local Copilot marketplace install
-  loads), and otherwise searches
+  loads). Copilot CLI 1.0.83 records that absolute root at
+  `extraKnownMarketplaces.kanban-kimi.source.path`, beside a `source` value of
+  `directory`; the locator appends `plugins/kanban/`. An absent settings file
+  or object with no `kanban-kimi` entry falls through, while an unreadable or
+  non-object file, a malformed applicable entry, a non-absolute recorded path,
+  or a recorded tree missing the helper refuses without fall-through. With no
+  local marketplace entry it searches
   `$COPILOT_HOME/installed-plugins/kanban-<hash>/` (default `~/.copilot`).
   None resolves a checkout-relative or personal-skill path, because the
   workflow runs with the worked repository as the working directory. The packaged
@@ -304,13 +310,13 @@ arithmetic, which §2.3 owns.
   `models.toml.example` declare — the cells Kanban's own
   `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
   verified model in the published `pr-review:v2` marker instead of
-  `unspecified`. The tracked Grok coordinator
-  (`grok-plugin/plugins/kanban/scripts/review_pr.py`) is a third copy of that
-  same pinned nested-spawn behavior, plus a Grok-only `--expected-origin` /
-  `--expected-route` refuse-before-spawn so `/autosolve` cannot drift into a
-  Claude review; the tracked Kimi coordinator
-  (`kimi-plugin/plugins/kanban/scripts/review_pr.py`) is a fourth copy
-  carrying the same extension with kimi in grok's place. Since issue #483 the pinning exception's *mechanism* is roster
+  `unspecified`. The tracked Grok and Kimi coordinators
+  (`grok-plugin/plugins/kanban/scripts/review_pr.py` and
+  `kimi-plugin/plugins/kanban/scripts/review_pr.py`) are byte-identical copies
+  of one external-origin coordinator. It carries the same pinned nested-spawn
+  behavior plus `--expected-origin` / `--expected-route`
+  refuse-before-spawn, so either external bundle's `/autosolve` cannot drift
+  into a Claude review. Since issue #483 the pinning exception's *mechanism* is roster
   resolution rather than a pinned constant, and the exception itself is
   unchanged: those coordinators load a byte-identical copy of
   `tools/kanban_models.py` from beside themselves -- never from `tools/`, which an
@@ -333,7 +339,8 @@ arithmetic, which §2.3 owns.
   compiled fallbacks against those cells and all five copies of the reader
   byte-identical to each other, so the lanes still cannot silently diverge.
   `tools/test_coordinator_parity.py` bounds Claude-vs-Codex to the pinning
-  exception and Claude-vs-Grok to the expected-origin/route extension.
+  exception, Claude-vs-Grok to the expected-origin/route extension, and Kimi
+  to byte identity with Grok.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
@@ -2220,10 +2227,10 @@ because that is where the record's own path is spelled whole:
 separate file name, so it carries neither literal, while the Haskell resolver
 spells each one for the same reason this manifest needs it spelled — a
 reconciliation matches a literal, not an expression. Both record rows also
-carry the same fourteen packaged assets, because since issue #445 each of them
+carry the same sixteen packaged assets, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
-naming the macOS one: the eleven Markdown workflow assets whose `bash` fence
-resolves the backend, and the three pull-request coordinators. An asset that spells
+naming the macOS one: the twelve Markdown workflow assets whose `bash` fence
+resolves the backend, and the four pull-request coordinators. An asset that spells
 both literals is declared against both rows, so neither spelling can be
 reverted in one asset while the other row still passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
@@ -3013,9 +3020,9 @@ brand's asset speaking a tool its declaration does not carry.
   the environment, never through the option it was installed with, and that
   is unchanged by the per-platform defaults.
   Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
-  `src/Kanban/Preflight.hs`, the three packaged `review_pr.py` coordinators, and
-  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok
-  `/solve`: a non-empty
+  `src/Kanban/Preflight.hs`, the four packaged `review_pr.py` coordinators, and
+  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok and
+  Kimi `/solve`: a non-empty
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
   only when that field is absent, which is exactly how an installation
   predating the record reads — the directory holding the record. A selected
@@ -3030,12 +3037,12 @@ brand's asset speaking a tool its declaration does not carry.
   `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
   is where the Haskell side's record location is now resolved and the only
   place either platform's spelling of it is written down on that side. The
-  fourteen vendored plugin assets listed above probe the same two record
+  sixteen vendored plugin assets listed above probe the same two record
   locations in the same order since issue #445, so an XDG-defaulted install is
   discovered on every host, but they reach that answer without importing
   either resolution point: neither a `bash` fence nor the Codex bundle's
   per-skill vendoring can, so each spells the two literals itself and §4's two
-  record rows declare all fourteen against both. One difference from the
+  record rows declare all sixteen against both. One difference from the
   resolvers is deliberate: with *neither* record occupied a packaged asset
   resolves the XDG candidate on every platform and reports both locations as
   consulted, rather than branching to this platform's write default, because

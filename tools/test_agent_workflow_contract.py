@@ -432,7 +432,7 @@ KIMI_PLUGIN_SURFACE_FILES = [
 
 # Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
-# already reconciled against the manifest; these three are named here so the
+# already reconciled against the manifest; these four are named here so the
 # non-vacuity pin below drives the real assets, and so dropping one from a
 # surface list fails a test rather than silently un-scanning a vendored asset.
 TRUSTED_SPEC_SURFACE_FILES = {
@@ -448,10 +448,10 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
 # same way and covered here with them; since issue #572 every coordinator
-# bundle carries a copy, because all three coordinators read the roster's
+# bundle carries a copy, because all four coordinators read the roster's
 # loaded provider set to route. What still differs is what each does with it --
-# the Claude and Grok copies resolve an assignment cell and pin it, the Codex
-# copy resolves none (D-2) -- and that is a routing fact rather than an
+# the Claude, Grok, and Kimi copies resolve an assignment cell and pin it, the
+# Codex copy resolves none (D-2) -- and that is a routing fact rather than an
 # external command, so the readers still spawn nothing at all. Their empty
 # sets are pins rather than omissions: a future edit that made any shell out
 # would have to declare it here.
@@ -3694,7 +3694,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and fifteen consumers across
+        # tools/install_issue_review.py writes it and seventeen consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -3703,7 +3703,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
         # it rather than spelling a location, so the count is unchanged.
         #
-        # Both platform rows are pinned to the *same* fifteen files, and
+        # Both platform rows are pinned to the *same* seventeen files, and
         # against the same list rather than against each other: since issue
         # #445 every one of these readers probes both locations, so each
         # spells both literals. Asserting one row alone would let the XDG
@@ -3799,8 +3799,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
             (
                 # Issue #444 gave the record its XDG sibling, and issue #445
-                # gave both rows the fourteen packaged readers that probe them
-                # (eleven markdown resolvers plus three coordinators).
+                # gave both rows the sixteen packaged readers that probe them
+                # (twelve markdown resolvers plus four coordinators).
                 # Neither spelling is tools/kanban_config.py's: that module
                 # composes the record path from the install directory above
                 # and a separate file name, so it carries neither literal

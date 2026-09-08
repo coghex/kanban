@@ -19,15 +19,24 @@ Claude packaging is at [claude-plugin/](../claude-plugin/README.md), Codex at
 
 ## Install and launch
 
-Two ways to load it, both keeping the bundle out of non-Kimi sessions — which
-is the point: a Copilot session on a Claude model is a canonical Claude
-participant and must follow the Claude bundle's workflows instead, so this
-bundle is never installed globally without intent.
+These instructions were verified with GitHub Copilot CLI 1.0.83. Copilot
+skills do not substitute a `$ARGUMENTS` variable: put the issue number in the
+invoking message, for example `/solve 652`, and the skill reads it there.
 
-The direct way loads the tracked checkout live, no install:
+Copilot discovers same-named skills from project, personal, and plugin
+locations and applies first-found-wins precedence. A project or personal
+`solve`, or an earlier-loaded provider bundle, can therefore shadow this
+bundle's `/solve` or `/autosolve`. The tested launches below use a dedicated
+`COPILOT_HOME` containing no Claude, Codex, or Grok Kanban bundle, and the
+worked repository must not provide a same-named project skill. A Copilot
+session using a Claude model is a canonical Claude participant and must not
+load this Kimi bundle.
+
+The direct way loads the tracked checkout live, with no install:
 
 ```console
-KIMI_PLUGIN_ROOT=$PWD/kimi-plugin/plugins/kanban \
+COPILOT_HOME=$HOME/.copilot-kimi \
+  KIMI_PLUGIN_ROOT=$PWD/kimi-plugin/plugins/kanban \
   copilot --model kimi-k3 --plugin-dir kimi-plugin/plugins/kanban
 ```
 
@@ -35,21 +44,28 @@ KIMI_PLUGIN_ROOT=$PWD/kimi-plugin/plugins/kanban \
 in the same launch line is what lets a `--plugin-dir` session find the
 vendored coordinator and trusted-comment helper beside the skills it loaded.
 
-The marketplace way registers and installs the bundle:
+The marketplace way registers and installs the bundle into that isolated
+profile. Copilot CLI 1.0.83 requires the tested absolute marketplace path:
 
 ```console
-copilot plugin marketplace add ./kimi-plugin
-copilot plugin install kanban@kanban-kimi
+COPILOT_HOME=$HOME/.copilot-kimi \
+  copilot plugin marketplace add "$PWD/kimi-plugin"
+COPILOT_HOME=$HOME/.copilot-kimi \
+  copilot plugin install kanban@kanban-kimi
+COPILOT_HOME=$HOME/.copilot-kimi copilot --model kimi-k3
 ```
 
 A local marketplace loads live from this directory — nothing is copied — and
-the CLI records its path under `extraKnownMarketplaces` in
-`$COPILOT_HOME/settings.json`, which the skills' helper lookup reads when
-`KIMI_PLUGIN_ROOT` is not set. Only a marketplace installed from a git remote
-copies into `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`), the
-layout the lookup searches last. A marketplace name collision is refused by
-the CLI rather than merged, which is why this marketplace is named
-`kanban-kimi` while the plugin inside keeps the shared name `kanban`.
+the CLI records its root at
+`extraKnownMarketplaces.kanban-kimi.source.path` in
+`$COPILOT_HOME/settings.json`, with the sibling `source` value `directory`.
+The skills map that absolute root to `plugins/kanban/`. When no local
+marketplace entry exists, they search exactly one copied git-source install
+under `$COPILOT_HOME/installed-plugins/kanban-*/`; malformed applicable
+settings, a missing helper, or zero or multiple copied matches stop without a
+fallback. A marketplace name collision is refused by the CLI rather than
+merged, which is why this marketplace is named `kanban-kimi` while the plugin
+inside keeps the shared name `kanban`.
 
 Whichever way it was loaded, invoke the skills by name in a Kimi session:
 `/solve` takes one issue to a pull request, `/autosolve` runs `/solve` and

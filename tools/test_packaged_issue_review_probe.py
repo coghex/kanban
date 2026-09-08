@@ -196,9 +196,9 @@ class PackagedRecordProbeTests(unittest.TestCase):
     """The probe order, the `$XDG_DATA_HOME` rule, occupancy, and the
     not-installed diagnostic.
 
-    Run against the three coordinators and one markdown fence standing in for
-    the eleven that are byte-identical to it; EveryPackagedResolverProbesTests
-    below pins that identity and drives all fourteen through the ordering case.
+    Run against the four coordinators and one markdown fence standing in for
+    the twelve that are byte-identical to it; EveryPackagedResolverProbesTests
+    below pins that identity and drives all sixteen through the ordering case.
     """
 
     @classmethod

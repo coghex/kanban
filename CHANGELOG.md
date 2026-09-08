@@ -24,7 +24,9 @@ created above it.
   register `kimi-plugin/` as the `kanban-kimi` marketplace and install
   `kanban@kanban-kimi`; helper lookup uses `$KIMI_PLUGIN_ROOT`, then the
   marketplace path recorded in `$COPILOT_HOME/settings.json`, then the hashed
-  `$COPILOT_HOME/installed-plugins/kanban-<hash>/` layout.
+  `$COPILOT_HOME/installed-plugins/kanban-<hash>/` layout. Installation was
+  verified with Copilot CLI 1.0.83 in an isolated Kimi-only profile because
+  its first-found skill precedence can shadow duplicate `/solve` names.
 - `<!-- pr-origin:kimi -->` is a known pull-request origin, on the same terms
   as grok: dual-mode review and rereview route it to Codex only — not Claude,
   and not both brands, which is what an unrecognized marker still does. Kimi

@@ -26,6 +26,9 @@ import plugin_bundle_gate
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KIMI_PLUGIN = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
 CLAUDE_PLUGIN = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
+GROK_COORDINATOR = (
+    REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
 SOLVE = KIMI_PLUGIN / "skills" / "solve" / "SKILL.md"
 AUTOSOLVE = KIMI_PLUGIN / "skills" / "autosolve" / "SKILL.md"
 TRUSTED_SPEC = KIMI_PLUGIN / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
@@ -33,6 +36,7 @@ COORDINATOR = KIMI_PLUGIN / "scripts" / "review_pr.py"
 MODELS = KIMI_PLUGIN / "scripts" / "kanban_models.py"
 PLUGIN_JSON = KIMI_PLUGIN / "plugin.json"
 MARKETPLACE = REPO_ROOT / "kimi-plugin" / ".github" / "plugin" / "marketplace.json"
+README = REPO_ROOT / "kimi-plugin" / "README.md"
 PLUGIN_MANIFEST_PATH = "kimi-plugin/plugins/kanban/plugin.json"
 MARKETPLACE_MANIFEST_PATH = "kimi-plugin/.github/plugin/marketplace.json"
 SKILLS_PREFIX = "kimi-plugin/plugins/kanban/skills"
@@ -62,16 +66,42 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.is_file():
+if settings.exists():
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
-        entry = document.get("extraKnownMarketplaces", {}).get("kanban-kimi", {})
-        source = entry.get("source", {})
-        if source.get("source") == "directory" and source.get("path"):
-            finish(Path(source["path"]) / "plugins" / "kanban" / relative)
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-matches = sorted((Path(copilot_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and "kanban-kimi" in marketplaces:
+        entry = marketplaces["kanban-kimi"]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed kanban-kimi entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name kanban-kimi as a directory source."
+            )
+        recorded = source.get("path")
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name an absolute kanban-kimi path: {recorded!r}."
+            )
+        finish(Path(recorded) / "plugins" / "kanban" / relative)
+matches = sorted(
+    candidate
+    for candidate in (Path(copilot_home) / "installed-plugins").glob(
+        "kanban-*/" + relative.as_posix()
+    )
+    if candidate.is_file()
+)
 if not matches:
     raise SystemExit("coordinator was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
 if len(matches) != 1:
@@ -175,6 +205,32 @@ class ManifestListingParityTests(unittest.TestCase):
                 )
 
 
+class DocumentationTests(unittest.TestCase):
+    def setUp(self):
+        self.text = README.read_text(encoding="utf-8")
+
+    def test_readme_pins_the_verified_copilot_install_mechanisms(self):
+        self.assertIn("GitHub Copilot CLI 1.0.83", self.text)
+        self.assertIn("--plugin-dir kimi-plugin/plugins/kanban", self.text)
+        self.assertIn('plugin marketplace add "$PWD/kimi-plugin"', self.text)
+        self.assertIn("plugin install kanban@kanban-kimi", self.text)
+        self.assertIn(
+            "extraKnownMarketplaces.kanban-kimi.source.path", self.text
+        )
+
+    def test_readme_explains_argument_and_shadowing_behavior(self):
+        self.assertIn("do not substitute a `$ARGUMENTS` variable", self.text)
+        self.assertIn("/solve 652", self.text)
+        self.assertIn("first-found-wins", self.text)
+        self.assertIn("shadow", self.text)
+        self.assertIn("dedicated\n`COPILOT_HOME`", self.text)
+        self.assertIn("Claude model is a canonical Claude participant", self.text)
+
+    def test_readme_states_the_review_safety_boundary(self):
+        self.assertIn("without**\n`--self-review`", self.text)
+        self.assertIn("route other than `codex` is a stop", self.text)
+
+
 class VendoredHelperTests(unittest.TestCase):
     def test_trusted_issue_spec_matches_the_claude_copy(self):
         self.assertEqual(
@@ -187,6 +243,9 @@ class VendoredHelperTests(unittest.TestCase):
         self.assertIn("--expected-origin", text)
         self.assertIn("--expected-route", text)
         self.assertIn("route_mismatch", text)
+
+    def test_review_pr_is_byte_identical_to_the_grok_coordinator(self):
+        self.assertEqual(COORDINATOR.read_bytes(), GROK_COORDINATOR.read_bytes())
 
     def test_kanban_models_matches_the_claude_copy(self):
         self.assertEqual(
@@ -263,7 +322,7 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn("installed-plugins/kanban-<hash>", text)
         self.assertIn("$KIMI_PLUGIN_ROOT", text)
         self.assertIn("ambiguous Kanban installs", text)
-        self.assertIn('glob("kanban-*/" + relative.as_posix())', text)
+        self.assertIn('"kanban-*/" + relative.as_posix()', text)
         self.assertIn(KIMI_COORDINATOR_PYTHON, text)
 
 
@@ -345,9 +404,9 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
-    def test_a_non_directory_marketplace_source_falls_through_to_the_glob(self):
+    def test_a_non_directory_marketplace_source_refuses_without_glob_fallback(self):
         home = self.root / "copilot-remote"
-        expected = self.install_hashed(home)
+        self.install_hashed(home)
         copilot_home = home / ".copilot"
         (copilot_home).mkdir(parents=True, exist_ok=True)
         (copilot_home / "settings.json").write_text(
@@ -364,8 +423,68 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
             encoding="utf-8",
         )
         proc = self.run_locator("", str(copilot_home))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("do not name kanban-kimi as a directory source", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_settings_without_a_kimi_entry_fall_through_to_the_glob(self):
+        home = self.root / "copilot-unrelated-marketplace"
+        expected = self.install_hashed(home)
+        copilot_home = home / ".copilot"
+        (copilot_home / "settings.json").write_text(
+            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
+            encoding="utf-8",
+        )
+        proc = self.run_locator("", str(copilot_home))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_malformed_settings_refuse_without_glob_fallback(self):
+        cases = {
+            "invalid-json": "{",
+            "non-object": json.dumps([]),
+            "marketplaces-not-object": json.dumps({"extraKnownMarketplaces": []}),
+            "entry-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-kimi": []}}
+            ),
+            "source-not-directory": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {"source": {"source": "github"}}
+                    }
+                }
+            ),
+            "relative-path": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "directory", "path": "relative"}
+                        }
+                    }
+                }
+            ),
+        }
+        for name, contents in cases.items():
+            with self.subTest(case=name):
+                home = self.root / f"copilot-malformed-{name}"
+                self.install_hashed(home)
+                settings = home / ".copilot" / "settings.json"
+                settings.write_text(contents + "\n", encoding="utf-8")
+                proc = self.run_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("Copilot settings", proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_recorded_marketplace_missing_the_helper_refuses_without_fallback(self):
+        home = self.root / "copilot-marketplace-missing-helper"
+        self.install_hashed(home)
+        marketplace = self.root / "empty-marketplace"
+        marketplace.mkdir()
+        self.register_local_marketplace(home, marketplace)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
 
     def test_the_lookup_uses_plugin_root_for_a_marketplace_source_outside_home(self):
         home = self.root / "copilot-empty-home"
@@ -649,7 +768,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                     )
                 collect.assert_called()
 
-    def test_pr_origin_keeps_a_cross_repository_kimi_marker(self):
+    def test_pr_origin_keeps_cross_repository_external_markers(self):
         self.assertEqual(
             self.module.pr_origin(self.pr("kimi", cross_repository=True)),
             "kimi",
@@ -660,8 +779,9 @@ class ExpectedRouteBindingTests(unittest.TestCase):
         self.assertIsNone(
             self.module.pr_origin(self.pr("codex", cross_repository=True))
         )
-        self.assertIsNone(
-            self.module.pr_origin(self.pr("grok", cross_repository=True))
+        self.assertEqual(
+            self.module.pr_origin(self.pr("grok", cross_repository=True)),
+            "grok",
         )
         self.assertEqual(
             self.module.pr_origin(self.pr("kimi", cross_repository=False)),

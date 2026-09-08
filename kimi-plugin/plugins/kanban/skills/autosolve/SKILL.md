@@ -180,7 +180,10 @@ directory this session loaded, whether a marketplace install or a local
 `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-kimi`
 marketplace's recorded local path out of `$COPILOT_HOME/settings.json`, and
 only then search the copied install layout
-`$COPILOT_HOME/installed-plugins/kanban-<hash>/` (default `~/.copilot`):
+`$COPILOT_HOME/installed-plugins/kanban-<hash>/` (default `~/.copilot`). An
+absent settings file or one with no `kanban-kimi` entry reaches that final
+search; unreadable or malformed applicable settings, a relative recorded path,
+and a recorded tree missing the coordinator refuse without falling through:
 
 ```bash
 COORDINATOR="$(python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
@@ -197,16 +200,42 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.is_file():
+if settings.exists():
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
-        entry = document.get("extraKnownMarketplaces", {}).get("kanban-kimi", {})
-        source = entry.get("source", {})
-        if source.get("source") == "directory" and source.get("path"):
-            finish(Path(source["path"]) / "plugins" / "kanban" / relative)
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-matches = sorted((Path(copilot_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and "kanban-kimi" in marketplaces:
+        entry = marketplaces["kanban-kimi"]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed kanban-kimi entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name kanban-kimi as a directory source."
+            )
+        recorded = source.get("path")
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name an absolute kanban-kimi path: {recorded!r}."
+            )
+        finish(Path(recorded) / "plugins" / "kanban" / relative)
+matches = sorted(
+    candidate
+    for candidate in (Path(copilot_home) / "installed-plugins").glob(
+        "kanban-*/" + relative.as_posix()
+    )
+    if candidate.is_file()
+)
 if not matches:
     raise SystemExit("coordinator was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
 if len(matches) != 1:
