@@ -32,6 +32,11 @@ COORDINATOR = GROK_PLUGIN / "scripts" / "review_pr.py"
 MODELS = GROK_PLUGIN / "scripts" / "kanban_models.py"
 PLUGIN_JSON = GROK_PLUGIN / "plugin.json"
 MARKETPLACE = REPO_ROOT / "grok-plugin" / ".grok-plugin" / "marketplace.json"
+PLUGIN_MANIFEST_PATH = "grok-plugin/plugins/kanban/plugin.json"
+MARKETPLACE_MANIFEST_PATH = "grok-plugin/.grok-plugin/marketplace.json"
+SKILLS_PREFIX = "grok-plugin/plugins/kanban/skills"
+COMMAND_SIGIL = "/"
+EXPECTED_SKILL_NAMES = {"solve", "autosolve"}
 
 GROK_ORIGIN = "<!-- pr-origin:grok -->"
 CLAUDE_ORIGIN = "<!-- pr-origin:claude -->"
@@ -61,6 +66,72 @@ class PluginLayoutTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn(f"name: {name}", text)
             self.assertIn("description:", text)
+
+
+class ManifestListingParityTests(unittest.TestCase):
+    """Manifest descriptions enumerate the workflows this bundle ships.
+
+    The shipped set is derived from tracked SKILL.md files rather than
+    restated as a constant, so adding a skill with only a version bump
+    fails unless every enumerating description names it.
+    """
+
+    def shipped(self) -> set[str]:
+        return plugin_bundle_gate.tracked_skill_names(REPO_ROOT, SKILLS_PREFIX)
+
+    def enumerating_surfaces(self) -> dict[str, str]:
+        marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+        return {
+            f"{PLUGIN_MANIFEST_PATH} description": json.loads(
+                PLUGIN_JSON.read_text(encoding="utf-8")
+            )["description"],
+            f"{MARKETPLACE_MANIFEST_PATH} description": marketplace["description"],
+            f"{MARKETPLACE_MANIFEST_PATH} plugin-entry description": marketplace[
+                "plugins"
+            ][0]["description"],
+        }
+
+    def test_the_tracked_skill_files_are_the_pinned_discovery_set(self):
+        self.assertEqual(self.shipped(), EXPECTED_SKILL_NAMES)
+
+    def test_every_enumerating_description_names_exactly_the_shipped_skills(self):
+        shipped = self.shipped()
+        failures = []
+        for surface, text in self.enumerating_surfaces().items():
+            failures.extend(
+                plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(text, COMMAND_SIGIL),
+                    shipped,
+                )
+            )
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_the_parity_check_detects_a_planted_omission_and_a_planted_extra(self):
+        shipped = self.shipped()
+        for surface, text in self.enumerating_surfaces().items():
+            with self.subTest(surface=surface):
+                omitted = text.replace("/autosolve", "")
+                self.assertNotEqual(omitted, text, "the planted omission changed nothing")
+                failures = plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(omitted, COMMAND_SIGIL),
+                    shipped,
+                )
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("omits shipped workflow(s): autosolve", failures[0])
+
+                spurious = f"{text} It also ships /retired-skill."
+                failures = plugin_bundle_gate.parity_failures(
+                    surface,
+                    plugin_bundle_gate.workflow_identifiers(spurious, COMMAND_SIGIL),
+                    shipped,
+                )
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn(
+                    "names workflow(s) the bundle does not ship: retired-skill",
+                    failures[0],
+                )
 
 
 class VendoredHelperTests(unittest.TestCase):
@@ -364,7 +435,6 @@ class ExpectedRouteBindingTests(unittest.TestCase):
 
 
 BUNDLE_PREFIX = "grok-plugin/plugins/kanban"
-PLUGIN_MANIFEST_PATH = "grok-plugin/plugins/kanban/plugin.json"
 ORIGINAL_BUNDLE_VERSION = "1.0.0"
 
 

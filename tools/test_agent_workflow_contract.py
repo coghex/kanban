@@ -1961,7 +1961,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -1988,7 +1988,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2476,7 +2476,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for name in discovered_commands_for_plugin_file(relative_path, content):
@@ -2612,7 +2612,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2644,7 +2644,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2694,7 +2694,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2742,7 +2742,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertEqual(
@@ -2783,7 +2783,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2822,7 +2822,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2863,7 +2863,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2931,7 +2931,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -3002,7 +3002,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -3173,7 +3173,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                f"{relative_path} is not scanned by any plugin surface list",
             )
 
     def test_every_document_asset_bash_command_is_documented(self):

@@ -63,7 +63,7 @@ COORDINATION_REASONS = ("audit-report", "coordination-note")
 # rather than discovered: a grep for a path in a test module also hits the
 # release lists and the prose comments that merely name a document, so it would
 # report every doc as parsed. Correction from issue #225's canonical review:
-# docs/design.md is parsed by test/Spec/UI/Keys.hs and both plugin bundles are
+# docs/design.md is parsed by test/Spec/UI/Keys.hs and the plugin bundles are
 # parsed by their own modules, so the reason is not confined to the two
 # workflow-contract documents the issue body named.
 TEST_PARSED_PATHS = {
