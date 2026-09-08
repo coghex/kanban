@@ -40,6 +40,8 @@ import Kanban.Preflight
     blockingRemediation,
     gatherPreflightEnvironment,
     issueOriginFromBody,
+    issueRevisionUnsupported,
+    issueRevisionUnsupportedMessage,
     preflightDiagnostic,
   )
 import Kanban.ProviderAdapter (brandForProvider)
@@ -68,7 +70,11 @@ actionRoute :: WorkflowConfig -> WorkflowActionKind -> Maybe SolverBrand -> Acti
 actionRoute config kind solverBrand target = case kind of
   ObserveApprovalQueue -> Right RouteApprovalQueue
   ReviewIssue -> RouteProvider . ActionIssueReview <$> issueOrigin
-  ReviseIssue -> RouteProvider . ActionIssueRevision <$> issueOrigin
+  ReviseIssue -> do
+    origin <- issueOrigin
+    if issueRevisionUnsupported origin
+      then Left (ActionRoutingUnavailable kind (issueRevisionUnsupportedMessage origin))
+      else Right (RouteProvider (ActionIssueRevision origin))
   SolveIssue -> RouteProvider . ActionSolve <$> brand
   AutoSolveIssue -> RouteProvider . ActionAutoSolve <$> brand
   ReviewPullRequest -> pullRequestRoute

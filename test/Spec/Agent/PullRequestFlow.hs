@@ -76,12 +76,19 @@ spec = do
       originFromBody "body\n<!-- pr-origin:claude -->" `shouldBe` Right PullRequestClaude
       originFromBody "body\n<!-- pr-origin:grok -->" `shouldBe` Right PullRequestGrok
       originFromBody "body\n<!-- pr-origin:kimi -->" `shouldBe` Right PullRequestKimi
+      originFromBody "body\n<!-- pr-origin:kimi -->\n \t\n" `shouldBe` Right PullRequestKimi
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
       originFromBody "<!-- pr-origin:unknown -->" `shouldBe` Left "PR body has no valid pr-origin marker"
       originFromBody "body\n<!-- pr-origin:grok -->\n<!-- pr-origin:claude -->"
         `shouldBe` Left "PR body contains both pr-origin markers"
+      originFromBody "body\n<!-- pr-origin:kimi -->\n<!-- pr-origin:codex -->"
+        `shouldBe` Left "PR body contains both pr-origin markers"
       originFromBody "<!-- pr-origin:grok -->\ntext"
         `shouldBe` Left "PR origin marker must be the final non-whitespace content"
+      originFromBody "<!-- pr-origin:kimi -->\ntext"
+        `shouldBe` Left "PR origin marker must be the final non-whitespace content"
+      originFromBody "<!-- pr-origin:kimi -->\n<!-- pr-origin:kimi -->"
+        `shouldBe` Left "PR body contains a duplicate pr-origin marker"
 
     -- Issue #494. `originFromBody` counts each marker across the whole body
     -- with no awareness of HTML comments, so a marker pasted into the

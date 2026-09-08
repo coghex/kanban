@@ -37,7 +37,7 @@ import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Text
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Kanban.Domain (Repository (..), defaultWorkflowConfig)
+import Kanban.Domain (Issue (..), Repository (..), defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
@@ -71,6 +71,7 @@ import Kanban.Review
   ( CommandBounds (..),
     ReviewClient,
     ReviewEvent (..),
+    ReviewStage (..),
     authenticatedClaudeArguments,
     beginIssueReview,
     claudeStartedEvent,
@@ -90,7 +91,7 @@ import Kanban.Solve
 import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
 import Kanban.UI.Overlay (solveChooserDisplay)
 import Kanban.UI.PullRequest (failPullRequestLaunch, freshPullRequestTranscript, pullRequestStartRefusal)
-import Kanban.UI.Review (claudeTranscriptStart)
+import Kanban.UI.Review (claudeTranscriptStart, issueReviewStartRefusal)
 import Kanban.UI.Session (agentSessionEntries, pullRequestSessionReusable, solvePhaseActive)
 import Kanban.UI.Settings
   ( RosterWrite (..),
@@ -254,6 +255,14 @@ spec = do
       pullRequestStartRefusal rostered PullRequestKimi PullRequestReview `shouldBe` Nothing
       pullRequestStartRefusal rostered PullRequestKimi PullRequestRevision
         `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestRepair
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
+
+    it "refuses a kimi-origin issue revision before any session exists" $ do
+      let kimiIssue = (baseIssue 469 []) {issueBody = "<!-- issue-origin:kimi -->"}
+      issueReviewStartRefusal kimiIssue IssueRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf "kimi-origin issue revision")
+      issueReviewStartRefusal kimiIssue InitialReview `shouldBe` Nothing
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the

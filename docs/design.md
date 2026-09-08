@@ -848,16 +848,19 @@ review and GPT-5.6-Terra high for revision and repair, Claude-origin PRs on
 GPT-5.6-Sol xhigh for review and Sonnet 5 high for revision and repair, and
 both solvers on GPT-5.6-Terra high and Sonnet 5 high.
 
-Single-agent mode moves that column rather than the roles. Every pull-request
-action — review, rereview, revision, repair — runs on the one loaded provider
-whatever the pull request's origin marker says, including a pull request whose
-origin is unknown or external, except grok-origin and kimi-origin revision
-and repair, which
-still have no spawned provider to collapse onto; the embedded issue review starts that
-provider's own backend, the Codex app-server in a Codex-only install and the
-`claude` stream-json session in a Claude-only one; a fresh solve starts on it
-without opening the chooser, because there is nothing to choose between; and
-the usage surfaces read only its account. Which provider that is has one
+Single-agent mode moves that column rather than the roles. Every supported
+pull-request action runs on the one loaded provider whatever the pull request's
+origin marker says, including review and rereview for a grok-origin or
+kimi-origin pull request and every action for an unknown or external origin.
+Grok-origin and kimi-origin revision and repair remain refused because those
+origins have no spawned provider to collapse onto. Canonical issue review,
+including a kimi-origin issue's review, likewise collapses onto the loaded
+provider; kimi-origin issue revision remains refused, and the Kimi session that
+filed the issue authors its amendment. The embedded issue review starts the
+loaded provider's own backend, the Codex app-server in a Codex-only install and
+the `claude` stream-json session in a Claude-only one; a fresh solve starts on
+it without opening the chooser, because there is nothing to choose between;
+and the usage surfaces read only its account. Which provider that is has one
 declaration site, beside the one that answers whether any is loaded at all, and
 no surface derives it from the `agents` list on its own. Origin markers are
 still written in every mode: a solve stamps its brand's marker as it always
@@ -910,12 +913,11 @@ the same thing in words.
 
 A missing or contradictory `pr-origin` marker fails visibly rather than
 guessing. `<!-- pr-origin:grok -->` and `<!-- pr-origin:kimi -->` are known
-origins: dual-mode review and
-rereview run on Codex, and an unknown or external origin still falls through
-to both loaded providers. Neither Grok nor Kimi is a compiled adapter, so the
-board
-refuses revision and repair of a grok-origin or kimi-origin pull request
-rather than
+origins: dual-mode review and rereview run on Codex, including for a valid Kimi
+marker on a fork pull request, while an unknown or external origin still falls
+through to both loaded providers. Neither Grok nor Kimi is a compiled adapter,
+so the board refuses revision and repair of a grok-origin or kimi-origin pull
+request rather than
 spawning Codex or Claude to edit it.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
@@ -948,9 +950,12 @@ the user may already have run. Preflight, both packaged PR coordinators, and
 the packaged issue-review and solve workflows resolve identically. Interactive revision remains inside Kanban.
 Each `r` invocation advances exactly one durable label-driven stage:
 
-1. With neither workflow label, the opposite brand performs the initial review.
-   Claude-origin issues route to GPT-6-Astra high, Codex-origin issues route
-   to Claude Fable 5.1 high, and unmarked issues require both. A *replaced*
+1. With neither workflow label, the routed reviewer performs the initial review.
+   In dual mode, Claude-origin issues route to GPT-6-Astra high, Codex-origin
+   issues route to Claude Fable 5.1 high, Kimi-origin issues route to
+   GPT-6-Astra high, and unmarked issues require both. Single-agent mode
+   collapses each of those routes onto the loaded provider; no-agent mode
+   starts no reviewer, publishes nothing, and changes no label. A *replaced*
    default does not retire the approvals standing under it: an append-only
    reviewer ledger records which assignment was canonical from when, and a
    marker is judged against the assignment in force the day it was written
@@ -968,7 +973,8 @@ Each `r` invocation advances exactly one durable label-driven stage:
    personas stay readable in the other direction, since a historical review that
    predates the marker's `verdicts=` field has only its human-readable summary
    to recover a per-reviewer verdict from.
-2. `reviewed:changes` switches back to the author brand for revision:
+2. For supported origins, `reviewed:changes` switches back to the author brand
+   for revision:
    GPT-6-Astra xhigh for Codex-origin issues and Claude Fable 5.1 high for
    Claude-origin issues. Unmarked issues default to GPT-6-Astra xhigh. The
    Codex half is the embedded thread's own coordinator and so reads
@@ -976,7 +982,10 @@ Each `r` invocation advances exactly one durable label-driven stage:
    `issue_revise.claude`. The
    agent writes one canonical specification
    amendment as an issue comment, then replaces `reviewed:changes` with
-   `reviewed:revised` without approving.
+   `reviewed:revised` without approving. Kimi-origin issue revision is refused
+   at the board and action-registry boundaries in every operating mode because
+   Kimi is not a spawned provider and Codex is already its dual-mode reviewer;
+   the Kimi session that filed the issue authors the amendment instead.
 3. `reviewed:revised` routes back to the same opposite-brand reviewer set. A
    passing rereview replaces it with `reviewed:approve`; a failing rereview
    returns to `reviewed:changes` for another cycle.
