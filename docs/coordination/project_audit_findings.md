@@ -35,7 +35,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 - [x] KA-2. Concurrent mission and board reads conflict over process bookkeeping — [#642]
 - [x] KA-3. Precondition reads do not bind the selected repository — [#643]
 - [x] KA-4. Failed command persistence can lose a pause request — [#644]
-- [ ] KA-5. Precondition reads bypass the configured GitHub timeout
+- [x] KA-5. Precondition reads bypass the configured GitHub timeout — [#645]
 
 ## Board responsiveness
 
@@ -118,7 +118,7 @@ After repairing the write fault, the pause is no longer queued. A separate probe
 
 **Remaining uncertainty:** Both cases were reproduced in temporary stores. The snapshot failure ends the current run with an error; the concern is lost operator intent on recovery.
 
-### KA-5. Precondition reads bypass the configured GitHub timeout
+### [#645] KA-5. Precondition reads bypass the configured GitHub timeout
 
 **Priority: medium.**
 
