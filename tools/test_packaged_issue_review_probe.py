@@ -10,8 +10,8 @@ each packaged resolver against a redirected `$HOME` and assert which record it
 selects, which backend it returns, and what its diagnostic says when it finds
 none.
 
-Fourteen resolvers owe the same answers -- the eleven markdown workflow assets whose
-`bash` fence resolves the backend, and the three pull-request coordinators -- and
+Sixteen resolvers owe the same answers -- the twelve markdown workflow assets whose
+`bash` fence resolves the backend, and the four pull-request coordinators -- and
 each is exercised through its real surface: the fence by running it in `bash`,
 the coordinator by calling its `approver_path()`. Nothing here reimplements the
 probe, so these tests cannot agree with a resolver that is wrong.
@@ -43,7 +43,7 @@ RECORD_NAME = "config.json"
 BACKEND_NAME = "approve_issues.py"
 
 # Every markdown workflow asset whose bash fence resolves the backend. All
-# eleven carry the same fence, which test_every_markdown_fence_is_the_same_probe
+# twelve carry the same fence, which test_every_markdown_fence_is_the_same_probe
 # pins; that is what lets the full case matrix run against one of them.
 MARKDOWN_RESOLVER_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -57,6 +57,7 @@ MARKDOWN_RESOLVER_ASSETS = (
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 REPRESENTATIVE_MARKDOWN_ASSET = "claude-plugin/plugins/kanban/commands/solve.md"
@@ -65,6 +66,7 @@ COORDINATORS = (
     ("claude", "claude-plugin/plugins/kanban/scripts/review_pr.py"),
     ("codex", "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py"),
     ("grok", "grok-plugin/plugins/kanban/scripts/review_pr.py"),
+    ("kimi", "kimi-plugin/plugins/kanban/scripts/review_pr.py"),
 )
 
 BASH_FENCE_RE = re.compile(r"```bash\n(.*?)\n[ \t]*```", re.DOTALL)
@@ -377,14 +379,14 @@ class EveryPackagedResolverProbesTests(unittest.TestCase):
             relative_path: record_resolver_fence(relative_path)
             for relative_path in MARKDOWN_RESOLVER_ASSETS
         }
-        self.assertEqual(len(fences), 11)
+        self.assertEqual(len(fences), 12)
         reference = fences[REPRESENTATIVE_MARKDOWN_ASSET]
         for relative_path, fence in fences.items():
             self.assertEqual(fence, reference, relative_path)
 
     def test_every_packaged_resolver_prefers_the_xdg_installation(self):
         resolvers = every_resolver()
-        self.assertEqual(len(resolvers), 14)
+        self.assertEqual(len(resolvers), 16)
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch) / "home"
             xdg_backend = install(home / XDG_RECORD_DIR)

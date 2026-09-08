@@ -15,6 +15,16 @@ created above it.
 
 ### Unreleased
 
+- The tracked Kimi plugin (`kimi-plugin/`) packages `/solve` and `/autosolve`
+  for Copilot CLI sessions running a Kimi model. A Kimi session stamps
+  `<!-- pr-origin:kimi -->` and `/autosolve` obtains a Codex review without
+  `--self-review`. It never invokes Claude. Kimi is still not a
+  Kanban-spawned provider. Load it per session with
+  `copilot --model <kimi-model> --plugin-dir kimi-plugin/plugins/kanban`, or
+  register `kimi-plugin/` as the `kanban-kimi` marketplace and install
+  `kanban@kanban-kimi`; helper lookup uses `$KIMI_PLUGIN_ROOT`, then the
+  marketplace path recorded in `$COPILOT_HOME/settings.json`, then the hashed
+  `$COPILOT_HOME/installed-plugins/kanban-<hash>/` layout.
 - `<!-- pr-origin:kimi -->` is a known pull-request origin, on the same terms
   as grok: dual-mode review and rereview route it to Codex only — not Claude,
   and not both brands, which is what an unrecognized marker still does. Kimi

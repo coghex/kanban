@@ -4,7 +4,8 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Issue #238 vendored `trusted_issue_spec.py` into the tracked plugin bundles and
 made it the solve workflows' only permitted view of an issue's comment timeline.
-The Grok bundle carries a third byte-identical copy. Every behavioural
+The Grok bundle carries a third byte-identical copy, and the Kimi bundle a
+fourth. Every behavioural
 assertion here runs against every copy: a trust boundary enforced in one
 bundle and not the others is not enforced, and these files are the whole
 boundary — the tracked solve workflows have no fallback comment source to fail
@@ -51,16 +52,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin" / "plugins" / "kanban"
 CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
 GROK_PLUGIN_ROOT = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
+KIMI_PLUGIN_ROOT = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
 
 CODEX_HELPER = CODEX_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 CLAUDE_HELPER = CLAUDE_PLUGIN_ROOT / "scripts" / "trusted_issue_spec.py"
 GROK_HELPER = GROK_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
-HELPERS = {"codex": CODEX_HELPER, "claude": CLAUDE_HELPER, "grok": GROK_HELPER}
+KIMI_HELPER = KIMI_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+HELPERS = {"codex": CODEX_HELPER, "claude": CLAUDE_HELPER, "grok": GROK_HELPER, "kimi": KIMI_HELPER}
 
 CODEX_SOLVE = CODEX_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 CLAUDE_SOLVE = CLAUDE_PLUGIN_ROOT / "commands" / "solve.md"
 GROK_SOLVE = GROK_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
-SOLVE_WORKFLOWS = {"codex": CODEX_SOLVE, "claude": CLAUDE_SOLVE, "grok": GROK_SOLVE}
+KIMI_SOLVE = KIMI_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
+SOLVE_WORKFLOWS = {"codex": CODEX_SOLVE, "claude": CLAUDE_SOLVE, "grok": GROK_SOLVE, "kimi": KIMI_SOLVE}
 
 # The exact lookup each solve workflow uses to find its own installed copy. The
 # Codex bundle searches under $CODEX_HOME the way its PR-flow skills locate the
@@ -93,6 +97,41 @@ print(matches[0])
 GROK_HELPER_LOOKUP = (
     'python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<\'PY\'\n'
     + GROK_HELPER_PYTHON
+    + "PY"
+)
+
+KIMI_HELPER_PYTHON = '''import json, sys
+from pathlib import Path
+
+plugin_root, copilot_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+def finish(candidate):
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+if plugin_root:
+    finish(Path(plugin_root) / relative)
+settings = Path(copilot_home) / "settings.json"
+if settings.is_file():
+    try:
+        document = json.loads(settings.read_text(encoding="utf-8"))
+        entry = document.get("extraKnownMarketplaces", {}).get("kanban-kimi", {})
+        source = entry.get("source", {})
+        if source.get("source") == "directory" and source.get("path"):
+            finish(Path(source["path"]) / "plugins" / "kanban" / relative)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+matches = sorted((Path(copilot_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("trusted helper was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+'''
+KIMI_HELPER_LOOKUP = (
+    'python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
+    + KIMI_HELPER_PYTHON
     + "PY"
 )
 
@@ -225,9 +264,9 @@ def imported_modules(path):
 
 
 def load_helper(brand: str):
-    """Import one vendored copy by file path. None of the three lives under
+    """Import one vendored copy by file path. None of the four lives under
     tools/, so none is ever on sys.path via `-s tools` discovery, and the
-    three must be loaded under distinct module names so importing one cannot
+    four must be loaded under distinct module names so importing one cannot
     serve another's assertions from sys.modules."""
     path = HELPERS[brand]
     spec = importlib.util.spec_from_file_location(
@@ -786,6 +825,165 @@ class InstalledResolutionTests(unittest.TestCase):
             timeout=60,
         )
 
+    def install_kimi_bundle(self, home: Path) -> Path:
+        # The copied layout of a git-sourced Copilot marketplace install:
+        # $COPILOT_HOME/installed-plugins/kanban-<hash>/.
+        installed = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "kanban-b0441dc6"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(KIMI_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def install_kimi_marketplace_source(self, root: Path) -> Path:
+        installed = (
+            root
+            / "marketplace"
+            / "plugins"
+            / "kanban"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(KIMI_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def register_kimi_local_marketplace(self, home: Path, marketplace: Path) -> None:
+        # What `copilot plugin marketplace add <local path>` records: the
+        # bundle loads live from that directory, so the path in settings.json
+        # is the resolution.
+        copilot_home = home / ".copilot"
+        copilot_home.mkdir(parents=True, exist_ok=True)
+        (copilot_home / "settings.json").write_text(
+            json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "directory", "path": str(marketplace)}
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def run_kimi_locator(self, plugin_root: str, copilot_home: str):
+        return subprocess.run(
+            ["python3", "-", plugin_root, copilot_home],
+            input=KIMI_HELPER_PYTHON,
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+        )
+
+    def test_the_kimi_skill_declares_the_lookup_it_is_tested_with(self):
+        self.assertIn(
+            KIMI_HELPER_PYTHON,
+            KIMI_SOLVE.read_text(encoding="utf-8"),
+            "the Kimi solve skill must prefer $KIMI_PLUGIN_ROOT, then the "
+            "recorded local marketplace path, else one hashed install",
+        )
+
+    def test_the_kimi_lookup_resolves_from_an_explicit_copilot_home(self):
+        home = self.root / "kimi-home"
+        expected = self.install_kimi_bundle(home)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_kimi_lookup_resolves_from_the_recorded_local_marketplace(self):
+        home = self.root / "kimi-local"
+        expected = self.install_kimi_marketplace_source(self.root)
+        self.register_kimi_local_marketplace(home, self.root / "marketplace")
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_kimi_lookup_uses_plugin_root_for_a_plugin_dir_launch(self):
+        home = self.root / "kimi-empty-home"
+        home.mkdir()
+        expected = self.install_kimi_marketplace_source(self.root)
+        plugin_root = expected.parents[3]  # .../plugins/kanban
+        proc = self.run_kimi_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_kimi_lookup_fails_closed_when_two_kanban_installs_match(self):
+        home = self.root / "kimi-ambiguous"
+        first = self.install_kimi_bundle(home)
+        second = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "kanban-aaaaaaaa"
+            / "skills"
+            / "solve"
+            / "scripts"
+            / "trusted_issue_spec.py"
+        )
+        second.parent.mkdir(parents=True, exist_ok=True)
+        second.write_bytes(KIMI_HELPER.read_bytes())
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertTrue(first.is_file())
+
+    def test_the_kimi_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
+        home = self.root / "kimi-competitor"
+        expected = self.install_kimi_bundle(home)
+        other = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "otherplugin-deadbeef"
+            / "skills"
+            / "solve"
+            / "scripts"
+            / "trusted_issue_spec.py"
+        )
+        other.parent.mkdir(parents=True)
+        other.write_bytes(KIMI_HELPER.read_bytes())
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_kimi_lookup_fails_closed_when_nothing_matches(self):
+        home = self.root / "kimi-empty"
+        (home / ".copilot" / "installed-plugins").mkdir(parents=True)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_resolved_kimi_copy_runs_from_the_worked_repository(self):
+        home = self.root / "kimi-runnable-home"
+        expected = self.install_kimi_bundle(home)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        run = subprocess.run(
+            ["python3", str(expected), "--self-test"],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("self-test passed", run.stdout)
+
     def test_the_grok_skill_declares_the_lookup_it_is_tested_with(self):
         self.assertIn(
             GROK_HELPER_PYTHON,
@@ -887,6 +1085,10 @@ class SolveWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
             GROK_SOLVE.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
+            KIMI_SOLVE.read_text(encoding="utf-8"),
         )
 
     def test_each_workflow_forbids_every_unfiltered_comment_source(self):
@@ -1096,7 +1298,7 @@ class ForkCheckoutRepositoryScopeTests(unittest.TestCase):
 
 class SolveRepositoryScopeTests(unittest.TestCase):
     """Issue #277 requirements 1, 2, 4, and 5: one established identity scopes
-    the whole solve run, in all three bundles. Kanban's resolved repository need not
+    the whole solve run, in all four bundles. Kanban's resolved repository need not
     be the checkout's own remote, so a lane that re-derives one for its
     selection, claim, spec fetch, or pull request works a different
     repository's issue #N than the one Kanban gated and displays."""
@@ -1136,9 +1338,11 @@ class SolveRepositoryScopeTests(unittest.TestCase):
             self.assertIn("are forbidden here", squashed, brand)
 
     def test_the_gate_check_and_the_helper_both_receive_the_identity(self):
-        # The three bundles resolve the helper differently — `$TRUSTED_SPEC`
-        # under `$CODEX_HOME`, `${CLAUDE_PLUGIN_ROOT}`, or `$GROK_PLUGIN_ROOT` /
-        # `$GROK_HOME/installed-plugins/kanban-<hash>` — so the invocation is
+        # The four bundles resolve the helper differently — `$TRUSTED_SPEC`
+        # under `$CODEX_HOME`, `${CLAUDE_PLUGIN_ROOT}`,
+        # `$GROK_PLUGIN_ROOT` / `$GROK_HOME/installed-plugins/kanban-<hash>`,
+        # or `$KIMI_PLUGIN_ROOT` / the recorded `kanban-kimi` marketplace path /
+        # `$COPILOT_HOME/installed-plugins/kanban-<hash>` — so the invocation is
         # matched by what it targets rather than by any one literal spelling, and
         # every match found must carry the identity.
         for brand, text in self.documents():

@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the three tracked review coordinators.
+"""Bounded-divergence gate for the four tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -114,6 +114,9 @@ CODEX_COORDINATOR = (
 )
 GROK_COORDINATOR = (
     REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
+KIMI_COORDINATOR = (
+    REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
@@ -530,6 +533,216 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +            "Refuse before spawning if the live reviewer route is not this "
 +            "value (for example codex). Combined with --expected-origin this "
 +            "is how a grok-origin autosolve refuses a Claude spawn."
++        ),
++    )
++    parser.add_argument(
+         "--repo",
+@@
+                 explicit_repo=args.repo,
++                expected_origin=args.expected_origin,
++                expected_route=args.expected_route,
+             )'''
+
+# Claude vs Kimi: the Kimi copy is the Claude pinning coordinator plus
+# the same --expected-origin/--expected-route refuse-before-spawn the Grok
+# copy carries, with kimi in the grok arm's place: a kimi marker survives
+# isCrossRepository, and the help text names the kimi-origin autosolve.
+# Compared the same way, with Claude as the `-` side and Kimi as `+`.
+KIMI_DOCUMENTED_DIVERGENCE = r'''@@
+ def pr_origin(pr: dict[str, Any]) -> str | None:
+-    if pr.get("isCrossRepository"):
+-        return None
+-    return origin_from_body(str(pr.get("body") or ""))
++    origin = origin_from_body(str(pr.get("body") or ""))
++    if pr.get("isCrossRepository"):
++        return origin if origin == "kimi" else None
++    return origin
+ def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
+@@
+    in docs/agent-workflow-contract.md §4 declaring this file, and that
+-    reconciliation matches a literal, not an expression. This bundle vendors a
+-    copy of kanban_config.py beside this module and still does not import it:
+-    the Codex bundle vendors per skill and has none beside its own copy of this
++    reconciliation matches a literal, not an expression. This bundle does not
++    vendor kanban_config.py beside this module: the Claude bundle does, and
++    the Codex bundle vendors per skill and has none beside its own copy of this
+    coordinator, and one probe implemented two ways is the drift both bundles
+@@
+    return verdict, body
++def expected_route_mismatch(
++    pr: dict[str, Any],
++    expected_origin: str | None,
++    expected_route: str | None,
++    *,
++    unpublished: str,
++) -> dict[str, Any] | None:
++    """Refuse when the live origin/route is no longer what the caller bound.
++    `None` when no binding was requested or the live values still match.
++    The payload is the same `route_mismatch` shape workflow() returns before
++    spawning, so publication can refuse without commenting or labeling.
++    """
++    if expected_origin is None and expected_route is None:
++        return None
++    origin = pr_origin(pr)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in route_reviewers(origin))
++    if expected_origin is not None and live_origin != expected_origin:
++        return {
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; {unpublished}"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return {
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; {unpublished}"
++            ),
++        }
++    return None
+ def require_current_review_state(
+@@
+     expected_gate_key: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != expected_head:
+@@
+     changes_requested_label: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != head:
+@@
+     config_path: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+        raise WorkflowError("linked issues changed during review; no verdict was published")
++    mismatch = expected_route_mismatch(
++        refreshed_pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        return 1, {"pr": number, **mismatch}
+     if not refreshed_gate["approved"]:
+@@
+        config_path=config_path,
++        expected_origin=expected_origin,
++        expected_route=expected_route,
+     post_comment(root, repo, number, body)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        if verdict == "APPROVE" and not verified["ready_for_review"]:
+@@
+                config_path=config_path,
++                expected_origin=expected_origin,
++                expected_route=expected_route,
+            if not verified["ready_for_review"]:
+@@
+     explicit_repo: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in reviewers)
++    if expected_origin is not None and live_origin != expected_origin:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
+     base = {
+@@
+         "head": pr["headRefOid"],
+-        "origin": origin or "unknown",
+-        "route": "+".join(item.key for item in reviewers),
++        "origin": live_origin,
++        "route": live_route,
+         "review_mode": "standalone" if allow_no_issue else "issue-gated",
+@@
+        allow_no_issue=allow_no_issue, config_path=config_path,
++        expected_origin=expected_origin, expected_route=expected_route,
+     )
+@@
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
+     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
+@@
+         help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
++        "--expected-origin",
++        metavar="ORIGIN",
++        help=(
++            "Refuse before spawning if the live origin is not this value "
++            "(unknown, claude, codex, grok, or kimi). Use with --expected-route to "
++            "fail closed when the pull request drifted after a dry run."
++        ),
++    )
++    parser.add_argument(
++        "--expected-route",
++        metavar="ROUTE",
++        help=(
++            "Refuse before spawning if the live reviewer route is not this "
++            "value (for example codex). Combined with --expected-origin this "
++            "is how a kimi-origin autosolve refuses a Claude spawn."
 +        ),
 +    )
 +    parser.add_argument(
@@ -1015,6 +1228,46 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
 
     def test_an_unrelated_grok_only_line_fails_the_gate(self):
         drifted = self.grok_source.replace(
+            "REVIEW_TIMEOUT_SECONDS = 7200",
+            "REVIEW_TIMEOUT_SECONDS = 60",
+            1,
+        )
+        report = divergence_report(self.claude_source, drifted, self.units)
+        self.assertIsNotNone(report)
+
+class KimiCoordinatorBoundedDivergenceTests(unittest.TestCase):
+    """The Kimi coordinator differs from Claude in expected-origin/route,
+    in not vendoring kanban_config.py beside the coordinator, and in
+    reading a kimi marker on a cross-repository pull request."""
+
+    def setUp(self):
+        self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
+        self.kimi_source = KIMI_COORDINATOR.read_text(encoding="utf-8")
+        self.units = documented_units(KIMI_DOCUMENTED_DIVERGENCE)
+
+    def test_kimi_differs_from_claude_only_in_the_route_binding_extension(self):
+        report = divergence_report(self.claude_source, self.kimi_source, self.units)
+        if report is not None:
+            self.fail(
+                "The Kimi coordinator diverges from the Claude copy outside "
+                "the --expected-origin/--expected-route extension, the "
+                "kanban_config.py vendor claim, and cross-repository kimi "
+                "provenance.\n\n"
+                f"{report}"
+            )
+
+    def test_every_recorded_kimi_unit_belongs_to_the_route_binding_exception(self):
+        self.assertTrue(self.units, "KIMI_DOCUMENTED_DIVERGENCE records no units")
+        for index, unit in enumerate(self.units):
+            with self.subTest(unit=index):
+                self.assertTrue(
+                    belongs_to_the_route_binding_exception(unit),
+                    f"Kimi divergence unit {index} is not the route-binding "
+                    f"extension:\n{rendered_unit(unit)}",
+                )
+
+    def test_an_unrelated_kimi_only_line_fails_the_gate(self):
+        drifted = self.kimi_source.replace(
             "REVIEW_TIMEOUT_SECONDS = 7200",
             "REVIEW_TIMEOUT_SECONDS = 60",
             1,

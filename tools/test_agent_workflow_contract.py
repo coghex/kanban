@@ -4,7 +4,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, against
-the tracked Codex, Claude, and Grok plugins' own packaged-workflow bash surfaces,
+the tracked Codex, Claude, Grok, and Kimi plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
@@ -41,7 +41,7 @@ covering nothing.
 Issue #493 added a second, non-manifest property over those same assets:
 every brand's solve workflow must state the art policy PR #251 landed in the
 Claude asset alone, so a missing texture, icon, sprite, or animation stops the
-run in Claude, Codex, or Grok. Its issue-drafting half lives in
+run in Claude, Codex, Grok, or Kimi. Its issue-drafting half lives in
 tools/test_drafting_workflow_contract.py.
 """
 
@@ -256,9 +256,9 @@ MANAGED_RECORD_TOKENS = {
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
-# issue-review backend out of the discovery record. All eleven carry the same
-# probe, so all eleven spell both record locations; `triage` and `retriage` reach
-# no other home-relative scan, which is why the pin below names the whole eleven
+# issue-review backend out of the discovery record. All twelve carry the same
+# probe, so all twelve spell both record locations; `triage` and `retriage` reach
+# no other home-relative scan, which is why the pin below names the whole twelve
 # rather than the six that also sit in a scanned surface list.
 MARKDOWN_RECORD_RESOLVER_FILES = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -272,6 +272,7 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # The issue approval service's own owning sources
@@ -421,6 +422,14 @@ GROK_PLUGIN_SURFACE_FILES = [
     "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
 ]
 
+KIMI_PLUGIN_SURFACE_FILES = [
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "kimi-plugin/plugins/kanban/scripts/review_pr.py",
+    "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+]
+
 # Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
 # already reconciled against the manifest; these three are named here so the
@@ -430,6 +439,7 @@ TRUSTED_SPEC_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
     "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
 }
 
 # Issue #370's vendored document mechanism, covered exactly the way the
@@ -1674,6 +1684,7 @@ ART_POLICY_SOLVE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/solve.md",
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
@@ -1704,6 +1715,7 @@ ART_POLICY_CONTROL_ASSETS = (
     "claude-plugin/plugins/kanban/commands/autosolve.md",
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 
 # Lowercase: compared against art_policy_canonical() output. Every fragment lies
@@ -1926,7 +1938,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             for row in self.manifest
             if row["kind"] == "executable"
         }
-        for relative_path in GROK_PLUGIN_SURFACE_FILES:
+        for relative_path in GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for name in discovered_commands_for_plugin_file(relative_path, content):
                 self.assertIn(
@@ -1951,6 +1963,13 @@ class AgentWorkflowContractTests(unittest.TestCase):
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
+    def test_kimi_review_pr_coordinator_command_invocations_are_documented(self):
+        # The Kimi plugin bundles a fourth coordinator copy for the same
+        # reason the Grok one does; pin its command surface identically.
+        content = (REPO_ROOT / "kimi-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
     def test_every_trusted_issue_spec_helper_is_scanned_and_declared(self):
         # Issue #238's review requirement: the vendored helpers must reach a
         # surface list (an unlisted vendored asset is never scanned at all), and
@@ -1964,7 +1983,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -1991,7 +2011,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2479,7 +2500,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2514,7 +2536,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # drafting loop does not -- that the DECLARING row actually names the
         # asset, so a documented token is not mistaken for a documented asset.
         rows = [row for row in self.manifest if row["kind"] == "personal-path"]
-        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES + GROK_PLUGIN_SURFACE_FILES:
+        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES + GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES:
             if not relative_path.endswith(".md"):
                 continue
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2615,7 +2637,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2647,7 +2670,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2697,7 +2721,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2745,7 +2770,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2786,7 +2812,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2825,7 +2852,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2866,7 +2894,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2934,7 +2963,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -3005,7 +3035,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -3176,7 +3207,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                or relative_path in GROK_PLUGIN_SURFACE_FILES
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
 
@@ -3683,6 +3715,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
             "claude-plugin/plugins/kanban/scripts/review_pr.py",
             "grok-plugin/plugins/kanban/scripts/review_pr.py",
+            "kimi-plugin/plugins/kanban/scripts/review_pr.py",
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
             "claude-plugin/plugins/kanban/commands/issue-review.md",
             "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
@@ -3694,6 +3727,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
             "claude-plugin/plugins/kanban/commands/retriage.md",
             "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
+            "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
         ]
         for row_id in (
             "issue-review-discovery-record",
