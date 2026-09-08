@@ -80,6 +80,8 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
+    grokOwnBrandUnsupported,
+    grokOwnBrandUnsupportedMessage,
     originFromBody,
     pullRequestAssignment
     )
@@ -124,10 +126,13 @@ startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOpt
 -- next press instead of retrying. The launch boundary asks again, because
 -- that is the boundary a process actually crosses.
 pullRequestStartRefusal :: AppState -> PullRequestOrigin -> PullRequestAction -> Maybe Text
-pullRequestStartRefusal state origin action =
-  case resolvedRosterCellFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
-    Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
-    Right _ -> Nothing
+pullRequestStartRefusal state origin action
+  | grokOwnBrandUnsupported origin action =
+      Just (pullRequestActionText action <> " did not start: " <> grokOwnBrandUnsupportedMessage)
+  | otherwise =
+      case resolvedRosterCellFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
+        Left message -> Just (pullRequestActionText action <> " did not start: " <> message)
+        Right _ -> Nothing
 
 -- | The header a fresh pull-request session opens its transcript with.
 -- Nothing is recorded yet, so it resolves the live cell its origin and action

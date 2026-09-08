@@ -41,6 +41,7 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
+    grokOwnBrandUnsupportedMessage,
     pullRequestAssignment,
   )
 import Kanban.Solve
@@ -656,6 +657,17 @@ spec = do
       actionRoute defaultWorkflowConfig ReviewPullRequest Nothing target
         `shouldSatisfy` either (Text.isInfixOf "both pr-origin markers" . actionRefusalMessage) (const False)
 
+    it "routes grok-origin review to Codex and refuses grok-origin revision" $ do
+      let reviewTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestGrok PullRequestReview] emptyHistory) (TargetByNumber 60))
+          reviseTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestGrok PullRequestRevision] emptyHistory) (TargetByNumber 60))
+      actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
+        `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestGrok PullRequestReview))
+      actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
+        `shouldSatisfy` either (Text.isInfixOf grokOwnBrandUnsupportedMessage . actionRefusalMessage) (const False)
+      agentForAction DualMode PullRequestGrok PullRequestReview `shouldBe` CodexSolver
+
     it "routes the approval queue to no provider at all" $ do
       actionRoute defaultWorkflowConfig ObserveApprovalQueue Nothing (ActionTargetRepositoryWide repositoryUnderTest)
         `shouldBe` Right RouteApprovalQueue
@@ -681,6 +693,8 @@ spec = do
       actionCapability noCodex DualMode Nothing (RouteProvider (ActionAutoSolve ClaudeSolver))
         `shouldNotBe` ActionCapable
       actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestClaude PullRequestReview))
+        `shouldNotBe` ActionCapable
+      actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestGrok PullRequestReview))
         `shouldNotBe` ActionCapable
       actionCapability noCodex DualMode Nothing (RouteProvider (ActionPullRequestFlow PullRequestCodex PullRequestReview))
         `shouldBe` ActionCapable
@@ -1373,6 +1387,9 @@ everyPreflightAction =
        | origin <- [PullRequestCodex, PullRequestClaude],
          action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
        ]
+    <> [ ActionPullRequestFlow PullRequestGrok action
+       | action <- [PullRequestReview, PullRequestRereview]
+       ]
 
 pullRequestFor :: PullRequestAction -> PullRequest
 pullRequestFor action = case action of
@@ -1395,6 +1412,7 @@ pullRequestForOrigin origin action =
     marker = case origin of
       PullRequestCodex -> "<!-- pr-origin:codex -->"
       PullRequestClaude -> "<!-- pr-origin:claude -->"
+      PullRequestGrok -> "<!-- pr-origin:grok -->"
 
 -- | A provider whose executable is definitely absent, which is the one
 -- observation that blocks rather than merely being unknown.

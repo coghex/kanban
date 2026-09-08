@@ -179,6 +179,7 @@ routingSpec = describe "the pull-request actions it collapses" $ do
               (PullRequestClaude, PullRequestReview) -> CodexSolver
               (PullRequestClaude, PullRequestRereview) -> CodexSolver
               (PullRequestClaude, _) -> ClaudeSolver
+              (PullRequestGrok, _) -> CodexSolver
       ]
 
   -- Requirement 5 and D-12: the marker a solve stamps is unchanged, and it is
@@ -219,6 +220,7 @@ stamped variant = case variant.variantProvider of
 opposite :: PullRequestOrigin -> PullRequestOrigin
 opposite PullRequestCodex = PullRequestClaude
 opposite PullRequestClaude = PullRequestCodex
+opposite PullRequestGrok = PullRequestGrok
 
 -- | The recorded cell an install's own provider takes for one role, resolved
 -- from the roster under test rather than written as a model name.
