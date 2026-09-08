@@ -170,7 +170,7 @@ def coordinator_resolvers():
 
 
 def every_resolver():
-    """The full fourteen."""
+    """The full sixteen."""
     return [
         MarkdownFenceResolver(path) for path in MARKDOWN_RESOLVER_ASSETS
     ] + coordinator_resolvers()
@@ -371,7 +371,7 @@ class PackagedRecordProbeTests(unittest.TestCase):
 
 class EveryPackagedResolverProbesTests(unittest.TestCase):
     """The matrix above runs against one markdown fence. These hold the other
-    ten to being the same program, and drive every one of the fourteen through
+    eleven to being the same program, and drive every one of the sixteen through
     the ordering case so none is covered by identity alone."""
 
     def test_every_markdown_fence_is_the_same_probe(self):

@@ -476,6 +476,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
     "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
     "grok-plugin/plugins/kanban/scripts/kanban_models.py": set(),
+    "kimi-plugin/plugins/kanban/scripts/kanban_models.py": set(),
 }
 
 # Both shipped copies of the janitor census, and the manifest rows each one

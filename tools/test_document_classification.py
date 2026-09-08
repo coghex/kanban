@@ -565,7 +565,7 @@ class ClassificationCoverageTests(unittest.TestCase):
 
     def test_the_plugin_bundles_are_covered_through_a_directory_row(self):
         # Requirement 1's directory row, exercised rather than assumed: the
-        # tracked bundle documents reach their class through three rows.
+        # tracked bundle documents reach their class through four rows.
         bundle_docs = [
             path
             for path in self.markdown

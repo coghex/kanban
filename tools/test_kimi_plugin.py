@@ -42,6 +42,16 @@ MARKETPLACE_MANIFEST_PATH = "kimi-plugin/.github/plugin/marketplace.json"
 SKILLS_PREFIX = "kimi-plugin/plugins/kanban/skills"
 COMMAND_SIGIL = "/"
 EXPECTED_SKILL_NAMES = {"solve", "autosolve"}
+EXPECTED_BUNDLE_FILES = {
+    "kimi-plugin/.github/plugin/marketplace.json",
+    "kimi-plugin/README.md",
+    "kimi-plugin/plugins/kanban/plugin.json",
+    "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "kimi-plugin/plugins/kanban/scripts/review_pr.py",
+    "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+}
 
 KIMI_ORIGIN = "<!-- pr-origin:kimi -->"
 CLAUDE_ORIGIN = "<!-- pr-origin:claude -->"
@@ -113,6 +123,18 @@ BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
 
 class PluginLayoutTests(unittest.TestCase):
+    def test_the_tracked_bundle_inventory_is_exact(self):
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", "kimi-plugin"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        )
+        tracked = {
+            path.decode("utf-8") for path in proc.stdout.split(b"\0") if path
+        }
+        self.assertEqual(tracked, EXPECTED_BUNDLE_FILES)
+
     def test_the_marketplace_lists_the_kanban_plugin(self):
         document = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
         # The marketplace name differs from the plugin's on purpose: two
@@ -670,6 +692,18 @@ class ExpectedRouteBindingTests(unittest.TestCase):
         self.assert_mismatch(code, result, "unknown", "codex+claude")
         self.assertIn("no reviewer was spawned", result["error"])
 
+    def test_a_route_only_drift_refuses_before_spawning_claude(self):
+        single = self.module.kanban_models().SINGLE_AGENT_MODE
+        with mock.patch.object(
+            self.module, "operating_mode", return_value=(single, ("claude",))
+        ):
+            code, result = self.run_workflow(
+                origin="kimi", expected_origin="kimi", expected_route="codex"
+            )
+        self.assert_mismatch(code, result, "kimi", "claude")
+        self.assertIn("does not match --expected-route", result["error"])
+        self.assertIn("no reviewer was spawned", result["error"])
+
     def test_publication_refuses_if_origin_drifts_after_review(self):
         drifted = self.pr(None)
         gate = {
@@ -704,6 +738,54 @@ class ExpectedRouteBindingTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "route_mismatch")
         self.assertEqual(result["origin"], "unknown")
+        self.assertEqual(self.calls, [])
+
+    def test_publication_refuses_a_route_only_drift_before_writing(self):
+        kimi_pr = self.pr("kimi")
+        gate = {
+            "allow_no_issue": True,
+            "approved": True,
+            "checks": [],
+            "invalid_links": [],
+            "issues": [],
+            "key": "deadbeef",
+            "overridden_issues": [],
+            "override_issue_gate": False,
+            "override_reason": None,
+        }
+        single = self.module.kanban_models().SINGLE_AGENT_MODE
+        with mock.patch.object(self.module, "pr_view", return_value=kimi_pr):
+            with mock.patch.object(
+                self.module, "operating_mode", return_value=(single, ("claude",))
+            ):
+                with mock.patch.object(self.module, "gate_status", return_value=gate):
+                    with mock.patch.object(
+                        self.module, "resolve_workflow_labels", return_value=("a", "c")
+                    ):
+                        code, result = self.module.publish_results(
+                            Path("/fake-repo"),
+                            "coghex/kanban",
+                            7,
+                            kimi_pr,
+                            gate,
+                            [self.module.CODEX_REVIEWER],
+                            [
+                                {
+                                    "verdict": "APPROVE",
+                                    "summary": "ok",
+                                    "blocking_concerns": [],
+                                }
+                            ],
+                            {"pr": 7},
+                            allow_no_issue=True,
+                            expected_origin="kimi",
+                            expected_route="codex",
+                        )
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "route_mismatch")
+        self.assertEqual(result["origin"], "kimi")
+        self.assertEqual(result["route"], "claude")
+        self.assertIn("does not match --expected-route", result["error"])
         self.assertEqual(self.calls, [])
 
     def test_publication_refuses_origin_drift_on_a_later_reread(self):
