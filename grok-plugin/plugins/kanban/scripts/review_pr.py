@@ -650,8 +650,8 @@ def issue_review_record_candidates() -> tuple[Path, Path]:
     Each literal is spelled whole rather than composed, for the reason
     tools/kanban_config.py gives for its own: both are `personal-path` tokens
     in docs/agent-workflow-contract.md §4 declaring this file, and that
-    reconciliation matches a literal, not an expression. This bundle vendors a
-    copy of kanban_config.py beside this module and still does not import it:
+    reconciliation matches a literal, not an expression. This bundle does not
+    vendor kanban_config.py beside this module: the Claude bundle does, and
     the Codex bundle vendors per skill and has none beside its own copy of this
     coordinator, and one probe implemented two ways is the drift both bundles
     exist to avoid."""

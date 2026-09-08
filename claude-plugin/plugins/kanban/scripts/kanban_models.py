@@ -1,5 +1,5 @@
 """Shared model-roster reader for approve_issues.py, drain_prs.py, and the
-Claude plugin's review_pr.py.
+Claude, Codex, and Grok plugins' review_pr.py.
 
 Schema is documented in models.toml.example at the repo root and mirrors
 src/Kanban/Models.hs, which is the authoritative implementation: the two sides

@@ -336,6 +336,15 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
+    in docs/agent-workflow-contract.md §4 declaring this file, and that
+-    reconciliation matches a literal, not an expression. This bundle vendors a
+-    copy of kanban_config.py beside this module and still does not import it:
+-    the Codex bundle vendors per skill and has none beside its own copy of this
++    reconciliation matches a literal, not an expression. This bundle does not
++    vendor kanban_config.py beside this module: the Claude bundle does, and
++    the Codex bundle vendors per skill and has none beside its own copy of this
+    coordinator, and one probe implemented two ways is the drift both bundles
+@@
     return verdict, body
 +def expected_route_mismatch(
 +    pr: dict[str, Any],
@@ -530,6 +539,7 @@ GROK_ROUTE_VOCABULARY = (
     "route_mismatch",
     "live_origin",
     "live_route",
+    "kanban_config.py",
 )
 
 # What a failing gate has to tell an author. Issue #624's false failures were
@@ -957,7 +967,8 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
 
 
 class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
-    """The Grok coordinator differs from Claude only in expected-origin/route."""
+    """The Grok coordinator differs from Claude in expected-origin/route
+    and in not vendoring kanban_config.py beside the coordinator."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -969,7 +980,8 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         if report is not None:
             self.fail(
                 "The Grok coordinator diverges from the Claude copy outside "
-                "the --expected-origin/--expected-route extension.\n\n"
+                "the --expected-origin/--expected-route extension and the "
+                "kanban_config.py vendor claim.\n\n"
                 f"{report}"
             )
 

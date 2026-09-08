@@ -4,7 +4,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, against
-the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
+the tracked Codex, Claude, and Grok plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
@@ -38,10 +38,10 @@ contract's declared set, and what the extractor recovers from each of them is
 pinned, so neither list can drift away from the other and neither can shrink to
 covering nothing.
 
-Issue #493 added a second, non-manifest property over two of those same assets:
-both brands' solve workflows must state the art policy PR #251 landed in the
+Issue #493 added a second, non-manifest property over those same assets:
+every brand's solve workflow must state the art policy PR #251 landed in the
 Claude asset alone, so a missing texture, icon, sprite, or animation stops the
-run in either brand. Its issue-drafting half lives in
+run in Claude, Codex, or Grok. Its issue-drafting half lives in
 tools/test_drafting_workflow_contract.py.
 """
 
@@ -1662,9 +1662,10 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # loudly, which is the safe direction. The captured segment keeps its leading
 # slash so it compares against a `personal-path` manifest token exactly the
 # way the Haskell segments do.
-# The two solve assets that owe issue #493's art policy: the paired Kanban-
-# invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares.
-# PR #251 made a missing texture, icon, sprite, or animation an explicit tracked
+# The three solve assets that owe issue #493's art policy: the paired Kanban-
+# invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares,
+# plus the Grok /solve skill that stamps grok-origin pull requests. PR #251
+# made a missing texture, icon, sprite, or animation an explicit tracked
 # blocker with a user-owned supply-or-generate decision and landed it in the
 # Claude asset alone, adding no regression assertion, so nothing held the Codex
 # twin to it. The issue-drafting half of the same policy is guarded the same way
@@ -1672,25 +1673,27 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 ART_POLICY_SOLVE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/solve.md",
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
-# match every Markdown file cannot pass vacuously. These six qualify by
+# match every Markdown file cannot pass vacuously. These seven qualify by
 # orchestrating or judging rather than implementing: the issue-review pair
 # judges a filed issue and never drafts or implements, and the autoissue and
-# autosolve pairs each delegate the work itself to another workflow.
+# autosolve assets each delegate the work itself to another workflow.
 #
 # The autosolve pair joined this tuple when issue #576 vendored it, and the
-# classification is this slice's, not an inherited one. The art policy binds
-# the session that reads an issue's requirements and decides how to satisfy
-# them, and the shipped assets place it exactly there -- at step 6 of solve's
-# `## Work In Isolation`, between "implement the smallest solution" and "add or
-# extend a focused test". Autosolve reaches none of that: it delegates the
-# implementation to solve and then loops over review verdicts, so the session
-# that would encounter a missing texture is the solve session the policy
-# already binds, reading solve's own copy of the rule. Stating it again in the
-# orchestrator would give a second, unreachable statement of a rule whose
-# enforced copy is one delegation away -- which is the autoissue pair's
+# Grok autosolve skill is the same classification: Grok ships no issue-review
+# or autoissue workflow, but its /autosolve is still an orchestrator. The art
+# policy binds the session that reads an issue's requirements and decides how
+# to satisfy them, and the shipped assets place it exactly there -- at step 6
+# of solve's `## Work In Isolation`, between "implement the smallest solution"
+# and "add or extend a focused test". Autosolve reaches none of that: it
+# delegates the implementation to solve and then loops over review verdicts, so
+# the session that would encounter a missing texture is the solve session the
+# policy already binds, reading solve's own copy of the rule. Stating it again
+# in the orchestrator would give a second, unreachable statement of a rule
+# whose enforced copy is one delegation away -- which is the autoissue pair's
 # situation with the drafting-side policy exactly, and why that pair is a
 # control here rather than a subject.
 ART_POLICY_CONTROL_ASSETS = (
@@ -1700,6 +1703,7 @@ ART_POLICY_CONTROL_ASSETS = (
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "claude-plugin/plugins/kanban/commands/autosolve.md",
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 
 # Lowercase: compared against art_policy_canonical() output. Every fragment lies
@@ -3794,7 +3798,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
 
 class ArtPolicyTests(unittest.TestCase):
-    """Issue #493's art policy across both brands' solve assets.
+    """Issue #493's art policy across every brand's solve assets.
 
     PR #251 landed the policy in claude-plugin/plugins/kanban/commands/solve.md
     and its /issue twin only, with no regression assertion, so the Codex solve
@@ -3802,7 +3806,8 @@ class ArtPolicyTests(unittest.TestCase):
     boundary at all. These assets are the program an agent executes, so the same
     missing-art observation could stop the run and hand the user a tracked
     blocker through one brand while producing a placeholder, a reused asset, or
-    a narrowed implementation through the other.
+    a narrowed implementation through another -- including Grok, which is not a
+    spawned provider but still implements issues through /solve.
 
     There is no behavioral prompt-testing harness here, so the reviewable
     property is the asset text itself.
@@ -3818,10 +3823,10 @@ class ArtPolicyTests(unittest.TestCase):
         findings = art_policy_findings(self.assets, ART_POLICY_SOLVE_RULES)
         self.assertEqual(findings, [], "\n".join(findings))
 
-    def test_removing_a_rule_from_either_brand_is_reported(self):
+    def test_removing_a_rule_from_any_solve_asset_is_reported(self):
         # The property under test is that a removal FAILS the enforced check,
-        # for each rule and each brand in turn, not merely that the text happens
-        # to be present today.
+        # for each rule and each solve asset in turn, not merely that the text
+        # happens to be present today.
         for path in ART_POLICY_SOLVE_ASSETS:
             for rule in ART_POLICY_SOLVE_RULES:
                 with self.subTest(asset=path, rule=rule):

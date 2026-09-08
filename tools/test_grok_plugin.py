@@ -44,6 +44,28 @@ CODEX_ORIGIN = "<!-- pr-origin:codex -->"
 
 COORDINATOR_LOOKUP = 'Path("scripts") / "review_pr.py"'
 
+# The exact Python locator /autosolve's coordinator fence runs. Asserted to
+# appear in the skill AND executed against a simulated install below, so a
+# rewrite that keeps the prose and breaks the resolution fails here.
+GROK_COORDINATOR_PYTHON = '''import sys
+from pathlib import Path
+
+plugin_root, grok_home = sys.argv[1], sys.argv[2]
+relative = Path("scripts") / "review_pr.py"
+if plugin_root:
+    candidate = Path(plugin_root) / relative
+    if not candidate.is_file():
+        raise SystemExit(f"coordinator was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("coordinator was not found under $GROK_HOME/installed-plugins/kanban-*")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+'''
+
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
 
@@ -54,10 +76,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_0_4(self):
+    def test_the_plugin_manifest_declares_version_1_0_5(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.4")
+        self.assertEqual(document["version"], "1.0.5")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -214,6 +236,125 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn("$GROK_PLUGIN_ROOT", text)
         self.assertIn("ambiguous Kanban installs", text)
         self.assertIn('glob("kanban-*/" + relative.as_posix())', text)
+        self.assertIn(GROK_COORDINATOR_PYTHON, text)
+
+
+class AutosolveCoordinatorLookupTests(unittest.TestCase):
+    """The autosolve coordinator locator is the same fail-closed Python as
+    /solve's helper lookup, with a different relative path. String search
+    cannot prove it prefers $GROK_PLUGIN_ROOT, finds one hashed install, or
+    refuses two kanban-* matches — these run the fenced locator itself."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.workdir = self.root / "worked-repo"
+        self.workdir.mkdir()
+
+    def install_hashed(self, home: Path, name: str = "kanban-b0441dc6") -> Path:
+        installed = home / ".grok" / "installed-plugins" / name / "scripts"
+        installed.mkdir(parents=True)
+        target = installed / "review_pr.py"
+        target.write_text("print('coordinator')\n", encoding="utf-8")
+        return target
+
+    def install_marketplace_source(self, root: Path) -> Path:
+        installed = root / "marketplace" / "plugins" / "kanban" / "scripts"
+        installed.mkdir(parents=True)
+        target = installed / "review_pr.py"
+        target.write_text("print('coordinator')\n", encoding="utf-8")
+        return target
+
+    def run_locator(self, plugin_root: str, grok_home: str):
+        return subprocess.run(
+            ["python3", "-", plugin_root, grok_home],
+            input=GROK_COORDINATOR_PYTHON,
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+        )
+
+    def test_the_autosolve_skill_declares_the_lookup_it_is_tested_with(self):
+        self.assertIn(
+            GROK_COORDINATOR_PYTHON,
+            AUTOSOLVE.read_text(encoding="utf-8"),
+            "the Grok autosolve skill must prefer $GROK_PLUGIN_ROOT, else one hashed install",
+        )
+
+    def test_the_lookup_resolves_from_a_hashed_install(self):
+        home = self.root / "grok-home"
+        expected = self.install_hashed(home)
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_lookup_uses_plugin_root_for_a_marketplace_source_outside_home(self):
+        home = self.root / "grok-empty-home"
+        home.mkdir()
+        expected = self.install_marketplace_source(self.root)
+        plugin_root = expected.parents[1]  # .../plugins/kanban
+        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_plugin_root_wins_over_a_hashed_install(self):
+        home = self.root / "grok-both"
+        self.install_hashed(home)
+        expected = self.install_marketplace_source(self.root)
+        plugin_root = expected.parents[1]
+        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_lookup_fails_closed_when_two_kanban_installs_match(self):
+        home = self.root / "grok-ambiguous"
+        first = self.install_hashed(home)
+        self.install_hashed(home, "kanban-aaaaaaaa")
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+        self.assertTrue(first.is_file())
+
+    def test_the_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
+        home = self.root / "grok-competitor"
+        expected = self.install_hashed(home)
+        other = (
+            home
+            / ".grok"
+            / "installed-plugins"
+            / "otherplugin-deadbeef"
+            / "scripts"
+            / "review_pr.py"
+        )
+        other.parent.mkdir(parents=True)
+        other.write_text("print('other')\n", encoding="utf-8")
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_lookup_fails_closed_when_no_install_matches(self):
+        home = self.root / "grok-empty"
+        (home / ".grok" / "installed-plugins").mkdir(parents=True)
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(
+            "coordinator was not found under $GROK_HOME/installed-plugins/kanban-*",
+            proc.stderr,
+        )
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_plugin_root_fails_closed_when_the_relative_path_is_missing(self):
+        home = self.root / "grok-missing"
+        home.mkdir()
+        plugin_root = self.root / "marketplace" / "plugins" / "kanban"
+        plugin_root.mkdir(parents=True)
+        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
 
 
 def load_grok_review_pr():
@@ -434,8 +575,11 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                 collect.assert_called()
 
 
-BUNDLE_PREFIX = "grok-plugin/plugins/kanban"
+# The whole tracked Grok tree, not just plugins/kanban/: marketplace.json
+# and grok-plugin/README.md live outside that inner prefix and still ship.
+BUNDLE_PREFIX = "grok-plugin"
 ORIGINAL_BUNDLE_VERSION = "1.0.0"
+BUNDLE_README_PATH = "grok-plugin/README.md"
 
 
 class BundleVersionGateTests(unittest.TestCase):
@@ -458,13 +602,28 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.root = Path(self.tmp.name) / "checkout"
         self.root.mkdir(parents=True)
         self.manifest = self.root / PLUGIN_MANIFEST_PATH
-        self.skill = self.root / BUNDLE_PREFIX / "skills" / "solve" / "SKILL.md"
+        self.skill = self.root / SKILLS_PREFIX / "solve" / "SKILL.md"
+        self.marketplace = self.root / MARKETPLACE_MANIFEST_PATH
+        self.bundle_readme = self.root / BUNDLE_README_PATH
         self.git("init", "-b", "master")
         self.git("config", "user.email", "bundle-gate@example.invalid")
         self.git("config", "user.name", "Bundle Gate Fixture")
         self.git("config", "commit.gpgsign", "false")
         (self.root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
         self.write_manifest(ORIGINAL_BUNDLE_VERSION)
+        self.marketplace.parent.mkdir(parents=True, exist_ok=True)
+        self.marketplace.write_text(
+            json.dumps(
+                {
+                    "name": "kanban",
+                    "plugins": [{"name": "kanban", "version": ORIGINAL_BUNDLE_VERSION}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.bundle_readme.parent.mkdir(parents=True, exist_ok=True)
+        self.bundle_readme.write_text("fixture readme\n", encoding="utf-8")
         self.skill.parent.mkdir(parents=True, exist_ok=True)
         self.skill.write_text("---\nname: solve\n---\n", encoding="utf-8")
         self.git("add", "-A")
@@ -493,8 +652,53 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         failures = self.failures()
         self.assertEqual(len(failures), 1)
         self.assertIn(plugin_bundle_gate.VERSION_BUMP_INSTRUCTION, failures[0])
+        self.assertIn(f"{SKILLS_PREFIX}/solve/SKILL.md", failures[0])
+
+    def test_an_outer_tree_marketplace_change_without_a_bump_fails(self):
+        # marketplace.json lives under grok-plugin/.grok-plugin/, outside
+        # plugins/kanban/. A prefix that stopped at the inner plugin directory
+        # would miss this edit and leave the gate green.
+        self.marketplace.write_text(
+            json.dumps(
+                {
+                    "name": "kanban",
+                    "description": "revised",
+                    "plugins": [{"name": "kanban", "version": ORIGINAL_BUNDLE_VERSION}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn(plugin_bundle_gate.VERSION_BUMP_INSTRUCTION, failures[0])
+        self.assertIn(MARKETPLACE_MANIFEST_PATH, failures[0])
+
+    def test_an_outer_tree_readme_change_without_a_bump_fails(self):
+        self.bundle_readme.write_text("revised readme\n", encoding="utf-8")
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn(plugin_bundle_gate.VERSION_BUMP_INSTRUCTION, failures[0])
+        self.assertIn(BUNDLE_README_PATH, failures[0])
+
+    def test_a_change_outside_the_bundle_owes_nothing(self):
+        (self.root / "README.md").write_text("unrelated\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "unrelated change")
+        self.assertEqual(self.failures(), [])
 
     def test_content_and_version_changing_together_pass(self):
         self.skill.write_text("---\nname: solve\n---\nrevised\n", encoding="utf-8")
+        self.marketplace.write_text(
+            json.dumps(
+                {
+                    "name": "kanban",
+                    "description": "revised",
+                    "plugins": [{"name": "kanban", "version": "1.1.0"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         self.write_manifest("1.1.0")
         self.assertEqual(self.failures(), [])
