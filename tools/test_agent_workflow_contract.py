@@ -421,9 +421,9 @@ GROK_PLUGIN_SURFACE_FILES = [
     "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
 ]
 
-# Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
+# Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
-# already reconciled against the manifest; these two are named here so the
+# already reconciled against the manifest; these three are named here so the
 # non-vacuity pin below drives the real assets, and so dropping one from a
 # surface list fails a test rather than silently un-scanning a vendored asset.
 TRUSTED_SPEC_SURFACE_FILES = {
@@ -437,13 +437,14 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # the three tools/ modules the document workflows invoke, so each copy's own
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
-# same way and covered here with them; since issue #572 BOTH bundles carry a
-# copy, because both coordinators read the roster's loaded provider set to
-# route. What still differs is what each does with it -- the Claude copy
-# resolves an assignment cell and pins it, the Codex copy resolves none (D-2) --
-# and that is a routing fact rather than an external command, so both readers
-# still spawn nothing at all. Their empty sets are pins rather than omissions:
-# a future edit that made either shell out would have to declare it here.
+# same way and covered here with them; since issue #572 every coordinator
+# bundle carries a copy, because all three coordinators read the roster's
+# loaded provider set to route. What still differs is what each does with it --
+# the Claude and Grok copies resolve an assignment cell and pin it, the Codex
+# copy resolves none (D-2) -- and that is a routing fact rather than an
+# external command, so the readers still spawn nothing at all. Their empty
+# sets are pins rather than omissions: a future edit that made any shell out
+# would have to declare it here.
 #
 # Issue #574's janitor census is vendored on the same terms and pinned here
 # with them, along with the third `kanban_config.py` copy it loads from beside
@@ -1946,8 +1947,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
-    def test_both_trusted_issue_spec_helpers_are_scanned_and_declared(self):
-        # Issue #238's review requirement: the two vendored helpers must reach a
+    def test_every_trusted_issue_spec_helper_is_scanned_and_declared(self):
+        # Issue #238's review requirement: the vendored helpers must reach a
         # surface list (an unlisted vendored asset is never scanned at all), and
         # what the extractor recovers from each is pinned so a helper whose `gh`
         # call the regex stops matching fails here rather than passing with an

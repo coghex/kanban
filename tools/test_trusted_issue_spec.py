@@ -2,7 +2,7 @@
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
-Issue #238 vendored `trusted_issue_spec.py` into both tracked plugin bundles and
+Issue #238 vendored `trusted_issue_spec.py` into the tracked plugin bundles and
 made it the solve workflows' only permitted view of an issue's comment timeline.
 The Grok bundle carries a third byte-identical copy. Every behavioural
 assertion here runs against every copy: a trust boundary enforced in one
@@ -284,11 +284,11 @@ class VendoredCopyTests(unittest.TestCase):
     brands different trust boundaries, which is the drift this vendoring
     exists to end."""
 
-    def test_both_bundles_carry_the_helper(self):
+    def test_every_bundle_carries_the_helper(self):
         for brand, path in sorted(HELPERS.items()):
             self.assertTrue(path.is_file(), f"{brand}: {path} is missing")
 
-    def test_the_two_copies_are_byte_identical(self):
+    def test_the_copies_are_byte_identical(self):
         reference = CODEX_HELPER.read_bytes()
         for brand, path in sorted(HELPERS.items()):
             self.assertEqual(
@@ -346,7 +346,7 @@ class VendoredCopyTests(unittest.TestCase):
 
 
 class TrustBoundaryTests(unittest.TestCase):
-    """The exposure rule itself, driven over both copies."""
+    """The exposure rule itself, driven over every copy."""
 
     def modules(self):
         return sorted((brand, load_helper(brand)) for brand in HELPERS)
@@ -1041,7 +1041,7 @@ class ForkCheckoutRepositoryScopeTests(unittest.TestCase):
     def gh_calls(self, fake):
         return [call["args"] for call in fake.calls("gh")]
 
-    def test_the_supplied_identity_scopes_every_api_path_in_both_bundles(self):
+    def test_the_supplied_identity_scopes_every_api_path_in_every_bundle(self):
         for brand, path in sorted(HELPERS.items()):
             fake, workdir = self.scenario()
             proc = self.run_helper(

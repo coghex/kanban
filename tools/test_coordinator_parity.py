@@ -336,41 +336,114 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
-     config_path: str | None = None,
-+    expected_origin: str | None = None,
-+    expected_route: str | None = None,
- ) -> tuple[int, dict[str, Any]]:
-@@
-             "comment_url": url,
-+    live_origin = pr_origin(refreshed_pr) or "unknown"
-+    live_route = "+".join(
-+        item.key for item in route_reviewers(pr_origin(refreshed_pr))
-+    )
+    return verdict, body
++def expected_route_mismatch(
++    pr: dict[str, Any],
++    expected_origin: str | None,
++    expected_route: str | None,
++    *,
++    unpublished: str,
++) -> dict[str, Any] | None:
++    """Refuse when the live origin/route is no longer what the caller bound.
++    `None` when no binding was requested or the live values still match.
++    The payload is the same `route_mismatch` shape workflow() returns before
++    spawning, so publication can refuse without commenting or labeling.
++    """
++    if expected_origin is None and expected_route is None:
++        return None
++    origin = pr_origin(pr)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in route_reviewers(origin))
 +    if expected_origin is not None and live_origin != expected_origin:
-+        return 1, {
-+            "pr": number,
++        return {
 +            "status": "route_mismatch",
 +            "origin": live_origin,
 +            "route": live_route,
 +            "error": (
 +                f"live origin {live_origin!r} does not match "
-+                f"--expected-origin {expected_origin!r}; nothing was published "
-+                "and no label was applied"
++                f"--expected-origin {expected_origin!r}; {unpublished}"
 +            ),
 +        }
 +    if expected_route is not None and live_route != expected_route:
-+        return 1, {
-+            "pr": number,
++        return {
 +            "status": "route_mismatch",
 +            "origin": live_origin,
 +            "route": live_route,
 +            "error": (
 +                f"live route {live_route!r} does not match "
-+                f"--expected-route {expected_route!r}; nothing was published "
-+                "and no label was applied"
++                f"--expected-route {expected_route!r}; {unpublished}"
 +            ),
 +        }
-     if list(refreshed_gate.get("overridden_issues") or []) != reviewed_bypass:
++    return None
+ def require_current_review_state(
+@@
+     expected_gate_key: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != expected_head:
+@@
+     changes_requested_label: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != head:
+@@
+     config_path: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+        raise WorkflowError("linked issues changed during review; no verdict was published")
++    mismatch = expected_route_mismatch(
++        refreshed_pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        return 1, {"pr": number, **mismatch}
+     if not refreshed_gate["approved"]:
+@@
+        config_path=config_path,
++        expected_origin=expected_origin,
++        expected_route=expected_route,
+     post_comment(root, repo, number, body)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        if verdict == "APPROVE" and not verified["ready_for_review"]:
+@@
+                config_path=config_path,
++                expected_origin=expected_origin,
++                expected_route=expected_route,
+            if not verified["ready_for_review"]:
 @@
      explicit_repo: str | None = None,
 +    expected_origin: str | None = None,

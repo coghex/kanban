@@ -1394,6 +1394,47 @@ def render_review(
     return verdict, body
 
 
+def expected_route_mismatch(
+    pr: dict[str, Any],
+    expected_origin: str | None,
+    expected_route: str | None,
+    *,
+    unpublished: str,
+) -> dict[str, Any] | None:
+    """Refuse when the live origin/route is no longer what the caller bound.
+
+    `None` when no binding was requested or the live values still match.
+    The payload is the same `route_mismatch` shape workflow() returns before
+    spawning, so publication can refuse without commenting or labeling.
+    """
+    if expected_origin is None and expected_route is None:
+        return None
+    origin = pr_origin(pr)
+    live_origin = origin or "unknown"
+    live_route = "+".join(item.key for item in route_reviewers(origin))
+    if expected_origin is not None and live_origin != expected_origin:
+        return {
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live origin {live_origin!r} does not match "
+                f"--expected-origin {expected_origin!r}; {unpublished}"
+            ),
+        }
+    if expected_route is not None and live_route != expected_route:
+        return {
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live route {live_route!r} does not match "
+                f"--expected-route {expected_route!r}; {unpublished}"
+            ),
+        }
+    return None
+
+
 def require_current_review_state(
     root: Path,
     repo: str,
@@ -1405,8 +1446,18 @@ def require_current_review_state(
     override_issue_gate: bool = False,
     expected_overridden: list[int] | None = None,
     config_path: str | None = None,
+    expected_origin: str | None = None,
+    expected_route: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
+    mismatch = expected_route_mismatch(
+        pr,
+        expected_origin,
+        expected_route,
+        unpublished="nothing was published and no label was applied",
+    )
+    if mismatch is not None:
+        raise WorkflowError(mismatch["error"])
     if pr["headRefOid"] != expected_head:
         raise WorkflowError("PR head changed; no current-head verdict may be labeled")
     gate = gate_status(
@@ -1491,8 +1542,18 @@ def verify_publication(
     override_issue_gate: bool = False,
     expected_overridden: list[int] | None = None,
     config_path: str | None = None,
+    expected_origin: str | None = None,
+    expected_route: str | None = None,
 ) -> dict[str, Any]:
     pr = pr_view(root, repo, number)
+    mismatch = expected_route_mismatch(
+        pr,
+        expected_origin,
+        expected_route,
+        unpublished="nothing was published and no label was applied",
+    )
+    if mismatch is not None:
+        raise WorkflowError(mismatch["error"])
     if pr["headRefOid"] != head:
         raise WorkflowError("PR head changed after publication")
     labels = [item.get("name") for item in pr.get("labels") or [] if isinstance(item, dict)]
@@ -1589,6 +1650,14 @@ def publish_results(
         raise WorkflowError("PR head changed during review; no verdict was published")
     if refreshed_gate["key"] != gate["key"]:
         raise WorkflowError("linked issues changed during review; no verdict was published")
+    mismatch = expected_route_mismatch(
+        refreshed_pr,
+        expected_origin,
+        expected_route,
+        unpublished="nothing was published and no label was applied",
+    )
+    if mismatch is not None:
+        return 1, {"pr": number, **mismatch}
     if not refreshed_gate["approved"]:
         status, url = publish_gate_comment(
             root,
@@ -1607,35 +1676,6 @@ def publish_results(
             "comment_url": url,
         }
 
-    live_origin = pr_origin(refreshed_pr) or "unknown"
-    live_route = "+".join(
-        item.key for item in route_reviewers(pr_origin(refreshed_pr))
-    )
-    if expected_origin is not None and live_origin != expected_origin:
-        return 1, {
-            "pr": number,
-            "status": "route_mismatch",
-            "origin": live_origin,
-            "route": live_route,
-            "error": (
-                f"live origin {live_origin!r} does not match "
-                f"--expected-origin {expected_origin!r}; nothing was published "
-                "and no label was applied"
-            ),
-        }
-    if expected_route is not None and live_route != expected_route:
-        return 1, {
-            "pr": number,
-            "status": "route_mismatch",
-            "origin": live_origin,
-            "route": live_route,
-            "error": (
-                f"live route {live_route!r} does not match "
-                f"--expected-route {expected_route!r}; nothing was published "
-                "and no label was applied"
-            ),
-        }
-
     if list(refreshed_gate.get("overridden_issues") or []) != reviewed_bypass:
         raise WorkflowError(
             "issue approval changed during review; the override now bypasses a "
@@ -1652,6 +1692,8 @@ def publish_results(
         override_issue_gate=override_issue_gate,
         expected_overridden=reviewed_bypass,
         config_path=config_path,
+        expected_origin=expected_origin,
+        expected_route=expected_route,
     )
     post_comment(root, repo, number, body)
     try:
@@ -1665,6 +1707,8 @@ def publish_results(
             override_issue_gate=override_issue_gate,
             expected_overridden=reviewed_bypass,
             config_path=config_path,
+            expected_origin=expected_origin,
+            expected_route=expected_route,
         )
         set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
@@ -1682,6 +1726,8 @@ def publish_results(
             override_issue_gate=override_issue_gate,
             expected_overridden=reviewed_bypass,
             config_path=config_path,
+            expected_origin=expected_origin,
+            expected_route=expected_route,
         )
         if verdict == "APPROVE" and not verified["ready_for_review"]:
             mark_ready_for_review(root, repo, number)
@@ -1700,6 +1746,8 @@ def publish_results(
                 override_issue_gate=override_issue_gate,
                 expected_overridden=reviewed_bypass,
                 config_path=config_path,
+                expected_origin=expected_origin,
+                expected_route=expected_route,
             )
             if not verified["ready_for_review"]:
                 raise WorkflowError("approved PR remained a draft after marking it ready for review")

@@ -49,10 +49,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_0_1(self):
+    def test_the_plugin_manifest_declares_version_1_0_4(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.3")
+        self.assertEqual(document["version"], "1.0.4")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -298,6 +298,52 @@ class ExpectedRouteBindingTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "route_mismatch")
         self.assertEqual(result["origin"], "unknown")
+        self.assertEqual(self.calls, [])
+
+    def test_publication_refuses_origin_drift_on_a_later_reread(self):
+        grok_pr = self.pr("grok")
+        drifted = self.pr(None)
+        gate = {
+            "allow_no_issue": True,
+            "approved": True,
+            "checks": [],
+            "invalid_links": [],
+            "issues": [],
+            "key": "deadbeef",
+            "overridden_issues": [],
+            "override_issue_gate": False,
+            "override_reason": None,
+        }
+        with mock.patch.object(
+            self.module, "pr_view", side_effect=[grok_pr, drifted]
+        ):
+            with mock.patch.object(self.module, "gate_status", return_value=gate):
+                with mock.patch.object(
+                    self.module, "resolve_workflow_labels", return_value=("a", "c")
+                ):
+                    with self.assertRaises(self.module.WorkflowError) as raised:
+                        self.module.publish_results(
+                            Path("/fake-repo"),
+                            "coghex/kanban",
+                            7,
+                            grok_pr,
+                            gate,
+                            [self.module.CODEX_REVIEWER],
+                            [
+                                {
+                                    "display_name": "Codex",
+                                    "reviewer": "codex",
+                                    "verdict": "APPROVE",
+                                    "summary": "ok",
+                                    "blocking_concerns": [],
+                                }
+                            ],
+                            {"pr": 7},
+                            allow_no_issue=True,
+                            expected_origin="grok",
+                            expected_route="codex",
+                        )
+        self.assertIn("does not match --expected-origin", str(raised.exception))
         self.assertEqual(self.calls, [])
 
     def test_a_matching_grok_codex_binding_is_not_a_mismatch(self):
