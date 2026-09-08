@@ -1,6 +1,19 @@
 ╔══════════ coghex/kanban ═════════╗
 ║┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━┳║
 ║┃                                ┃║
+║┃  STANDALONE                    ┃║
+║┃ ▌╭───────────────────────────╮ ┃║
+║┃  │ #812 Modal input leaks    │ ┃║
+║┃  │ through overlay           │ ┃║
+║┃  │  reviewed:approve   bug   │ ┃║
+║┃  │  ui                       │ ┃║
+║┃  │ unassigned · updated 4h   │ ┃║
+║┃  │ ago                       │ ┃║
+║┃  │ Empty modal areas         │ ┃║
+║┃  │ currently allow pointer   │ ┃║
+║┃  │ events to reach lower…    │ ┃║
+║┃  ╰───────────────────────────╯ ┃║
+║┃                                ┃║
 ║┃                                ┃║
 ║┃  ▾ #700  Persistence contract  ┃║
 ║┃  rollout  1/2 complete         ┃║
@@ -19,19 +32,6 @@
 ║┃                                ┃║
 ║┃  ▸ #701  Input routing         ┃║
 ║┃  hardening  0/1 complete       ┃║
-║┃  STANDALONE                    ┃║
-║┃ ▌╭───────────────────────────╮ ┃║
-║┃  │ #812 Modal input leaks    │ ┃║
-║┃  │ through overlay           │ ┃║
-║┃  │  reviewed:approve   bug   │ ┃║
-║┃  │  ui                       │ ┃║
-║┃  │ unassigned · updated 4h   │ ┃║
-║┃  │ ago                       │ ┃║
-║┃  │ Empty modal areas         │ ┃║
-║┃  │ currently allow pointer   │ ┃║
-║┃  │ events to reach lower…    │ ┃║
-║┃  ╰───────────────────────────╯ ┃║
-║┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
 ║ j/↓ next  k/↑ previous  x kill   ║
 ║ board: updated 3h ago · history: ║

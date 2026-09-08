@@ -49,24 +49,24 @@ spec = do
       isProblem config (PullRequestItem pullRequest) `shouldBe` False
 
     it "reorders standalone board entries when amber blocking severity drops a blocked PR out of the problem bucket" $ do
-      let blocked = (basePullRequest 10 [] False [Label "reviewed:changes" "ff0000"]) {pullRequestCreatedAt = addUTCTime 3600 epoch}
-          neutral = basePullRequest 11 [] False []
+      let blocked = (basePullRequest 11 [] False [Label "reviewed:changes" "ff0000"]) {pullRequestCreatedAt = addUTCTime 3600 epoch}
+          neutral = basePullRequest 10 [] False []
           snapshot = RepoSnapshot [] [blocked, neutral] epoch
           Board redColumns = deriveBoard defaultWorkflowConfig snapshot
           amberConfig = defaultWorkflowConfig {blockingSeverity = SeverityAmber}
           Board amberColumns = deriveBoard amberConfig snapshot
-      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [10, 11]
-      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [11, 10]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing redColumns) `shouldBe` [11, 10]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing amberColumns) `shouldBe` [10, 11]
 
     it "reorders tracker groups when amber blocking severity drops a blocked child PR out of the problem bucket" $ do
       let blockedTracker =
-            (baseIssue 100 [])
+            (baseIssue 200 [])
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #1 — A1: Child",
                 issueCreatedAt = addUTCTime 3600 epoch
               }
           neutralTracker =
-            (baseIssue 200 [])
+            (baseIssue 100 [])
               { issueLabels = [Label "epic" "5319e7"],
                 issueBody = "## Children\n- [ ] #2 — A1: Child",
                 issueCreatedAt = epoch

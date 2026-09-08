@@ -1,44 +1,44 @@
 +-------------------------------------------------------------------------- coghex/kanban -------------------------------------------------------------------------+
 |+---------- USAGE ---------++---------- ISSUES  1/5 ----------+----------- ACTIVE  3 ----------+--------- REVIEWING  2 ---------+------------ DONE  3 -----------+|
 || Codex          3h 0m old ||                                 |                                |                                |                                ||
-|| 5 hour  [######....] 63% || +----------- SEARCH ----------+ |                                |  STANDALONE                    |  STANDALONE                    ||
-|| in 1h 5m · Thu 16:05     || | envelope                    | |  v #700  Persistence contract  |  +---------------------------+ |  +---------------------------+ ||
-|| week    [####......] 41% || +-----------------------------+ |  rollout  1/2 complete         |  | PR #841 Split the input   | |  | PR #851 Resolve save      | ||
-|| in 4d 18h · Tue 09:00    ||                                 |  `- +------------------------+ |  | dispatch facade           | |  | envelope conflict         | ||
-|| Claude         3h 0m old ||                                 |     | A2 · tracker #700      | |  |  refactor                 | |  |  reviewed:approve         | ||
-|| 5 hour  [########..] 78% ||  v #700  Persistence contract   |     | #712 Migrate the       | |  | #833 · agent-name →       | |  | UNLINKED · agent-name →   | ||
-|| in 2h 30m · Thu 17:30    ||  rollout  1/2 complete          |     | terrain cache reader   | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
-|| week    [##........] 22% || >`- +-------------------------+ |     |  code-health           | |  | Moves per-domain dispatch | |  | Updates the branch after  | ||
-|| in 1d 18h · Sat 09:10    ||     | A1 · tracker #700       | |     | @codex-agent · updated | |  | into small modules while  | |  | the persistence registry  | ||
-|| +---+                    ||     | #711 Adopt the          | |     | 4h ago                 | |  | preserving the public…    | |  | changed on master.        | ||
-|| | ↻ |                    ||     | versioned save envelope | |     | Read through the       | |  | ◐ CI 12/14 · behind       | |  | ✓ CI 12/12 · merge        | ||
-|| +---+                    ||     |  feature                | |     | envelope and reject a  | |  +---------------------------+ |  | conflict                  | ||
-||                          ||     | unassigned · updated 4h | |     | payload whose recorde… | |                                |  +---------------------------+ ||
-||                          ||     | ago                     | |     +------------------------+ |  +---------------------------+ |                                ||
-||                          ||     | Write the envelope      | |                                |  | DRAFT #847 Prototype      | |  +---------------------------+ ||
-||                          ||     | header ahead of the     | |  STANDALONE                    |  | native sub-issue import   | |  | PR #823 Fix modal scroll  | ||
-||                          ||     | payload so a partial…   | |  +---------------------------+ |  |  experimental             | |  | routing                   | ||
-||                          ||     +-------------------------+ |  | #799 Repair stale world   | |  | #756 · agent-name →       | |  |  reviewed:approve         | ||
-||                          ||                                 |  | cache invalidation        | |  | master · updated 3h ago   | |  |  input   ui               | ||
-||                          ||                                 |  |  blocked   bug            | |  | An early draft of the     | |  | #812 · agent-name →       | ||
-||                          ||                                 |  | @codex-agent · updated 4h | |  | native GitHub sub-issue   | |  | master · updated 3h ago   | ||
-||                          ||                                 |  | ago                       | |  | membership adapter.       | |  | Routes Shift-wheel        | ||
-||                          ||                                 |  | A stale cache survives a  | |  | ? CI unknown ·            | |  | through the same          | ||
-||                          ||                                 |  | save reload and exposes   | |  | calculating               | |  | modal-aware ownership…    | ||
-||                          ||                                 |  | old terrain data to the…  | |  +---------------------------+ |  | ✓ CI 14/14 · clean        | ||
-||                          ||                                 |  +---------------------------+ |                                |  +---------------------------+ ||
+|| 5 hour  [######....] 63% || +----------- SEARCH ----------+ |  STANDALONE                    |  STANDALONE                    |  STANDALONE                    ||
+|| in 1h 5m · Thu 16:05     || | envelope                    | |  +---------------------------+ |  +---------------------------+ |  +---------------------------+ ||
+|| week    [####......] 41% || +-----------------------------+ |  | #799 Repair stale world   | |  | PR #841 Split the input   | |  | PR #851 Resolve save      | ||
+|| in 4d 18h · Tue 09:00    ||                                 |  | cache invalidation        | |  | dispatch facade           | |  | envelope conflict         | ||
+|| Claude         3h 0m old ||                                 |  |  blocked   bug            | |  |  refactor                 | |  |  reviewed:approve         | ||
+|| 5 hour  [########..] 78% ||  v #700  Persistence contract   |  | @codex-agent · updated 4h | |  | #833 · agent-name →       | |  | UNLINKED · agent-name →   | ||
+|| in 2h 30m · Thu 17:30    ||  rollout  1/2 complete          |  | ago                       | |  | master · updated 3h ago   | |  | master · updated 3h ago   | ||
+|| week    [##........] 22% || >`- +-------------------------+ |  | A stale cache survives a  | |  | Moves per-domain dispatch | |  | Updates the branch after  | ||
+|| in 1d 18h · Sat 09:10    ||     | A1 · tracker #700       | |  | save reload and exposes   | |  | into small modules while  | |  | the persistence registry  | ||
+|| +---+                    ||     | #711 Adopt the          | |  | old terrain data to the…  | |  | preserving the public…    | |  | changed on master.        | ||
+|| | ↻ |                    ||     | versioned save envelope | |  +---------------------------+ |  | ◐ CI 12/14 · behind       | |  | ✓ CI 12/12 · merge        | ||
+|| +---+                    ||     |  feature                | |                                |  +---------------------------+ |  | conflict                  | ||
+||                          ||     | unassigned · updated 4h | |                                |                                |  +---------------------------+ ||
+||                          ||     | ago                     | |  v #700  Persistence contract  |  +---------------------------+ |                                ||
+||                          ||     | Write the envelope      | |  rollout  1/2 complete         |  | DRAFT #847 Prototype      | |  +---------------------------+ ||
+||                          ||     | header ahead of the     | |  `- +------------------------+ |  | native sub-issue import   | |  | PR #823 Fix modal scroll  | ||
+||                          ||     | payload so a partial…   | |     | A2 · tracker #700      | |  |  experimental             | |  | routing                   | ||
+||                          ||     +-------------------------+ |     | #712 Migrate the       | |  | #756 · agent-name →       | |  |  reviewed:approve         | ||
+||                          ||                                 |     | terrain cache reader   | |  | master · updated 3h ago   | |  |  input   ui               | ||
+||                          ||                                 |     |  code-health           | |  | An early draft of the     | |  | #812 · agent-name →       | ||
+||                          ||                                 |     | @codex-agent · updated | |  | native GitHub sub-issue   | |  | master · updated 3h ago   | ||
+||                          ||                                 |     | 4h ago                 | |  | membership adapter.       | |  | Routes Shift-wheel        | ||
+||                          ||                                 |     | Read through the       | |  | ? CI unknown ·            | |  | through the same          | ||
+||                          ||                                 |     | envelope and reject a  | |  | calculating               | |  | modal-aware ownership…    | ||
+||                          ||                                 |     | payload whose recorde… | |  +---------------------------+ |  | ✓ CI 14/14 · clean        | ||
+||                          ||                                 |     +------------------------+ |                                |  +---------------------------+ ||
 ||                          ||                                 |                                |                                |                                ||
-||                          ||                                 |  +---------------------------+ |                                |  +---------------------------+ ||
-||                          ||                                 |  | #833 Improve notification | |                                |  | PR #861 Adopt the         | ||
-||                          ||                                 |  | category defaults         | |                                |  | envelope in the snapshot… | ||
-||                          ||                                 |  |  code-health              | |                                |  |  reviewed:approve         | ||
-||                          ||                                 |  | @claude-agent · updated   | |                                |  |  feature                  | ||
-||                          ||                                 |  | 4h ago                    | |                                |  | #901 · agent-name →       | ||
-|| +-------------------+    ||                                 |  | Make the fresh-install    | |                                |  | master · updated 3h ago   | ||
-|| | approve_issues.py |    ||                                 |  | behavior explicit and     | |                                |  | Reads the cache through   | ||
-|| +-------------------+    ||                                 |  | keep local state outside… | |                                |  | the versioned envelope    | ||
-|| off                      ||                                 |  +---------------------------+ |                                |  | and reports a truncated…  | ||
-|| +--------------+         ||                                 |                                |                                |  | ◐ CI 9/12 · behind        | ||
+||                          ||                                 |  STANDALONE                    |                                |  +---------------------------+ ||
+||                          ||                                 |  +---------------------------+ |                                |  | PR #861 Adopt the         | ||
+||                          ||                                 |  | #833 Improve notification | |                                |  | envelope in the snapshot… | ||
+||                          ||                                 |  | category defaults         | |                                |  |  reviewed:approve         | ||
+||                          ||                                 |  |  code-health              | |                                |  |  feature                  | ||
+||                          ||                                 |  | @claude-agent · updated   | |                                |  | #901 · agent-name →       | ||
+|| +-------------------+    ||                                 |  | 4h ago                    | |                                |  | master · updated 3h ago   | ||
+|| | approve_issues.py |    ||                                 |  | Make the fresh-install    | |                                |  | Reads the cache through   | ||
+|| +-------------------+    ||                                 |  | behavior explicit and     | |                                |  | the versioned envelope    | ||
+|| off                      ||                                 |  | keep local state outside… | |                                |  | and reports a truncated…  | ||
+|| +--------------+         ||                                 |  +---------------------------+ |                                |  | ◐ CI 9/12 · behind        | ||
 || | drain_prs.py |         ||                                 |                                |                                |  +---------------------------+ ||
 || +--------------+         ||                                 |                                |                                |                                ||
 || off                      ||                                 |                                |                                |                                ||

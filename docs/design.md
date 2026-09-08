@@ -1859,7 +1859,8 @@ implementation key, and lists every tracker in its details overlay. Ties are
 resolved deterministically by the tuple `(implementation key, tracker issue
 number, linked child issue number)`, each in ascending natural order.
 
-Untracked issues and PRs appear under a compact `Standalone` section. An
+Untracked issues and PRs share the column order with epic groups. Each
+consecutive run of untracked cards has a compact `Standalone` heading. An
 unlinked PR is necessarily standalone and carries `UNLINKED`.
 
 ### Sorting with trackers
@@ -1871,14 +1872,23 @@ Global attention sorting and implementation order interact as follows:
   standalone cards. A tracked revised issue promotes its tracker group and
   appears before that group's ordinary children. A tracker issue that is itself
   labeled `reviewed:revised` also promotes its group.
-- Tracker groups are ordered by their strongest visible attention state:
-  problems first, then groups containing approved work, then oldest tracker
-  first.
+- Tracker groups and standalone cards share the same attention tiers:
+  revised issues first, then problems, then approved work, then other work.
+  Problem and approval flags remain independent, so work carrying both sorts
+  ahead of problem-only work. Within each tier, sort numerically ascending by
+  the tracker issue number or standalone issue/PR number. Epics have no separate
+  leading partition, including childless epics. Groups take their problem and
+  approval flags from their live entries in that column.
 - Inside a tracker group, implementation order is authoritative after the
   revised-issue tier, even if a later child has a problem. Its red border
   remains visible in place.
-- Standalone cards are sorted problems first, then approved, then oldest first
-  after the revised-issue tier.
+- Expanding an epic leaves its position unchanged and exposes its contiguous
+  children in implementation order after the revised-issue tier. Epics remain
+  collapsed by default. The filter panel's Structure options can select Epic
+  groups alone by unchecking Standalone.
+- After criteria filtering repairs group membership, reapply this order.
+  A child whose tracker is hidden sorts as a standalone card by its own
+  attention state and number.
 - Collapsed tracker headers participate in keyboard focus for expansion but do
   not open a details overlay. The details overlay for an expanded child includes
   its tracker context.
@@ -1888,24 +1898,19 @@ never promotes itself or its group, whatever labels it carries — a closed
 blocked issue is not an outstanding problem, and a closed `reviewed:revised`
 issue has nothing left to rereview — while keeping the status color and border
 its labels and checks earned, so a closed issue that was blocked still reads as
-blocked. What they form instead is a settled block at the tail of each
-partition:
+blocked. What they form instead is one settled block after all live groups
+and standalone cards:
 
 - Implementation order stays authoritative for every tracked child whatever its
   lifecycle, so a group holding both open and completed children orders all of
   them the same way it always did.
-- Standalone completed cards form one block after every open standalone card,
-  ordered by newest updated first, with the item's own identity as the
-  tie-break so two cards updated in the same second keep a stable order across
-  refreshes.
-- Wholly completed groups form one block after every group holding open work,
-  ordered by the greatest update time among the tracker and its members,
-  newest first, with the tracker number as the tie-break. A group is wholly
-  completed when its tracker issue and every member grouped under it are
-  completed — a property of the whole group across all four columns, not of one
-  column's slice of it.
-- The existing placement between the group and standalone partitions is
-  otherwise unchanged.
+- Completed standalone cards and wholly completed groups share one block,
+  ordered by newest updated first. A group's update time is the greatest
+  update time among the tracker and its members. The standalone item's identity
+  or tracker issue identity breaks ties for a stable order across refreshes.
+- A group is wholly completed when its tracker issue and every member grouped
+  under it are completed — a property of the whole group across all four
+  columns, not of one column's slice of it.
 
 ## 13. GitHub data acquisition
 
@@ -3795,7 +3800,8 @@ network, GitHub account, or installed AI client.
 
 - Issue/PR column classification.
 - Pull-request readiness and color priority.
-- Rereview-first, problems-next, approved-next, oldest-first sorting.
+- Rereview-first, problems-next, approved-next, numeric ordering shared by
+  epic groups and standalone cards.
 - Natural implementation-key ordering.
 - Tracker checklist parsing across supported formats.
 - Multiple trackers, unlinked PRs, and multiple linked issues.

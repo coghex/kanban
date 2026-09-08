@@ -68,6 +68,7 @@ import Kanban.Workflow
     isProblem,
     itemCompleted,
     pruneOffBoardChildren,
+    sortBoardEntries,
   )
 
 -- | Whether a card is live work or settled history. The visible @Closed@
@@ -336,7 +337,7 @@ visibleBoardFor config criteria openBoard openSnapshot history =
 filterBoardEntries :: WorkflowConfig -> FilterCriteria -> Board -> Board
 filterBoardEntries config criteria board
   | admitsEveryEntry criteria = board
-  | otherwise = Board (Map.mapWithKey rebuild board.boardColumns)
+  | otherwise = sortBoardEntries config (Board (Map.mapWithKey rebuild board.boardColumns))
   where
     -- Ascending column order, which is what makes the home column below the
     -- leftmost one a group appears in rather than an arbitrary one.
@@ -392,10 +393,9 @@ filterBoardEntries config criteria board
                 repaired = repairedFor tracker
                 (here, moved)
                   -- The criteria hid the epic itself, so its children are
-                  -- standalone cards. They are moved to the tail rather than
-                  -- left where the group was, because §12 puts every group
-                  -- ahead of every standalone card and the renderer draws one
-                  -- STANDALONE heading per run.
+                  -- standalone cards. Collect them separately during repair;
+                  -- the final sort places them by their own attention state
+                  -- and number alongside the surviving groups and cards.
                   | not (admitsTracker tracker) = ([], map demote children)
                   | not (null children) = (map (reseatTracker repaired) children, [])
                   -- Nothing of this group survived anywhere, so it is

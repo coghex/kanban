@@ -1,46 +1,46 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
 ║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ 5 hour  [██████░░░░] 63% ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃ in 1h 5m · Thu 16:05     ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃ week    [████░░░░░░] 41% ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃ in 4d 18h · Tue 09:00    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
-║┃ Claude         3h 0m old ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃     │ #711 Adopt the vers┏━━━━━━━━━━━━━━━━━━━━━━━━━━ PR #823  Fix modal scroll routing ━━━━━━━━━━━━━━━━━━━━━━━━━┓r ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃ in 2h 30m · Thu 17:30    ┃┃     │ envelope           ┃                                                                                      ┃          │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃     │  feature           ┃ PR #823  Fix modal scroll routing                                                    ┃ into     │ ┃  │ Updates the branch after the       │ ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃     │ unassigned · update┃  reviewed:approve   input   ui                                                       ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
-║┃ ┏━━━┓                    ┃┃     │ Write the envelope ┃ Metadata                                                                             ┃          │ ┃  │ master.                            │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃     │ of the payload so a┃ #812 · agent-name → master · updated 3h ago                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ write is detectable┃ Author                                                                               ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────────┃ @agent-name                                                                          ┃            ┃                                         ┃║
-║┃                          ┃┃                          ┃ Branches                                                                             ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                          ┃ work/issue-823 → master                                                              ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
-║┃                          ┃┃  ▸ #701  Input routing ha┃ Linked issues                                                                        ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
-║┃                          ┃┃  complete                ┃ #812                                                                                 ┃          │ ┃  │ #812 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  STANDALONE              ┃ Mergeability                                                                         ┃r ·       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃ ▌╭───────────────────────┃ clean — the head is current and merges into the base without conflict                ┃          │ ┃  │ Routes Shift-wheel through the     │ ┃║
-║┃                          ┃┃  │ #812 Modal input leaks┃ Checks                                                                               ┃ive       │ ┃  │ same modal-aware ownership path as │ ┃║
-║┃                          ┃┃  │ overlay               ┃ 14/14 passed                                                                         ┃ip        │ ┃  │ ordinary wheel events.             │ ┃║
-║┃                          ┃┃  │  reviewed:approve   bu┃ Timestamps                                                                           ┃          │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4┃ created 2026-07-08 10:00 UTC                                                         ┃g         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas curr┃ updated 2026-07-16 11:43 UTC · 3h ago                                                ┃──────────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to reac┃ Body                                                                                 ┃            ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is visible┃ Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel     ┃            ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ╰───────────────────────┃ events.                                                                              ┃            ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃                          ┃ URL                                                                                  ┃            ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭───────────────────────┃ https://example.test/pull/823                                                        ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture         ┃                                                                                      ┃            ┃  │ versioned envelope and reports a   │ ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ barriers, and the vers┃                                                                                      ┃            ┃  ╰────────────────────────────────────╯ ┃║
-║┃ off                      ┃┃  │ envelope before implem┃                                                                                      ┃            ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰───────────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃                                         ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
-║┃ off                      ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃  STANDALONE                              ┃  STANDALONE                             ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃ ▌╭─────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  │ #812 Modal input leaks through      │ ┃  │ #799 Repair stale world cache      │ ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  │ overlay                             │ ┃  │ invalidation                       │ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃  │  reviewed:approve   bug   ui        │ ┃  │  blocked   bug                     │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃  │ unassigned · updated 4┏━━━━━━━━━━━━━━━━━━━━━━━━━━ PR #823  Fix modal scroll routing ━━━━━━━━━━━━━━━━━━━━━━━━━┓r ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃  │ Empty modal areas curr┃                                                                                      ┃          │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃  │ pointer events to reac┃ PR #823  Fix modal scroll routing                                                    ┃ into     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃  │ pages. This is visible┃  reviewed:approve   input   ui                                                       ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ ┏━━━┓                    ┃┃  ╰───────────────────────┃ Metadata                                                                             ┃          │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃                          ┃ #812 · agent-name → master · updated 3h ago                                          ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃                          ┃ Author                                                                               ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  ▾ #700  Persistence cont┃ @agent-name                                                                          ┃            ┃                                         ┃║
+║┃                          ┃┃  1/2 complete            ┃ Branches                                                                             ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  └─ ╭────────────────────┃ work/issue-823 → master                                                              ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃     │ A1 · tracker #700  ┃ Linked issues                                                                        ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃     │ #711 Adopt the vers┃ #812                                                                                 ┃          │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃     │ envelope           ┃ Mergeability                                                                         ┃r ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃     │  feature           ┃ clean — the head is current and merges into the base without conflict                ┃          │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃     │ unassigned · update┃ Checks                                                                               ┃ive       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃     │ Write the envelope ┃ 14/14 passed                                                                         ┃ip        │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃     │ of the payload so a┃ Timestamps                                                                           ┃          │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃     │ write is detectable┃ created 2026-07-08 10:00 UTC                                                         ┃g         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰────────────────────┃ updated 2026-07-16 11:43 UTC · 3h ago                                                ┃──────────╯ ┃                                         ┃║
+║┃                          ┃┃                          ┃ Body                                                                                 ┃            ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                          ┃ Routes Shift-wheel through the same modal-aware ownership path as ordinary wheel     ┃            ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing ha┃ events.                                                                              ┃            ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  complete                ┃ URL                                                                                  ┃            ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  STANDALONE              ┃ https://example.test/pull/823                                                        ┃            ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  ╭───────────────────────┃                                                                                      ┃            ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ #756 Define the persis┃                                                                                      ┃            ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │ contract              ┃                                                                                      ┃            ┃  │ versioned envelope and reports a   │ ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  │  architecture         ┃                                                                                      ┃            ┃  │ truncated payload.                 │ ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  │ unassigned · updated 4┃                                                                                      ┃            ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ Document root owners, ┃                                                                                      ┃            ┃  ╰────────────────────────────────────╯ ┃║
+║┃ off                      ┃┃  │ barriers, and the vers┃                                                                                      ┃            ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ envelope before implem┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛            ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ x kill  f fullscreen  esc close  r review/revise  S solve  A autosolve  m merge  q/Ctrl-C quit                                                                                                       ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║

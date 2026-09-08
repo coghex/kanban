@@ -8,56 +8,56 @@
 ║┃ Claude         3h 0m old ┃└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘║
 ║┃ 5 hour  [████████░░] 78% ┃┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━┳━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━┳━━━━━━━━━ REVIEWING  2 ━━━━━━━━━┳━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━┓║
 ║┃ in 2h 30m · Thu 17:30    ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃                                 ┃                                ┃  STANDALONE                    ┃  STANDALONE                    ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃  ▾ #700  Persistence contract   ┃  ▾ #700  Persistence contract  ┃  ╭───────────────────────────╮ ┃  ╭───────────────────────────╮ ┃║
-║┃ ┏━━━┓                    ┃┃  rollout  1/2 complete          ┃  rollout  1/2 complete         ┃  │ PR #841 Split the input   │ ┃  │ PR #851 Resolve save      │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃  └─ ╭─────────────────────────╮ ┃  └─ ╭────────────────────────╮ ┃  │ dispatch facade           │ ┃  │ envelope conflict         │ ┃║
-║┃ ┗━━━┛                    ┃┃     │ A1 · tracker #700       │ ┃     │ A2 · tracker #700      │ ┃  │  refactor                 │ ┃  │  reviewed:approve         │ ┃║
-║┃                          ┃┃     │ #711 Adopt the          │ ┃     │ #712 Migrate the       │ ┃  │ #833 · agent-name →       │ ┃  │ UNLINKED · agent-name →   │ ┃║
-║┃                          ┃┃     │ versioned save envelope │ ┃     │ terrain cache reader   │ ┃  │ master · updated 3h ago   │ ┃  │ master · updated 3h ago   │ ┃║
-║┃                          ┃┃     │  feature                │ ┃     │  code-health           │ ┃  │ Moves per-domain dispatch │ ┃  │ Updates the branch after  │ ┃║
-║┃                          ┃┃     │ unassigned · updated 4h │ ┃     │ @codex-agent · updated │ ┃  │ into small modules while  │ ┃  │ the persistence registry  │ ┃║
-║┃                          ┃┃     │ ago                     │ ┃     │ 4h ago                 │ ┃  │ preserving the public…    │ ┃  │ changed on master.        │ ┃║
-║┃                          ┃┃     │ Write the envelope      │ ┃     │ Read through the       │ ┃  │ ◐ CI 12/14 · behind       │ ┃  │ ✓ CI 12/12 · merge        │ ┃║
-║┃                          ┃┃     │ header ahead of the     │ ┃     │ envelope and reject a  │ ┃  ╰───────────────────────────╯ ┃  │ conflict                  │ ┃║
-║┃                          ┃┃     │ payload so a partial…   │ ┃     │ payload whose recorde… │ ┃                                ┃  ╰───────────────────────────╯ ┃║
-║┃                          ┃┃     ╰─────────────────────────╯ ┃     ╰────────────────────────╯ ┃  ╭───────────────────────────╮ ┃                                ┃║
-║┃                          ┃┃                                 ┃                                ┃  │ DRAFT #847 Prototype      │ ┃  ╭───────────────────────────╮ ┃║
-║┃                          ┃┃                                 ┃  STANDALONE                    ┃  │ native sub-issue import   │ ┃  │ PR #823 Fix modal scroll  │ ┃║
-║┃                          ┃┃  ▸ #701  Input routing          ┃  ╭───────────────────────────╮ ┃  │  experimental             │ ┃  │ routing                   │ ┃║
-║┃                          ┃┃  hardening  0/1 complete        ┃  │ #799 Repair stale world   │ ┃  │ #756 · agent-name →       │ ┃  │  reviewed:approve         │ ┃║
-║┃                          ┃┃  STANDALONE                     ┃  │ cache invalidation        │ ┃  │ master · updated 3h ago   │ ┃  │  input   ui               │ ┃║
-║┃                          ┃┃ ▌╭────────────────────────────╮ ┃  │  blocked   bug            │ ┃  │ An early draft of the     │ ┃  │ #812 · agent-name →       │ ┃║
-║┃                          ┃┃  │ #812 Modal input leaks     │ ┃  │ @codex-agent · updated 4h │ ┃  │ native GitHub sub-issue   │ ┃  │ master · updated 3h ago   │ ┃║
-║┃                          ┃┃  │ through overlay            │ ┃  │ ago                       │ ┃  │ membership adapter.       │ ┃  │ Routes Shift-wheel        │ ┃║
-║┃                          ┃┃  │  reviewed:approve   bug    │ ┃  │ A stale cache survives a  │ ┃  │ ? CI unknown ·            │ ┃  │ through the same          │ ┃║
-║┃                          ┃┃  │  ui                        │ ┃  │ save reload and exposes   │ ┃  │ calculating               │ ┃  │ modal-aware ownership…    │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h    │ ┃  │ old terrain data to the…  │ ┃  ╰───────────────────────────╯ ┃  │ ✓ CI 14/14 · clean        │ ┃║
-║┃                          ┃┃  │ ago                        │ ┃  ╰───────────────────────────╯ ┃                                ┃  ╰───────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas          │ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃  │ currently allow pointer    │ ┃  ╭───────────────────────────╮ ┃                                ┃  ╭───────────────────────────╮ ┃║
-║┃                          ┃┃  │ events to reach lower…     │ ┃  │ #833 Improve notification │ ┃                                ┃  │ PR #861 Adopt the         │ ┃║
-║┃                          ┃┃  ╰────────────────────────────╯ ┃  │ category defaults         │ ┃                                ┃  │ envelope in the snapshot… │ ┃║
-║┃                          ┃┃                                 ┃  │  code-health              │ ┃                                ┃  │  reviewed:approve         │ ┃║
-║┃                          ┃┃  ╭────────────────────────────╮ ┃  │ @claude-agent · updated   │ ┃                                ┃  │  feature                  │ ┃║
-║┃                          ┃┃  │ #756 Define the            │ ┃  │ 4h ago                    │ ┃                                ┃  │ #901 · agent-name →       │ ┃║
-║┃                          ┃┃  │ persistence contract       │ ┃  │ Make the fresh-install    │ ┃                                ┃  │ master · updated 3h ago   │ ┃║
-║┃                          ┃┃  │  architecture              │ ┃  │ behavior explicit and     │ ┃                                ┃  │ Reads the cache through   │ ┃║
-║┃                          ┃┃  │ unassigned · updated 4h    │ ┃  │ keep local state outside… │ ┃                                ┃  │ the versioned envelope    │ ┃║
-║┃                          ┃┃  │ ago                        │ ┃  ╰───────────────────────────╯ ┃                                ┃  │ and reports a truncated…  │ ┃║
-║┃                          ┃┃  │ Document root owners,      │ ┃                                ┃                                ┃  │ ◐ CI 9/12 · behind        │ ┃║
-║┃                          ┃┃  │ snapshot barriers, and the │ ┃                                ┃                                ┃  ╰───────────────────────────╯ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃  STANDALONE                     ┃  STANDALONE                    ┃  STANDALONE                    ┃  STANDALONE                    ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃ ▌╭────────────────────────────╮ ┃  ╭───────────────────────────╮ ┃  ╭───────────────────────────╮ ┃  ╭───────────────────────────╮ ┃║
+║┃ ┏━━━┓                    ┃┃  │ #812 Modal input leaks     │ ┃  │ #799 Repair stale world   │ ┃  │ PR #841 Split the input   │ ┃  │ PR #851 Resolve save      │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃  │ through overlay            │ ┃  │ cache invalidation        │ ┃  │ dispatch facade           │ ┃  │ envelope conflict         │ ┃║
+║┃ ┗━━━┛                    ┃┃  │  reviewed:approve   bug    │ ┃  │  blocked   bug            │ ┃  │  refactor                 │ ┃  │  reviewed:approve         │ ┃║
+║┃                          ┃┃  │  ui                        │ ┃  │ @codex-agent · updated 4h │ ┃  │ #833 · agent-name →       │ ┃  │ UNLINKED · agent-name →   │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h    │ ┃  │ ago                       │ ┃  │ master · updated 3h ago   │ ┃  │ master · updated 3h ago   │ ┃║
+║┃                          ┃┃  │ ago                        │ ┃  │ A stale cache survives a  │ ┃  │ Moves per-domain dispatch │ ┃  │ Updates the branch after  │ ┃║
+║┃                          ┃┃  │ Empty modal areas          │ ┃  │ save reload and exposes   │ ┃  │ into small modules while  │ ┃  │ the persistence registry  │ ┃║
+║┃                          ┃┃  │ currently allow pointer    │ ┃  │ old terrain data to the…  │ ┃  │ preserving the public…    │ ┃  │ changed on master.        │ ┃║
+║┃                          ┃┃  │ events to reach lower…     │ ┃  ╰───────────────────────────╯ ┃  │ ◐ CI 12/14 · behind       │ ┃  │ ✓ CI 12/12 · merge        │ ┃║
+║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃  ╰───────────────────────────╯ ┃  │ conflict                  │ ┃║
+║┃                          ┃┃                                 ┃                                ┃                                ┃  ╰───────────────────────────╯ ┃║
+║┃                          ┃┃                                 ┃  ▾ #700  Persistence contract  ┃  ╭───────────────────────────╮ ┃                                ┃║
+║┃                          ┃┃  ▾ #700  Persistence contract   ┃  rollout  1/2 complete         ┃  │ DRAFT #847 Prototype      │ ┃  ╭───────────────────────────╮ ┃║
+║┃                          ┃┃  rollout  1/2 complete          ┃  └─ ╭────────────────────────╮ ┃  │ native sub-issue import   │ ┃  │ PR #823 Fix modal scroll  │ ┃║
+║┃                          ┃┃  └─ ╭─────────────────────────╮ ┃     │ A2 · tracker #700      │ ┃  │  experimental             │ ┃  │ routing                   │ ┃║
+║┃                          ┃┃     │ A1 · tracker #700       │ ┃     │ #712 Migrate the       │ ┃  │ #756 · agent-name →       │ ┃  │  reviewed:approve         │ ┃║
+║┃                          ┃┃     │ #711 Adopt the          │ ┃     │ terrain cache reader   │ ┃  │ master · updated 3h ago   │ ┃  │  input   ui               │ ┃║
+║┃                          ┃┃     │ versioned save envelope │ ┃     │  code-health           │ ┃  │ An early draft of the     │ ┃  │ #812 · agent-name →       │ ┃║
+║┃                          ┃┃     │  feature                │ ┃     │ @codex-agent · updated │ ┃  │ native GitHub sub-issue   │ ┃  │ master · updated 3h ago   │ ┃║
+║┃                          ┃┃     │ unassigned · updated 4h │ ┃     │ 4h ago                 │ ┃  │ membership adapter.       │ ┃  │ Routes Shift-wheel        │ ┃║
+║┃                          ┃┃     │ ago                     │ ┃     │ Read through the       │ ┃  │ ? CI unknown ·            │ ┃  │ through the same          │ ┃║
+║┃                          ┃┃     │ Write the envelope      │ ┃     │ envelope and reject a  │ ┃  │ calculating               │ ┃  │ modal-aware ownership…    │ ┃║
+║┃                          ┃┃     │ header ahead of the     │ ┃     │ payload whose recorde… │ ┃  ╰───────────────────────────╯ ┃  │ ✓ CI 14/14 · clean        │ ┃║
+║┃                          ┃┃     │ payload so a partial…   │ ┃     ╰────────────────────────╯ ┃                                ┃  ╰───────────────────────────╯ ┃║
+║┃                          ┃┃     ╰─────────────────────────╯ ┃                                ┃                                ┃                                ┃║
+║┃                          ┃┃                                 ┃  STANDALONE                    ┃                                ┃  ╭───────────────────────────╮ ┃║
+║┃                          ┃┃                                 ┃  ╭───────────────────────────╮ ┃                                ┃  │ PR #861 Adopt the         │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing          ┃  │ #833 Improve notification │ ┃                                ┃  │ envelope in the snapshot… │ ┃║
+║┃                          ┃┃  hardening  0/1 complete        ┃  │ category defaults         │ ┃                                ┃  │  reviewed:approve         │ ┃║
+║┃                          ┃┃  STANDALONE                     ┃  │  code-health              │ ┃                                ┃  │  feature                  │ ┃║
+║┃                          ┃┃  ╭────────────────────────────╮ ┃  │ @claude-agent · updated   │ ┃                                ┃  │ #901 · agent-name →       │ ┃║
+║┃                          ┃┃  │ #756 Define the            │ ┃  │ 4h ago                    │ ┃                                ┃  │ master · updated 3h ago   │ ┃║
+║┃                          ┃┃  │ persistence contract       │ ┃  │ Make the fresh-install    │ ┃                                ┃  │ Reads the cache through   │ ┃║
+║┃                          ┃┃  │  architecture              │ ┃  │ behavior explicit and     │ ┃                                ┃  │ the versioned envelope    │ ┃║
+║┃                          ┃┃  │ unassigned · updated 4h    │ ┃  │ keep local state outside… │ ┃                                ┃  │ and reports a truncated…  │ ┃║
+║┃                          ┃┃  │ ago                        │ ┃  ╰───────────────────────────╯ ┃                                ┃  │ ◐ CI 9/12 · behind        │ ┃║
+║┃                          ┃┃  │ Document root owners,      │ ┃                                ┃                                ┃  ╰───────────────────────────╯ ┃║
+║┃                          ┃┃  │ snapshot barriers, and the │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  │ versioned envelope before… │ ┃                                ┃                                ┃                                ┃║
 ║┃                          ┃┃  ╰────────────────────────────╯ ┃                                ┃                                ┃                                ┃║
-║┃                          ┃┃                                 ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ approve_issues.py ┃    ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
-║┃ off                      ┃┃  │ snapshot at startup and    │ ┃                                ┃                                ┃                                ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃                                 ┃                                ┃                                ┃                                ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃  ╭────────────────────────────╮ ┃                                ┃                                ┃                                ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃  │ #901 Add repository        │ ┃                                ┃                                ┃                                ┃║
+║┃ off                      ┃┃  │ snapshot cache             │ ┃                                ┃                                ┃                                ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │  feature                   │ ┃                                ┃                                ┃                                ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  │ unassigned · updated 4h    │ ┃                                ┃                                ┃                                ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  │ ago                        │ ┃                                ┃                                ┃                                ┃║
+║┃ off                      ┃┃  │ Load the last good GitHub  │ ┃                                ┃                                ┃                                ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ j/k/↑/↓ box  ←/→ group  space toggle  d defaults  s search  F/esc close                                                                                          ║
 ║ board: updated 3h ago · history: current                                                                                                                         ║

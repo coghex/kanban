@@ -14,6 +14,7 @@ module Kanban.Workflow
     pullRequestStatus,
     readOnlyHistoryNotice,
     rereviewLabel,
+    sortBoardEntries,
   )
 where
 
@@ -209,24 +210,35 @@ uniqueMemberships =
     . Map.fromList
     . map (\membership -> ((membership.membershipTracker.trackerIssue.issueNumber, membership.membershipChild.trackerChildIssueNumber), membership))
 
+-- | Reapply the board order after filtering has repaired group membership.
+-- Lifecycles are read across all columns so an open member anywhere keeps
+-- its group out of the completed block.
+sortBoardEntries :: WorkflowConfig -> Board -> Board
+sortBoardEntries config (Board columns) =
+  Board (Map.map (sortColumnEntries config lifecycles) columns)
+  where
+    entries = concat (Map.elems columns)
+    trackers = Map.elems (Map.fromList (mapMaybe trackerOf entries))
+    trackerOf (Tracked context _) =
+      let tracker = context.trackingPrimary.membershipTracker
+       in Just (tracker.trackerIssue.issueNumber, tracker)
+    trackerOf (TrackerHeader tracker) = Just (tracker.trackerIssue.issueNumber, tracker)
+    trackerOf (Standalone _) = Nothing
+    lifecycles = groupLifecyclesFor entries trackers
+
 -- | §12's order for one column, over a board that may hold settled history
 -- alongside live work.
 --
 -- Completed cards are attention-neutral: they never enter the rereview tier
 -- and never carry a problem or an approval into an ordering decision, so
 -- turning history on cannot reorder the live board underneath it. What they do
--- instead is form a block of their own at the tail of each partition —
--- completed groups after every group holding open work, completed standalone
--- cards after every open standalone card — ordered by what moved most
--- recently, because recency is the only useful order over work that is done.
+-- instead is form one block after all live work, ordered by what moved most
+-- recently. Live groups and standalone cards share attention tiers and use
+-- the tracker or card number within each tier; a group stays contiguous.
 sortColumnEntries :: WorkflowConfig -> Map.Map Int GroupLifecycle -> [ColumnEntry] -> [ColumnEntry]
 sortColumnEntries config groupLifecycles entries =
-  concatMap snd rereviewGroups
-    <> rereviewStandalone
-    <> concatMap snd openGroups
-    <> concatMap snd completedGroups
-    <> openStandalone
-    <> completedStandalone
+  concatMap snd (sortOn fst liveBlocks)
+    <> concatMap snd (sortOn fst completedBlocks)
   where
     (tracked, trackerHeaders, standalone) = partitionEntries entries
     grouped =
@@ -243,14 +255,17 @@ sortColumnEntries config groupLifecycles entries =
         | (tracker, groupEntries) <- Map.elems grouped
       ]
     (settledGroups, liveGroups) = partition (whollyCompletedGroup . fst) orderedGroups
-    sortedLiveGroups = sortOn (\(tracker, groupEntries) -> trackerGroupKey config tracker groupEntries) liveGroups
-    rereviewGroups = filter (uncurry groupNeedsRereview) sortedLiveGroups
-    openGroups = filter (not . uncurry groupNeedsRereview) sortedLiveGroups
-    completedGroups = sortOn (completedGroupKey . fst) settledGroups
     (settledStandalone, liveStandalone) = partition (itemCompleted . entryItem) standalone
-    rereviewStandalone = sortOn (attentionKey config . entryItem) (filter (needsRereview . entryItem) liveStandalone)
-    openStandalone = sortOn (attentionKey config . entryItem) (filter (not . needsRereview . entryItem) liveStandalone)
-    completedStandalone = sortOn (completedCardKey . entryItem) settledStandalone
+    liveBlocks =
+      [ ((if groupNeedsRereview tracker groupEntries then 0 :: Int else 1, trackerGroupKey config tracker groupEntries), groupEntries)
+        | (tracker, groupEntries) <- liveGroups
+      ]
+        <> [ ((if needsRereview (entryItem entry) then 0 else 1, attentionKey config (entryItem entry)), [entry])
+             | entry <- liveStandalone
+           ]
+    completedBlocks =
+      [(completedGroupKey tracker, groupEntries) | (tracker, groupEntries) <- settledGroups]
+        <> [(completedCardKey (entryItem entry), [entry]) | entry <- settledStandalone]
     combineGroup (_, newEntries) (tracker, existingEntries) = (tracker, newEntries <> existingEntries)
     -- A tracker with no lifecycle recorded is one this board did not derive
     -- the group for, which cannot happen for a group it is now sorting; it
@@ -259,12 +274,12 @@ sortColumnEntries config groupLifecycles entries =
       maybe False (.groupWhollyCompleted) (Map.lookup tracker.trackerIssue.issueNumber groupLifecycles)
     completedGroupKey tracker =
       ( Down (maybe tracker.trackerIssue.issueUpdatedAt (.groupRecency) (Map.lookup number groupLifecycles)),
-        number
+        IssueId number
       )
       where
         number = tracker.trackerIssue.issueNumber
 
--- | Settled cards in the standalone block: newest-updated first, with the
+-- | Settled groups and cards: newest-updated first, with the
 -- item's own identity as the tie-break so two cards updated in the same second
 -- keep a stable order across refreshes.
 completedCardKey :: BoardItem -> (Down UTCTime, ItemId)
@@ -296,11 +311,10 @@ trackedChildKey (TrackerHeader _) = (1, 1, "", 0, 0)
 -- A completed member keeps whatever status treatment its labels and checks
 -- earned on its own card, but it can no longer promote the group it sits in:
 -- a closed blocked issue is not an outstanding problem.
-trackerGroupKey :: WorkflowConfig -> Tracker -> [ColumnEntry] -> (Int, Int, UTCTime, Int)
+trackerGroupKey :: WorkflowConfig -> Tracker -> [ColumnEntry] -> (Int, Int, Int)
 trackerGroupKey config tracker entries =
   ( if any (liveItem (isProblem config)) entries then 0 else 1,
     if any (liveItem (isApproved config)) entries then 0 else 1,
-    tracker.trackerIssue.issueCreatedAt,
     tracker.trackerIssue.issueNumber
   )
   where
@@ -356,11 +370,13 @@ approvedPullRequest config pullRequest =
     byLabel = hasLabel config.approvalLabel pullRequest.pullRequestLabels
     byReview = pullRequest.pullRequestReviewDecision == ReviewApproved
 
-attentionKey :: WorkflowConfig -> BoardItem -> (Int, Int, UTCTime)
+attentionKey :: WorkflowConfig -> BoardItem -> (Int, Int, Int)
 attentionKey config item =
   ( if isProblem config item then 0 else 1,
     if isApproved config item then 0 else 1,
-    itemCreatedAt item
+    case itemId item of
+      IssueId number -> number
+      PullRequestId number -> number
   )
 
 -- | The strongest attention tier, which settled work never enters. A closed

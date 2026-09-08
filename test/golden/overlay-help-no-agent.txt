@@ -1,46 +1,46 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
 ║┃ ┏━━━┓                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ ┃ ↻ ┃                    ┃┃                                          ┃                                         ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃ ┗━━━┛                    ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  1/2 complete        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃                          ┃┃  └─ ╭────────────────┃                                                                                             ┃       │ ┃  │ conflict                           │ ┃║
-║┃                          ┃┃     │ A1 · tracker #7┃ j / Down         next card                                                                  ┃       │ ┃  │  reviewed:approve                  │ ┃║
-║┃                          ┃┃     │ #711 Adopt the ┃ k / Up           previous card                                                              ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃                          ┃┃     │ envelope       ┃ x                kill selected working process tree                                         ┃       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃     │  feature       ┃ h / Left         previous column                                                            ┃to     │ ┃  │ Updates the branch after the       │ ┃║
-║┃                          ┃┃     │ unassigned · up┃ l / Right        next column                                                                ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃     │ Write the envel┃ g                first visible item in the column                                           ┃       │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃     │ of the payload ┃ G                last visible item in the column                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃     │ write is detect┃ s                search a column; h/l type into the query, Left/Right move the search       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃         ┃                                         ┃║
-║┃                          ┃┃                      ┃ e                expand / collapse focused epic                                             ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                      ┃ Enter            details                                                                    ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
-║┃                          ┃┃  ▸ #701  Input routin┃ f                toggle the open overlay between windowed and fullscreen                    ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║
-║┃                          ┃┃  complete            ┃ Esc              close overlay or dismiss a notice                                          ┃       │ ┃  │ #812 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  STANDALONE          ┃ p                processes and agent sessions                                               ┃       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃ ▌╭───────────────────┃ i                everything needing attention; Enter goes to its work                       ┃       │ ┃  │ Routes Shift-wheel through the     │ ┃║
-║┃                          ┃┃  │ #812 Modal input l┃ u / click        update board and both usage providers                                      ┃       │ ┃  │ same modal-aware ownership path as │ ┃║
-║┃                          ┃┃  │ overlay           ┃ d / click        start or stop PR drainer                                                   ┃       │ ┃  │ ordinary wheel events.             │ ┃║
-║┃                          ┃┃  │  reviewed:approve ┃ m                merge the selected approved PR in Done                                     ┃       │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
-║┃                          ┃┃  │ unassigned · updat┃ c                collapse / expand sidebar                                                  ┃       │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ Empty modal areas ┃ o                settings                                                                   ┃───────╯ ┃                                         ┃║
-║┃                          ┃┃  │ pointer events to ┃ ?                this help overlay                                                          ┃         ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ pages. This is vis┃ Ctrl-L           repaint                                                                    ┃         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ╰───────────────────┃ q / Ctrl-C       quit                                                                       ┃         ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃                      ┃ Tab              next session in an open solve/PR/review overlay                            ┃         ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  ╭───────────────────┃ Ctrl-C           interrupt agent turn; guidance resumes it, r restarts canonical review     ┃         ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  │ #756 Define the pe┃ i                session overlay: type into the draft (insert mode)                         ┃         ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ contract          ┃ j / k            session overlay normal mode: scroll transcript one line                    ┃         ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │  architecture     ┃ g / G            session overlay normal mode: transcript beginning / live tail              ┃         ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │ unassigned · updat┃ Ctrl-D / Ctrl-U  session overlay normal mode: scroll transcript sixteen lines               ┃         ┃  │ truncated payload.                 │ ┃║
-║┃                          ┃┃  │ Document root owne┃ q                session overlay normal mode: hide the overlay                              ┃         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃                          ┃┃  │ barriers, and the ┃ left click       select card; click selected card for details                               ┃         ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ envelope before im┃ mouse wheel      scroll column under pointer                                                ┃         ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  ╰───────────────────┃ right click      close card details, windowed or fullscreen                                 ┃         ┃                                         ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃                      ┃ outside click    close card details, while it is windowed                                   ┃         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃  ╭───────────────────┃                                                                                             ┃         ┃                                         ┃║
-║┃ off                      ┃┃  │ #901 Add repositor┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛         ┃                                         ┃║
+║┃ ┃ ↻ ┃                    ┃┃  STANDALONE                              ┃  STANDALONE                             ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃ ┗━━━┛                    ┃┃ ▌╭─────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ #812 Modal input l┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃                          ┃┃  │ overlay           ┃                                                                                             ┃       │ ┃  │ conflict                           │ ┃║
+║┃                          ┃┃  │  reviewed:approve ┃ j / Down         next card                                                                  ┃       │ ┃  │  reviewed:approve                  │ ┃║
+║┃                          ┃┃  │ unassigned · updat┃ k / Up           previous card                                                              ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃                          ┃┃  │ Empty modal areas ┃ x                kill selected working process tree                                         ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ pointer events to ┃ h / Left         previous column                                                            ┃to     │ ┃  │ Updates the branch after the       │ ┃║
+║┃                          ┃┃  │ pages. This is vis┃ l / Right        next column                                                                ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃  ╰───────────────────┃ g                first visible item in the column                                           ┃       │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃                      ┃ G                last visible item in the column                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃                      ┃ s                search a column; h/l type into the query, Left/Right move the search       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  ▾ #700  Persistence ┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃         ┃                                         ┃║
+║┃                          ┃┃  1/2 complete        ┃ e                expand / collapse focused epic                                             ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  └─ ╭────────────────┃ Enter            details                                                                    ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃     │ A1 · tracker #7┃ f                toggle the open overlay between windowed and fullscreen                    ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃     │ #711 Adopt the ┃ Esc              close overlay or dismiss a notice                                          ┃       │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃     │ envelope       ┃ p                processes and agent sessions                                               ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃     │  feature       ┃ i                everything needing attention; Enter goes to its work                       ┃       │ ┃  │ Routes Shift-wheel through the     │ ┃║
+║┃                          ┃┃     │ unassigned · up┃ u / click        update board and both usage providers                                      ┃       │ ┃  │ same modal-aware ownership path as │ ┃║
+║┃                          ┃┃     │ Write the envel┃ d / click        start or stop PR drainer                                                   ┃       │ ┃  │ ordinary wheel events.             │ ┃║
+║┃                          ┃┃     │ of the payload ┃ m                merge the selected approved PR in Done                                     ┃       │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃     │ write is detect┃ c                collapse / expand sidebar                                                  ┃       │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰────────────────┃ o                settings                                                                   ┃───────╯ ┃                                         ┃║
+║┃                          ┃┃                      ┃ ?                this help overlay                                                          ┃         ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                      ┃ Ctrl-L           repaint                                                                    ┃         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ▸ #701  Input routin┃ q / Ctrl-C       quit                                                                       ┃         ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  complete            ┃ Tab              next session in an open solve/PR/review overlay                            ┃         ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  STANDALONE          ┃ Ctrl-C           interrupt agent turn; guidance resumes it, r restarts canonical review     ┃         ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  ╭───────────────────┃ i                session overlay: type into the draft (insert mode)                         ┃         ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ #756 Define the pe┃ j / k            session overlay normal mode: scroll transcript one line                    ┃         ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │ contract          ┃ g / G            session overlay normal mode: transcript beginning / live tail              ┃         ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │  architecture     ┃ Ctrl-D / Ctrl-U  session overlay normal mode: scroll transcript sixteen lines               ┃         ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ unassigned · updat┃ q                session overlay normal mode: hide the overlay                              ┃         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ Document root owne┃ left click       select card; click selected card for details                               ┃         ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ barriers, and the ┃ mouse wheel      scroll column under pointer                                                ┃         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ envelope before im┃ right click      close card details, windowed or fullscreen                                 ┃         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  ╰───────────────────┃ outside click    close card details, while it is windowed                                   ┃         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                      ┃                                                                                             ┃         ┃                                         ┃║
+║┃ off                      ┃┃  ╭───────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛         ┃                                         ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ f fullscreen  esc close  q/Ctrl-C quit                                                                                                                                                               ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║

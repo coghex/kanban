@@ -14,14 +14,7 @@
 ║│ showing 13 of 17 cards         │║
 ║└────────────────────────────────┘║
 ║┏━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━┳║
-║┃     │ Write the envelope     │ ┃║
-║┃     │ header ahead of the    │ ┃║
-║┃     │ payload so a partial…  │ ┃║
-║┃     ╰────────────────────────╯ ┃║
 ║┃                                ┃║
-║┃                                ┃║
-║┃  ▸ #701  Input routing         ┃║
-║┃  hardening  0/1 complete       ┃║
 ║┃  STANDALONE                    ┃║
 ║┃ ▌╭───────────────────────────╮ ┃║
 ║┃  │ #812 Modal input leaks    │ ┃║
@@ -34,6 +27,13 @@
 ║┃  │ currently allow pointer   │ ┃║
 ║┃  │ events to reach lower…    │ ┃║
 ║┃  ╰───────────────────────────╯ ┃║
+║┃                                ┃║
+║┃                                ┃║
+║┃  ▾ #700  Persistence contract  ┃║
+║┃  rollout  1/2 complete         ┃║
+║┃  └─ ╭────────────────────────╮ ┃║
+║┃     │ A1 · tracker #700      │ ┃║
+║┃     │ #711 Adopt the         │ ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻║
 ║ j/k/↑/↓ box  ←/→ group  space to ║
 ║ board: updated 3h ago · history: ║
