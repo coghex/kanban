@@ -1722,6 +1722,8 @@ def workflow(
     self_review_as: str | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
+    expected_origin: str | None = None,
+    expected_route: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     # Argument misuse first, ahead of even the mode question: it needs no
     # roster, no network and no repository to decide, so refusing it here is
@@ -1750,12 +1752,38 @@ def workflow(
     )
     origin = pr_origin(pr)
     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
+    live_origin = origin or "unknown"
+    live_route = "+".join(item.key for item in reviewers)
+    if expected_origin is not None and live_origin != expected_origin:
+        return 1, {
+            "pr": number,
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live origin {live_origin!r} does not match "
+                f"--expected-origin {expected_origin!r}; nothing was published "
+                "and no reviewer was spawned"
+            ),
+        }
+    if expected_route is not None and live_route != expected_route:
+        return 1, {
+            "pr": number,
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live route {live_route!r} does not match "
+                f"--expected-route {expected_route!r}; nothing was published "
+                "and no reviewer was spawned"
+            ),
+        }
     base = {
         "pr": number,
         "url": pr["url"],
         "head": pr["headRefOid"],
-        "origin": origin or "unknown",
-        "route": "+".join(item.key for item in reviewers),
+        "origin": live_origin,
+        "route": live_route,
         "review_mode": "standalone" if allow_no_issue else "issue-gated",
         "issue_gate": gate,
     }
@@ -2163,6 +2191,24 @@ def parse_args() -> argparse.Namespace:
         help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
     )
     parser.add_argument(
+        "--expected-origin",
+        metavar="ORIGIN",
+        help=(
+            "Refuse before spawning if the live origin is not this value "
+            "(unknown, claude, codex, or grok). Use with --expected-route to "
+            "fail closed when the pull request drifted after a dry run."
+        ),
+    )
+    parser.add_argument(
+        "--expected-route",
+        metavar="ROUTE",
+        help=(
+            "Refuse before spawning if the live reviewer route is not this "
+            "value (for example codex). Combined with --expected-origin this "
+            "is how a grok-origin autosolve refuses a Claude spawn."
+        ),
+    )
+    parser.add_argument(
         "--repo",
         metavar="OWNER/NAME",
         help=(
@@ -2220,6 +2266,8 @@ def main() -> None:
                 self_review_as=args.self_review_as,
                 config_path=args.config,
                 explicit_repo=args.repo,
+                expected_origin=args.expected_origin,
+                expected_route=args.expected_route,
             )
     except WorkflowError as exc:
         result = {"pr": number, "status": "error", "error": str(exc)}

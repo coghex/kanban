@@ -151,7 +151,7 @@ own job into themselves. Each:
    timeline only through its own bundle's vendored trusted-comment helper
    (`skills/solve/scripts/trusted_issue_spec.py` for the Codex skill,
    `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py` for the Claude
-   command, `$GROK_HOME` for the Grok skill). No fallback to an unfiltered issue-comment source is permitted,
+   command). No fallback to an unfiltered issue-comment source is permitted,
    on the same terms
    [agent-workflow-contract.md §2.1](agent-workflow-contract.md#21-issue-solve-solve--solve)
    sets for the solve workflows.

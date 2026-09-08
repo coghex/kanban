@@ -1,6 +1,6 @@
 ---
 name: autosolve
-description: Run /solve for one GitHub issue, then drive a Codex review loop of up to five rounds until the pull request is approved — or, for a documentation-only issue whose own spec calls for direct publication instead of a pull request, land it and close the issue directly. Stops at reviewed:approve and never merges, labels, or finalizes. Use only when the user invokes /autosolve or explicitly asks for this autonomous workflow. This is the Grok brand; never invoke Claude.
+description: Run /solve for one GitHub issue, then drive a Codex review loop of up to five rounds until the pull request is approved. Documentation-only issues that require a landing helper this bundle does not ship are reported and stopped. Stops at reviewed:approve and never merges, labels, or finalizes. Use only when the user invokes /autosolve or explicitly asks for this autonomous workflow. This is the Grok brand; never invoke Claude.
 argument-hint: "[issue number]"
 ---
 
@@ -42,10 +42,13 @@ the first step below. Reporting what was resolved is what catches a wrong
 resolution, and it catches it only while nothing has been claimed in the wrong
 repository yet.
 
-The issue number is the text after `/autosolve` in this invocation, if any.
-Grok does not substitute `$ARGUMENTS`. An empty issue number is not an error:
-given no number, /solve selects the oldest approved, unassigned
-implementation issue itself.
+```bash
+ISSUE="$ARGUMENTS"
+```
+
+`$ARGUMENTS` is what Grok substitutes before the session reads this file.
+An empty `$ISSUE` is not an error: given no number, /solve selects the
+oldest approved, unassigned implementation issue itself.
 
 ## 2. Complete the solve
 
@@ -59,8 +62,8 @@ with a `## Stop Condition` section telling you to end with exactly
 `PR #<number> - <summary>`; that line is the handoff into step 4, not a final
 answer. Never emit it as this run's last output — the closing lines at the end
 of this document are the only permitted endings, and every one of them reports
-on a review that step 5 already attempted, or on the direct-land disposition
-step 3 covers.
+on a review that step 5 already attempted, or on the documentation-landing
+stop step 3 covers.
 
 What does stay in force is every prohibition in that same section: as the
 solver you must not review, label, merge, or finalize the pull request.
@@ -110,11 +113,7 @@ claims it), since it may have sat unassigned and unwatched since the stop:
 gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
 ```
 
-Then check whether this checkout can reach `$REPO` directly at all.
-`/push-docs`'s landing helper always publishes to this checkout's own
-`origin/master`, never to a `$REPO` a fork checkout only reaches by the pull
-request path's owner-qualified head, so a mismatch here rules out landing
-directly from here regardless of how simple the change otherwise looks:
+Then check whether this checkout can reach `$REPO` directly at all:
 
 ```bash
 gh repo view --json nameWithOwner --jq .nameWithOwner
@@ -131,34 +130,12 @@ the issue:
   /solve exactly as it runs for any other issue — implement in the
   issue's own worktree, open the pull request with `Closes #<issue>` — and
   resume at step 4.
-- **Simple** — this checkout's own repository matches `$REPO`, the effective
-  spec leaves no open decision (a trusted review verdict saying so is the
-  strongest evidence), the fix is self-contained to the file or files the
-  issue names, and every acceptance check the issue lists can be run and
-  confirmed to pass before landing. Do not open a pull request.
-
-  Implement the fix in the repository's own documentation worktree, run every
-  acceptance check the issue lists and confirm each one passes, then land it
-  with /push-docs. Invoking /autosolve for this issue is the
-  user-directed publication request /push-docs requires: this
-  command's own description names direct documentation landing as one of
-  its outcomes, so choosing to run it for this issue is choosing to
-  authorize exactly that outcome — never a request this session inferred on
-  its own from the issue's wording. That authorization reaches only the
-  file or files this issue's trusted spec names; /push-docs's default
-  caution against a broader or unprompted landing still applies to every
-  other document, so do not fold any of them in while doing this.
-
-  Close the issue only after /push-docs reports the landing verified
-  with no refusal and no warning, quoting the landing commit and confirming
-  each acceptance check by name:
-
-  ```bash
-  gh issue close -R "$REPO" "$ISSUE" --reason completed --comment "<landing commit and confirmed acceptance checks>"
-  ```
-
-  This disposition ends the run: there is no pull request for steps 4 through
-  6 to record or review. Skip straight to the fourth closing line in step 7.
+- **Needs a documentation landing workflow this bundle does not ship** —
+  this checkout's own repository matches `$REPO` and the change is otherwise
+  simple enough to land without a pull request. Stop and report that. This
+  Grok bundle packages only /solve and /autosolve; it does not package
+  /push-docs. Do not invent a landing, do not call a Claude or Codex
+  /push-docs skill, and do not open a pull request just to avoid the stop.
 
 ## 4. Record the pull request and its worktree
 
@@ -241,13 +218,29 @@ reports `"route": "claude"`, a comma-separated dual route, or an empty route,
 stop and report it: that is a mis-stamped origin or a stale coordinator, and
 continuing would invoke Claude. Do not compensate by reviewing it yourself.
 
-Then run the same invocation without `--dry-run`. The published result must
-report `"status": "reviewed"`, and the `pr-review:v2` marker the coordinator
+Then run the real round with the same flags plus `--expected-origin grok` and
+`--expected-route codex`, so a pull request whose origin drifted after the
+dry run is refused before any reviewer is spawned:
+
+```bash
+python3 "$COORDINATOR" \
+  --path "$(git rev-parse --show-toplevel)" \
+  --repo "$REPO" \
+  --review "$PR" \
+  --expected-origin grok \
+  --expected-route codex \
+  --json
+```
+
+A `"status": "route_mismatch"` result means the live origin or route is no
+longer grok/codex; stop and report it. Do not retry without those flags, and
+do not invoke Claude. The published success result must report
+`"status": "reviewed"`, and the `pr-review:v2` marker the coordinator
 posts on the pull request must carry `reviewers=codex`. An
-`"awaiting_self_review"` status means the flag leaked in and the round must be
-rerun without it; a `"self_review_refused"` status means the coordinator caught
-it first, in which case nothing was published and no label changed, so rerun
-with both `--self-review` and `--self-review-as` dropped.
+`"awaiting_self_review"` status means `--self-review` leaked in and the round
+must be rerun without it; a `"self_review_refused"` status means the
+coordinator caught it first, in which case nothing was published and no label
+changed, so rerun with both `--self-review` and `--self-review-as` dropped.
 
 ## 6. Read the verdict after every round
 
@@ -295,5 +288,5 @@ End with exactly one of:
 PR #<pr> approved after <k> inline review round(s) — run /finalize when ready.
 PR #<pr> still reviewed:changes after 5 rounds — needs your input.
 PR #<pr> review publication failed in round <k> — needs your input.
-Issue #<issue> landed directly as <commit> — documentation-only, no pull request needed.
+Issue #<issue> needs a documentation landing workflow this bundle does not ship.
 ```

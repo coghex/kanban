@@ -68,7 +68,7 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 ## Select And Claim
 
-1. Use the issue number supplied by the user after `/solve`. Grok does not substitute `$ARGUMENTS`. If none was supplied, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
+1. Capture the issue number from `$ARGUMENTS` (Grok substitutes the text after `/solve` before this skill runs). If `$ARGUMENTS` is empty, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
 
    ```bash
    gh issue list -R "$REPO" --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"

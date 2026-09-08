@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+import plugin_bundle_gate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GROK_PLUGIN = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
@@ -66,11 +70,11 @@ class VendoredHelperTests(unittest.TestCase):
             (CLAUDE_PLUGIN / "scripts" / "trusted_issue_spec.py").read_bytes(),
         )
 
-    def test_review_pr_matches_the_claude_copy(self):
-        self.assertEqual(
-            COORDINATOR.read_bytes(),
-            (CLAUDE_PLUGIN / "scripts" / "review_pr.py").read_bytes(),
-        )
+    def test_review_pr_carries_expected_route_binding(self):
+        text = COORDINATOR.read_text(encoding="utf-8")
+        self.assertIn("--expected-origin", text)
+        self.assertIn("--expected-route", text)
+        self.assertIn("route_mismatch", text)
 
     def test_kanban_models_matches_the_claude_copy(self):
         self.assertEqual(
@@ -86,6 +90,7 @@ class SolveOriginTests(unittest.TestCase):
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
         self.assertIn("Never stamp a Claude or Codex origin marker from this session", text)
+        self.assertIn("$ARGUMENTS", text)
 
     def test_solve_forbids_reviewing_the_pull_request(self):
         text = SOLVE.read_text(encoding="utf-8")
@@ -100,8 +105,13 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn('"origin": "grok"', text)
         self.assertIn('"route": "codex"', text)
         self.assertIn("reviewers=codex", text)
+        self.assertIn("ISSUE=\"$ARGUMENTS\"", text)
+        self.assertIn("--expected-origin grok", text)
+        self.assertIn("--expected-route codex", text)
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
+        self.assertIn("does not package\n  /push-docs", text)
+        self.assertNotIn("land it\n  with /push-docs", text)
 
     def test_autosolve_never_invokes_claude(self):
         text = AUTOSOLVE.read_text(encoding="utf-8")
@@ -128,3 +138,70 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text)
         self.assertNotIn("$CODEX_HOME", text)
         self.assertIn("Never fall back to a\nClaude or Codex plugin path", text)
+
+
+BUNDLE_PREFIX = "grok-plugin/plugins/kanban"
+PLUGIN_MANIFEST_PATH = "grok-plugin/plugins/kanban/plugin.json"
+ORIGINAL_BUNDLE_VERSION = "1.0.0"
+
+
+class BundleVersionGateTests(unittest.TestCase):
+    def test_the_marketplace_plugin_version_matches_the_manifest(self):
+        plugin = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
+        marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+        self.assertEqual(marketplace["plugins"][0]["version"], plugin["version"])
+
+    def test_the_tracked_tree_owes_no_version_bump(self):
+        failures = plugin_bundle_gate.bundle_version_failures(
+            REPO_ROOT, BUNDLE_PREFIX, BUNDLE_PREFIX, PLUGIN_MANIFEST_PATH
+        )
+        self.assertEqual(failures, [], "\n".join(failures))
+
+
+class PlantedBundleVersionGateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "checkout"
+        self.root.mkdir(parents=True)
+        self.manifest = self.root / PLUGIN_MANIFEST_PATH
+        self.skill = self.root / BUNDLE_PREFIX / "skills" / "solve" / "SKILL.md"
+        self.git("init", "-b", "master")
+        self.git("config", "user.email", "bundle-gate@example.invalid")
+        self.git("config", "user.name", "Bundle Gate Fixture")
+        self.git("config", "commit.gpgsign", "false")
+        (self.root / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        self.write_manifest(ORIGINAL_BUNDLE_VERSION)
+        self.skill.parent.mkdir(parents=True, exist_ok=True)
+        self.skill.write_text("---\nname: solve\n---\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "baseline bundle")
+        self.git("checkout", "-q", "-b", "work")
+
+    def git(self, *args: str):
+        subprocess.run(
+            ["git", *args], cwd=self.root, capture_output=True, text=True, check=True
+        )
+
+    def write_manifest(self, version: str):
+        self.manifest.parent.mkdir(parents=True, exist_ok=True)
+        self.manifest.write_text(
+            json.dumps({"name": "kanban", "version": version}) + "\n", encoding="utf-8"
+        )
+
+    def failures(self):
+        return plugin_bundle_gate.bundle_version_failures(
+            self.root, BUNDLE_PREFIX, BUNDLE_PREFIX, PLUGIN_MANIFEST_PATH
+        )
+
+    def test_a_committed_content_change_without_a_bump_fails(self):
+        self.skill.write_text("---\nname: solve\n---\nrevised\n", encoding="utf-8")
+        self.git("commit", "-am", "revise the packaged skill")
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn(plugin_bundle_gate.VERSION_BUMP_INSTRUCTION, failures[0])
+
+    def test_content_and_version_changing_together_pass(self):
+        self.skill.write_text("---\nname: solve\n---\nrevised\n", encoding="utf-8")
+        self.write_manifest("1.1.0")
+        self.assertEqual(self.failures(), [])
