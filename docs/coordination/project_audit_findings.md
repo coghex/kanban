@@ -32,7 +32,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 ## Status
 
 - [x] KA-1. Rendering cost grows with offscreen cards — [#640]
-- [ ] KA-2. Concurrent mission and board reads conflict over process bookkeeping
+- [x] KA-2. Concurrent mission and board reads conflict over process bookkeeping — [#642]
 - [ ] KA-3. Precondition reads do not bind the selected repository
 - [ ] KA-4. Failed command persistence can lose a pause request
 - [ ] KA-5. Precondition reads bypass the configured GitHub timeout
@@ -64,7 +64,7 @@ Selection changed between renders. Wall times closely matched CPU times.
 
 ## Mission reliability
 
-### KA-2. Concurrent mission and board reads conflict over process bookkeeping
+### [#642] KA-2. Concurrent mission and board reads conflict over process bookkeeping
 
 **Priority: high.**
 
