@@ -41,7 +41,7 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
-    grokOwnBrandUnsupportedMessage,
+    externalOwnBrandUnsupportedMessage,
     pullRequestAssignment,
   )
 import Kanban.Solve
@@ -640,6 +640,15 @@ spec = do
       actionRoute defaultWorkflowConfig ReviseIssue Nothing target
         `shouldBe` Right (RouteProvider (ActionIssueRevision IssueOriginClaude))
 
+    it "routes kimi-origin issue review and refuses to launch its revision" $ do
+      let kimiIssue = (baseIssue 70 []) {issueBody = "<!-- issue-origin:kimi -->"}
+          catalog = catalogOf [kimiIssue] [] emptyHistory
+          target = either (error . show) id (resolveIn catalog (TargetByNumber 70))
+      actionRoute defaultWorkflowConfig ReviewIssue Nothing target
+        `shouldBe` Right (RouteProvider (ActionIssueReview IssueOriginKimi))
+      actionRoute defaultWorkflowConfig ReviseIssue Nothing target
+        `shouldSatisfy` either (Text.isInfixOf "kimi-origin issue revision" . actionRefusalMessage) (const False)
+
     it "carries the operator's solver choice into the solve routes and refuses without one" $ do
       let catalog = catalogOf [baseIssue 71 []] [] emptyHistory
           target = either (error . show) id (resolveIn catalog (TargetByNumber 71))
@@ -665,8 +674,23 @@ spec = do
       actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
         `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestGrok PullRequestReview))
       actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
-        `shouldSatisfy` either (Text.isInfixOf grokOwnBrandUnsupportedMessage . actionRefusalMessage) (const False)
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGrok) . actionRefusalMessage) (const False)
       agentForAction DualMode PullRequestGrok PullRequestReview `shouldBe` CodexSolver
+
+    it "routes kimi-origin review to Codex and refuses kimi-origin revision" $ do
+      let reviewTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestKimi PullRequestReview] emptyHistory) (TargetByNumber 60))
+          reviseTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestKimi PullRequestRevision] emptyHistory) (TargetByNumber 60))
+          repairTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestKimi PullRequestRepair] emptyHistory) (TargetByNumber 60))
+      actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
+        `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestKimi PullRequestReview))
+      actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi) . actionRefusalMessage) (const False)
+      actionRoute defaultWorkflowConfig RepairPullRequest Nothing repairTarget
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi) . actionRefusalMessage) (const False)
+      agentForAction DualMode PullRequestKimi PullRequestReview `shouldBe` CodexSolver
 
     it "routes the approval queue to no provider at all" $ do
       actionRoute defaultWorkflowConfig ObserveApprovalQueue Nothing (ActionTargetRepositoryWide repositoryUnderTest)
@@ -1379,7 +1403,7 @@ capabilityFromReport environment action =
 
 everyPreflightAction :: [PreflightAction]
 everyPreflightAction =
-  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked, IssueOriginConflicting]]
+  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginUnmarked, IssueOriginConflicting]]
     <> [ActionIssueRevision origin | origin <- [IssueOriginCodex, IssueOriginClaude]]
     <> [ActionSolve brand | brand <- [CodexSolver, ClaudeSolver]]
     <> [ActionAutoSolve brand | brand <- [CodexSolver, ClaudeSolver]]
@@ -1387,8 +1411,9 @@ everyPreflightAction =
        | origin <- [PullRequestCodex, PullRequestClaude],
          action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
        ]
-    <> [ ActionPullRequestFlow PullRequestGrok action
-       | action <- [PullRequestReview, PullRequestRereview]
+    <> [ ActionPullRequestFlow origin action
+       | origin <- [PullRequestGrok, PullRequestKimi],
+         action <- [PullRequestReview, PullRequestRereview]
        ]
 
 pullRequestFor :: PullRequestAction -> PullRequest
@@ -1413,6 +1438,7 @@ pullRequestForOrigin origin action =
       PullRequestCodex -> "<!-- pr-origin:codex -->"
       PullRequestClaude -> "<!-- pr-origin:claude -->"
       PullRequestGrok -> "<!-- pr-origin:grok -->"
+      PullRequestKimi -> "<!-- pr-origin:kimi -->"
 
 -- | A provider whose executable is definitely absent, which is the one
 -- observation that blocks rather than merely being unknown.

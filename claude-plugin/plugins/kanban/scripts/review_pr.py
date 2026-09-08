@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 REVIEW_TIMEOUT_SECONDS = 7200
 GATE_TEXT = "Issue has not been approved."
-VALID_ORIGIN_RE = re.compile(r"<!-- pr-origin:(claude|codex|grok) -->")
+VALID_ORIGIN_RE = re.compile(r"<!-- pr-origin:(claude|codex|grok|kimi) -->")
 REVIEW_MARKER_RE = re.compile(
     r"<!-- pr-review:v2 reviewers=(?P<reviewers>\S+) models=(?P<models>\S+) "
     r"head=(?P<head>[0-9a-f]{40}) verdict=(?P<verdict>APPROVE|CHANGES_REQUESTED) -->"
@@ -505,9 +505,10 @@ def route_reviewers(
     """Which reviewers this pull request's origin routes it to.
 
     Dual mode is the cross-brand routing this workflow has always done, with
-    an unknown or external origin falling through to both. A grok origin is
-    known and reviews as Codex only -- never Claude, and never both -- because
-    Grok is not a spawned provider and Codex is its cross-brand reviewer.
+    an unknown or external origin falling through to both. A grok or kimi
+    origin is known and reviews as Codex only -- never Claude, and never both
+    -- because neither Grok nor Kimi is a spawned provider and Codex is their
+    cross-brand reviewer.
     Single-agent collapses every origin -- known, unknown, and external alike
     -- to the one loaded provider, because that provider is the only reviewer
     this installation can spawn; the opposite-brand promise is a property of a
@@ -529,6 +530,8 @@ def route_reviewers(
     if origin == "codex":
         return [CLAUDE_REVIEWER]
     if origin == "grok":
+        return [CODEX_REVIEWER]
+    if origin == "kimi":
         return [CODEX_REVIEWER]
     return [CODEX_REVIEWER, CLAUDE_REVIEWER]
 
@@ -608,9 +611,10 @@ def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
 
 
 def pr_origin(pr: dict[str, Any]) -> str | None:
+    origin = origin_from_body(str(pr.get("body") or ""))
     if pr.get("isCrossRepository"):
-        return None
-    return origin_from_body(str(pr.get("body") or ""))
+        return origin if origin == "kimi" else None
+    return origin
 
 
 def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
@@ -1982,6 +1986,11 @@ def self_test() -> None:
     assert origin_from_body("body\n\n<!-- pr-origin:claude -->") == "claude"
     assert origin_from_body("body\n\n<!-- pr-origin:codex -->") == "codex"
     assert origin_from_body("body\n\n<!-- pr-origin:grok -->") == "grok"
+    assert origin_from_body("body\n\n<!-- pr-origin:kimi -->") == "kimi"
+    assert origin_from_body("body\n\n<!-- pr-origin:kimi -->\n \t\n") == "kimi"
+    assert origin_from_body("<!-- pr-origin:kimi -->\ntext") is None
+    assert origin_from_body("<!-- pr-origin:kimi -->\n<!-- pr-origin:kimi -->") is None
+    assert origin_from_body("<!-- pr-origin:kimi -->\n<!-- pr-origin:codex -->") is None
     assert origin_from_body("external contribution") is None
     assert origin_from_body("<!-- pr-origin:codex -->\ntext") is None
     assert origin_from_body("<!-- pr-origin:codex -->\n<!-- pr-origin:codex -->") is None
@@ -1994,17 +2003,19 @@ def self_test() -> None:
     assert [item.key for item in route_reviewers("claude", **dual)] == ["codex"]
     assert [item.key for item in route_reviewers("codex", **dual)] == ["claude"]
     assert [item.key for item in route_reviewers("grok", **dual)] == ["codex"]
+    assert [item.key for item in route_reviewers("kimi", **dual)] == ["codex"]
     for brand in ("codex", "claude"):
         single = {"mode": "single-agent", "loaded": (brand,)}
-        for origin in (None, "codex", "claude", "grok"):
+        for origin in (None, "codex", "claude", "grok", "kimi"):
             assert [item.key for item in route_reviewers(origin, **single)] == [brand]
     none_loaded = {"mode": "no-agent", "loaded": ()}
-    for origin in (None, "codex", "claude", "grok"):
+    for origin in (None, "codex", "claude", "grok", "kimi"):
         assert route_reviewers(origin, **none_loaded) == []
     refusal_code, refusal = no_agent_refusal(7)
     assert refusal_code == 1 and refusal["status"] == NO_AGENT_STATUS
     assert "no-agent" in refusal["error"]
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "APPROVE"}]) == "APPROVE"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "CHANGES_REQUESTED"}]) == "CHANGES_REQUESTED"

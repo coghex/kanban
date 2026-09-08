@@ -58,6 +58,7 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestOrigin (..),
     agentForAction,
+    externalOwnBrandUnsupported,
     expectedPullRequestOrigin,
     pullRequestAssignment,
     recordedPullRequestBrand,
@@ -126,6 +127,10 @@ everyRoute =
   | origin <- [PullRequestCodex, PullRequestClaude],
     action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
   ]
+    <> [ (origin, action)
+       | origin <- [PullRequestGrok, PullRequestKimi],
+         action <- [PullRequestReview, PullRequestRereview]
+       ]
 
 -- | Which roster role an action reads, written out rather than reached
 -- through 'Kanban.PullRequestFlow.pullRequestRole', so this is a control over
@@ -142,16 +147,24 @@ roleOfAction PullRequestRereview = PrReviewRole
 
 routingSpec :: Spec
 routingSpec = describe "the pull-request actions it collapses" $ do
-  -- Requirement 2, and the review's first spec addition: both origins crossed
-  -- with all four actions, for both singleton rosters. The origin marker is
-  -- still written in this mode (requirement 5, D-12); what changes is that
-  -- routing stops reading it.
-  it "runs every action of every origin on the one loaded provider" $
+  -- Requirement 2, and the review's first spec addition: both internal origins
+  -- crossed with all four actions, plus every supported external-origin action,
+  -- for both singleton rosters. The origin marker is still written in this mode
+  -- (requirement 5, D-12); what changes is that routing stops reading it.
+  it "runs every supported action of every origin on the one loaded provider" $
     sequence_
       [ (variant.variantName, origin, action, agentForAction (variantMode variant) origin action)
           `shouldBe` (variant.variantName, origin, action, variant.variantBrand)
       | variant <- variants,
         (origin, action) <- everyRoute
+      ]
+
+  it "does not invent a provider for kimi-origin revision or repair" $
+    sequence_
+      [ (variant.variantName, action, externalOwnBrandUnsupported PullRequestKimi action)
+          `shouldBe` (variant.variantName, action, True)
+      | variant <- variants,
+        action <- [PullRequestRevision, PullRequestRepair]
       ]
 
   -- The cell as well as the brand. A launch records the provider it resolved
@@ -180,6 +193,7 @@ routingSpec = describe "the pull-request actions it collapses" $ do
               (PullRequestClaude, PullRequestRereview) -> CodexSolver
               (PullRequestClaude, _) -> ClaudeSolver
               (PullRequestGrok, _) -> CodexSolver
+              (PullRequestKimi, _) -> CodexSolver
       ]
 
   -- Requirement 5 and D-12: the marker a solve stamps is unchanged, and it is
@@ -221,6 +235,7 @@ opposite :: PullRequestOrigin -> PullRequestOrigin
 opposite PullRequestCodex = PullRequestClaude
 opposite PullRequestClaude = PullRequestCodex
 opposite PullRequestGrok = PullRequestGrok
+opposite PullRequestKimi = PullRequestKimi
 
 -- | The recorded cell an install's own provider takes for one role, resolved
 -- from the roster under test rather than written as a model name.
@@ -353,12 +368,16 @@ reviewSpec = describe "the embedded review it starts" $ do
       | variant <- variants
       ]
 
-  it "says the coordinator authors every amendment itself, and that the tool is absent" $
+  it "says the coordinator authors every supported amendment itself, refuses Kimi, and has no handoff tool" $
     sequence_
       [ (variant.variantName, map (`Data.Text.isInfixOf` instructionsFor variant) claims)
-          `shouldBe` (variant.variantName, [True, True])
+          `shouldBe` (variant.variantName, [True, True, True])
       | variant <- variants,
-        let claims = ["author every amendment yourself", "There is no " <> claudeToolName <> " tool in this thread"]
+        let claims =
+              [ "you author each Codex-origin, Claude-origin, or unmarked amendment yourself",
+                "Kimi-origin issue revision is not a board action",
+                "There is no " <> claudeToolName <> " tool in this thread"
+              ]
       ]
 
   -- The negative control: dual mode still describes the handoff, and still
@@ -636,11 +655,11 @@ preflightSpec = describe "the executables it does not require" $ do
       `shouldBe` [ExecutableUnavailable]
   where
     -- Every action whose provider set the mode moves: the canonical issue
-    -- review, the embedded revision -- whose coordinator and whose amendment
-    -- author both collapse onto the loaded provider -- an autosolve run's own
-    -- review of its pull request, the four pull-request actions of both
-    -- origins, and the nested rereview a revision or repair spawns from
-    -- inside its own session.
+    -- review, the supported embedded revisions -- whose coordinator and whose
+    -- amendment author both collapse onto the loaded provider -- an autosolve
+    -- run's own review of its pull request, every supported pull-request
+    -- route, and the nested rereview a revision or repair spawns from inside
+    -- its own session.
     --
     -- Every issue origin for the two issue-side actions, because in dual mode
     -- the origin is what picks the second brand, and this mode is where that
@@ -651,11 +670,12 @@ preflightSpec = describe "the executables it does not require" $ do
     -- loaded provider, and a run recorded on the other brand is still owed a
     -- block for the executable it really would spawn.
     modeSensitiveActions variant =
-      [ActionIssueReview origin | origin <- issueOrigins]
-        <> [ActionIssueRevision origin | origin <- issueOrigins]
+      [ActionIssueReview origin | origin <- issueReviewOrigins]
+        <> [ActionIssueRevision origin | origin <- issueRevisionOrigins]
         <> [ActionAutoSolve variant.variantBrand]
         <> [ActionPullRequestFlow origin action | (origin, action) <- everyRoute]
-    issueOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked]
+    issueReviewOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginUnmarked]
+    issueRevisionOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked]
     -- What a worker created before the roster moved recorded: that brand's
     -- own cell for the role the action takes, built the way a launch builds
     -- it rather than as a bare provider name.

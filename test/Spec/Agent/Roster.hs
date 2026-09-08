@@ -37,7 +37,7 @@ import Data.Time (UTCTime, addUTCTime, getCurrentTime)
 import qualified Data.Text
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
-import Kanban.Domain (Repository (..), defaultWorkflowConfig)
+import Kanban.Domain (Issue (..), Repository (..), defaultWorkflowConfig)
 import Kanban.Models
   ( Assignment (..),
     ModelRoster (..),
@@ -63,7 +63,7 @@ import Kanban.PullRequestFlow
   ( PullRequestAction (..),
     PullRequestFlowEvent (..),
     PullRequestOrigin (..),
-    grokOwnBrandUnsupportedMessage,
+    externalOwnBrandUnsupportedMessage,
     pullRequestAssignment,
     pullRequestRole,
   )
@@ -71,6 +71,7 @@ import Kanban.Review
   ( CommandBounds (..),
     ReviewClient,
     ReviewEvent (..),
+    ReviewStage (..),
     authenticatedClaudeArguments,
     beginIssueReview,
     claudeStartedEvent,
@@ -90,7 +91,7 @@ import Kanban.Solve
 import Kanban.Solve (SolveEvent (..), SolveOutcome (..))
 import Kanban.UI.Overlay (solveChooserDisplay)
 import Kanban.UI.PullRequest (failPullRequestLaunch, freshPullRequestTranscript, pullRequestStartRefusal)
-import Kanban.UI.Review (claudeTranscriptStart)
+import Kanban.UI.Review (claudeTranscriptStart, issueReviewStartRefusal)
 import Kanban.UI.Session (agentSessionEntries, pullRequestSessionReusable, solvePhaseActive)
 import Kanban.UI.Settings
   ( RosterWrite (..),
@@ -250,7 +251,18 @@ spec = do
       pullRequestStartRefusal rostered PullRequestCodex PullRequestRevision `shouldBe` Nothing
       pullRequestStartRefusal rostered PullRequestGrok PullRequestReview `shouldBe` Nothing
       pullRequestStartRefusal rostered PullRequestGrok PullRequestRevision
-        `shouldSatisfy` maybe False (Data.Text.isInfixOf grokOwnBrandUnsupportedMessage)
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGrok))
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestReview `shouldBe` Nothing
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
+      pullRequestStartRefusal rostered PullRequestKimi PullRequestRepair
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
+
+    it "refuses a kimi-origin issue revision before any session exists" $ do
+      let kimiIssue = (baseIssue 469 []) {issueBody = "<!-- issue-origin:kimi -->"}
+      issueReviewStartRefusal kimiIssue IssueRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf "kimi-origin issue revision")
+      issueReviewStartRefusal kimiIssue InitialReview `shouldBe` Nothing
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the
@@ -902,9 +914,14 @@ spec = do
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRepair ClaudeSolver defaults
         `shouldBe` "claude · Sonnet 5 high"
       -- And the prose correction: one spelling of the codex cell, the
-      -- roster's own, where the literal said "GPT-5.4 high".
-      reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
+      -- roster's own, where the literal said "GPT-5.4 high", without reviving
+      -- the Kimi amendment path the board and registry refuse.
+      let instructions = reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
+      instructions
         `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra xhigh."
+      instructions
+        `shouldMention` "If the live issue body declares <!-- issue-origin:kimi --> and the live labels select REVISION, STOP immediately."
+      instructions `shouldNotMention` "kimi-origin amendment content is authored by you"
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 

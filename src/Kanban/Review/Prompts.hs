@@ -203,7 +203,7 @@ githubTool workflowConfig =
 
 reviewDeveloperInstructions :: WorkflowConfig -> ModelRoster -> ProviderName -> Text
 reviewDeveloperInstructions workflowConfig roster coordinator =
-  Text.unlines (openingLines <> authoringLines <> closingLines)
+  Text.unlines (openingLines <> kimiRefusalLines <> authoringLines <> closingLines)
   where
     openingLines =
       [ "You are the interactive issue-review and specification-revision coordinator embedded inside the Kanban terminal dashboard.",
@@ -212,7 +212,7 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
         "All questions requiring user input MUST use the kanban_prompt_user tool. Never ask a question in ordinary assistant prose.",
         "Use kind=choice with 2-5 concrete options when possible. Set multiple=false and ask one decision per tool call. Use kind=text only for genuinely free-form context.",
         "Read the live GitHub issue, all of its comments in chronological order, and its labels. The effective specification is the issue body plus canonical issue-comment amendments, with explicit later amendments superseding earlier conflicting text.",
-        "Find the hidden <!-- issue-origin:claude --> or <!-- issue-origin:codex --> marker in the issue body.",
+        "Find the hidden <!-- issue-origin:claude -->, <!-- issue-origin:codex -->, or <!-- issue-origin:kimi --> marker in the issue body.",
         "You MUST use kanban_github_issue for every GitHub issue read, comment, or review-label mutation. Never invoke gh, curl, or a GitHub API through a shell or command tool. The Kanban tool is already authenticated and its update operation is restricted to one issue comment and the three review workflow labels.",
         "Choose the one stage from live labels: reviewed:revised means REREVIEW; otherwise "
           <> workflowConfig.changesRequestedLabel
@@ -220,11 +220,18 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
         "INITIAL REVIEW and REREVIEW are owned by the canonical approve-issues.py v2 backend and must never be performed in this thread. This thread performs REVISION only."
       ]
 
+    -- The board and action registry refuse this origin before launch. This
+    -- live-issue rule is the second line of defence if the issue gained its
+    -- marker after the board cached it but before this coordinator read it.
+    kimiRefusalLines =
+      [ "If the live issue body declares <!-- issue-origin:kimi --> and the live labels select REVISION, STOP immediately. This rule takes precedence over every later REVISION instruction: do not author or request amendment content, do not post a comment, and do not mutate labels. Return stage=revision, approved=false, commentUrl=null, and a blockingReasons entry stating that Kimi-origin issue revision is not a board action because Kimi is not a spawned provider; the Kimi session must author its own amendment."
+      ]
+
     -- Who authors the amendment, and therefore whether the handoff tool is
     -- described at all. An install with one provider has one author for every
-    -- origin marker, and naming a second agent to a thread that has no tool
+    -- supported origin, and naming a second agent to a thread that has no tool
     -- to reach it -- or no such agent loaded -- would describe a handoff it
-    -- cannot perform.
+    -- cannot perform. Kimi is refused above rather than assigned an author.
     authoringLines
       | claudeRevisionAvailable roster coordinator =
           [ "Whenever revision requires "
@@ -240,9 +247,9 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
               <> "."
           ]
       | otherwise =
-          [ "This install loads one provider, so REVISION does not switch brands: you author every amendment yourself as "
+          [ "This install loads one provider, so supported REVISION does not switch brands: you author each Codex-origin, Claude-origin, or unmarked amendment yourself as "
               <> coordinatorName roster coordinator
-              <> ", whatever origin marker the issue carries and whether or not it carries one.",
+              <> ". This does not override the Kimi-origin refusal above.",
             "There is no kanban_run_claude tool in this thread. Never invoke claude, claude-code, codex, gh, curl, or any other executable through a shell or command tool to author or publish an amendment."
           ]
 

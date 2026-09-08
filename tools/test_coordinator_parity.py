@@ -336,15 +336,8 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
- def pr_origin(pr: dict[str, Any]) -> str | None:
--    if pr.get("isCrossRepository"):
--        return None
--    return origin_from_body(str(pr.get("body") or ""))
-+    origin = origin_from_body(str(pr.get("body") or ""))
-+    if pr.get("isCrossRepository"):
-+        return origin if origin == "grok" else None
-+    return origin
- def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
+-        return origin if origin == "kimi" else None
++        return origin if origin in {"grok", "kimi"} else None
 @@
     in docs/agent-workflow-contract.md §4 declaring this file, and that
 -    reconciliation matches a literal, not an expression. This bundle vendors a
@@ -511,6 +504,9 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 @@
      assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
 +    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
+@@
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
 +    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
      assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
 @@
@@ -519,7 +515,7 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        metavar="ORIGIN",
 +        help=(
 +            "Refuse before spawning if the live origin is not this value "
-+            "(unknown, claude, codex, or grok). Use with --expected-route to "
++            "(unknown, claude, codex, grok, or kimi). Use with --expected-route to "
 +            "fail closed when the pull request drifted after a dry run."
 +        ),
 +    )
@@ -556,6 +552,7 @@ GROK_ROUTE_VOCABULARY = (
     "live_route",
     "kanban_config.py",
     "isCrossRepository",
+    'origin in {"grok", "kimi"}',
 )
 
 # What a failing gate has to tell an author. Issue #624's false failures were

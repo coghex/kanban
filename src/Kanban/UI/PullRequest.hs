@@ -80,8 +80,8 @@ import Kanban.PullRequestFlow
     agentForAction,
     directPullRequestAction,
     labelPullRequestAction,
-    grokOwnBrandUnsupported,
-    grokOwnBrandUnsupportedMessage,
+    externalOwnBrandUnsupported,
+    externalOwnBrandUnsupportedMessage,
     originFromBody,
     pullRequestAssignment
     )
@@ -127,8 +127,8 @@ startPullRequestReviewWithVisibility showOverlay = startPullRequestReviewWithOpt
 -- that is the boundary a process actually crosses.
 pullRequestStartRefusal :: AppState -> PullRequestOrigin -> PullRequestAction -> Maybe Text
 pullRequestStartRefusal state origin action
-  | grokOwnBrandUnsupported origin action =
-      Just (pullRequestActionText action <> " did not start: " <> grokOwnBrandUnsupportedMessage)
+  | externalOwnBrandUnsupported origin action =
+      Just (pullRequestActionText action <> " did not start: " <> externalOwnBrandUnsupportedMessage origin)
   | otherwise =
       case resolvedRosterCellFor (\roster -> pullRequestAssignment roster origin action) state.appModelRoster of
         Left message -> Just (pullRequestActionText action <> " did not start: " <> message)

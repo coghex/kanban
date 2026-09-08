@@ -60,13 +60,14 @@ data PreflightCheck = PreflightCheck
 
 -- | Which agent authored an issue, since both issue-side actions route
 -- their provider work by it. 'IssueOriginConflicting' mirrors the backend's
--- own error case: a body declaring both origins.
+-- own error case: a body declaring more than one origin.
 -- Durable because an issue action's specification records the origin its
 -- launch boundary read, rather than re-reading an issue body the detached
 -- host does not hold (SAG-10).
 data IssueOrigin
   = IssueOriginCodex
   | IssueOriginClaude
+  | IssueOriginKimi
   | IssueOriginUnmarked
   | IssueOriginConflicting
   deriving stock (Eq, Show, Generic)
@@ -95,11 +96,29 @@ issueOriginFromBody body = case declaredIssueOrigins body of
   [single]
     | single == "claude" -> IssueOriginClaude
     | single == "codex" -> IssueOriginCodex
+    | single == "kimi" -> IssueOriginKimi
   _ -> IssueOriginConflicting
+
+-- | Whether an issue revision has no board-side author to spawn.
+--
+-- Kimi can file issues but is not a provider Kanban can launch. Its initial
+-- canonical review is already Codex-only, so letting the embedded Codex
+-- coordinator author the amendment would also hand that amendment back to
+-- Codex as though it were independent. The Kimi session that owns the issue
+-- must revise it instead.
+issueRevisionUnsupported :: IssueOrigin -> Bool
+issueRevisionUnsupported IssueOriginKimi = True
+issueRevisionUnsupported _ = False
+
+issueRevisionUnsupportedMessage :: IssueOrigin -> Text
+issueRevisionUnsupportedMessage IssueOriginKimi =
+  "kimi-origin issue revision is not a board action; Kimi is not a spawned provider"
+issueRevisionUnsupportedMessage _ =
+  "external-origin issue revision is not a board action; the origin is not a spawned provider"
 
 -- | Every distinct origin a body declares, parsed exactly as
 -- @ORIGIN_RE@/@issue_origin@ in @tools\/approve_issues.py@ do:
--- @\<!--\\s*issue-origin:(claude|codex)\\s*--\>@, matched case-insensitively.
+-- @\<!--\\s*issue-origin:(claude|codex|kimi)\\s*--\>@, matched case-insensitively.
 declaredIssueOrigins :: Text -> [Text]
 declaredIssueOrigins = nub . scan . Text.toLower
   where
@@ -112,7 +131,7 @@ declaredIssueOrigins = nub . scan . Text.toLower
                in maybe id (:) (markerOrigin body) (scan body)
     markerOrigin body = do
       value <- Text.stripPrefix "issue-origin:" (Text.dropWhile isSpace body)
-      origin <- find (`Text.isPrefixOf` value) ["claude", "codex"]
+      origin <- find (`Text.isPrefixOf` value) ["claude", "codex", "kimi"]
       let closing = Text.dropWhile isSpace (Text.drop (Text.length origin) value)
       if "-->" `Text.isPrefixOf` closing then Just origin else Nothing
 
@@ -125,8 +144,11 @@ declaredIssueOrigins = nub . scan . Text.toLower
 canonicalReviewBrands :: IssueOrigin -> [SolverBrand]
 canonicalReviewBrands IssueOriginClaude = [CodexSolver]
 canonicalReviewBrands IssueOriginCodex = [ClaudeSolver]
+-- Kimi is a known origin that is never a spawned reviewer: like a
+-- grok-origin pull request, a kimi-origin issue is Codex-reviewed only.
+canonicalReviewBrands IssueOriginKimi = [CodexSolver]
 canonicalReviewBrands IssueOriginUnmarked = [CodexSolver, ClaudeSolver]
--- The backend rejects a body declaring both origins before it reaches any
+-- The backend rejects a body declaring conflicting origins before it reaches any
 -- reviewer, so no provider is required. Its own error names the real
 -- problem, which is a malformed issue rather than missing setup.
 canonicalReviewBrands IssueOriginConflicting = []
@@ -136,7 +158,7 @@ canonicalReviewBrands IssueOriginConflicting = []
 -- Single-agent collapses every routed reviewer onto the one loaded provider,
 -- exactly as @reviewers_for_origin@ already does on the Python side (issue
 -- #572), so an unmarked issue requires one CLI there rather than both. A body
--- declaring both origins still requires none: the backend rejects it before
+-- declaring conflicting origins still requires none: the backend rejects it before
 -- it reaches a reviewer in every mode, and collapsing an empty list would
 -- demand a provider for an issue no reviewer is ever spawned for.
 canonicalReviewBrandsIn :: OperatingMode -> IssueOrigin -> [SolverBrand]
@@ -161,6 +183,9 @@ reviewBackendAction = ActionIssueRevision IssueOriginCodex
 -- issue routes that authoring through @kanban_run_claude@, so its revision
 -- needs the Claude CLI as well as the Codex coordinator thread; a
 -- Codex-origin or unmarked issue is authored by the coordinator itself.
+-- Kimi is retained as a total constructor here, but
+-- 'issueRevisionUnsupported' refuses it before this routing is consulted and
+-- the live coordinator prompt repeats that refusal against cache races.
 -- Mirrors the REVISION rule in
 -- 'Kanban.Review.Prompts.reviewDeveloperInstructions'.
 revisionAuthorBrand :: IssueOrigin -> SolverBrand
@@ -228,10 +253,12 @@ pullRequestOriginLabel :: PullRequestOrigin -> Text
 pullRequestOriginLabel PullRequestCodex = "codex-origin"
 pullRequestOriginLabel PullRequestClaude = "claude-origin"
 pullRequestOriginLabel PullRequestGrok = "grok-origin"
+pullRequestOriginLabel PullRequestKimi = "kimi-origin"
 
 originLabel :: IssueOrigin -> Text
 originLabel IssueOriginCodex = "codex-origin"
 originLabel IssueOriginClaude = "claude-origin"
+originLabel IssueOriginKimi = "kimi-origin"
 originLabel IssueOriginUnmarked = "unmarked"
 originLabel IssueOriginConflicting = "conflicting-origin"
 
@@ -488,6 +515,7 @@ doctorActions :: [PreflightAction]
 doctorActions =
   [ ActionIssueReview IssueOriginCodex,
     ActionIssueReview IssueOriginClaude,
+    ActionIssueReview IssueOriginKimi,
     ActionIssueReview IssueOriginUnmarked,
     ActionIssueRevision IssueOriginCodex,
     ActionIssueRevision IssueOriginClaude,
@@ -501,9 +529,11 @@ doctorActions =
     ActionPullRequestFlow PullRequestCodex PullRequestReview,
     ActionPullRequestFlow PullRequestClaude PullRequestReview,
     ActionPullRequestFlow PullRequestGrok PullRequestReview,
+    ActionPullRequestFlow PullRequestKimi PullRequestReview,
     ActionPullRequestFlow PullRequestCodex PullRequestRereview,
     ActionPullRequestFlow PullRequestClaude PullRequestRereview,
     ActionPullRequestFlow PullRequestGrok PullRequestRereview,
+    ActionPullRequestFlow PullRequestKimi PullRequestRereview,
     ActionPullRequestFlow PullRequestCodex PullRequestRevision,
     ActionPullRequestFlow PullRequestClaude PullRequestRevision,
     ActionPullRequestFlow PullRequestCodex PullRequestRepair,
