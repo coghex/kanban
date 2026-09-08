@@ -31,7 +31,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 
 ## Status
 
-- [ ] KA-1. Rendering cost grows with offscreen cards
+- [x] KA-1. Rendering cost grows with offscreen cards — [#640]
 - [ ] KA-2. Concurrent mission and board reads conflict over process bookkeeping
 - [ ] KA-3. Precondition reads do not bind the selected repository
 - [ ] KA-4. Failed command persistence can lose a pause request
@@ -39,7 +39,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 
 ## Board responsiveness
 
-### KA-1. Rendering cost grows with offscreen cards
+### [#640] KA-1. Rendering cost grows with offscreen cards
 
 **Priority: medium; highest board priority.**
 
