@@ -336,6 +336,42 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
+     config_path: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+             "comment_url": url,
++    live_origin = pr_origin(refreshed_pr) or "unknown"
++    live_route = "+".join(
++        item.key for item in route_reviewers(pr_origin(refreshed_pr))
++    )
++    if expected_origin is not None and live_origin != expected_origin:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; nothing was published "
++                "and no label was applied"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; nothing was published "
++                "and no label was applied"
++            ),
++        }
+     if list(refreshed_gate.get("overridden_issues") or []) != reviewed_bypass:
+@@
      explicit_repo: str | None = None,
 +    expected_origin: str | None = None,
 +    expected_route: str | None = None,
@@ -376,6 +412,10 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        "origin": live_origin,
 +        "route": live_route,
          "review_mode": "standalone" if allow_no_issue else "issue-gated",
+@@
+        allow_no_issue=allow_no_issue, config_path=config_path,
++        expected_origin=expected_origin, expected_route=expected_route,
+     )
 @@
          help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
 +        "--expected-origin",

@@ -1554,6 +1554,8 @@ def publish_results(
     *,
     allow_no_issue: bool,
     config_path: str | None = None,
+    expected_origin: str | None = None,
+    expected_route: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Safely publish an already-computed set of review results: re-verify
     nothing went stale since `gate`/`pr` were captured, post the
@@ -1603,6 +1605,35 @@ def publish_results(
             "status": "blocked",
             "comment_status": status,
             "comment_url": url,
+        }
+
+    live_origin = pr_origin(refreshed_pr) or "unknown"
+    live_route = "+".join(
+        item.key for item in route_reviewers(pr_origin(refreshed_pr))
+    )
+    if expected_origin is not None and live_origin != expected_origin:
+        return 1, {
+            "pr": number,
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live origin {live_origin!r} does not match "
+                f"--expected-origin {expected_origin!r}; nothing was published "
+                "and no label was applied"
+            ),
+        }
+    if expected_route is not None and live_route != expected_route:
+        return 1, {
+            "pr": number,
+            "status": "route_mismatch",
+            "origin": live_origin,
+            "route": live_route,
+            "error": (
+                f"live route {live_route!r} does not match "
+                f"--expected-route {expected_route!r}; nothing was published "
+                "and no label was applied"
+            ),
         }
 
     if list(refreshed_gate.get("overridden_issues") or []) != reviewed_bypass:
@@ -1901,6 +1932,7 @@ def workflow(
     return publish_results(
         root, repo, number, pr, gate, reviewers, results, base,
         allow_no_issue=allow_no_issue, config_path=config_path,
+        expected_origin=expected_origin, expected_route=expected_route,
     )
 
 

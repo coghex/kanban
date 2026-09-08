@@ -1916,18 +1916,26 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
     def test_every_grok_plugin_bash_command_is_documented(self):
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
+        executable_rows = {
+            row["token"]: row
+            for row in self.manifest
+            if row["kind"] == "executable"
         }
         for relative_path in GROK_PLUGIN_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for name in discovered_commands_for_plugin_file(relative_path, content):
                 self.assertIn(
                     name,
-                    executable_tokens,
+                    executable_rows,
                     f"{relative_path} invokes undocumented external command "
                     f"{name!r}; add it to the manifest in "
                     "docs/agent-workflow-contract.md",
+                )
+                self.assertIn(
+                    relative_path,
+                    executable_rows[name]["files"],
+                    f"{relative_path} invokes {name!r} but is not listed on "
+                    f"that command's manifest row; add it to the files column",
                 )
 
     def test_grok_review_pr_coordinator_command_invocations_are_documented(self):
