@@ -24,7 +24,7 @@ Every tracked file gets a stated release decision, and
 tracked file has none:
 
 * In, as a whole tree: `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
-  `claude-plugin/`, and `docs/media/` ship every tracked file they contain.
+  `claude-plugin/`, `grok-plugin/`, and `docs/media/` ship every tracked file they contain.
   `docs/media/` is a tree rather than a list of files because the packaged
   `README.md` shows `docs/media/board-wide.png` through a repository-relative
   path: an asset that document names has to be in the archive or
@@ -166,6 +166,7 @@ RELEASE_TREES = (
     "claude-plugin",
     "codex-plugin",
     "docs/media",
+    "grok-plugin",
     "src",
     "test",
     "tools",
@@ -289,6 +290,8 @@ PROVIDER_MANIFESTS = (
     "claude-plugin/plugins/kanban/.claude-plugin/plugin.json",
     "codex-plugin/.agents/plugins/marketplace.json",
     "codex-plugin/plugins/kanban/.codex-plugin/plugin.json",
+    "grok-plugin/.grok-plugin/marketplace.json",
+    "grok-plugin/plugins/kanban/plugin.json",
 )
 
 # Issue #370's vendored document mechanism, asserted by exact name rather than
@@ -310,13 +313,15 @@ PROVIDER_MANIFESTS = (
 # census without that sibling would resolve no drainer at all. The Codex bundle
 # needs its own second copy of `kanban_config.py` because it has no shared
 # scripts root -- each skill carries what it loads.
-# Eleven modules: five in the Claude bundle and six in the Codex bundle.
+# Twelve modules: five in the Claude bundle, six in the Codex bundle, and
+# the Grok coordinator's roster reader.
 BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
@@ -370,7 +375,7 @@ MARKDOWN_LINK = re.compile(r"\[[^\]\n]*\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 # Paths into the packaged trees named as literal text by the documentation --
 # `python3 tools/setup_workflows.py`, and so on.
 DOCUMENTED_TREE_PATH = re.compile(
-    r"\b((?:tools|codex-plugin|claude-plugin)/[\w./-]+\.(?:py|json|md))"
+    r"\b((?:tools|codex-plugin|claude-plugin|grok-plugin)/[\w./-]+\.(?:py|json|md))"
 )
 
 # A `tools/` module named the way a document tells the reader to run it --

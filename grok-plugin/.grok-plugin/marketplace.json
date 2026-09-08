@@ -1,0 +1,19 @@
+{
+  "name": "kanban",
+  "description": "Kanban's tracked Grok marketplace, packaging the Grok-side /solve and /autosolve workflows. Grok-origin pull requests are reviewed by Codex only.",
+  "owner": {
+    "name": "Kanban"
+  },
+  "plugins": [
+    {
+      "name": "kanban",
+      "version": "1.0.0",
+      "description": "Kanban's Grok-side workflow bundle: /solve claims and implements a GitHub issue through a grok-origin pull request, and /autosolve drives Codex review of that pull request until approval. Never invokes Claude.",
+      "author": {
+        "name": "Kanban"
+      },
+      "source": "./plugins/kanban",
+      "category": "development"
+    }
+  ]
+}

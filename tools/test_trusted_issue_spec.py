@@ -4,10 +4,11 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Issue #238 vendored `trusted_issue_spec.py` into both tracked plugin bundles and
 made it the solve workflows' only permitted view of an issue's comment timeline.
-Every behavioural assertion here runs against BOTH copies: a trust boundary
-enforced in one bundle and not the other is not enforced, and these two files
-are the whole boundary — the tracked solve workflows have no fallback comment
-source to fail over to.
+The Grok bundle carries a third byte-identical copy. Every behavioural
+assertion here runs against every copy: a trust boundary enforced in one
+bundle and not the others is not enforced, and these files are the whole
+boundary — the tracked solve workflows have no fallback comment source to fail
+over to.
 
 What is pinned, per that issue's requirements and its review's amendments:
 
@@ -49,14 +50,17 @@ import fake_cli
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin" / "plugins" / "kanban"
 CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
+GROK_PLUGIN_ROOT = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
 
 CODEX_HELPER = CODEX_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 CLAUDE_HELPER = CLAUDE_PLUGIN_ROOT / "scripts" / "trusted_issue_spec.py"
-HELPERS = {"codex": CODEX_HELPER, "claude": CLAUDE_HELPER}
+GROK_HELPER = GROK_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+HELPERS = {"codex": CODEX_HELPER, "claude": CLAUDE_HELPER, "grok": GROK_HELPER}
 
 CODEX_SOLVE = CODEX_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 CLAUDE_SOLVE = CLAUDE_PLUGIN_ROOT / "commands" / "solve.md"
-SOLVE_WORKFLOWS = {"codex": CODEX_SOLVE, "claude": CLAUDE_SOLVE}
+GROK_SOLVE = GROK_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
+SOLVE_WORKFLOWS = {"codex": CODEX_SOLVE, "claude": CLAUDE_SOLVE, "grok": GROK_SOLVE}
 
 # The exact lookup each solve workflow uses to find its own installed copy. The
 # Codex bundle searches under $CODEX_HOME the way its PR-flow skills locate the
@@ -68,6 +72,10 @@ CODEX_HELPER_LOOKUP = (
     "-path '*/kanban/*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
 )
 CLAUDE_HELPER_REFERENCE = '"${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py"'
+GROK_HELPER_LOOKUP = (
+    'find "${GROK_HOME:-$HOME/.grok}" '
+    "-path '*/kanban/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
+)
 
 # Every value GitHub documents for author_association. None of them grants a
 # comment body, which is the whole point: the reviewer gate in
@@ -253,8 +261,8 @@ def issue_payload(author="outsider"):
 
 
 class VendoredCopyTests(unittest.TestCase):
-    """The two copies are one asset in two bundles: divergence would give the
-    two brands different trust boundaries, which is the drift this vendoring
+    """The copies are one asset in every bundle: divergence would give the
+    brands different trust boundaries, which is the drift this vendoring
     exists to end."""
 
     def test_both_bundles_carry_the_helper(self):
@@ -262,11 +270,13 @@ class VendoredCopyTests(unittest.TestCase):
             self.assertTrue(path.is_file(), f"{brand}: {path} is missing")
 
     def test_the_two_copies_are_byte_identical(self):
-        self.assertEqual(
-            CODEX_HELPER.read_bytes(),
-            CLAUDE_HELPER.read_bytes(),
-            "the vendored copies have diverged; they must stay one asset",
-        )
+        reference = CODEX_HELPER.read_bytes()
+        for brand, path in sorted(HELPERS.items()):
+            self.assertEqual(
+                reference,
+                path.read_bytes(),
+                f"the {brand} vendored copy has diverged; they must stay one asset",
+            )
 
     def test_each_copy_compiles(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,6 +723,79 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("self-test passed", proc.stdout)
 
+    def install_grok_bundle(self, home: Path) -> Path:
+        installed = (
+            home
+            / ".grok"
+            / "plugins"
+            / "user"
+            / "kanban"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(GROK_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def test_the_grok_skill_declares_the_lookup_it_is_tested_with(self):
+        self.assertIn(
+            GROK_HELPER_LOOKUP,
+            GROK_SOLVE.read_text(encoding="utf-8"),
+            "the Grok solve skill must locate the helper under $GROK_HOME",
+        )
+
+    def test_the_grok_lookup_resolves_from_an_explicit_grok_home(self):
+        home = self.root / "grok-home"
+        expected = self.install_grok_bundle(home)
+        proc = subprocess.run(
+            ["bash", "-c", GROK_HELPER_LOOKUP],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env={**os.environ, "GROK_HOME": str(home / ".grok"), "HOME": str(home)},
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_grok_lookup_falls_back_to_the_default_under_home(self):
+        home = self.root / "grok-default-home"
+        expected = self.install_grok_bundle(home)
+        env = {key: value for key, value in os.environ.items() if key != "GROK_HOME"}
+        env["HOME"] = str(home)
+        proc = subprocess.run(
+            ["bash", "-c", GROK_HELPER_LOOKUP],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env=env,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_resolved_grok_copy_runs_from_the_worked_repository(self):
+        home = self.root / "grok-runnable-home"
+        self.install_grok_bundle(home)
+        script = (
+            f'TRUSTED_SPEC="$({GROK_HELPER_LOOKUP})"\n'
+            'python3 "$TRUSTED_SPEC" --self-test\n'
+        )
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env={**os.environ, "GROK_HOME": str(home / ".grok"), "HOME": str(home)},
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("self-test passed", proc.stdout)
+
 
 class SolveWorkflowContractTests(unittest.TestCase):
     """Requirement 2: both tracked solve workflows require the vendored helper,
@@ -733,6 +816,10 @@ class SolveWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             f'python3 {CLAUDE_HELPER_REFERENCE} --repo "$REPO" <issue>',
             CLAUDE_SOLVE.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
+            GROK_SOLVE.read_text(encoding="utf-8"),
         )
 
     def test_each_workflow_forbids_every_unfiltered_comment_source(self):

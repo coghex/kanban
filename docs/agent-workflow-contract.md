@@ -78,12 +78,14 @@ everything else.
   canonical-gate refusal, whose single-line `KANBAN_NEEDS_INPUT` spelling is
   fixed. A directly invoked workflow given no identity resolves one once from
   its own checkout and is bound by it for the rest of the run.
-- **Comment trust boundary:** both tracked solve workflows
-  (`codex-plugin/plugins/kanban/skills/solve/SKILL.md` and
-  `claude-plugin/plugins/kanban/commands/solve.md`) fetch the issue's effective
+- **Comment trust boundary:** the tracked solve workflows
+  (`codex-plugin/plugins/kanban/skills/solve/SKILL.md`,
+  `claude-plugin/plugins/kanban/commands/solve.md`, and
+  `grok-plugin/plugins/kanban/skills/solve/SKILL.md`) fetch the issue's effective
   spec exclusively through their own bundle's vendored `trusted_issue_spec.py`
   (`codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
-  `claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py`). Each copy
+  `claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py`,
+  `grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`). Each copy
   retrieves the complete paginated timeline in deterministic chronological
   order and serializes a comment body only for the exact, case-insensitive
   logins `claude`, `codex`, and `coghex`; every other comment is returned as
@@ -99,14 +101,15 @@ everything else.
   standalone `--self-test`, and declares its `gh` surface in §4. The Codex
   skill locates its copy under `$CODEX_HOME` the way its PR-flow skills locate
   their coordinator; the Claude command resolves its own at
-  `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`. Neither resolves a
-  checkout-relative or personal-skill path, because Kanban spawns the workflow
-  with the worked repository as the working directory. The packaged
+  `${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py`; the Grok skill locates
+  its copy under `$GROK_HOME` (default `~/.grok`). None resolves a
+  checkout-relative or personal-skill path, because the workflow runs with the
+  worked repository as the working directory. The packaged
   `issue-rereview` assets
   ([drafting-workflow-contract.md §3.6](drafting-workflow-contract.md#36-the-repair-loop-issue-rereview-and-issue-rereview))
-  read the timeline through the same two vendored copies, resolved the same
-  two ways and under the identical no-unfiltered-fallback rule; they are the
-  only other consumers, and they add no third copy.
+  read the timeline through the Codex and Claude copies, resolved the same
+  two ways and under the identical no-unfiltered-fallback rule; they do not
+  add a fourth copy.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.

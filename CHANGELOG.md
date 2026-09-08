@@ -15,6 +15,10 @@ created above it.
 
 ### Unreleased
 
+- The tracked Grok plugin (`grok-plugin/`) packages `/solve` and `/autosolve`.
+  A Grok session stamps `<!-- pr-origin:grok -->` and `/autosolve` obtains a
+  Codex review without `--self-review`. It never invokes Claude. Grok is still
+  not a Kanban-spawned provider.
 - `<!-- pr-origin:grok -->` is a known pull-request origin. Dual-mode review
   and rereview route it to Codex only — not Claude, and not both brands, which
   is what an unrecognized marker still does. Grok is not a spawned provider,
