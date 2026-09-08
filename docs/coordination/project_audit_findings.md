@@ -31,15 +31,15 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` deliberately no
 
 ## Status
 
-- [ ] KA-1. Rendering cost grows with offscreen cards
-- [ ] KA-2. Concurrent mission and board reads conflict over process bookkeeping
-- [ ] KA-3. Precondition reads do not bind the selected repository
-- [ ] KA-4. Failed command persistence can lose a pause request
-- [ ] KA-5. Precondition reads bypass the configured GitHub timeout
+- [x] KA-1. Rendering cost grows with offscreen cards — [#640]
+- [x] KA-2. Concurrent mission and board reads conflict over process bookkeeping — [#642]
+- [x] KA-3. Precondition reads do not bind the selected repository — [#643]
+- [x] KA-4. Failed command persistence can lose a pause request — [#644]
+- [x] KA-5. Precondition reads bypass the configured GitHub timeout — [#645]
 
 ## Board responsiveness
 
-### KA-1. Rendering cost grows with offscreen cards
+### [#640] KA-1. Rendering cost grows with offscreen cards
 
 **Priority: medium; highest board priority.**
 
@@ -64,7 +64,7 @@ Selection changed between renders. Wall times closely matched CPU times.
 
 ## Mission reliability
 
-### KA-2. Concurrent mission and board reads conflict over process bookkeeping
+### [#642] KA-2. Concurrent mission and board reads conflict over process bookkeeping
 
 **Priority: high.**
 
@@ -78,7 +78,7 @@ Missions are allowed to run beside a dashboard. However, each mission board read
 
 **Remaining uncertainty:** The false refusal is reproduced. This reproduction did not kill another reader or demonstrate lost record updates.
 
-### KA-3. Precondition reads do not bind the selected repository
+### [#643] KA-3. Precondition reads do not bind the selected repository
 
 **Priority: high.**
 
@@ -98,7 +98,7 @@ The working directory remains the Kanban checkout. Additionally, a fake response
 
 **Remaining uncertainty:** The argument, directory, and identity-validation defects are reproduced; no wrong-repository mutation was attempted.
 
-### KA-4. Failed command persistence can lose a pause request
+### [#644] KA-4. Failed command persistence can lose a pause request
 
 **Priority: high.**
 
@@ -118,7 +118,7 @@ After repairing the write fault, the pause is no longer queued. A separate probe
 
 **Remaining uncertainty:** Both cases were reproduced in temporary stores. The snapshot failure ends the current run with an error; the concern is lost operator intent on recovery.
 
-### KA-5. Precondition reads bypass the configured GitHub timeout
+### [#645] KA-5. Precondition reads bypass the configured GitHub timeout
 
 **Priority: medium.**
 
