@@ -4,7 +4,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, against
-the tracked Codex and Claude plugins' own packaged-workflow bash surfaces,
+the tracked Codex, Claude, and Grok plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
@@ -38,10 +38,10 @@ contract's declared set, and what the extractor recovers from each of them is
 pinned, so neither list can drift away from the other and neither can shrink to
 covering nothing.
 
-Issue #493 added a second, non-manifest property over two of those same assets:
-both brands' solve workflows must state the art policy PR #251 landed in the
+Issue #493 added a second, non-manifest property over those same assets:
+every brand's solve workflow must state the art policy PR #251 landed in the
 Claude asset alone, so a missing texture, icon, sprite, or animation stops the
-run in either brand. Its issue-drafting half lives in
+run in Claude, Codex, or Grok. Its issue-drafting half lives in
 tools/test_drafting_workflow_contract.py.
 """
 
@@ -256,9 +256,9 @@ MANAGED_RECORD_TOKENS = {
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
-# issue-review backend out of the discovery record. All ten carry the same
-# probe, so all ten spell both record locations; `triage` and `retriage` reach
-# no other home-relative scan, which is why the pin below names the whole ten
+# issue-review backend out of the discovery record. All eleven carry the same
+# probe, so all eleven spell both record locations; `triage` and `retriage` reach
+# no other home-relative scan, which is why the pin below names the whole eleven
 # rather than the six that also sit in a scanned surface list.
 MARKDOWN_RECORD_RESOLVER_FILES = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -271,6 +271,7 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
     "codex-plugin/plugins/kanban/skills/triage/SKILL.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # The issue approval service's own owning sources
@@ -412,14 +413,23 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/census.py",
 ]
 
-# Both bundles' vendored trusted-comment issue-spec helper (issue #238). Each is
+GROK_PLUGIN_SURFACE_FILES = [
+    "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "grok-plugin/plugins/kanban/scripts/review_pr.py",
+    "grok-plugin/plugins/kanban/scripts/kanban_models.py",
+    "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+]
+
+# Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
-# already reconciled against the manifest; these two are named here so the
+# already reconciled against the manifest; these three are named here so the
 # non-vacuity pin below drives the real assets, and so dropping one from a
 # surface list fails a test rather than silently un-scanning a vendored asset.
 TRUSTED_SPEC_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
+    "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
 }
 
 # Issue #370's vendored document mechanism, covered exactly the way the
@@ -427,13 +437,14 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # the three tools/ modules the document workflows invoke, so each copy's own
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
-# same way and covered here with them; since issue #572 BOTH bundles carry a
-# copy, because both coordinators read the roster's loaded provider set to
-# route. What still differs is what each does with it -- the Claude copy
-# resolves an assignment cell and pins it, the Codex copy resolves none (D-2) --
-# and that is a routing fact rather than an external command, so both readers
-# still spawn nothing at all. Their empty sets are pins rather than omissions:
-# a future edit that made either shell out would have to declare it here.
+# same way and covered here with them; since issue #572 every coordinator
+# bundle carries a copy, because all three coordinators read the roster's
+# loaded provider set to route. What still differs is what each does with it --
+# the Claude and Grok copies resolve an assignment cell and pin it, the Codex
+# copy resolves none (D-2) -- and that is a routing fact rather than an
+# external command, so the readers still spawn nothing at all. Their empty
+# sets are pins rather than omissions: a future edit that made any shell out
+# would have to declare it here.
 #
 # Issue #574's janitor census is vendored on the same terms and pinned here
 # with them, along with the third `kanban_config.py` copy it loads from beside
@@ -454,6 +465,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
     "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
+    "grok-plugin/plugins/kanban/scripts/kanban_models.py": set(),
 }
 
 # Both shipped copies of the janitor census, and the manifest rows each one
@@ -1650,9 +1662,10 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # loudly, which is the safe direction. The captured segment keeps its leading
 # slash so it compares against a `personal-path` manifest token exactly the
 # way the Haskell segments do.
-# The two solve assets that owe issue #493's art policy: the paired Kanban-
-# invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares.
-# PR #251 made a missing texture, icon, sprite, or animation an explicit tracked
+# The three solve assets that owe issue #493's art policy: the paired Kanban-
+# invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares,
+# plus the Grok /solve skill that stamps grok-origin pull requests. PR #251
+# made a missing texture, icon, sprite, or animation an explicit tracked
 # blocker with a user-owned supply-or-generate decision and landed it in the
 # Claude asset alone, adding no regression assertion, so nothing held the Codex
 # twin to it. The issue-drafting half of the same policy is guarded the same way
@@ -1660,25 +1673,27 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 ART_POLICY_SOLVE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/solve.md",
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
-# match every Markdown file cannot pass vacuously. These six qualify by
+# match every Markdown file cannot pass vacuously. These seven qualify by
 # orchestrating or judging rather than implementing: the issue-review pair
 # judges a filed issue and never drafts or implements, and the autoissue and
-# autosolve pairs each delegate the work itself to another workflow.
+# autosolve assets each delegate the work itself to another workflow.
 #
 # The autosolve pair joined this tuple when issue #576 vendored it, and the
-# classification is this slice's, not an inherited one. The art policy binds
-# the session that reads an issue's requirements and decides how to satisfy
-# them, and the shipped assets place it exactly there -- at step 6 of solve's
-# `## Work In Isolation`, between "implement the smallest solution" and "add or
-# extend a focused test". Autosolve reaches none of that: it delegates the
-# implementation to solve and then loops over review verdicts, so the session
-# that would encounter a missing texture is the solve session the policy
-# already binds, reading solve's own copy of the rule. Stating it again in the
-# orchestrator would give a second, unreachable statement of a rule whose
-# enforced copy is one delegation away -- which is the autoissue pair's
+# Grok autosolve skill is the same classification: Grok ships no issue-review
+# or autoissue workflow, but its /autosolve is still an orchestrator. The art
+# policy binds the session that reads an issue's requirements and decides how
+# to satisfy them, and the shipped assets place it exactly there -- at step 6
+# of solve's `## Work In Isolation`, between "implement the smallest solution"
+# and "add or extend a focused test". Autosolve reaches none of that: it
+# delegates the implementation to solve and then loops over review verdicts, so
+# the session that would encounter a missing texture is the solve session the
+# policy already binds, reading solve's own copy of the rule. Stating it again
+# in the orchestrator would give a second, unreachable statement of a rule
+# whose enforced copy is one delegation away -- which is the autoissue pair's
 # situation with the drafting-side policy exactly, and why that pair is a
 # control here rather than a subject.
 ART_POLICY_CONTROL_ASSETS = (
@@ -1688,6 +1703,7 @@ ART_POLICY_CONTROL_ASSETS = (
     "codex-plugin/plugins/kanban/skills/autoissue/SKILL.md",
     "claude-plugin/plugins/kanban/commands/autosolve.md",
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 
 # Lowercase: compared against art_policy_canonical() output. Every fragment lies
@@ -1904,8 +1920,39 @@ class AgentWorkflowContractTests(unittest.TestCase):
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
-    def test_both_trusted_issue_spec_helpers_are_scanned_and_declared(self):
-        # Issue #238's review requirement: the two vendored helpers must reach a
+    def test_every_grok_plugin_bash_command_is_documented(self):
+        executable_rows = {
+            row["token"]: row
+            for row in self.manifest
+            if row["kind"] == "executable"
+        }
+        for relative_path in GROK_PLUGIN_SURFACE_FILES:
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            for name in discovered_commands_for_plugin_file(relative_path, content):
+                self.assertIn(
+                    name,
+                    executable_rows,
+                    f"{relative_path} invokes undocumented external command "
+                    f"{name!r}; add it to the manifest in "
+                    "docs/agent-workflow-contract.md",
+                )
+                self.assertIn(
+                    relative_path,
+                    executable_rows[name]["files"],
+                    f"{relative_path} invokes {name!r} but is not listed on "
+                    f"that command's manifest row; add it to the files column",
+                )
+
+    def test_grok_review_pr_coordinator_command_invocations_are_documented(self):
+        # The Grok plugin bundles a third coordinator copy so /autosolve can
+        # spawn Codex without --self-review; pin its command surface the same
+        # way the Codex and Claude copies are pinned above.
+        content = (REPO_ROOT / "grok-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
+    def test_every_trusted_issue_spec_helper_is_scanned_and_declared(self):
+        # Issue #238's review requirement: the vendored helpers must reach a
         # surface list (an unlisted vendored asset is never scanned at all), and
         # what the extractor recovers from each is pinned so a helper whose `gh`
         # call the regex stops matching fails here rather than passing with an
@@ -1916,8 +1963,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path, expected in sorted(TRUSTED_SPEC_SURFACE_FILES.items()):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -1942,8 +1990,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path, expected in sorted(DOCUMENT_MECHANISM_SURFACE_FILES.items()):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2429,8 +2478,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path in DRAFTING_SURFACE_FILES:
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for name in discovered_commands_for_plugin_file(relative_path, content):
@@ -2464,7 +2514,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # drafting loop does not -- that the DECLARING row actually names the
         # asset, so a documented token is not mistaken for a documented asset.
         rows = [row for row in self.manifest if row["kind"] == "personal-path"]
-        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES:
+        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES + GROK_PLUGIN_SURFACE_FILES:
             if not relative_path.endswith(".md"):
                 continue
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2564,8 +2614,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2595,8 +2646,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2644,8 +2696,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2691,8 +2744,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertEqual(
@@ -2731,8 +2785,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2769,8 +2824,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path, expected in sorted(FIX_SURFACE_EXPECTED_COMMANDS.items()):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2809,8 +2865,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2876,8 +2933,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -2946,8 +3004,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             found = discovered_commands_for_plugin_file(relative_path, content)
@@ -3116,8 +3175,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
         for relative_path in sorted(declared):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by either plugin surface list",
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
+                or relative_path in GROK_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
             )
 
     def test_every_document_asset_bash_command_is_documented(self):
@@ -3602,7 +3662,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and thirteen consumers across
+        # tools/install_issue_review.py writes it and fifteen consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -3611,7 +3671,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
         # it rather than spelling a location, so the count is unchanged.
         #
-        # Both platform rows are pinned to the *same* thirteen files, and
+        # Both platform rows are pinned to the *same* fifteen files, and
         # against the same list rather than against each other: since issue
         # #445 every one of these readers probes both locations, so each
         # spells both literals. Asserting one row alone would let the XDG
@@ -3622,6 +3682,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "src/Kanban/ManagedPaths.hs",
             "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
             "claude-plugin/plugins/kanban/scripts/review_pr.py",
+            "grok-plugin/plugins/kanban/scripts/review_pr.py",
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
             "claude-plugin/plugins/kanban/commands/issue-review.md",
             "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
@@ -3632,6 +3693,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "claude-plugin/plugins/kanban/commands/triage.md",
             "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
             "claude-plugin/plugins/kanban/commands/retriage.md",
+            "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
         ]
         for row_id in (
             "issue-review-discovery-record",
@@ -3703,7 +3765,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
             (
                 # Issue #444 gave the record its XDG sibling, and issue #445
-                # gave both rows the twelve packaged readers that probe them.
+                # gave both rows the fourteen packaged readers that probe them
+                # (eleven markdown resolvers plus three coordinators).
                 # Neither spelling is tools/kanban_config.py's: that module
                 # composes the record path from the install directory above
                 # and a separate file name, so it carries neither literal
@@ -3736,7 +3799,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
 
 class ArtPolicyTests(unittest.TestCase):
-    """Issue #493's art policy across both brands' solve assets.
+    """Issue #493's art policy across every brand's solve assets.
 
     PR #251 landed the policy in claude-plugin/plugins/kanban/commands/solve.md
     and its /issue twin only, with no regression assertion, so the Codex solve
@@ -3744,7 +3807,8 @@ class ArtPolicyTests(unittest.TestCase):
     boundary at all. These assets are the program an agent executes, so the same
     missing-art observation could stop the run and hand the user a tracked
     blocker through one brand while producing a placeholder, a reused asset, or
-    a narrowed implementation through the other.
+    a narrowed implementation through another -- including Grok, which is not a
+    spawned provider but still implements issues through /solve.
 
     There is no behavioral prompt-testing harness here, so the reviewable
     property is the asset text itself.
@@ -3760,10 +3824,10 @@ class ArtPolicyTests(unittest.TestCase):
         findings = art_policy_findings(self.assets, ART_POLICY_SOLVE_RULES)
         self.assertEqual(findings, [], "\n".join(findings))
 
-    def test_removing_a_rule_from_either_brand_is_reported(self):
+    def test_removing_a_rule_from_any_solve_asset_is_reported(self):
         # The property under test is that a removal FAILS the enforced check,
-        # for each rule and each brand in turn, not merely that the text happens
-        # to be present today.
+        # for each rule and each solve asset in turn, not merely that the text
+        # happens to be present today.
         for path in ART_POLICY_SOLVE_ASSETS:
             for rule in ART_POLICY_SOLVE_RULES:
                 with self.subTest(asset=path, rule=rule):

@@ -100,8 +100,8 @@ extracted by, so nothing else delimits a release.
 
 The source distribution is meant to be a complete Kanban checkout, so that
 everything the packaged documentation advertises — the workflow setup command,
-the drainer installer, both provider bundles, and the test suites — is present
-after unpacking. Verify it with:
+the drainer installer, the Claude, Codex, and Grok workflow bundles, and the
+test suites — is present after unpacking. Verify it with:
 
 ```console
 cabal sdist all
@@ -110,8 +110,8 @@ python3 -m unittest tools.test_source_distribution
 
 That check builds the real archive into a temporary directory, unpacks it, and
 compares the result against the repository's tracked file set. Adding a tracked
-file under `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`, or
-`claude-plugin/` requires no manifest change only when an existing
+file under `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
+`claude-plugin/`, or `grok-plugin/` requires no manifest change only when an existing
 `kanban.cabal` glob already covers its extension; anything else — a new
 top-level file, a new document under `docs/`, a new file extension — fails the
 check until `kanban.cabal` declares it and `tools/test_source_distribution.py`
@@ -123,24 +123,30 @@ the toolchain-free job that runs the rest of the Python suite.
 
 ## Changing a workflow bundle
 
-A change that touches tracked content under `claude-plugin/` or `codex-plugin/`
-must raise that bundle's declared manifest version in the same change, and must
-leave the manifest still naming exactly the workflows the bundle ships.
-`tools/test_claude_plugin.py` and `tools/test_codex_plugin.py` enforce both
-through `tools/plugin_bundle_gate.py`, so both fail in the required
-`build-test` job rather than after the fact.
+A change that touches tracked content under `claude-plugin/`, `codex-plugin/`,
+or `grok-plugin/` must raise that bundle's declared manifest version in the
+same change, and must leave the manifest still naming exactly the workflows
+the bundle ships. `tools/test_claude_plugin.py`, `tools/test_codex_plugin.py`,
+and `tools/test_grok_plugin.py` enforce both through
+`tools/plugin_bundle_gate.py`, so they fail in the required `build-test` job
+rather than after the fact.
 
 - **Version.** Bump `codex-plugin/plugins/kanban/.codex-plugin/plugin.json`, or
   — for Claude, which declares its version twice — both
   `claude-plugin/plugins/kanban/.claude-plugin/plugin.json` and the plugin
-  entry in `claude-plugin/.claude-plugin/marketplace.json`, which must agree.
+  entry in `claude-plugin/.claude-plugin/marketplace.json`, which must agree,
+  or — for Grok, which also declares its version twice — both
+  `grok-plugin/plugins/kanban/plugin.json` and the plugin entry in
+  `grok-plugin/.grok-plugin/marketplace.json`, which must agree.
   Codex caches a local-source bundle under exactly that version
   (`$CODEX_HOME/plugins/cache/kanban/kanban/<version>/`), so an unchanged
-  version makes a stale cache indistinguishable from a current one.
+  version makes a stale cache indistinguishable from a current one. Grok
+  installs under `$GROK_HOME/installed-plugins/kanban-<hash>/`.
 - **Listing.** Add the workflow to every manifest field that enumerates them:
-  the description on the Claude side (in both manifests), and the description,
+  the description on the Claude side (in both manifests), the description,
   keywords, `interface.shortDescription`, `interface.longDescription`, and
-  `interface.defaultPrompt` on the Codex side.
+  `interface.defaultPrompt` on the Codex side, and the description on the Grok
+  side (plugin.json and both marketplace description fields).
 
 The change unit is one pull request: the candidate tracked tree compared with
 its default-branch merge base, counting committed, staged, and tracked
@@ -183,7 +189,7 @@ proved. A command rendered into `claude-plugin/.../commands/` or
 - `test/` — Haskell tests.
 - `tools/` — PR drainer, issue approval service, both of their controllers,
   installers, workflow setup, and Python tests.
-- `codex-plugin/`, `claude-plugin/` — the tracked workflow bundles, in two halves: the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, and the drafting and document workflows you invoke yourself in a Codex or Claude session, which no Kanban action spawns.
+- `codex-plugin/`, `claude-plugin/`, `grok-plugin/` — the tracked workflow bundles. Claude and Codex each ship the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, plus the drafting and document workflows you invoke yourself in a session, which no Kanban action spawns. Grok is not a spawned provider: it ships `/solve` and `/autosolve` so a Grok session can open a grok-origin pull request and obtain a Codex review.
 - `.github/workflows/` — continuous integration.
 
 ## Further detail

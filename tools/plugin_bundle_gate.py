@@ -1,8 +1,8 @@
-"""Manifest gates shared by the tracked Claude and Codex plugin bundles.
+"""Manifest gates shared by the tracked Claude, Codex, and Grok plugin bundles.
 
-Imported by `tools/test_claude_plugin.py` and `tools/test_codex_plugin.py`;
-never collected by `unittest discover` itself, since it is not a `test_*.py`
-module.
+Imported by `tools/test_claude_plugin.py`, `tools/test_codex_plugin.py`, and
+`tools/test_grok_plugin.py`; never collected by `unittest discover` itself,
+since it is not a `test_*.py` module.
 
 Issue #235: both bundles drifted from their own manifests in two directions
 at once, and neither drift had a check.

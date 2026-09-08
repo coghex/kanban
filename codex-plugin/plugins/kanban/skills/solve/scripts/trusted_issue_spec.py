@@ -2,9 +2,9 @@
 """Fetch one issue's effective spec while keeping untrusted comment bodies out
 of a solve agent's context.
 
-Vendored into both tracked plugin bundles per docs/agent-workflow-contract.md
+Vendored into the three tracked plugin bundles per docs/agent-workflow-contract.md
 §3: standard library only, no import from tools/, so an installed bundle runs
-this from any repository without a Kanban checkout. Both tracked solve
+this from any repository without a Kanban checkout. The tracked solve
 workflows read the issue timeline exclusively through this script; §2.1 of that
 contract records the trust rule and why it deliberately differs from
 tools/approve_issues.py's association-based gate arithmetic.

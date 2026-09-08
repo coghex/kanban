@@ -63,7 +63,7 @@ COORDINATION_REASONS = ("audit-report", "coordination-note")
 # rather than discovered: a grep for a path in a test module also hits the
 # release lists and the prose comments that merely name a document, so it would
 # report every doc as parsed. Correction from issue #225's canonical review:
-# docs/design.md is parsed by test/Spec/UI/Keys.hs and both plugin bundles are
+# docs/design.md is parsed by test/Spec/UI/Keys.hs and the plugin bundles are
 # parsed by their own modules, so the reason is not confined to the two
 # workflow-contract documents the issue body named.
 TEST_PARSED_PATHS = {
@@ -104,6 +104,8 @@ TEST_PARSED_PATHS = {
     "claude-plugin/",
     # tools/test_codex_plugin.py reads every packaged skill the same way.
     "codex-plugin/",
+    # tools/test_grok_plugin.py reads the tracked Grok skills the same way.
+    "grok-plugin/",
     # tools/test_render_command_sources.py reads the authored command sources
     # under tools/command_sources/ and byte-compares the files rendered from
     # them, so editing either alone fails build-test (issue #375).
@@ -560,12 +562,12 @@ class ClassificationCoverageTests(unittest.TestCase):
         )
 
     def test_the_plugin_bundles_are_covered_through_a_directory_row(self):
-        # Requirement 1's directory row, exercised rather than assumed: the 24
-        # tracked bundle documents reach their class through two rows.
+        # Requirement 1's directory row, exercised rather than assumed: the
+        # tracked bundle documents reach their class through three rows.
         bundle_docs = [
             path
             for path in self.markdown
-            if path.startswith(("claude-plugin/", "codex-plugin/"))
+            if path.startswith(("claude-plugin/", "codex-plugin/", "grok-plugin/"))
         ]
         self.assertTrue(bundle_docs)
         for path in bundle_docs:

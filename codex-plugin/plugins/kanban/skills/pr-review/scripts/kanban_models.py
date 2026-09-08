@@ -1,5 +1,5 @@
 """Shared model-roster reader for approve_issues.py, drain_prs.py, and the
-Claude plugin's review_pr.py.
+Claude, Codex, and Grok plugins' review_pr.py.
 
 Schema is documented in models.toml.example at the repo root and mirrors
 src/Kanban/Models.hs, which is the authoritative implementation: the two sides
@@ -26,17 +26,18 @@ must never have an agent quietly run on the old one. A present file is likewise
 a complete roster rather than a sparse patch over the defaults: every loaded
 provider a role applies to must resolve from the file itself.
 
-This module ships in three homes, held byte-identical the way `kanban_config.py`'s
+This module ships in four homes, held byte-identical the way `kanban_config.py`'s
 copies are: `tools/kanban_models.py`, which the issue-review and drainer
 installers link beside the scripts that import it, and one copy beside each
 bundled review coordinator --
-`claude-plugin/plugins/kanban/scripts/kanban_models.py` and
-`codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py` --
+`claude-plugin/plugins/kanban/scripts/kanban_models.py`,
+`codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py`, and
+`grok-plugin/plugins/kanban/scripts/kanban_models.py` --
 because an installed coordinator runs from its bundle with no `tools/` sibling
-and must load the reader from beside itself. The two coordinator copies read
-different things out of it: the Claude one resolves `roles.pr_review` cells and
-pins them, while the Codex one reads only `agents` for the operating mode and
-still passes no model or effort to anything (D-2).
+and must load the reader from beside itself. The Claude and Grok coordinator
+copies resolve `roles.pr_review` cells and pin them, while the Codex one reads
+only `agents` for the operating mode and still passes no model or effort to
+anything (D-2).
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the two tracked review coordinators.
+"""Bounded-divergence gate for the three tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -111,6 +111,9 @@ CODEX_COORDINATOR = (
     / "pr-review"
     / "scripts"
     / "review_pr.py"
+)
+GROK_COORDINATOR = (
+    REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
@@ -329,12 +332,231 @@ DOCUMENTED_DIVERGENCE = r'''@@
 +    assert pinned_match and pinned_match.group("models") == "gpt-5.6-sol@xhigh"
      print("self-test passed")'''
 
+# Claude vs Grok: the Grok copy is the Claude pinning coordinator plus
+# --expected-origin/--expected-route refuse-before-spawn. Compared the same
+# way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
+GROK_DOCUMENTED_DIVERGENCE = r'''@@
+ def pr_origin(pr: dict[str, Any]) -> str | None:
+-    if pr.get("isCrossRepository"):
+-        return None
+-    return origin_from_body(str(pr.get("body") or ""))
++    origin = origin_from_body(str(pr.get("body") or ""))
++    if pr.get("isCrossRepository"):
++        return origin if origin == "grok" else None
++    return origin
+ def linked_issue_numbers(pr: dict[str, Any], repo: str) -> tuple[list[int], list[str]]:
+@@
+    in docs/agent-workflow-contract.md §4 declaring this file, and that
+-    reconciliation matches a literal, not an expression. This bundle vendors a
+-    copy of kanban_config.py beside this module and still does not import it:
+-    the Codex bundle vendors per skill and has none beside its own copy of this
++    reconciliation matches a literal, not an expression. This bundle does not
++    vendor kanban_config.py beside this module: the Claude bundle does, and
++    the Codex bundle vendors per skill and has none beside its own copy of this
+    coordinator, and one probe implemented two ways is the drift both bundles
+@@
+    return verdict, body
++def expected_route_mismatch(
++    pr: dict[str, Any],
++    expected_origin: str | None,
++    expected_route: str | None,
++    *,
++    unpublished: str,
++) -> dict[str, Any] | None:
++    """Refuse when the live origin/route is no longer what the caller bound.
++    `None` when no binding was requested or the live values still match.
++    The payload is the same `route_mismatch` shape workflow() returns before
++    spawning, so publication can refuse without commenting or labeling.
++    """
++    if expected_origin is None and expected_route is None:
++        return None
++    origin = pr_origin(pr)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in route_reviewers(origin))
++    if expected_origin is not None and live_origin != expected_origin:
++        return {
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; {unpublished}"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return {
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; {unpublished}"
++            ),
++        }
++    return None
+ def require_current_review_state(
+@@
+     expected_gate_key: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != expected_head:
+@@
+     changes_requested_label: str,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> dict[str, Any]:
+@@
+    pr = pr_view(root, repo, number)
++    mismatch = expected_route_mismatch(
++        pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        raise WorkflowError(mismatch["error"])
+     if pr["headRefOid"] != head:
+@@
+     config_path: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+        raise WorkflowError("linked issues changed during review; no verdict was published")
++    mismatch = expected_route_mismatch(
++        refreshed_pr,
++        expected_origin,
++        expected_route,
++        unpublished="nothing was published and no label was applied",
++    )
++    if mismatch is not None:
++        return 1, {"pr": number, **mismatch}
+     if not refreshed_gate["approved"]:
+@@
+        config_path=config_path,
++        expected_origin=expected_origin,
++        expected_route=expected_route,
+     post_comment(root, repo, number, body)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
+@@
+            config_path=config_path,
++            expected_origin=expected_origin,
++            expected_route=expected_route,
+        if verdict == "APPROVE" and not verified["ready_for_review"]:
+@@
+                config_path=config_path,
++                expected_origin=expected_origin,
++                expected_route=expected_route,
+            if not verified["ready_for_review"]:
+@@
+     explicit_repo: str | None = None,
++    expected_origin: str | None = None,
++    expected_route: str | None = None,
+ ) -> tuple[int, dict[str, Any]]:
+@@
+     reviewers = route_reviewers(origin, mode=mode, loaded=loaded)
++    live_origin = origin or "unknown"
++    live_route = "+".join(item.key for item in reviewers)
++    if expected_origin is not None and live_origin != expected_origin:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live origin {live_origin!r} does not match "
++                f"--expected-origin {expected_origin!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
++    if expected_route is not None and live_route != expected_route:
++        return 1, {
++            "pr": number,
++            "status": "route_mismatch",
++            "origin": live_origin,
++            "route": live_route,
++            "error": (
++                f"live route {live_route!r} does not match "
++                f"--expected-route {expected_route!r}; nothing was published "
++                "and no reviewer was spawned"
++            ),
++        }
+     base = {
+@@
+         "head": pr["headRefOid"],
+-        "origin": origin or "unknown",
+-        "route": "+".join(item.key for item in reviewers),
++        "origin": live_origin,
++        "route": live_route,
+         "review_mode": "standalone" if allow_no_issue else "issue-gated",
+@@
+        allow_no_issue=allow_no_issue, config_path=config_path,
++        expected_origin=expected_origin, expected_route=expected_route,
+     )
+@@
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
++    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
+     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
+@@
+         help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
++        "--expected-origin",
++        metavar="ORIGIN",
++        help=(
++            "Refuse before spawning if the live origin is not this value "
++            "(unknown, claude, codex, or grok). Use with --expected-route to "
++            "fail closed when the pull request drifted after a dry run."
++        ),
++    )
++    parser.add_argument(
++        "--expected-route",
++        metavar="ROUTE",
++        help=(
++            "Refuse before spawning if the live reviewer route is not this "
++            "value (for example codex). Combined with --expected-origin this "
++            "is how a grok-origin autosolve refuses a Claude spawn."
++        ),
++    )
++    parser.add_argument(
+         "--repo",
+@@
+                 explicit_repo=args.repo,
++                expected_origin=args.expected_origin,
++                expected_route=args.expected_route,
+             )'''
+
 # The vocabulary §2.2's exception is written in. Used only as a backstop on
 # DOCUMENTED_DIVERGENCE itself: regenerating that constant to bless a fresh
 # divergence has to smuggle the new lines past this too, so a unit that has
 # nothing to do with model or effort pinning cannot be recorded as though it
 # were part of the pinning exception.
 PINNING_VOCABULARY = ("model", "effort")
+GROK_ROUTE_VOCABULARY = (
+    "expected-origin",
+    "expected-route",
+    "expected_origin",
+    "expected_route",
+    "route_mismatch",
+    "live_origin",
+    "live_route",
+    "kanban_config.py",
+    "isCrossRepository",
+)
 
 # What a failing gate has to tell an author. Issue #624's false failures were
 # expensive because the advice named only the one cause it was not -- the
@@ -447,6 +669,11 @@ def divergent_lines(unit: DivergentUnit) -> str:
 
 def belongs_to_the_pinning_exception(unit: DivergentUnit) -> bool:
     return any(word in divergent_lines(unit).lower() for word in PINNING_VOCABULARY)
+
+
+def belongs_to_the_route_binding_exception(unit: DivergentUnit) -> bool:
+    text = divergent_lines(unit)
+    return any(word in text for word in GROK_ROUTE_VOCABULARY)
 
 
 def mirror_units(units: list[DivergentUnit]) -> list[DivergentUnit]:
@@ -753,6 +980,47 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
                 self.assertIn("def url_names_a_pull_request(", source)
                 self.assertIn("def github_number_kind(", source)
                 self.assertIn("is an ISSUE, not a pull request", source)
+
+
+class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
+    """The Grok coordinator differs from Claude in expected-origin/route,
+    in not vendoring kanban_config.py beside the coordinator, and in
+    reading a grok marker on a cross-repository pull request."""
+
+    def setUp(self):
+        self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
+        self.grok_source = GROK_COORDINATOR.read_text(encoding="utf-8")
+        self.units = documented_units(GROK_DOCUMENTED_DIVERGENCE)
+
+    def test_grok_differs_from_claude_only_in_the_route_binding_extension(self):
+        report = divergence_report(self.claude_source, self.grok_source, self.units)
+        if report is not None:
+            self.fail(
+                "The Grok coordinator diverges from the Claude copy outside "
+                "the --expected-origin/--expected-route extension, the "
+                "kanban_config.py vendor claim, and cross-repository grok "
+                "provenance.\n\n"
+                f"{report}"
+            )
+
+    def test_every_recorded_grok_unit_belongs_to_the_route_binding_exception(self):
+        self.assertTrue(self.units, "GROK_DOCUMENTED_DIVERGENCE records no units")
+        for index, unit in enumerate(self.units):
+            with self.subTest(unit=index):
+                self.assertTrue(
+                    belongs_to_the_route_binding_exception(unit),
+                    f"Grok divergence unit {index} is not the route-binding "
+                    f"extension:\n{rendered_unit(unit)}",
+                )
+
+    def test_an_unrelated_grok_only_line_fails_the_gate(self):
+        drifted = self.grok_source.replace(
+            "REVIEW_TIMEOUT_SECONDS = 7200",
+            "REVIEW_TIMEOUT_SECONDS = 60",
+            1,
+        )
+        report = divergence_report(self.claude_source, drifted, self.units)
+        self.assertIsNotNone(report)
 
 
 class SharedEditStabilityTests(unittest.TestCase):
