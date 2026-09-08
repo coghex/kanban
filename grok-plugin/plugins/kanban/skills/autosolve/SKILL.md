@@ -103,39 +103,40 @@ implement a guess. An unresolved open decision, ambiguity, or reviewer
 disagreement in the effective spec is not grounds for either disposition
 below — the stop in step 2 stands exactly as it would for any other issue.
 
-Before choosing a disposition, reclaim the issue — /solve already
-released it at the stop — then immediately repeat the collision check
-/solve's own "Select And Claim" step performs right after claiming (no
-open pull request already closes this issue, no other worktree already
-claims it), since it may have sat unassigned and unwatched since the stop:
-
-```bash
-gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
-```
-
-Then check whether this checkout can reach `$REPO` directly at all:
+Check whether this checkout can reach `$REPO` directly at all before
+choosing a disposition; that check does not need the issue claimed:
 
 ```bash
 gh repo view --json nameWithOwner --jq .nameWithOwner
 ```
 
 Choose the disposition on the merits of the specific change, not the label on
-the issue:
+the issue. /solve already released the claim at the stop, so reclaim only
+the branch that will keep working:
 
 - **Worthy of review** — this checkout's own repository does not match
   `$REPO`; the fix reaches more than the file or files the issue names; a
   listed acceptance check cannot be run and confirmed before landing; or this
   session is not fully confident the correction is right. Override the "not
-  through a pull request" instruction instead of honoring it: continue
+  through a pull request" instruction instead of honoring it: reclaim the
+  issue, immediately repeat the collision check /solve's own "Select And
+  Claim" step performs right after claiming (no open pull request already
+  closes this issue, no other worktree already claims it), then continue
   /solve exactly as it runs for any other issue — implement in the
   issue's own worktree, open the pull request with `Closes #<issue>` — and
   resume at step 4.
+
+  ```bash
+  gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
+  ```
+
 - **Needs a documentation landing workflow this bundle does not ship** —
   this checkout's own repository matches `$REPO` and the change is otherwise
-  simple enough to land without a pull request. Stop and report that. This
-  Grok bundle packages only /solve and /autosolve; it does not package
-  /push-docs. Do not invent a landing, do not call a Claude or Codex
-  /push-docs skill, and do not open a pull request just to avoid the stop.
+  simple enough to land without a pull request. Stop and report that. Do
+  not reclaim the issue; /solve already released it. This Grok bundle
+  packages only /solve and /autosolve; it does not package /push-docs. Do
+  not invent a landing, do not call a Claude or Codex /push-docs skill,
+  and do not open a pull request just to avoid the stop.
 
 ## 4. Record the pull request and its worktree
 
@@ -180,7 +181,26 @@ outside `$GROK_HOME`. Otherwise search the documented install layout
 `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`):
 
 ```bash
-COORDINATOR="$(find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" -path '*/scripts/review_pr.py' 2>/dev/null | head -n1)"
+COORDINATOR="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
+import sys
+from pathlib import Path
+
+plugin_root, grok_home = sys.argv[1], sys.argv[2]
+relative = Path("scripts") / "review_pr.py"
+if plugin_root:
+    candidate = Path(plugin_root) / relative
+    if not candidate.is_file():
+        raise SystemExit(f"coordinator was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("coordinator was not found under $GROK_HOME/installed-plugins/kanban-*")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+PY
+)"
 ```
 
 If that leaves `$COORDINATOR` empty, stop and report it. Never fall back to a

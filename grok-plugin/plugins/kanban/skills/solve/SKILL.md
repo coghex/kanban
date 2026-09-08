@@ -98,7 +98,26 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Grok invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory this session loaded, whether a hashed install or a local marketplace source outside `$GROK_HOME`. Otherwise search the documented install layout `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`). Never search a fabricated `$GROK_HOME/plugins/user/kanban` path, and never resolve a checkout-relative copy:
 
    ```bash
-   TRUSTED_SPEC="$(find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" -path '*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1)"
+   TRUSTED_SPEC="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
+import sys
+from pathlib import Path
+
+plugin_root, grok_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+if plugin_root:
+    candidate = Path(plugin_root) / relative
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("trusted helper was not found under $GROK_HOME/installed-plugins/kanban-*")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+PY
+)"
    python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>
    ```
 

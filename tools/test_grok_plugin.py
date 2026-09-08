@@ -37,10 +37,7 @@ GROK_ORIGIN = "<!-- pr-origin:grok -->"
 CLAUDE_ORIGIN = "<!-- pr-origin:claude -->"
 CODEX_ORIGIN = "<!-- pr-origin:codex -->"
 
-COORDINATOR_LOOKUP = (
-    'find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" '
-    "-path '*/scripts/review_pr.py' 2>/dev/null | head -n1"
-)
+COORDINATOR_LOOKUP = 'Path("scripts") / "review_pr.py"'
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
@@ -55,7 +52,7 @@ class PluginLayoutTests(unittest.TestCase):
     def test_the_plugin_manifest_declares_version_1_0_1(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.1")
+        self.assertEqual(document["version"], "1.0.2")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -113,8 +110,9 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn("--expected-route codex", text)
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
-        self.assertIn("does not package\n  /push-docs", text)
+        self.assertIn("does not package /push-docs", text)
         self.assertNotIn("land it\n  with /push-docs", text)
+        self.assertIn("Do\n  not reclaim the issue", text)
 
     def test_autosolve_never_invokes_claude(self):
         text = AUTOSOLVE.read_text(encoding="utf-8")
@@ -143,6 +141,8 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn("Never fall back to a\nClaude or Codex plugin path", text)
         self.assertIn("installed-plugins/kanban-<hash>", text)
         self.assertIn("$GROK_PLUGIN_ROOT", text)
+        self.assertIn("ambiguous Kanban installs", text)
+        self.assertIn('glob("kanban-*/" + relative.as_posix())', text)
 
 
 def load_grok_review_pr():

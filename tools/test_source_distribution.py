@@ -283,7 +283,7 @@ EXCLUDED_TRACKED_PATHS = (
 
 # The files each provider's `plugin marketplace add` reads. They are the only
 # tracked bundle files under dot-prefixed directories -- the one glob-semantics
-# detail whose silent change would strand both bundles while every other bundle
+# detail whose silent change would strand all three bundles while every other bundle
 # file still shipped -- so they are asserted by exact name.
 PROVIDER_MANIFESTS = (
     "claude-plugin/.claude-plugin/marketplace.json",
@@ -300,13 +300,13 @@ PROVIDER_MANIFESTS = (
 # and "the tree ships" is the guarantee that was already true while these files
 # existed only under tools/. Naming them here is what makes an unpacked release
 # prove it carries them.
-# The model-roster reader joins them for BOTH bundles since issue #572: each
-# coordinator loads a copy from beside itself to read the roster's loaded
-# provider set, which is what decides who reviews a pull request. What the two
-# do with it still differs -- the Claude copy resolves the `pr_review` cells
-# and pins them, the Codex copy resolves no cell and passes no model or effort
-# (D-2) -- but a release that shipped either coordinator without its reader
-# would install a workflow that cannot route at all.
+# The model-roster reader joins them for all three bundles since issue #572:
+# each coordinator loads a copy from beside itself to read the roster's loaded
+# provider set, which is what decides who reviews a pull request. What they
+# do with it still differs -- the Claude and Grok copies resolve the
+# `pr_review` cells and pin them, the Codex copy resolves no cell and passes
+# no model or effort (D-2) -- but a release that shipped a coordinator without
+# its reader would install a workflow that cannot route at all.
 # Issue #574's janitor census joins them on the same terms: it is the janitor
 # workflow's whole read side, and it loads a configuration module from beside
 # itself the way the publication module does, so a bundle that shipped the

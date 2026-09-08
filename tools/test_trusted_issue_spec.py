@@ -72,9 +72,28 @@ CODEX_HELPER_LOOKUP = (
     "-path '*/kanban/*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
 )
 CLAUDE_HELPER_REFERENCE = '"${CLAUDE_PLUGIN_ROOT}/scripts/trusted_issue_spec.py"'
+GROK_HELPER_PYTHON = '''import sys
+from pathlib import Path
+
+plugin_root, grok_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+if plugin_root:
+    candidate = Path(plugin_root) / relative
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if not matches:
+    raise SystemExit("trusted helper was not found under $GROK_HOME/installed-plugins/kanban-*")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+'''
 GROK_HELPER_LOOKUP = (
-    'find "${GROK_PLUGIN_ROOT:-${GROK_HOME:-$HOME/.grok}/installed-plugins}" '
-    "-path '*/skills/solve/scripts/trusted_issue_spec.py' 2>/dev/null | head -n1"
+    'python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<\'PY\'\n'
+    + GROK_HELPER_PYTHON
+    + "PY"
 )
 
 # Every value GitHub documents for author_association. None of them grants a
@@ -757,56 +776,45 @@ class InstalledResolutionTests(unittest.TestCase):
         target.chmod(0o755)
         return target
 
+    def run_locator(self, plugin_root: str, grok_home: str):
+        return subprocess.run(
+            ["python3", "-", plugin_root, grok_home],
+            input=GROK_HELPER_PYTHON,
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+        )
+
     def test_the_grok_skill_declares_the_lookup_it_is_tested_with(self):
         self.assertIn(
-            GROK_HELPER_LOOKUP,
+            GROK_HELPER_PYTHON,
             GROK_SOLVE.read_text(encoding="utf-8"),
-            "the Grok solve skill must prefer $GROK_PLUGIN_ROOT, else the hashed install",
+            "the Grok solve skill must prefer $GROK_PLUGIN_ROOT, else one hashed install",
         )
 
     def test_the_grok_lookup_resolves_from_an_explicit_grok_home(self):
         home = self.root / "grok-home"
         expected = self.install_grok_bundle(home)
-        proc = subprocess.run(
-            ["bash", "-c", GROK_HELPER_LOOKUP],
-            capture_output=True,
-            text=True,
-            cwd=str(self.workdir),
-            env={**os.environ, "GROK_HOME": str(home / ".grok"), "HOME": str(home)},
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_the_grok_lookup_falls_back_to_the_default_under_home(self):
         home = self.root / "grok-default-home"
         expected = self.install_grok_bundle(home)
-        env = {key: value for key, value in os.environ.items() if key != "GROK_HOME"}
-        env["HOME"] = str(home)
-        proc = subprocess.run(
-            ["bash", "-c", GROK_HELPER_LOOKUP],
-            capture_output=True,
-            text=True,
-            cwd=str(self.workdir),
-            env=env,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_the_resolved_grok_copy_runs_from_the_worked_repository(self):
         home = self.root / "grok-runnable-home"
-        self.install_grok_bundle(home)
-        script = (
-            f'TRUSTED_SPEC="$({GROK_HELPER_LOOKUP})"\n'
-            'python3 "$TRUSTED_SPEC" --self-test\n'
-        )
+        expected = self.install_grok_bundle(home)
         proc = subprocess.run(
-            ["bash", "-c", script],
+            ["python3", str(expected), "--self-test"],
             capture_output=True,
             text=True,
             cwd=str(self.workdir),
-            env={**os.environ, "GROK_HOME": str(home / ".grok"), "HOME": str(home)},
             timeout=60,
             stdin=subprocess.DEVNULL,
         )
@@ -818,20 +826,41 @@ class InstalledResolutionTests(unittest.TestCase):
         home.mkdir()
         expected = self.install_marketplace_source(self.root)
         plugin_root = expected.parents[3]  # .../plugins/kanban
-        proc = subprocess.run(
-            ["bash", "-c", GROK_HELPER_LOOKUP],
-            capture_output=True,
-            text=True,
-            cwd=str(self.workdir),
-            env={
-                **os.environ,
-                "GROK_HOME": str(home / ".grok"),
-                "HOME": str(home),
-                "GROK_PLUGIN_ROOT": str(plugin_root),
-            },
-            timeout=60,
-            stdin=subprocess.DEVNULL,
+        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_grok_lookup_fails_closed_when_two_kanban_installs_match(self):
+        home = self.root / "grok-ambiguous"
+        first = self.install_grok_bundle(home)
+        second_dir = first.parents[3].parent / "kanban-aaaaaaaa"
+        second = (
+            second_dir / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
         )
+        second.parent.mkdir(parents=True)
+        second.write_bytes(GROK_HELPER.read_bytes())
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_grok_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
+        home = self.root / "grok-competitor"
+        expected = self.install_grok_bundle(home)
+        other = (
+            home
+            / ".grok"
+            / "installed-plugins"
+            / "otherplugin-deadbeef"
+            / "skills"
+            / "solve"
+            / "scripts"
+            / "trusted_issue_spec.py"
+        )
+        other.parent.mkdir(parents=True)
+        other.write_bytes(GROK_HELPER.read_bytes())
+        proc = self.run_locator("", str(home / ".grok"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
 

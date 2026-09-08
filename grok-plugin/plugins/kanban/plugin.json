@@ -1,6 +1,6 @@
 {
   "name": "kanban",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Kanban's Grok-side workflow bundle: /solve claims and implements a GitHub issue through a grok-origin pull request, and /autosolve drives Codex review of that pull request until approval. Never invokes Claude.",
   "author": {
     "name": "Kanban"
