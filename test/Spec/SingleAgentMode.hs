@@ -368,12 +368,16 @@ reviewSpec = describe "the embedded review it starts" $ do
       | variant <- variants
       ]
 
-  it "says the coordinator authors every amendment itself, and that the tool is absent" $
+  it "says the coordinator authors every supported amendment itself, refuses Kimi, and has no handoff tool" $
     sequence_
       [ (variant.variantName, map (`Data.Text.isInfixOf` instructionsFor variant) claims)
-          `shouldBe` (variant.variantName, [True, True])
+          `shouldBe` (variant.variantName, [True, True, True])
       | variant <- variants,
-        let claims = ["author every amendment yourself", "There is no " <> claudeToolName <> " tool in this thread"]
+        let claims =
+              [ "you author each Codex-origin, Claude-origin, or unmarked amendment yourself",
+                "Kimi-origin issue revision is not a board action",
+                "There is no " <> claudeToolName <> " tool in this thread"
+              ]
       ]
 
   -- The negative control: dual mode still describes the handoff, and still

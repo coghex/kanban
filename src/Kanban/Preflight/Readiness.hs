@@ -182,8 +182,10 @@ reviewBackendAction = ActionIssueRevision IssueOriginCodex
 -- | Which brand authors a revision's amendment content. A Claude-origin
 -- issue routes that authoring through @kanban_run_claude@, so its revision
 -- needs the Claude CLI as well as the Codex coordinator thread; a
--- Codex-origin, kimi-origin, or unmarked issue is authored by the
--- coordinator itself.
+-- Codex-origin or unmarked issue is authored by the coordinator itself.
+-- Kimi is retained as a total constructor here, but
+-- 'issueRevisionUnsupported' refuses it before this routing is consulted and
+-- the live coordinator prompt repeats that refusal against cache races.
 -- Mirrors the REVISION rule in
 -- 'Kanban.Review.Prompts.reviewDeveloperInstructions'.
 revisionAuthorBrand :: IssueOrigin -> SolverBrand

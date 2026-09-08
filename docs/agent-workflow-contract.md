@@ -1305,9 +1305,11 @@ reimplement the removal, and `--check` remains read-only.
   the Claude one `kanban_run_claude` uses for a Claude-origin issue in dual
   mode; neither needs a packaged bundle, since both run their providers
   directly. Kimi-origin issue revision is refused before this dependency
-  boundary because Kimi is not a spawned provider. Auto-solve needs both
-  brands, since it reviews its own pull request with the opposite one, and so
-  do `pr-revise` and `repair`: each
+  boundary because Kimi is not a spawned provider. The embedded coordinator
+  repeats the refusal after reading the live issue, without commenting or
+  mutating labels, so a marker added after the board cached the issue cannot
+  reopen that path. Auto-solve needs both brands, since it reviews its own pull
+  request with the opposite one, and so do `pr-revise` and `repair`: each
   runs on the PR's own brand and spawns the opposite one for its single
   nested canonical rereview (§2.2, §2.7), which is a direct provider call
   and therefore needs that brand's executable and sign-in but not its

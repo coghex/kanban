@@ -985,7 +985,10 @@ Each `r` invocation advances exactly one durable label-driven stage:
    `reviewed:revised` without approving. Kimi-origin issue revision is refused
    at the board and action-registry boundaries in every operating mode because
    Kimi is not a spawned provider and Codex is already its dual-mode reviewer;
-   the Kimi session that filed the issue authors the amendment instead.
+   the Kimi session that filed the issue authors the amendment instead. As a
+   second line of defence against the marker changing after the board cached
+   the issue, the embedded coordinator re-reads the live body and stops without
+   commenting or changing labels when it finds a Kimi marker during REVISION.
 3. `reviewed:revised` routes back to the same opposite-brand reviewer set. A
    passing rereview replaces it with `reviewed:approve`; a failing rereview
    returns to `reviewed:changes` for another cycle.
