@@ -90,7 +90,7 @@ spec = do
           workCards = filter (not . isTrackerHeaderEntry) (concat (Map.elems columns))
       map (itemNumber . entryItem) workCards `shouldBe` [3]
       case Map.findWithDefault [] Issues columns of
-        [TrackerHeader rendered, standalone] -> do
+        [standalone, TrackerHeader rendered] -> do
           rendered.trackerIssue.issueNumber `shouldBe` 12
           rendered.trackerTotal `shouldBe` 0
           rendered.trackerDiagnostics `shouldBe` zeroChildDiagnostics
@@ -111,7 +111,7 @@ spec = do
           configured = zeroChildTracker {issueNumber = 20, issueLabels = [Label "tracker" "5319e7"]}
           Board columns = deriveBoard config (RepoSnapshot [configured, zeroChildTracker] [] epoch)
       case Map.findWithDefault [] Issues columns of
-        [TrackerHeader rendered, epicLabelled] -> do
+        [epicLabelled, TrackerHeader rendered] -> do
           rendered.trackerIssue.issueNumber `shouldBe` 20
           rendered.trackerDiagnostics `shouldBe` zeroChildDiagnostics
           -- "epic" is not configured here, so that issue is ordinary work.
@@ -166,7 +166,7 @@ spec = do
           problem = (baseIssue 4 []) {issueLabels = [Label "blocked" "d73a4a"]}
           snapshot = RepoSnapshot [tracker, baseIssue 2 [], revised, problem] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
-      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [3, 2, 4]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [3, 4, 2]
 
     it "promotes tracker groups containing rereview issues and puts those children first" $ do
       let revisedTracker =
@@ -246,10 +246,10 @@ spec = do
         values -> expectationFailure ("unexpected multi-tracked entries: " <> show values)
 
     -- attentionKey orders on two independent booleans (problem, approved)
-    -- before age, so an item carrying both a changes-requested and an
+    -- before number, so an item carrying both a changes-requested and an
     -- approval label sits in its own tier rather than collapsing into either
     -- one alone.
-    it "orders standalone issues by all four problem/approved tiers, then by age within each tier" $ do
+    it "orders standalone issues by all four problem/approved tiers, then by number within each tier" $ do
       let older = epoch
           newer = addUTCTime 3600 epoch
           problemLabel = Label "reviewed:changes" "d73a4a"
@@ -275,8 +275,8 @@ spec = do
     -- of its tier, which would split the four tiers across two columns.
     -- Keeping every fixture a draft holds them all in Reviewing (drafts stay
     -- there no matter their approval label), so the same four-tier,
-    -- age-ordered assertion applies to pull requests too.
-    it "orders standalone pull requests by all four problem/approved tiers, then by age within each tier" $ do
+    -- number-ordered assertion applies to pull requests too.
+    it "orders standalone pull requests by all four problem/approved tiers, then by number within each tier" $ do
       let older = epoch
           newer = addUTCTime 3600 epoch
           approvedLabel = Label "reviewed:approve" "0e8a16"
@@ -301,7 +301,7 @@ spec = do
     -- trackerGroupKey reads the same two booleans off a group's tracked
     -- children rather than the tracker issue itself, so the "both" tier here
     -- comes from two different children each contributing one flag.
-    it "orders tracker groups by the four problem/approved tiers, then by the tracker's own age within a tier" $ do
+    it "orders tracker groups by the four problem/approved tiers, then by the tracker's own number within a tier" $ do
       let older = epoch
           newer = addUTCTime 3600 epoch
           problemLabel = Label "reviewed:changes" "d73a4a"
@@ -347,14 +347,34 @@ spec = do
           Board columns = deriveBoard defaultWorkflowConfig snapshot
       map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [1, 2]
 
-    -- sortOn is stable, so standalone issues sharing an identical attention
-    -- key -- no labels, the same creation time -- keep the order the
-    -- snapshot listed them in rather than picking up an incidental
-    -- numeric or canonical-identity ordering.
-    it "preserves snapshot input order for standalone issues with equal attention keys" $ do
-      let snapshot = RepoSnapshot [baseIssue 7 [], baseIssue 3 [], baseIssue 9 []] [] epoch
+    it "orders equal-priority standalone issues numerically regardless of snapshot order or creation time" $ do
+      let snapshot = RepoSnapshot [baseIssue 7 [], (baseIssue 3 []) {issueCreatedAt = addUTCTime 60 epoch}, baseIssue 9 []] [] epoch
           Board columns = deriveBoard defaultWorkflowConfig snapshot
-      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [7, 3, 9]
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [3, 7, 9]
+
+    it "interleaves populated and childless epics with cards by epic number, keeping expanded children together" $ do
+      let tracker = (nativeTrackerIssue 20 [localSubIssue 91 False, localSubIssue 92 False] 0 2) {issueCreatedAt = addUTCTime 60 epoch}
+          empty = nativeTrackerIssue 40 [] 0 0
+          snapshot = RepoSnapshot [empty, baseIssue 50 [], baseIssue 92 [], tracker, baseIssue 10 [], baseIssue 91 [], baseIssue 30 []] [] epoch
+          board@(Board columns) = deriveBoard defaultWorkflowConfig snapshot
+          entries = Map.findWithDefault [] Issues columns
+      map (itemNumber . entryItem) entries `shouldBe` [10, 91, 92, 30, 40, 50]
+      visibleSelectionRows Set.empty board Issues `shouldBe` [0, 1, 3, 4, 5]
+      visibleSelectionRows (Set.singleton 20) board Issues `shouldBe` [0, 1, 2, 3, 4, 5]
+
+    it "shares rereview and problem tiers between epics and standalone cards" $ do
+      let tracker = (nativeTrackerIssue 20 [localSubIssue 91 False] 0 1)
+          revised number = (baseIssue number []) {issueLabels = [Label "reviewed:revised" "8250df"]}
+          problem = (baseIssue 5 []) {issueLabels = [Label "blocked" "d73a4a"]}
+          snapshot = RepoSnapshot [tracker, revised 91, revised 30, problem, revised 10] [] epoch
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Issues columns) `shouldBe` [10, 91, 30, 5]
+
+    it "places a PR group by its epic number among standalone PRs" $ do
+      let tracker = nativeTrackerIssue 20 [localSubIssue 91 False] 0 1
+          snapshot = RepoSnapshot [tracker, baseIssue 91 []] [basePullRequest 30 [] False [], basePullRequest 95 [91] False [], (basePullRequest 10 [] False []) {pullRequestCreatedAt = addUTCTime 60 epoch}] epoch
+          Board columns = deriveBoard defaultWorkflowConfig snapshot
+      map (itemNumber . entryItem) (Map.findWithDefault [] Reviewing columns) `shouldBe` [10, 95, 30]
 
   describe "epic collapse selection normalization" $ do
     it "moves another column's remembered row to the tracker's first row there once collapse hides it" $ do

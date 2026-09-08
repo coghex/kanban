@@ -256,9 +256,8 @@ admittedSpec = describe "criteria admitting completed history" $ do
     map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (2, 2)]
     concat [entriesForBoard filtered column | column <- [Active, Reviewing, Done]] `shouldBe` []
 
-  -- A child whose epic the criteria hide is a standalone card, and §12 puts
-  -- every group ahead of every standalone card.
-  it "moves a demoted child behind the groups it no longer belongs to" $ do
+  -- A child whose epic the criteria hide is sorted by its own number.
+  it "sorts a demoted child among surviving groups by its own number" $ do
     let snapshot =
           RepoSnapshot
             [ (epicIssue 870 [871]) {issueLabels = [Label "epic" "5319e7", Label "reviewed:changes" "b60205"]},
@@ -276,7 +275,7 @@ admittedSpec = describe "criteria admitting completed history" $ do
             snapshot
             Nothing
     map summarize (entriesForBoard filtered Issues)
-      `shouldBe` [("tracked", 876), ("standalone", 871)]
+      `shouldBe` [("standalone", 871), ("tracked", 876)]
 
   -- Values are ORed inside a facet and the facets ANDed, so an empty facet is
   -- a real empty result rather than an implicit reset.
@@ -326,17 +325,16 @@ orderingSpec = describe "ordering with settled cards" $ do
             [ closed (epicIssue 880 [881]),
               updatedAfter 120 (closedIssue 881),
               closed (epicIssue 890 [891]),
-              updatedAfter 900 (closedIssue 891)
+              updatedAfter 900 (closedIssue 891),
+              updatedAfter 300 (closedIssue 889)
             ]
             []
             epoch
         board = visibleFrom everyLifecycle snapshot (Just history)
-    -- The live group leads, then #890's group (updated 900s in) ahead of
-    -- #880's (120s in), and the open standalone card sits between the group
-    -- and standalone partitions exactly as §12 already places it.
+    -- All live work leads, followed by completed groups in recency order.
     trackerNumbers (entriesForBoard board Issues)
-      `shouldBe` [Just 870, Just 890, Just 880, Nothing]
-    numbersIn board Issues `shouldBe` [871, 891, 881, 879]
+      `shouldBe` [Just 870, Nothing, Just 890, Nothing, Just 880]
+    numbersIn board Issues `shouldBe` [871, 879, 891, 889, 881]
 
   -- "Wholly completed" is a property of the whole group rather than of one
   -- column's slice of it: a live member anywhere keeps the group live.

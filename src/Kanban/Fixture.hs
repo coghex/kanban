@@ -45,8 +45,8 @@ fixtureSnapshot =
   RepoSnapshot
     { snapshotIssues =
         [ -- Two trackers, so a board drawn from this snapshot can show an
-          -- expanded one beside a collapsed one. Their children are their
-          -- own, which keeps every card above standalone.
+          -- expanded one beside a collapsed one, interleaved with ordinary
+          -- cards by attention tier and tracker number.
           tracker 700 "Persistence contract rollout" ["[x] #711 — A1: Save envelope", "[ ] #712 — A2: Cache reader"],
           tracker 701 "Input routing hardening" ["[ ] #721 — B1: Pointer capture"],
           issue 711 "Adopt the versioned save envelope" "Write the envelope header ahead of the payload so a partial write is detectable on load." [label "feature" "a2eeef"] [],

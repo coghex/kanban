@@ -188,6 +188,11 @@ The filter has four groups of checkboxes:
 - **Workflow**: Changes, Problems, Approved, Other
 - **Structure**: Epic groups, Standalone
 
+Epics start collapsed and share numeric ordering with ordinary cards within
+priority tiers, rather than occupying a separate block at the top. To focus on
+epics and their children, leave **Epic groups** checked and uncheck
+**Standalone**.
+
 Everything starts checked except Closed, which is why Kanban opens on the live
 open board. Checking or unchecking a box changes the cards straight away; there
 is nothing to apply, and nothing is sent to GitHub. Inside a group the checked
