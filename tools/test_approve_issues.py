@@ -68,6 +68,22 @@ class ReviewArgumentTests(unittest.TestCase):
                     approve_issues.positive_issue_number(value)
 
 
+class ReviewPromptContractTests(unittest.TestCase):
+    def test_approve_output_constraints_match_the_validator(self):
+        prompt = approve_issues.review_prompt(
+            approve_issues.CODEX_REVIEWER, {}, mode="initial"
+        )
+        self.assertIn(
+            "`open_decisions` and `recommended_disposition` must both be empty "
+            "for APPROVE",
+            prompt,
+        )
+        properties = approve_issues.REVIEW_SCHEMA["properties"]
+        for field in ("open_decisions", "recommended_disposition"):
+            with self.subTest(field=field):
+                self.assertIn("Must be empty for APPROVE", properties[field]["description"])
+
+
 class PortableDefaultPathTests(unittest.TestCase):
     """The managed locations this backend freezes into module constants.
 

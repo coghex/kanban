@@ -375,9 +375,17 @@ REVIEW_SCHEMA: dict[str, Any] = {
         "corrections": {"type": "array", "items": {"type": "string"}},
         "spec_additions": {"type": "array", "items": {"type": "string"}},
         "supporting_context": {"type": "array", "items": {"type": "string"}},
-        "open_decisions": {"type": "array", "items": {"type": "string"}},
+        "open_decisions": {
+            "type": "array",
+            "description": "Human decisions blocking readiness. Must be empty for APPROVE.",
+            "items": {"type": "string"},
+        },
         "recommended_disposition": {
             "type": "array",
+            "description": (
+                "Human disposition required by INVALID or CHANGES_REQUESTED. "
+                "Must be empty for APPROVE."
+            ),
             "items": {"type": "string"},
         },
     },
@@ -1981,7 +1989,7 @@ Verdicts:
 - CHANGES_REQUESTED: a real open decision, unresolved contradiction, or scope problem requires human action. Do not use this merely because you found corrections that your comment can fully resolve.
 - INVALID: use only when verified evidence shows the issue is fundamentally unnecessary or wrong: already implemented, duplicate, impossible premise, or requested behavior should not exist. INVALID stops the entire daemon, so provide decisive evidence and a recommended disposition.
 
-Every list item must stand alone and include its evidence or grounding pointer. `open_decisions` must be empty for APPROVE. `recommended_disposition` must be non-empty for INVALID. Return only the schema-conforming result.
+Every list item must stand alone and include its evidence or grounding pointer. `open_decisions` and `recommended_disposition` must both be empty for APPROVE. `recommended_disposition` must be non-empty for INVALID. Return only the schema-conforming result.
 
 DOSSIER:
 {json.dumps(dossier, indent=2, ensure_ascii=False)}
