@@ -241,6 +241,8 @@ spec = do
       -- The backend raises on a body declaring conflicting origins before reaching any
       -- reviewer, so preflight must not demand a provider for it either.
       it "mirrors the backend's conflicting-marker case" $ do
+        -- All 6 pairwise combinations of the 4 supported origins
+        -- (claude, codex, kimi, google):
         let conflicts =
               [ "<!-- issue-origin:claude -->\n<!-- issue-origin:codex -->",
                 "<!-- issue-origin:kimi -->\n<!-- issue-origin:codex -->",

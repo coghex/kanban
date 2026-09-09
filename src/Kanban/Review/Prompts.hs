@@ -220,7 +220,7 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
         "INITIAL REVIEW and REREVIEW are owned by the canonical approve-issues.py v2 backend and must never be performed in this thread. This thread performs REVISION only."
       ]
 
-    -- The board and action registry refuse this origin before launch. This
+    -- The board and action registry refuse these origins before launch. This
     -- live-issue rule is the second line of defence if the issue gained its
     -- marker after the board cached it but before this coordinator read it.
     externalRefusalLines =
@@ -232,7 +232,7 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
     -- described at all. An install with one provider has one author for every
     -- supported origin, and naming a second agent to a thread that has no tool
     -- to reach it -- or no such agent loaded -- would describe a handoff it
-    -- cannot perform. Kimi is refused above rather than assigned an author.
+    -- cannot perform. Kimi and Google are refused above rather than assigned an author.
     authoringLines
       | claudeRevisionAvailable roster coordinator =
           [ "Whenever revision requires "

@@ -991,7 +991,7 @@ Each `r` invocation advances exactly one durable label-driven stage:
    authors the amendment instead. As a
    second line of defence against the marker changing after the board cached
    the issue, the embedded coordinator re-reads the live body and stops without
-   commenting or changing labels when it finds a Kimi marker during REVISION.
+   commenting or changing labels when it finds a Kimi or Google marker during REVISION.
 3. `reviewed:revised` routes back to the same opposite-brand reviewer set. A
    passing rereview replaces it with `reviewed:approve`; a failing rereview
    returns to `reviewed:changes` for another cycle.

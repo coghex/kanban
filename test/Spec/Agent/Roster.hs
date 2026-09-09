@@ -926,7 +926,7 @@ spec = do
         `shouldBe` "claude · Sonnet 5 high"
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high", without reviving
-      -- the Kimi amendment path the board and registry refuse.
+      -- the Kimi or Google amendment path the board and registry refuse.
       let instructions = reviewDeveloperInstructions defaultWorkflowConfig defaultRoster CodexProvider
       instructions
         `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra xhigh."

@@ -911,7 +911,7 @@ issueReviewStage config issue = reviewStageForLabels config (map (.labelName) is
 -- The registry repeats this at its own dispatch boundary, so a refresh or a
 -- headless caller cannot race past the press-time decision. Reattachment stays
 -- ahead of the refusal, matching pull-request sessions: a worker an older
--- release already started remains observable, but no new Kimi worker launches.
+-- release already started remains observable, but no new Kimi or Google worker launches.
 issueReviewStartRefusal :: Issue -> ReviewStage -> Maybe Text
 issueReviewStartRefusal issue stage
   | stage == IssueRevision,
