@@ -146,7 +146,14 @@ runGh guard repository arguments = afterLaunch $ do
         -- has nothing left to cover.
         Right () -> do
           exitCode <- waitForProcess processHandle
-          dropGhGroup guard repository groupPid
+          -- Deliberately not turned into a cleanup failure the way an
+          -- abandoned group's undropped entry is. 'settleGroup' has just
+          -- proven this group empty and this run is returning gh's real
+          -- answer, so an entry that outlives it names nothing that is
+          -- running and the next fetch's reclaim re-verifies the pgid and
+          -- clears it. Failing here would discard a page gh actually
+          -- answered, over a record that is stale rather than live.
+          void (dropGhGroup guard repository groupPid)
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
         -- not exiting, and a descendant can do the first without the second.

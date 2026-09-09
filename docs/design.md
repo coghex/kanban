@@ -2008,10 +2008,12 @@ path it already has for a precondition it could not verify: the run ends
 without writing a blocked lifecycle, and the worker refuses its turn as
 unverified. Neither is ever reported as the target having moved or gone, which
 is a different reading and a different repair. A timeout is published as one
-only when the interrupted read's own cleanup proved its `gh` process group
-gone, which is the same act that takes the group off the durable record; a
-cleanup that could not prove it leaves both that finding and the record as it
-made them, and is reported instead.
+only when the interrupted read's own cleanup both proved its `gh` process group
+gone and took that group off the durable record. Either half failing is
+reported in its place, and leaves the record naming whatever it names, so the
+next fetch re-verifies that entry rather than starting a `gh` beside it — a
+group killed but still recorded is no more a clean timeout than one that was
+never confirmed dead.
 
 Completed history is acquired the same way, in the background. A second
 traversal follows the closed issues and the closed-or-merged pull requests, each

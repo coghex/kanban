@@ -28,6 +28,8 @@
 -- hang the suite.
 module Spec.GitHub.Precondition (spec) where
 
+import Control.Exception (finally)
+import Control.Monad (when)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -42,7 +44,8 @@ import Spec.Support.Env
     withFakeOnPath,
     withTemporaryCacheRoot
   )
-import System.Directory (createDirectoryIfMissing, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, withCurrentDirectory)
+import System.Posix.Files (setFileMode)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
 import System.Process (callProcess, readProcessWithExitCode)
@@ -134,6 +137,32 @@ spec = describe "the one-item precondition read" $ do
 
   it "ends a non-answering pull-request read within the configured timeout, cleaned up" $
     boundsANonAnsweringRead (PullRequestId 655) "pull request #655"
+
+  -- The other half of requirement 1. The entry going is what makes a timeout
+  -- clean, so a drop that could not happen must not be published as one --
+  -- otherwise the caller reports an ordinary timeout while the record still
+  -- names a group, which is the state the record exists to prevent anything
+  -- spawning beside.
+  it "refuses to call it a clean timeout when the record entry could not be dropped" $
+    withFixtureRunning recordSealingGh $ \fixture ->
+      withRestoredRecordDirectory fixture $ do
+        bounded <- timeout outerDeadlineMicros (observingWithin 1 fixture (IssueId 844))
+        case bounded of
+          Nothing -> expectationFailure "the read never ended; it is not bounded by the configured timeout"
+          Just (guard, observed) -> do
+            case observed of
+              Right precondition ->
+                expectationFailure ("a gh that never answered produced " <> show precondition)
+              Left failure -> do
+                -- Not RequestTimedOut, and it says which half failed: the
+                -- group was killed, the entry naming it was not removed.
+                failure.providerErrorKind `shouldBe` RequestFailed
+                failure.providerErrorMessage
+                  `shouldSatisfy` Text.isInfixOf "durable record entry could not be dropped"
+            -- And the evidence is still there, because nothing may delete it
+            -- to make the read look bounded.
+            leaderPid <- readMarkerPid (fixtureRoot fixture </> "gh.pid")
+            ghGroupIsRecorded guard (readRepository fixture) leaderPid `shouldReturn` True
 
   -- Requirement 4, with teeth. This gh answers a whole second after it is
   -- asked -- comfortably inside a ten-second budget and comfortably outside a
@@ -235,6 +264,35 @@ withFixtureRunning ghBody action =
       . withFakeOnPath root ("gh", ghBody)
       $ action Fixture {fixtureRoot = root, fixtureResponses = responses, fixtureArgv = argv}
 
+-- | 'hangingGh', which additionally seals the directory the durable @gh@
+-- record lives in against writes.
+--
+-- Read and traverse are left alone, so the entry stays visible to an example
+-- and to the cleanup; only unlinking and rewriting it are refused. The kill
+-- therefore succeeds and only the removal fails, which is the one combination
+-- this is for.
+recordSealingGh :: [ByteString.ByteString]
+recordSealingGh =
+  hangingGhThen
+    [ByteString.pack ("chmod 500 \"$KANBAN_TEST_GH_ROOT/" <> recordDirectorySuffix <> "\"")]
+
+-- | Where 'withFixtureRunning' puts the durable record, relative to the
+-- fixture root: @$XDG_CACHE_HOME@ is @<root>\/cache@ and 'Kanban.Cache' keys
+-- the record under @kanban\/gh-groups@ beneath it.
+recordDirectorySuffix :: String
+recordDirectorySuffix = "cache" </> "kanban" </> "gh-groups"
+
+-- | Puts the record directory back the way it was found, so the fixture's own
+-- teardown can still delete the tree it sealed.
+withRestoredRecordDirectory :: Fixture -> IO result -> IO result
+withRestoredRecordDirectory fixture =
+  (`finally` restore)
+  where
+    directory = fixtureRoot fixture </> recordDirectorySuffix
+    restore = do
+      sealed <- doesDirectoryExist directory
+      when sealed (setFileMode directory 0o700)
+
 -- | 'resolvingGh', a whole second late.
 slowResolvingGh :: [ByteString.ByteString]
 slowResolvingGh = "sleep 1" : resolvingGh
@@ -253,13 +311,25 @@ outerDeadlineMicros = 45 * 1000 * 1000
 -- the only thing added: both are recorded before it settles in to wait, so an
 -- example can ask the process table about them after the read has reported.
 hangingGh :: [ByteString.ByteString]
-hangingGh =
+hangingGh = hangingGhThen []
+
+-- | The same, running @afterRecording@ in the window between writing those
+-- pids down and settling in to wait.
+--
+-- That window is the useful one, and it is named rather than reached by
+-- counting lines: the record entry is written before the child is released
+-- from its spawn barrier, and the deadline that abandons the read cannot fire
+-- until after that, so anything here happens with the entry on disk and the
+-- cleanup still ahead.
+hangingGhThen :: [ByteString.ByteString] -> [ByteString.ByteString]
+hangingGhThen afterRecording =
   [ "trap '' TERM",
     "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
     "printf '%s\\n' \"$!\" > \"$KANBAN_TEST_GH_ROOT/helper.pid\"",
-    "printf '%s\\n' \"$$\" > \"$KANBAN_TEST_GH_ROOT/gh.pid\"",
-    "while :; do sleep 1; done"
+    "printf '%s\\n' \"$$\" > \"$KANBAN_TEST_GH_ROOT/gh.pid\""
   ]
+    <> afterRecording
+    <> ["while :; do sleep 1; done"]
 
 -- | A @gh@ that resolves its repository the way the real one does: from
 -- @--repo@ when it is given one, and otherwise from the invoking directory's

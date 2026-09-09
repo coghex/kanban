@@ -208,6 +208,13 @@ clearCleanupFailure guard = writeIORef guard.ghGuardCleanupFailure Nothing
 -- reported as one — and written to the durable record, so the very next
 -- fetch re-verifies it before spawning anything, even if the dashboard is
 -- restarted in between.
+--
+-- A group this /did/ prove gone owes one more thing before the cleanup counts
+-- as clean: its entry has to leave that record. Removing it is a filesystem
+-- write like any other and can fail, and an entry that outlives the process it
+-- names is exactly what the next fetch holds back over — so a drop that did
+-- not happen is recorded on the guard too, as 'GuardRecorded', since the
+-- record is precisely what survived.
 abandonGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
 abandonGh guard repository (input, _, _, processHandle) = do
   let cleanupFailure = guard.ghGuardCleanupFailure
@@ -256,21 +263,46 @@ abandonGh guard repository (input, _, _, processHandle) = do
     -- block this thread and the refresh would never report anything at all.
     Right proven -> do
       void (try @IOException (waitForProcess processHandle))
-      mapM_ (dropGhGroup guard repository) spawnedPid
-      -- A finding this cleanup did not make is retracted only by evidence
-      -- this cleanup did make: proving the group empty. Otherwise the fetch's
-      -- own finding stands, since it saw things no longer observable here.
-      --
-      -- Retracting on `proven` matters as much as keeping it otherwise. A
-      -- cleanup that has just emptied the group and dropped its record has
-      -- left nothing to hold off for, and a board held off for nothing would
-      -- never refresh again.
-      when (proven || not alreadyReported) (writeIORef cleanupFailure Nothing)
+      undropped <- dropRecordedGroup spawnedPid
+      case undropped of
+        -- Killed, confirmed, and still named on disk. That is not a clean
+        -- cleanup: the entry the next fetch will re-verify is precisely the
+        -- one this could not remove, and a caller told the cleanup was clean
+        -- would publish an ordinary timeout over it. 'GuardRecorded' is exact
+        -- here rather than merely conservative — the record is what survived —
+        -- so the notice §17 renders points at a group a later run clears
+        -- itself once it confirms the pgid is unoccupied.
+        Just message -> writeIORef cleanupFailure (Just (GhCleanupFailure message GuardRecorded))
+        -- A finding this cleanup did not make is retracted only by evidence
+        -- this cleanup did make: proving the group empty. Otherwise the fetch's
+        -- own finding stands, since it saw things no longer observable here.
+        --
+        -- Retracting on `proven` matters as much as keeping it otherwise. A
+        -- cleanup that has just emptied the group and dropped its record has
+        -- left nothing to hold off for, and a board held off for nothing would
+        -- never refresh again.
+        Nothing -> when (proven || not alreadyReported) (writeIORef cleanupFailure Nothing)
   mapM_ (ignoreIOException . hClose) input
   where
     recordAndConfirm unconfirmed = do
       void (recordGhGroup guard repository unconfirmed)
       ghGroupIsRecorded guard repository unconfirmed.ownedProcessGroupPid
+
+    -- 'Nothing' when there is nothing to drop: an entry is keyed by the pid
+    -- captured before the handle was reaped, and without one there is no entry
+    -- this cleanup wrote to remove.
+    dropRecordedGroup Nothing = pure Nothing
+    dropRecordedGroup (Just groupPid) = do
+      dropped <- dropGhGroup guard repository groupPid
+      pure $ case dropped of
+        Right () -> Nothing
+        Left message ->
+          Just
+            ( "gh's process group "
+                <> Text.pack (show groupPid)
+                <> " was terminated but its durable record entry could not be dropped: "
+                <> message
+            )
 
 -- | Runs a cleanup that must not be cut short by the refresh timer.
 --
@@ -356,12 +388,27 @@ recordGhGroup guard repository group = withRecordLock guard $ do
   let owned = group {ownedProcessGroupOwner = guard.ghGuardRecordLock.ghRecordOwner}
   writeGhGroupRecord repository (owned : withoutGroup group.ownedProcessGroupPid existing)
 
-dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO ()
+-- | Takes one group off the durable record, reporting whether the record
+-- actually stopped naming it.
+--
+-- The outcome is returned rather than discarded because dropping the entry is
+-- half of what makes a cleanup clean: the group has to be gone from the
+-- machine /and/ gone from the record. Removing the file and rewriting it are
+-- both ordinary filesystem writes that can fail — an unwritable cache
+-- directory is enough — and a caller that took the removal on trust would
+-- report an ordinary timeout over an entry still sitting on disk, which is the
+-- one thing the record exists to stop.
+--
+-- Reporting the write's own outcome rather than re-reading the record
+-- afterwards is deliberate. 'recordedGhGroups' reads an unusable record as an
+-- empty one, so a re-read would answer \"not recorded\" for a record nobody
+-- could parse — fail-open in exactly the case that most needs the opposite.
+dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO (Either Text ())
 dropGhGroup guard repository groupPid = withRecordLock guard $ do
   existing <- recordedGhGroups repository
   case withoutGroup groupPid existing of
-    [] -> void (removeGhGroupRecord repository)
-    remaining -> void (writeGhGroupRecord repository remaining)
+    [] -> removeGhGroupRecord repository
+    remaining -> writeGhGroupRecord repository remaining
 
 withoutGroup :: Int -> [OwnedProcessGroup] -> [OwnedProcessGroup]
 withoutGroup groupPid = filter ((/= groupPid) . ownedProcessGroupPid)
