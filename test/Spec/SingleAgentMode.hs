@@ -128,7 +128,7 @@ everyRoute =
     action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
   ]
     <> [ (origin, action)
-       | origin <- [PullRequestGrok, PullRequestKimi],
+       | origin <- [PullRequestGrok, PullRequestKimi, PullRequestGoogle],
          action <- [PullRequestReview, PullRequestRereview]
        ]
 
@@ -167,6 +167,14 @@ routingSpec = describe "the pull-request actions it collapses" $ do
         action <- [PullRequestRevision, PullRequestRepair]
       ]
 
+  it "does not invent a provider for google-origin revision or repair" $
+    sequence_
+      [ (variant.variantName, action, externalOwnBrandUnsupported PullRequestGoogle action)
+          `shouldBe` (variant.variantName, action, True)
+      | variant <- variants,
+        action <- [PullRequestRevision, PullRequestRepair]
+      ]
+
   -- The cell as well as the brand. A launch records the provider it resolved
   -- through, so routing that moved without the lookup moving with it would
   -- spawn one provider on the other's model -- and the role still splits
@@ -194,6 +202,7 @@ routingSpec = describe "the pull-request actions it collapses" $ do
               (PullRequestClaude, _) -> ClaudeSolver
               (PullRequestGrok, _) -> CodexSolver
               (PullRequestKimi, _) -> CodexSolver
+              (PullRequestGoogle, _) -> CodexSolver
       ]
 
   -- Requirement 5 and D-12: the marker a solve stamps is unchanged, and it is
@@ -236,6 +245,7 @@ opposite PullRequestCodex = PullRequestClaude
 opposite PullRequestClaude = PullRequestCodex
 opposite PullRequestGrok = PullRequestGrok
 opposite PullRequestKimi = PullRequestKimi
+opposite PullRequestGoogle = PullRequestGoogle
 
 -- | The recorded cell an install's own provider takes for one role, resolved
 -- from the roster under test rather than written as a model name.
@@ -368,14 +378,15 @@ reviewSpec = describe "the embedded review it starts" $ do
       | variant <- variants
       ]
 
-  it "says the coordinator authors every supported amendment itself, refuses Kimi, and has no handoff tool" $
+  it "says the coordinator authors every supported amendment itself, refuses Kimi and Google, and has no handoff tool" $
     sequence_
       [ (variant.variantName, map (`Data.Text.isInfixOf` instructionsFor variant) claims)
-          `shouldBe` (variant.variantName, [True, True, True])
+          `shouldBe` (variant.variantName, [True, True, True, True])
       | variant <- variants,
         let claims =
               [ "you author each Codex-origin, Claude-origin, or unmarked amendment yourself",
                 "Kimi-origin issue revision is not a board action",
+                "Google-origin issue revision is not a board action",
                 "There is no " <> claudeToolName <> " tool in this thread"
               ]
       ]
@@ -674,7 +685,7 @@ preflightSpec = describe "the executables it does not require" $ do
         <> [ActionIssueRevision origin | origin <- issueRevisionOrigins]
         <> [ActionAutoSolve variant.variantBrand]
         <> [ActionPullRequestFlow origin action | (origin, action) <- everyRoute]
-    issueReviewOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginUnmarked]
+    issueReviewOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginGoogle, IssueOriginUnmarked]
     issueRevisionOrigins = [IssueOriginCodex, IssueOriginClaude, IssueOriginUnmarked]
     -- What a worker created before the roster moved recorded: that brand's
     -- own cell for the role the action takes, built the way a launch builds

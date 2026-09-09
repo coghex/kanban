@@ -257,12 +257,23 @@ spec = do
         `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
       pullRequestStartRefusal rostered PullRequestKimi PullRequestRepair
         `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi))
+      pullRequestStartRefusal rostered PullRequestGoogle PullRequestReview `shouldBe` Nothing
+      pullRequestStartRefusal rostered PullRequestGoogle PullRequestRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle))
+      pullRequestStartRefusal rostered PullRequestGoogle PullRequestRepair
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle))
 
     it "refuses a kimi-origin issue revision before any session exists" $ do
       let kimiIssue = (baseIssue 469 []) {issueBody = "<!-- issue-origin:kimi -->"}
       issueReviewStartRefusal kimiIssue IssueRevision
         `shouldSatisfy` maybe False (Data.Text.isInfixOf "kimi-origin issue revision")
       issueReviewStartRefusal kimiIssue InitialReview `shouldBe` Nothing
+
+    it "refuses a google-origin issue revision before any session exists" $ do
+      let googleIssue = (baseIssue 470 []) {issueBody = "<!-- issue-origin:google -->"}
+      issueReviewStartRefusal googleIssue IssueRevision
+        `shouldSatisfy` maybe False (Data.Text.isInfixOf "google-origin issue revision")
+      issueReviewStartRefusal googleIssue InitialReview `shouldBe` Nothing
 
     -- Why that pair is the fix rather than a nicety. A session left at
     -- 'SolveStarting' counts as live, and live is the disjunct that makes the
@@ -921,7 +932,10 @@ spec = do
         `shouldMention` "authored by you as GPT-6-Astra xhigh; Claude-origin amendment content is authored by Claude Fable 5.1 high; unmarked issues default to you as GPT-6-Astra xhigh."
       instructions
         `shouldMention` "If the live issue body declares <!-- issue-origin:kimi --> and the live labels select REVISION, STOP immediately."
+      instructions
+        `shouldMention` "If the live issue body declares <!-- issue-origin:google --> and the live labels select REVISION, STOP immediately."
       instructions `shouldNotMention` "kimi-origin amendment content is authored by you"
+      instructions `shouldNotMention` "google-origin amendment content is authored by you"
       encodedValue (claudeTool defaultRoster)
         `shouldMention` "Run the authenticated Claude Fable 5.1 high specification-revision agent"
 

@@ -63,7 +63,7 @@ import System.Exit (ExitCode (..))
 import System.IO (BufferMode (..), Handle, hSetBuffering)
 import System.Process (ProcessHandle, createProcess, waitForProcess)
 
-data PullRequestOrigin = PullRequestCodex | PullRequestClaude | PullRequestGrok | PullRequestKimi
+data PullRequestOrigin = PullRequestCodex | PullRequestClaude | PullRequestGrok | PullRequestKimi | PullRequestGoogle
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
@@ -85,7 +85,8 @@ originMarkers =
   [ ("<!-- pr-origin:codex -->", PullRequestCodex),
     ("<!-- pr-origin:claude -->", PullRequestClaude),
     ("<!-- pr-origin:grok -->", PullRequestGrok),
-    ("<!-- pr-origin:kimi -->", PullRequestKimi)
+    ("<!-- pr-origin:kimi -->", PullRequestKimi),
+    ("<!-- pr-origin:google -->", PullRequestGoogle)
   ]
 
 originFromBody :: Text -> Either Text PullRequestOrigin
@@ -228,19 +229,22 @@ crossBrandAgentForAction origin action
       -- stays total.
       PullRequestGrok -> CodexSolver
       PullRequestKimi -> CodexSolver
+      PullRequestGoogle -> CodexSolver
   | otherwise = case origin of
       PullRequestCodex -> ClaudeSolver
       PullRequestClaude -> CodexSolver
       PullRequestGrok -> CodexSolver
       PullRequestKimi -> CodexSolver
+      PullRequestGoogle -> CodexSolver
 
--- | Grok and Kimi are known origins Codex reviews, not compiled providers
+-- | Grok, Kimi, and Google are known origins Codex reviews, not compiled providers
 -- Kanban can spawn. Revision and repair of an external-origin pull request
 -- therefore have no board agent in any operating mode; the session that
 -- opened the pull request revises it itself.
 externalOwnBrandUnsupported :: PullRequestOrigin -> PullRequestAction -> Bool
 externalOwnBrandUnsupported PullRequestGrok action = authoredOnOwnBrand action
 externalOwnBrandUnsupported PullRequestKimi action = authoredOnOwnBrand action
+externalOwnBrandUnsupported PullRequestGoogle action = authoredOnOwnBrand action
 externalOwnBrandUnsupported _ _ = False
 
 externalOwnBrandUnsupportedMessage :: PullRequestOrigin -> Text
@@ -248,6 +252,8 @@ externalOwnBrandUnsupportedMessage PullRequestGrok =
   "grok-origin revision and repair are not a board action; Grok is not a spawned provider"
 externalOwnBrandUnsupportedMessage PullRequestKimi =
   "kimi-origin revision and repair are not a board action; Kimi is not a spawned provider"
+externalOwnBrandUnsupportedMessage PullRequestGoogle =
+  "google-origin revision and repair are not a board action; Google is not a spawned provider"
 externalOwnBrandUnsupportedMessage _ =
   "external-origin revision and repair are not a board action; the origin is not a spawned provider"
 

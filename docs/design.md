@@ -850,13 +850,14 @@ both solvers on GPT-5.6-Terra high and Sonnet 5 high.
 
 Single-agent mode moves that column rather than the roles. Every supported
 pull-request action runs on the one loaded provider whatever the pull request's
-origin marker says, including review and rereview for a grok-origin or
-kimi-origin pull request and every action for an unknown or external origin.
-Grok-origin and kimi-origin revision and repair remain refused because those
-origins have no spawned provider to collapse onto. Canonical issue review,
-including a kimi-origin issue's review, likewise collapses onto the loaded
-provider; kimi-origin issue revision remains refused, and the Kimi session that
-filed the issue authors its amendment. The embedded issue review starts the
+origin marker says, including review and rereview for a grok-origin,
+kimi-origin, or google-origin pull request and every action for an unknown or
+external origin. Grok-origin, kimi-origin, and google-origin revision and repair
+remain refused because those origins have no spawned provider to collapse onto.
+Canonical issue review, including a kimi-origin or google-origin issue's
+review, likewise collapses onto the loaded provider; kimi-origin and
+google-origin issue revision remain refused, and the session that filed the
+issue authors its amendment. The embedded issue review starts the
 loaded provider's own backend, the Codex app-server in a Codex-only install and
 the `claude` stream-json session in a Claude-only one; a fresh solve starts on
 it without opening the chooser, because there is nothing to choose between;
@@ -912,12 +913,13 @@ back to the compiled defaults; review prose, which cannot be dimmed, states
 the same thing in words.
 
 A missing or contradictory `pr-origin` marker fails visibly rather than
-guessing. `<!-- pr-origin:grok -->` and `<!-- pr-origin:kimi -->` are known
+guessing. `<!-- pr-origin:grok -->`, `<!-- pr-origin:kimi -->`, and
+`<!-- pr-origin:google -->` are known
 origins: dual-mode review and rereview run on Codex, including for a valid Kimi
-marker on a fork pull request, while an unknown or external origin still falls
-through to both loaded providers. Neither Grok nor Kimi is a compiled adapter,
-so the board refuses revision and repair of a grok-origin or kimi-origin pull
-request rather than
+or Google marker on a fork pull request, while an unknown or external origin still falls
+through to both loaded providers. None of Grok, Kimi, or Google is a compiled
+adapter, so the board refuses revision and repair of a grok-origin,
+kimi-origin, or google-origin pull request rather than
 spawning Codex or Claude to edit it.
 
 The review is a direct, explicit workflow and never starts an approval daemon.
@@ -952,8 +954,8 @@ Each `r` invocation advances exactly one durable label-driven stage:
 
 1. With neither workflow label, the routed reviewer performs the initial review.
    In dual mode, Claude-origin issues route to GPT-6-Astra high, Codex-origin
-   issues route to Claude Fable 5.1 high, Kimi-origin issues route to
-   GPT-6-Astra high, and unmarked issues require both. Single-agent mode
+   issues route to Claude Fable 5.1 high, Kimi-origin and Google-origin issues
+   route to GPT-6-Astra high, and unmarked issues require both. Single-agent mode
    collapses each of those routes onto the loaded provider; no-agent mode
    starts no reviewer, publishes nothing, and changes no label. A *replaced*
    default does not retire the approvals standing under it: an append-only
@@ -982,10 +984,11 @@ Each `r` invocation advances exactly one durable label-driven stage:
    `issue_revise.claude`. The
    agent writes one canonical specification
    amendment as an issue comment, then replaces `reviewed:changes` with
-   `reviewed:revised` without approving. Kimi-origin issue revision is refused
-   at the board and action-registry boundaries in every operating mode because
-   Kimi is not a spawned provider and Codex is already its dual-mode reviewer;
-   the Kimi session that filed the issue authors the amendment instead. As a
+   `reviewed:revised` without approving. Kimi-origin and Google-origin issue
+   revision are refused at the board and action-registry boundaries in every
+   operating mode because neither Kimi nor Google is a spawned provider and
+   Codex is already their dual-mode reviewer; the session that filed the issue
+   authors the amendment instead. As a
    second line of defence against the marker changing after the board cached
    the issue, the embedded coordinator re-reads the live body and stops without
    commenting or changing labels when it finds a Kimi marker during REVISION.

@@ -649,6 +649,15 @@ spec = do
       actionRoute defaultWorkflowConfig ReviseIssue Nothing target
         `shouldSatisfy` either (Text.isInfixOf "kimi-origin issue revision" . actionRefusalMessage) (const False)
 
+    it "routes google-origin issue review and refuses to launch its revision" $ do
+      let googleIssue = (baseIssue 73 []) {issueBody = "<!-- issue-origin:google -->"}
+          catalog = catalogOf [googleIssue] [] emptyHistory
+          target = either (error . show) id (resolveIn catalog (TargetByNumber 73))
+      actionRoute defaultWorkflowConfig ReviewIssue Nothing target
+        `shouldBe` Right (RouteProvider (ActionIssueReview IssueOriginGoogle))
+      actionRoute defaultWorkflowConfig ReviseIssue Nothing target
+        `shouldSatisfy` either (Text.isInfixOf "google-origin issue revision" . actionRefusalMessage) (const False)
+
     it "carries the operator's solver choice into the solve routes and refuses without one" $ do
       let catalog = catalogOf [baseIssue 71 []] [] emptyHistory
           target = either (error . show) id (resolveIn catalog (TargetByNumber 71))
@@ -691,6 +700,21 @@ spec = do
       actionRoute defaultWorkflowConfig RepairPullRequest Nothing repairTarget
         `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestKimi) . actionRefusalMessage) (const False)
       agentForAction DualMode PullRequestKimi PullRequestReview `shouldBe` CodexSolver
+
+    it "routes google-origin review to Codex and refuses google-origin revision" $ do
+      let reviewTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestGoogle PullRequestReview] emptyHistory) (TargetByNumber 60))
+          reviseTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestGoogle PullRequestRevision] emptyHistory) (TargetByNumber 60))
+          repairTarget =
+            either (error . show) id (resolveIn (catalogOf [] [pullRequestForOrigin PullRequestGoogle PullRequestRepair] emptyHistory) (TargetByNumber 60))
+      actionRoute defaultWorkflowConfig ReviewPullRequest Nothing reviewTarget
+        `shouldBe` Right (RouteProvider (ActionPullRequestFlow PullRequestGoogle PullRequestReview))
+      actionRoute defaultWorkflowConfig RevisePullRequest Nothing reviseTarget
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle) . actionRefusalMessage) (const False)
+      actionRoute defaultWorkflowConfig RepairPullRequest Nothing repairTarget
+        `shouldSatisfy` either (Text.isInfixOf (externalOwnBrandUnsupportedMessage PullRequestGoogle) . actionRefusalMessage) (const False)
+      agentForAction DualMode PullRequestGoogle PullRequestReview `shouldBe` CodexSolver
 
     it "routes the approval queue to no provider at all" $ do
       actionRoute defaultWorkflowConfig ObserveApprovalQueue Nothing (ActionTargetRepositoryWide repositoryUnderTest)
@@ -1403,7 +1427,7 @@ capabilityFromReport environment action =
 
 everyPreflightAction :: [PreflightAction]
 everyPreflightAction =
-  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginUnmarked, IssueOriginConflicting]]
+  [ActionIssueReview origin | origin <- [IssueOriginCodex, IssueOriginClaude, IssueOriginKimi, IssueOriginGoogle, IssueOriginUnmarked, IssueOriginConflicting]]
     <> [ActionIssueRevision origin | origin <- [IssueOriginCodex, IssueOriginClaude]]
     <> [ActionSolve brand | brand <- [CodexSolver, ClaudeSolver]]
     <> [ActionAutoSolve brand | brand <- [CodexSolver, ClaudeSolver]]
@@ -1412,7 +1436,7 @@ everyPreflightAction =
          action <- [PullRequestReview, PullRequestRereview, PullRequestRevision, PullRequestRepair]
        ]
     <> [ ActionPullRequestFlow origin action
-       | origin <- [PullRequestGrok, PullRequestKimi],
+       | origin <- [PullRequestGrok, PullRequestKimi, PullRequestGoogle],
          action <- [PullRequestReview, PullRequestRereview]
        ]
 
@@ -1439,6 +1463,7 @@ pullRequestForOrigin origin action =
       PullRequestClaude -> "<!-- pr-origin:claude -->"
       PullRequestGrok -> "<!-- pr-origin:grok -->"
       PullRequestKimi -> "<!-- pr-origin:kimi -->"
+      PullRequestGoogle -> "<!-- pr-origin:google -->"
 
 -- | A provider whose executable is definitely absent, which is the one
 -- observation that blocks rather than merely being unknown.

@@ -122,17 +122,22 @@ V2_RE = re.compile(
 MARKER_OPENING_RE = re.compile(r"<!--\s*pr-review:v", re.IGNORECASE)
 # The origin markers, character for character as `originFromBody` spells
 # them in src/Kanban/PullRequestFlow.hs. A different spacing is not one of
-# these markers there and is not one here. Grok and Kimi are known origins
-# Codex reviews; neither is a spawned provider and neither ever appears in
+# these markers there and is not one here. Grok, Kimi, and Google are known
+# origins Codex reviews; none is a spawned provider and none ever appears in
 # `reviewers=`.
 ORIGIN_MARKERS = {
     "claude": "<!-- pr-origin:claude -->",
     "codex": "<!-- pr-origin:codex -->",
     "grok": "<!-- pr-origin:grok -->",
     "kimi": "<!-- pr-origin:kimi -->",
+    "google": "<!-- pr-origin:google -->",
 }
 UNKNOWN_ORIGIN_REVIEWERS = {"claude", "codex"}
-EXTERNAL_ORIGIN_REVIEWERS = {"grok": {"codex"}, "kimi": {"codex"}}
+EXTERNAL_ORIGIN_REVIEWERS = {
+    "grok": {"codex"},
+    "kimi": {"codex"},
+    "google": {"codex"},
+}
 
 repo = sys.argv[1].strip()
 viewer = sys.argv[2].strip()

@@ -128,8 +128,9 @@ everything else.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
-  A pull request may also carry `<!-- pr-origin:grok -->` or
-  `<!-- pr-origin:kimi -->` when Grok or Kimi opened it
+  A pull request may also carry `<!-- pr-origin:grok -->`,
+  `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` when Grok, Kimi,
+  or Google opened it
   outside Kanban's spawned solvers; those markers are known origins, not
   unknown ones, and dual-mode review routes them to Codex only.
 - **Failure semantics:** a missing executable surfaces
@@ -174,26 +175,25 @@ arithmetic, which §2.3 owns.
   `adapterPullRequestProcess` — running the named canonical command:
   `pr-review` and `pr-rereview`
   run on the opposite brand from the PR's origin marker whenever the roster
-  loads both providers — except `pr-origin:grok` and `pr-origin:kimi`, which
-  are known origins
+  loads both providers — except `pr-origin:grok`, `pr-origin:kimi`, and
+  `pr-origin:google`, which are known origins
   whose cross-brand reviewer is Codex, never Claude, and never both.
   `pr-revise`
   and `repair` run on the PR's own origin brand and each internally invokes
-  exactly one canonical `pr-rereview` after pushing a fix. Neither Grok nor
-  Kimi is a
-  spawned provider, so board revision and repair of a grok-origin or
-  kimi-origin pull
-  request are refused in every operating mode; the session that opened
-  the pull request revises it itself. All four bundled
+  exactly one canonical `pr-rereview` after pushing a fix. None of Grok,
+  Kimi, or Google is a spawned provider, so board revision and repair of a
+  grok-origin, kimi-origin, or google-origin pull request are refused in
+  every operating mode; the session that opened the pull request revises
+  it itself. All four bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
   no-agent mode, publishing nothing and changing no label (issue #572).
   Kanban's own dashboard collapses it on the same terms: `agentForAction`
   takes the operating mode, and single-agent routes all four actions to the
-  loaded provider (issue #589) except grok-origin and kimi-origin revision
-  and repair, which
-  still have no spawned provider to collapse onto. Which provider that is has one declaration
+  loaded provider (issue #589) except grok-origin, kimi-origin, and
+  google-origin revision and repair, which still have no spawned provider
+  to collapse onto. Which provider that is has one declaration
   site, `Kanban.Models.soleAgent`, as `agentsLoaded` beside it is the one site
   for whether any is loaded; the mode carries the provider rather than only a
   count, so a surface holding one can ask. Origin markers are still written in
@@ -470,17 +470,18 @@ arithmetic, which §2.3 owns.
     - **dual** — two providers loaded, which is what an absent roster file
       means. Every routing decision, published marker, and result document is
       exactly what it was before this existed. Claude- and Codex-origin issues
-      route to the opposite provider, a Kimi-origin issue routes to Codex only,
-      and an unmarked issue follows the selected legacy policy.
+      route to the opposite provider, a Kimi-origin or Google-origin issue
+      routes to Codex only, and an unmarked issue follows the selected legacy
+      policy.
     - **single-agent** — one provider loaded. `reviewers_for_origin` and the
       rereview route both collapse to that provider whatever the origin marker
-      says, including a Kimi-origin issue, and an unmarked issue's
-      `--legacy-policy dual` route collapses with them. Kimi-origin issue
-      revision remains unavailable because Kimi is not a spawned provider;
-      the Kimi session authors its own amendment. `--legacy-policy hold` still
-      holds: an unmarked issue's provenance
-      is unknown, and the collapse decides which reviewer a route names rather
-      than creating one the policy withheld. A published rereview marker's
+      says, including a Kimi-origin or Google-origin issue, and an unmarked
+      issue's `--legacy-policy dual` route collapses with them. Kimi-origin and
+      Google-origin issue revision remain unavailable because neither Kimi nor
+      Google is a spawned provider; the authoring session authors its own
+      amendment. `--legacy-policy hold` still holds: an unmarked issue's
+      provenance is unknown, and the collapse decides which reviewer a route
+      names rather than creating one the policy withheld. A published rereview marker's
       `trigger=` field is *not* collapsed — it records the parent review's
       changes-requesting reviewers, which is what
       `expected_reviewers_for_record` validates it against. Because the route
@@ -1315,26 +1316,27 @@ reimplement the removal, and `--check` remains read-only.
   dependency set is exact and follows what each action spawns: the
   canonical gate needs both installed backend files, `gh`, and the reviewer
   the backend itself invokes (the opposite brand from a Claude- or Codex-origin
-  issue, Codex for a Kimi-origin issue, or both when unmarked under the dual
-  policy Kanban passes); a supported revision
+  issue, Codex for a Kimi-origin or Google-origin issue, or both when unmarked
+  under the dual policy Kanban passes); a supported revision
   needs the coordinator whose embedded-review backend this install starts
   and, where its amendment author is a different brand, that brand's CLI —
   the Claude one `kanban_run_claude` uses for a Claude-origin issue in dual
   mode; neither needs a packaged bundle, since both run their providers
-  directly. Kimi-origin issue revision is refused before this dependency
-  boundary because Kimi is not a spawned provider. The embedded coordinator
-  repeats the refusal after reading the live issue, without commenting or
-  mutating labels, so a marker added after the board cached the issue cannot
-  reopen that path. Auto-solve needs both brands, since it reviews its own pull
-  request with the opposite one, and so do `pr-revise` and `repair`: each
+  directly. Kimi-origin and Google-origin issue revision are refused before
+  this dependency boundary because neither is a spawned provider. The embedded
+  coordinator repeats the refusal after reading the live issue, without
+  commenting or mutating labels, so a marker added after the board cached the
+  issue cannot reopen that path. Auto-solve needs both brands, since it
+  reviews its own pull request with the opposite one, and so do `pr-revise`
+  and `repair`: each
   runs on the PR's own brand and spawns the opposite one for its single
   nested canonical rereview (§2.2, §2.7), which is a direct provider call
   and therefore needs that brand's executable and sign-in but not its
   bundle. Single-agent mode narrows every one of those sets to the provider
   it loads (issue #589): the routed reviewer, the coordinator, the amendment
   author, and both sides of each supported handoff are the same brand, so no
-  action is blocked on a CLI this install never spawns. The Kimi revision
-  refusal remains in force. `--doctor` is the exception and
+  action is blocked on a CLI this install never spawns. The Kimi and Google
+  revision refusals remain in force. `--doctor` is the exception and
   stays on the whole dual matrix: it is answered before any configuration is
   read, so it has no roster to derive a mode from, and dual is the superset.
 - **Required authority:** setup needs write access to the user's own

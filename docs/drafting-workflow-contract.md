@@ -266,6 +266,7 @@ are a hard contract, not a formatting preference:
 - Claude-created issue bodies end with `<!-- issue-origin:claude -->`.
 - Codex-created issue bodies end with `<!-- issue-origin:codex -->`.
 - Kimi-created issue bodies end with `<!-- issue-origin:kimi -->`.
+- Google-created issue bodies end with `<!-- issue-origin:google -->`.
 
 Each `autoissue` workflow preserves the marker produced by its delegated
 drafting workflow, and each `issue-rereview` workflow preserves whichever
