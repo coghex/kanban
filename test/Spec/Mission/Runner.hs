@@ -1675,8 +1675,11 @@ durableCommandSpec = describe "answering a command durably" $ do
           sealed <- sealMissionJournal store
           failed <- missionControllerIteration controller
           case failed of
-            MissionControllerFailed detail ->
+            MissionControllerFailed detail -> do
               Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-pause"
+              -- A file-backed request is still on disk, so this one really
+              -- does stay queued and the wording says so.
+              Text.unpack detail `shouldSatisfy` isInfixOf "the command stays queued"
             other -> expectationFailure ("an unjournaled pause was reported as applied: " <> show other)
           -- The transition did land, and that is exactly why the command must
           -- stay: the state moved and no durable line says what moved it, so
@@ -1712,8 +1715,9 @@ durableCommandSpec = describe "answering a command durably" $ do
           sealed <- sealMissionJournal store
           failed <- missionControllerIteration controller
           case failed of
-            MissionControllerFailed detail ->
+            MissionControllerFailed detail -> do
               Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-forged"
+              Text.unpack detail `shouldSatisfy` isInfixOf "the command stays queued"
             other -> expectationFailure ("an unjournaled refusal was reported: " <> show other)
           listDirectory requests `shouldReturn` ["c-forged.json"]
           unsealMissionJournal sealed
@@ -1747,8 +1751,13 @@ durableCommandSpec = describe "answering a command durably" $ do
           submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
           failed <- missionControllerIteration controller
           case failed of
-            MissionControllerFailed detail ->
+            MissionControllerFailed detail -> do
               Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-end"
+              -- A console command has no request file, so the failure must not
+              -- tell its operator to wait for a retry nothing will make. The
+              -- resubmission below is what the wording asks for.
+              Text.unpack detail `shouldSatisfy` isInfixOf "no request file to stay queued in"
+              Text.unpack detail `shouldSatisfy` not . isInfixOf "the command stays queued"
             other -> expectationFailure ("an unjournaled termination was reported: " <> show other)
           readIORef stage.stageTerminated `shouldReturn` []
           unsealMissionJournal sealed
@@ -1929,6 +1938,57 @@ durableCommandSpec = describe "answering a command durably" $ do
           node.missionSessionParent /= Nothing
         ]
         `shouldBe` [(childSessionFor theParent "r-40", Just theParent)]
+
+  -- An unknown conclusion and the halt beside it are two writes, and the
+  -- second can be the one that fails. What that leaves is the worst pair in
+  -- the store: an effect that may have happened, recorded — so the recovery
+  -- scans, which read unresolved records, skip it — beside a lifecycle that
+  -- still advances, which is exactly the condition 'missionRunnerHalt' needs
+  -- before it reads unknown invocations at all. A replay is the last iteration
+  -- in a position to notice, and these two assert it writes the missing half.
+  it "halts durably on a replayed child request whose launch was recorded unknown" $
+    withLiveParent $ \store stage controller -> do
+      openChildInvocation store "r-50"
+      concludeInvocation store (childInvocationFor "r-50") (MissionInvocationUnknown "no worker records it")
+      advancing <- currentSnapshot store
+      advancing.missionSnapshotLifecycle `shouldBe` MissionRunning
+      submitConsoleCommand controller "c-unknown" (childRequest "r-50" theMission theParent)
+      halted <- missionControllerIteration controller
+      halted `shouldSatisfy` isWaitingInput
+      readIORef stage.stageDispatches `shouldReturn` []
+      -- Durable rather than a report: read back, the mission is stopped, and
+      -- the next iteration ends the run instead of carrying on past a launch
+      -- nobody can account for.
+      stopped <- currentSnapshot store
+      stopped.missionSnapshotLifecycle `shouldBe` MissionWaitingInput
+      next <- missionControllerIteration controller
+      case next of
+        MissionStopped _ -> pure ()
+        other -> expectationFailure ("the run carried on past an unknown launch: " <> show other)
+
+  it "halts durably on a replayed termination whose record was recorded unknown" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      concludeInvocation
+        store
+        (MissionInvocationId "terminate-c-end")
+        (MissionInvocationUnknown "the subtree cannot be shown to have ended")
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          halted <- missionControllerIteration controller
+          halted `shouldSatisfy` isWaitingInput
+          next <- missionControllerIteration controller
+          case next of
+            MissionStopped _ -> pure ()
+            other -> expectationFailure ("the run carried on past an unknown termination: " <> show other)
+          stopMissionController controller
+      readIORef stage.stageTerminated `shouldReturn` []
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionWaitingInput
 
 -- ---------------------------------------------------------------------------
 -- Child requests

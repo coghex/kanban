@@ -1300,15 +1300,29 @@ liveReadingFor snapshot step =
 -- | The failure a command whose account could not be journaled reports.
 --
 -- Named as the journal rather than as the command, because what has gone
--- wrong is a write to @events.jsonl@ and not anything the operator asked for
--- — and because the sentence has to tell whoever reads it why the command is
--- still queued.
+-- wrong is a write to @events.jsonl@ and not anything the operator asked for.
+--
+-- What it says about the command itself depends on where the command came
+-- from, and getting that wrong is worse than saying nothing. A file-backed
+-- request is still on disk and a later iteration reads it again, so "stays
+-- queued" is an instruction to repair the fault and wait. An authenticated
+-- console command has no request file at all — it left an in-memory queue
+-- before it was applied, and section 5 is why it has no durable spelling to go
+-- back to — so telling its operator it stays queued would leave them waiting
+-- for a retry that is never coming. The difference is read off the command
+-- rather than assumed, because both kinds reach this.
 commandJournalFailure :: MissionSubmittedCommand -> Text -> Text
 commandJournalFailure command detail =
   "the journal entry for command "
     <> command.missionCommandId
-    <> " could not be written, so the command stays queued: "
+    <> " could not be written, so "
+    <> retention
+    <> ": "
     <> detail
+  where
+    retention = case command.missionCommandPath of
+      Just _ -> "the command stays queued"
+      Nothing -> "the command was not applied; it came from this run's own console and has no request file to stay queued in, so submit it again"
 
 -- | Journals what a command did and consumes it only if that entry landed.
 --
@@ -1344,6 +1358,28 @@ answerCommand controller command detail answered = do
     Right () -> do
       consumeMissionCommand command
       answered
+
+-- | Answers a command that met an effect nobody could establish, and makes the
+-- mission's stop on it durable before doing so.
+--
+-- A conclusion recorded as unknown and a mission still advancing are a pair no
+-- pass puts back together. The recovery scans read /unresolved/ records and
+-- this one is resolved; 'missionRunnerHalt' reads unknown invocations only
+-- once the lifecycle has already stopped being advanceable. The two writes
+-- that should produce the pair are separate — the conclusion lands and the
+-- @waiting_input@ snapshot behind it can fail — so a store can hold an effect
+-- that may have happened beside a run that will carry on past it.
+--
+-- A replay meeting such a record is the one iteration left in a position to
+-- notice, so it writes the lifecycle the failed half was going to. The write
+-- is idempotent, and it comes first: a command is never consumed over a halt
+-- that did not land.
+haltForDirection :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> Text -> Text -> IO MissionIteration
+haltForDirection controller snapshot command journaled detail = do
+  halted <- applyMissionLifecycle controller snapshot MissionWaitingInput detail
+  case halted of
+    MissionAdvanced _ -> answerCommand controller command journaled (pure halted)
+    other -> pure other
 
 -- | Applies exactly one command, and journals what it did before consuming it.
 --
@@ -1509,7 +1545,17 @@ replayTermination controller snapshot command session existing = case existing.m
   Just (MissionInvocationRefused detail) -> unperformed ("was refused before it reached the subtree: " <> detail)
   Just (MissionInvocationStale stale) -> unperformed ("did not run: " <> missionStaleVersionMessage stale)
   Just (MissionInvocationAbandoned detail) -> unperformed ("was resolved as never having happened: " <> detail)
-  Just (MissionInvocationUnknown detail) -> unperformed ("cannot be shown to have happened: " <> detail)
+  -- Neither performed nor refused, and not this command's to settle. The
+  -- mission stops for authenticated direction, durably, and this iteration
+  -- writes that stop rather than assuming the run that recorded the unknown
+  -- outcome finished writing it.
+  Just (MissionInvocationUnknown detail) ->
+    haltForDirection
+      controller
+      snapshot
+      command
+      ("replay of " <> subject <> "that cannot be shown to have happened: " <> detail)
+      (subject <> "cannot be shown to have happened: " <> detail)
   where
     subject = "the termination of the subtree under " <> session.unMissionSessionId <> " "
     applied outcome =
@@ -1775,7 +1821,23 @@ replayChildRequest controller snapshot command request existing = case existing.
   Just (MissionInvocationRefused detail) -> refused detail
   Just (MissionInvocationStale stale) -> refused (missionStaleVersionMessage stale)
   Just (MissionInvocationAbandoned detail) -> refused ("it was resolved as never having happened: " <> detail)
-  Just (MissionInvocationUnknown detail) -> unresolved detail
+  -- The one outcome no later pass revisits: it is recorded, so the recovery
+  -- scans skip it, and the halt that should sit beside it is a separate write
+  -- that can be missing. This writes it.
+  Just (MissionInvocationUnknown detail) ->
+    haltForDirection
+      controller
+      snapshot
+      command
+      (replayOf ("its launch cannot be shown to have happened: " <> detail))
+      ( "child request "
+          <> request.missionChildRequestId
+          <> " cannot be shown to have launched: "
+          <> detail
+      )
+  -- Still open, which 'resolveOpenInvocation' reads on the iteration this
+  -- one's consumption makes room for: it adopts the launch, or closes it
+  -- unknown and halts the mission itself.
   Nothing -> unresolved "its launch is journaled and its outcome is not yet recorded"
   where
     registered identity = any ((== identity) . (.missionSessionId)) snapshot.missionSnapshotSessions
