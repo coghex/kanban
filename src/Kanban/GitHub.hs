@@ -15,7 +15,10 @@ module Kanban.GitHub
     -- 'graphqlArguments' are internal, exported so the suite can assert the
     -- exact argv handed to gh, the way one decoded page advances the fetch,
     -- and how a failed one is classified and reported, all without a live
-    -- request.
+    -- request. 'ghGroupIsRecorded' is internal for the same reason: the
+    -- durable record is where an abandoned group's cleanup is proved to have
+    -- finished, and asking it under the record lock is how the suite reads
+    -- that without a second reader of its own.
     FetchState (..),
     GhCleanupFailure (..),
     GhCleanupGuard (..),
@@ -37,6 +40,7 @@ module Kanban.GitHub
     fetchHistoryPage,
     ghFailureKind,
     ghFetchCleanupFailure,
+    ghGroupIsRecorded,
     graphqlArguments,
     historyFetchProgress,
     historyGraphqlArguments,
@@ -154,7 +158,7 @@ import Kanban.GitHub.History
     newHistoryTraversal,
     runCompletedHistoryPage,
   )
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, setCleanupFailure)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)

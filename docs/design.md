@@ -1984,15 +1984,34 @@ page. There are no display caps and nothing to configure: a repository with
 several hundred open issues yields every one of them, and no column heading,
 banner, or count ever stands for more items than it names.
 
-`timeouts.github_seconds` bounds one page request and its cleanup rather than
-the whole traversal. An uncapped refresh of a large repository legitimately
-takes many pages, and bounding all of them together by a single page's budget
-would fail exactly the repositories pagination exists for; what the deadline is
-there to catch is one `gh` that has stopped answering. A page that exceeds it
-fails that generation with the timeout vocabulary of section 17, and unwinds
-through the same verified `gh` cleanup an interrupted fetch has always used.
-Waiting for the coordinator's owner and waiting out a rate limit are not the
-fetch being slow and consume none of that budget (section 15).
+`timeouts.github_seconds` bounds one request and its cleanup rather than the
+whole traversal. An uncapped refresh of a large repository legitimately takes
+many pages, and bounding all of them together by a single page's budget would
+fail exactly the repositories pagination exists for; what the deadline is there
+to catch is one `gh` that has stopped answering. A page that exceeds it fails
+that generation with the timeout vocabulary of section 17, and unwinds through
+the same verified `gh` cleanup an interrupted fetch has always used. The budget
+bounds the request; the cleanup that request unwinds through is allowed to
+finish afterwards, under a fixed thirty-second allowance of its own, so an
+overrun ends within the two together rather than within the configured seconds
+alone. Waiting for the coordinator's owner and waiting out a rate limit are not
+the fetch being slow and consume none of that budget (section 15).
+
+The same setting bounds the single-item precondition read, resolved for the
+repository being read. That read asks whether one recorded target still holds
+— the mission runner takes it before every effect, and a worker takes it again
+at the last instant before its agent session begins — and it is one `gh`
+request in exactly the sense the paragraph above means, so a `gh` wedged on it
+costs what a wedged page costs. An overrun is reported as that read having
+timed out, naming the configured seconds, and reaches each caller through the
+path it already has for a precondition it could not verify: the run ends
+without writing a blocked lifecycle, and the worker refuses its turn as
+unverified. Neither is ever reported as the target having moved or gone, which
+is a different reading and a different repair. A timeout is published as one
+only when the interrupted read's own cleanup proved its `gh` process group
+gone, which is the same act that takes the group off the durable record; a
+cleanup that could not prove it leaves both that finding and the record as it
+made them, and is reported instead.
 
 Completed history is acquired the same way, in the background. A second
 traversal follows the closed issues and the closed-or-merged pull requests, each

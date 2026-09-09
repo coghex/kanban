@@ -38,6 +38,26 @@
 -- and a response nobody can attribute to the requested item leaves the target
 -- unknown.
 --
+-- The wait is bounded, and by the very setting that bounds a page of the board
+-- fetch: @timeouts.github_seconds@, resolved for the repository being read
+-- (§13). One @gh@ that has stopped answering is exactly what that deadline
+-- exists to catch, and this is one request in the sense that sentence means --
+-- the fact that it fetches an item rather than a page changes nothing about
+-- what a hung one costs. Both callers run it synchronously on a thread that
+-- does other work between reads, so an unbounded one does not merely delay
+-- this answer: it stops the mission runner draining its console commands and
+-- holds a worker's turn open indefinitely.
+--
+-- Interrupting it unwinds through 'Kanban.GitHub.Run.runGh'\'s own verified
+-- cleanup, exactly as an interrupted page does, so the abandoned group is
+-- dealt with before anything is reported. That is also what decides which
+-- failure is reported: a timeout is only ever published as one when that
+-- cleanup proved the group gone -- which is the same act that took its entry
+-- off the durable record. A cleanup that could not prove it leaves the guard's
+-- finding and the record exactly as it made them and is reported instead,
+-- because a @gh@ that may still be running is not a clean timeout and the
+-- evidence of one is never deleted to make a read look bounded.
+--
 -- The decoding is deliberately narrow. It reads only the five facts a
 -- 'TargetPrecondition' is made of, plus the @number@ that identifies them, and
 -- it normalizes GitHub's own spellings into the ones
@@ -58,59 +78,93 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import Kanban.Domain (ItemId (..), Repository (..), TargetPrecondition (..))
-import Kanban.GitHub.Guard (GhFetchGuard)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhFetchGuard, ghFetchCleanupFailure)
 import Kanban.GitHub.Message (compactError, decodeGhOutput)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.GitHub.Run (runGh)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import System.Timeout (timeout)
 
 -- | The live precondition one item currently satisfies, in the repository it
--- was asked about.
+-- was asked about, within @readSeconds@.
 --
 -- A failure is a 'ProviderError' rather than a bare message so a caller can
 -- tell an unreachable network from a target that has genuinely gone: the first
 -- must never be read as the second, which is the whole reason requirement 7
--- separates \"unknown\" from \"failed\".
-observeTargetPrecondition :: GhFetchGuard -> Repository -> ItemId -> IO (Either ProviderError TargetPrecondition)
-observeTargetPrecondition guard repository item = do
-  (code, out, err) <- runGh guard repository arguments
-  pure $ case code of
-    ExitFailure _ ->
-      Left
-        ProviderError
-          { providerErrorKind = RequestFailed,
-            providerErrorMessage = compactError (decodeGhOutput err)
-          }
-    ExitSuccess -> case eitherDecodeStrict' out of
-      Left message ->
+-- separates \"unknown\" from \"failed\". An overrun is the first of those two:
+-- a read that never answered has shown nothing about the target, and both
+-- callers already route every 'ProviderError' into their unverified-precondition
+-- path rather than into a target that moved.
+observeTargetPrecondition :: GhFetchGuard -> Int -> Repository -> ItemId -> IO (Either ProviderError TargetPrecondition)
+observeTargetPrecondition guard readSeconds repository item = do
+  settled <- timeout (readSeconds * 1000000) (runGh guard repository arguments)
+  case settled of
+    Nothing -> Left <$> unanswered
+    Just (code, out, err) -> pure (decoded code out err)
+  where
+    -- What an interrupted read reports, decided by what its own cleanup
+    -- established rather than by the clock alone. 'runGh' has already unwound
+    -- by the time this runs, so the guard's verdict is final: unset means the
+    -- group was proven gone and its record entry dropped with it, and anything
+    -- else is a @gh@ nobody could confirm stopped, which is not a clean
+    -- timeout however long the caller waited.
+    unanswered = do
+      cleanupFailure <- ghFetchCleanupFailure guard
+      pure $ case cleanupFailure of
+        Nothing -> ProviderError RequestTimedOut timedOut
+        Just failure ->
+          ProviderError
+            RequestFailed
+            ( timedOut
+                <> " and its gh process could not be confirmed stopped ("
+                <> failure.ghCleanupMessage
+                <> ")"
+            )
+
+    timedOut =
+      "reading "
+        <> subject
+        <> " from GitHub timed out after "
+        <> Text.pack (show readSeconds)
+        <> " seconds"
+
+    decoded code out err = case code of
+      ExitFailure _ ->
         Left
           ProviderError
-            { providerErrorKind = InvalidResponse,
-              providerErrorMessage = "gh returned invalid JSON for " <> subject <> ": " <> Text.pack message
+            { providerErrorKind = RequestFailed,
+              providerErrorMessage = compactError (decodeGhOutput err)
             }
-      Right value -> case parseEither (parsePrecondition item) value of
+      ExitSuccess -> case eitherDecodeStrict' out of
         Left message ->
           Left
             ProviderError
               { providerErrorKind = InvalidResponse,
-                providerErrorMessage = "gh omitted a field " <> subject <> " needs: " <> Text.pack message
+                providerErrorMessage = "gh returned invalid JSON for " <> subject <> ": " <> Text.pack message
               }
-        -- Named in the request and named again in the response, and the two
-        -- have to agree. Reporting the pair is what makes the refusal
-        -- actionable: which item was asked for, and which one came back.
-        Right (answered, precondition)
-          | answered /= requested ->
-              Left
-                ProviderError
-                  { providerErrorKind = InvalidResponse,
-                    providerErrorMessage =
-                      "gh answered with #"
-                        <> Text.pack (show answered)
-                        <> " when asked for "
-                        <> subject
-                  }
-          | otherwise -> Right precondition
-  where
+        Right value -> case parseEither (parsePrecondition item) value of
+          Left message ->
+            Left
+              ProviderError
+                { providerErrorKind = InvalidResponse,
+                  providerErrorMessage = "gh omitted a field " <> subject <> " needs: " <> Text.pack message
+                }
+          -- Named in the request and named again in the response, and the two
+          -- have to agree. Reporting the pair is what makes the refusal
+          -- actionable: which item was asked for, and which one came back.
+          Right (answered, precondition)
+            | answered /= requested ->
+                Left
+                  ProviderError
+                    { providerErrorKind = InvalidResponse,
+                      providerErrorMessage =
+                        "gh answered with #"
+                          <> Text.pack (show answered)
+                          <> " when asked for "
+                          <> subject
+                    }
+            | otherwise -> Right precondition
+
     arguments = case item of
       IssueId number -> ["issue", "view", show number, "--repo", slug, "--json", "number,updatedAt,labels,state"]
       PullRequestId number -> ["pr", "view", show number, "--repo", slug, "--json", "number,updatedAt,labels,state,headRefOid"]
