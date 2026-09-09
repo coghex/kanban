@@ -162,6 +162,8 @@ module Kanban.Mission
     concludeMissionInvocation,
     readMissionInvocations,
     missionInvocationPath,
+    missionJournalPath,
+    missionDirectory,
 
     -- * The runner-owned control channel
     MissionControlEndpoint (..),
@@ -287,7 +289,7 @@ import Kanban.Mission.Lease
     readMissionLeaseOwner,
     releaseMissionLease,
   )
-import Kanban.Mission.Paths (MissionRead (..), missionInvocationPath, missionStoreRoot)
+import Kanban.Mission.Paths (MissionRead (..), missionDirectory, missionInvocationPath, missionJournalPath, missionStoreRoot)
 import Kanban.Mission.Reconcile
 import Kanban.Mission.Runner
 import Kanban.Mission.Session

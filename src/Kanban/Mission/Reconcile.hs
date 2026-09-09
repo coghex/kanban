@@ -429,7 +429,7 @@ missionHaltMessage (MissionHaltTerminal lifecycle) = "mission " <> missionLifecy
 missionHaltMessage (MissionHaltBlocked lifecycle detail) =
   "mission " <> missionLifecycleTag lifecycle <> ": " <> detail
 missionHaltMessage (MissionHaltIndeterminate lifecycle detail) =
-  "mission " <> missionLifecycleTag lifecycle <> ": " <> detail <> ", and a step's outcome is unknown"
+  "mission " <> missionLifecycleTag lifecycle <> ": " <> detail <> ", and an outcome it may have produced is unknown"
 
 -- | Whether this halt leaves something nobody has established.
 --
@@ -478,6 +478,24 @@ missionLifecycleBlocks lifecycle =
 -- of waiting beside it (§3's non-goal).
 missionRunnerHalt :: MissionSnapshot -> [MissionInvocationState] -> Maybe MissionHalt
 missionRunnerHalt snapshot states
+  -- An invocation recorded as unknown outranks every other reading of this
+  -- snapshot, a terminal one included, and this guard is first because that is
+  -- the only way to say so.
+  --
+  -- The lifecycle beside such a record cannot be trusted to have been written
+  -- by a reader that knew about it. A run closes an effect as unknown and
+  -- writes @waiting_input@ as a second, separate write; a store where that
+  -- second write failed has been carried forward by whatever ran next, and a
+  -- release that did not consult the record could settle the mission over it.
+  -- Durable state outlives the release that wrote it, so @completed@ here is a
+  -- claim about the plan and never evidence that the effect was accounted for
+  -- — and reporting it as a success is precisely what section 16 forbids.
+  --
+  -- A step's unknown outcome is deliberately not treated this way: the pass
+  -- that derives a blocked lifecycle rereads the step records every iteration,
+  -- so a lifecycle write it lost is one it makes again. This record is the one
+  -- nothing revisits.
+  | unknownInvocation = Just (MissionHaltIndeterminate lifecycle unaccountedDetail)
   | missionLifecycleIsTerminal lifecycle = Just (MissionHaltTerminal lifecycle)
   -- Read off the record rather than off the lifecycle, because
   -- @waiting_input@ is written for several reasons and only one of them is
@@ -490,17 +508,27 @@ missionRunnerHalt snapshot states
   -- a registered child and a subtree termination — have nowhere to write it
   -- but their own invocation, so a run that consulted the steps alone would
   -- exit zero over exactly the effects nobody can account for.
-  | missionLifecycleBlocks lifecycle, indeterminate = Just (MissionHaltIndeterminate lifecycle blockedDetail)
+  -- Only a step's unknown outcome reaches here: an invocation's was answered
+  -- above, whatever this lifecycle says.
+  | missionLifecycleBlocks lifecycle, unknownStep = Just (MissionHaltIndeterminate lifecycle blockedDetail)
   | missionLifecycleBlocks lifecycle = Just (MissionHaltBlocked lifecycle blockedDetail)
   | otherwise = Nothing
   where
     lifecycle = snapshot.missionSnapshotLifecycle
-    indeterminate =
-      any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
-        || any unknownOutcome states
+    unknownStep = any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
+    unknownInvocation = any unknownOutcome states
     unknownOutcome state = case state.missionInvocationOutcome of
       Just (MissionInvocationUnknown _) -> True
       _ -> False
+    -- The blocked sentence where there is one, because a mission that /is/
+    -- stopped for an answer is best described as stopped for an answer; the
+    -- indeterminacy is carried by the halt's own kind and by
+    -- 'missionHaltMessage'. Only a lifecycle with no such sentence — one still
+    -- advancing, or one already called terminal — needs this to say what
+    -- stopped the run.
+    unaccountedDetail
+      | missionLifecycleBlocks lifecycle = blockedDetail
+      | otherwise = "an effect it may have had is recorded as unaccounted for"
     blockedDetail = case lifecycle of
       MissionWaitingInput -> "it is waiting for an answer this runner cannot supply"
       MissionWaitingBarrier -> "it is waiting on a barrier outside this runner"

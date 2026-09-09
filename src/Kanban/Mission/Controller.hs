@@ -20,7 +20,11 @@
 -- that is appended and flushed to disk, and followed by a second record
 -- concluding it. An opening record with no conclusion is the @outcome_unknown@
 -- of requirement 7 — something may have happened — and nothing here ever
--- retries one on the strength of the record alone.
+-- retries one on the strength of the record alone. An operator command is held
+-- to the same discipline from the other end: the request file is removed only
+-- once both the transition it asked for and the journal entry describing that
+-- transition have landed, so a fault at either leaves the command queued for a
+-- later iteration rather than answered in no durable place at all.
 --
 -- /The precondition is rechecked at the boundary./ The version an effect was
 -- planned against is recorded when it is planned, and reread immediately
@@ -1293,18 +1297,113 @@ liveReadingFor snapshot step =
 -- Commands
 -- ---------------------------------------------------------------------------
 
--- | Applies exactly one command, and journals what it did before consuming it.
+-- | The failure a command whose account could not be journaled reports.
 --
--- The ordering matters because the two steps can be separated by a crash. The
+-- Named as the journal rather than as the command, because what has gone
+-- wrong is a write to @events.jsonl@ and not anything the operator asked for.
+--
+-- What it says about the command itself depends on where the command came
+-- from, and getting that wrong is worse than saying nothing. A file-backed
+-- request is still on disk and a later iteration reads it again, so "stays
+-- queued" is an instruction to repair the fault and wait. An authenticated
+-- console command has no request file at all — it left an in-memory queue
+-- before it was applied, and section 5 is why it has no durable spelling to go
+-- back to — so telling its operator it stays queued would leave them waiting
+-- for a retry that is never coming. The difference is read off the command
+-- rather than assumed, because both kinds reach this.
+commandJournalFailure :: MissionSubmittedCommand -> Text -> Text
+commandJournalFailure command detail =
+  "the journal entry for command "
+    <> command.missionCommandId
+    <> " could not be written, so "
+    <> retention
+    <> ": "
+    <> detail
+  where
+    retention = case command.missionCommandPath of
+      Just _ -> "the command stays queued"
+      Nothing -> "the command was not applied; it came from this run's own console and has no request file to stay queued in, so submit it again"
+
+-- | The failure a command reports when its account was lost /after/ its effect
+-- had already happened.
+--
+-- Deliberately not 'commandJournalFailure'. That one tells a console operator
+-- to submit the command again, which is the right instruction while nothing
+-- has reached outside and the wrong one the moment something has. The effect
+-- itself is not lost — the invocation record opened before it is what accounts
+-- for it, and the pass that closes that record reads the sessions rather than
+-- this line — so what a resubmission would add is not a repair but a repeat.
+commandPerformedJournalFailure :: MissionSubmittedCommand -> Text -> Text -> Text
+commandPerformedJournalFailure command performed detail =
+  performed
+    <> ", and the journal entry for command "
+    <> command.missionCommandId
+    <> " could not be written; the effect stands and its own record accounts for it, so do not submit the command again: "
+    <> detail
+
+-- | Journals what a command did and consumes it only if that entry landed.
+--
+-- The ordering matters because the two steps can be separated by a crash, and
+-- the conditional matters because they can be separated by a failure. The
 -- journal entry is written first, so a run that dies before the file is
 -- removed leaves an account of what was done; the file is still there, so the
--- next run applies the command again. What makes that safe is a property of
--- each command rather than of this ordering: a pause, a resume, and an
--- override are writes of a state the second application reaches identically,
--- and the two commands that reach outside — a subtree termination and a child
--- request — are each deduplicated by an invocation identity derived from the
--- command, so a second application finds the first one's record and returns
--- what it already did.
+-- next run applies the command again. A journal that could not be written at
+-- all is the same window held open indefinitely: consuming over it would
+-- destroy the only remaining record that the command was ever asked for, so
+-- the request stays exactly where it is and the iteration reports the
+-- failure.
+--
+-- What makes meeting the command again safe is a property of each command
+-- rather than of this ordering: a pause, a resume, and an override are writes
+-- of a state the second application reaches identically, and the two commands
+-- that reach outside — a subtree termination and a child request — are each
+-- deduplicated by an invocation identity derived from the command, so a
+-- second application finds the first one's record and answers from what that
+-- record says.
+--
+-- Only a file-backed request is retained by this, and that is the whole of
+-- what retention can mean: an authenticated console command was taken off an
+-- in-memory queue before it was applied and has no durable spelling to go back
+-- to, which is section 5's prohibition on replayable console authority rather
+-- than a gap in this. Such a command still reports the failure, and still
+-- refuses to claim it was applied.
+answerCommand :: MissionController -> MissionSubmittedCommand -> Text -> IO MissionIteration -> IO MissionIteration
+answerCommand controller command detail answered = do
+  journaled <- journalCommand controller command detail
+  case journaled of
+    Left failure -> pure (MissionControllerFailed (commandJournalFailure command failure))
+    Right () -> do
+      consumeMissionCommand command
+      answered
+
+-- | Answers a command that met an effect nobody could establish, and makes the
+-- mission's stop on it durable before doing so.
+--
+-- A conclusion recorded as unknown and a mission still advancing are a pair no
+-- pass puts back together. The recovery scans read /unresolved/ records and
+-- this one is resolved; 'missionRunnerHalt' reads unknown invocations only
+-- once the lifecycle has already stopped being advanceable. The two writes
+-- that should produce the pair are separate — the conclusion lands and the
+-- @waiting_input@ snapshot behind it can fail — so a store can hold an effect
+-- that may have happened beside a run that will carry on past it.
+--
+-- A replay meeting such a record is the one iteration left in a position to
+-- notice, so it writes the lifecycle the failed half was going to. The write
+-- is idempotent, and it comes first: a command is never consumed over a halt
+-- that did not land.
+haltForDirection :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> Text -> Text -> IO MissionIteration
+haltForDirection controller snapshot command journaled detail = do
+  halted <- applyMissionLifecycle controller snapshot MissionWaitingInput detail
+  case halted of
+    MissionAdvanced _ -> answerCommand controller command journaled (pure halted)
+    other -> pure other
+
+-- | Applies exactly one command, and journals what it did before consuming it.
+--
+-- Every branch below answers through 'answerCommand', which is where the
+-- journal-then-consume ordering and its failure both live. A branch whose
+-- transition did not land does not reach it at all: the request is left
+-- queued for a later iteration to apply once the fault is repaired.
 applyCommand :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> IO MissionIteration
 applyCommand controller snapshot command = case command.missionCommandPayload of
   MissionPauseCommand reason -> do
@@ -1346,16 +1445,19 @@ applyCommand controller snapshot command = case command.missionCommandPayload of
     | otherwise -> terminateSubtree controller snapshot command session reason
   MissionChildRequestCommand request -> registerChild controller snapshot command request
   where
-    finish iteration detail = do
-      journalCommand controller command detail
-      consumeMissionCommand command
-      pure $ case iteration of
-        MissionAdvanced _ -> MissionAdvanced (MissionCommandApplied command.missionCommandId detail)
-        other -> other
-    refuse submitted detail = do
-      journalCommand controller submitted ("refused: " <> detail)
-      consumeMissionCommand submitted
-      pure (MissionAdvanced (MissionCommandRefused submitted.missionCommandId detail))
+    -- The transition first, and nothing else if it did not land. A snapshot
+    -- this iteration could not replace is a command that has not been
+    -- answered: journaling it would record a state nothing reached, and
+    -- consuming it would take away the operator's request along with any
+    -- chance of applying it once the fault is repaired.
+    finish iteration detail = case iteration of
+      MissionAdvanced _ ->
+        answerCommand controller command detail $
+          pure (MissionAdvanced (MissionCommandApplied command.missionCommandId detail))
+      other -> pure other
+    refuse submitted detail =
+      answerCommand controller submitted ("refused: " <> detail) $
+        pure (MissionAdvanced (MissionCommandRefused submitted.missionCommandId detail))
 
 -- | Closes every launch of one step that this store never saw the end of,
 -- on the operator's word.
@@ -1415,18 +1517,100 @@ terminateSubtree controller snapshot command session reason = do
   case recorded of
     Left detail -> pure (MissionControllerFailed detail)
     Right states -> case missionInvocationFor (terminationInvocation command) states of
-      -- A replay of a termination this controller already performed. Signalling
+      -- A replay of a termination this controller already recorded. Signalling
       -- the subtree again would journal a second account of one operator
       -- command, which is the duplicate the invocation identity exists to
       -- prevent.
-      Just _ -> do
-        journalCommand controller command "replay of a termination already performed"
-        consumeMissionCommand command
-        pure
-          ( MissionAdvanced
-              (MissionCommandApplied command.missionCommandId "the subtree was already terminated")
-          )
-      Nothing -> performTermination controller snapshot command session reason
+      Just existing -> replayTermination controller snapshot command session existing
+      Nothing -> case openTerminationOf session states of
+        -- A different command asking for a termination this run has already
+        -- signalled and whose end nothing has established yet.
+        Just inFlight -> replayTermination controller snapshot command session inFlight
+        Nothing -> performTermination controller snapshot command session reason
+
+-- | An unresolved termination of this very subtree, whatever command asked for
+-- it.
+--
+-- The command's identity is not the effect's identity, and the difference
+-- shows the moment one instruction is submitted twice. A console submission
+-- mints a fresh identifier for every line, and a termination's invocation
+-- identity is derived from that identifier — so two @terminate x@ lines are
+-- two identities for one subtree, and the second would signal a subtree the
+-- first has already signalled. What is actually unique is the root, so an open
+-- record naming it answers the second command as the replay it is.
+--
+-- Open records only. A termination that completed is an ended subtree and says
+-- nothing about a later one, and a record closed as refused or unknown is
+-- answered by its own identity rather than standing in the way of a fresh
+-- attempt the operator is entitled to make.
+openTerminationOf :: MissionSessionId -> [MissionInvocationState] -> Maybe MissionInvocationState
+openTerminationOf session states =
+  case [ state
+       | state <- states,
+         state.missionInvocationOutcome == Nothing,
+         state.missionInvocationRecord.missionInvocationEffect
+           == MissionEffectTerminateSubtree session.unMissionSessionId
+       ] of
+    (state : _) -> Just state
+    [] -> Nothing
+
+-- | Answers a replayed termination from what its record says, not from the
+-- fact that the record exists.
+--
+-- The invocation identity stops one operator command reaching the driver
+-- twice; it establishes nothing about whether the first attempt worked, and
+-- the two are separate questions. A record closed as anything but completed
+-- belongs to a termination that did not happen, or that nobody could show
+-- happened, and reporting either as an already-terminated subtree would hand
+-- the operator a success no effect produced and section 16 forbids inventing.
+--
+-- An /open/ record is the one that says least of all. It is written before the
+-- driver is asked for anything, so it covers both the signal that was sent and
+-- the one a crash or a failure stopped ever being sent, and no reading of the
+-- record can tell those apart. So this branch answers nothing itself: it hands
+-- the record to 'resolveOpenTermination', which is the pass that resolves it
+-- from the sessions themselves — completed once they have all ended, waiting
+-- while any is still ending, and closed as unknown with the mission halted for
+-- authenticated direction if one cannot be shown to have ended at all. Every
+-- answer that comes back is fresh evidence rather than an inference from the
+-- marker, which is exactly what requirement 7 asks of an unresolved effect.
+--
+-- Reaching it takes consuming the request, because that pass runs only once no
+-- command is queued — so it is run here, in this iteration, rather than left to
+-- a later one that would find the same request in the way.
+--
+-- No branch attempts the effect again. One recorded as refused or abandoned is
+-- answered as the refusal it was; an operator who wants another attempt
+-- submits another command, which mints another identity.
+replayTermination :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionSessionId -> MissionInvocationState -> IO MissionIteration
+replayTermination controller snapshot command session existing = case existing.missionInvocationOutcome of
+  Nothing ->
+    answerCommand controller command ("replay of " <> subject <> "whose outcome is not established; resolving it from the sessions") $
+      resolveOpenTermination controller snapshot existing.missionInvocationRecord.missionInvocationId session
+  Just (MissionInvocationCompleted detail) -> applied ("was already terminated: " <> detail)
+  Just (MissionInvocationDispatched worker) -> unperformed ("recorded " <> worker <> " rather than an ended subtree")
+  Just (MissionInvocationRefused detail) -> unperformed ("was refused before it reached the subtree: " <> detail)
+  Just (MissionInvocationStale stale) -> unperformed ("did not run: " <> missionStaleVersionMessage stale)
+  Just (MissionInvocationAbandoned detail) -> unperformed ("was resolved as never having happened: " <> detail)
+  -- Neither performed nor refused, and not this command's to settle. The
+  -- mission stops for authenticated direction, durably, and this iteration
+  -- writes that stop rather than assuming the run that recorded the unknown
+  -- outcome finished writing it.
+  Just (MissionInvocationUnknown detail) ->
+    haltForDirection
+      controller
+      snapshot
+      command
+      ("replay of " <> subject <> "that cannot be shown to have happened: " <> detail)
+      (subject <> "cannot be shown to have happened: " <> detail)
+  where
+    subject = "the termination of the subtree under " <> session.unMissionSessionId <> " "
+    applied outcome =
+      answerCommand controller command ("replay of a termination that " <> outcome) $
+        pure (MissionAdvanced (MissionCommandApplied command.missionCommandId (subject <> outcome)))
+    unperformed outcome =
+      answerCommand controller command ("replay of a termination that " <> outcome) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId (subject <> outcome)))
 
 terminationInvocation :: MissionSubmittedCommand -> MissionInvocationId
 terminationInvocation command = MissionInvocationId ("terminate-" <> command.missionCommandId)
@@ -1435,93 +1619,122 @@ performTermination :: MissionController -> MissionSnapshot -> MissionSubmittedCo
 performTermination controller snapshot command session reason = do
   let subtree = missionSessionSubtree snapshot session
       identities = map (.missionSessionId) subtree
-  now <- getCurrentTime
-  let invocation = terminationInvocation command
-  journaled <-
-    recordMissionInvocation
-      controller.missionControllerInvocations
-      MissionInvocation
-        { missionInvocationId = invocation,
-          missionInvocationMission = controller.missionControllerMission,
-          missionInvocationRepository = controller.missionControllerStore.missionStoreRepository,
-          missionInvocationStep = MissionStepId "-",
-          missionInvocationAction = "terminate_subtree",
-          missionInvocationTarget = Nothing,
-          missionInvocationVersion = Nothing,
-          missionInvocationEffect = MissionEffectTerminateSubtree session.unMissionSessionId,
-          missionInvocationParent = Nothing,
-          missionInvocationAt = now
-        }
-  case journaled of
-    Left detail -> pure (MissionControllerFailed detail)
+      invocation = terminationInvocation command
+  -- The command's own account before the invocation record rather than after
+  -- it, and the order is what a lost journal line costs. Both writes still
+  -- precede the driver, so the write-ahead discipline the effect needs is
+  -- untouched; what changes is which record a failure leaves behind. Opening
+  -- the invocation first and then failing to journal would leave a
+  -- termination identity on disk that nothing ever signalled, and 'replayTermination'
+  -- would meet it on the next iteration as an open termination in flight.
+  -- Journaling first leaves nothing at all, so the retried command performs
+  -- the termination from the beginning.
+  announced <-
+    journalCommand
+      controller
+      command
+      ( "terminating "
+          <> Text.pack (show (length identities))
+          <> " registered session(s) under "
+          <> session.unMissionSessionId
+          <> ": "
+          <> reason
+      )
+  case announced of
+    Left failure -> pure (MissionControllerFailed (commandJournalFailure command failure))
     Right () -> do
-      journalCommand
-        controller
-        command
-        ( "terminating "
-            <> Text.pack (show (length identities))
-            <> " registered session(s) under "
-            <> session.unMissionSessionId
-            <> ": "
-            <> reason
-        )
-      terminated <- controller.missionControllerDriver.missionDriverTerminate identities
-      concluded <- getCurrentTime
-      case terminated of
-        Left detail -> do
-          -- The one conclusion whose failure is not propagated, because this
-          -- record has a recovery path of its own: an open termination is what
-          -- 'resolveOpenTermination' reads on the next run, and it reconciles
-          -- it from the sessions themselves. Stopping here instead would leave
-          -- the command file unconsumed as well, and a replayed termination is
-          -- answered from this same record — so failing would trade a
-          -- recoverable record for two.
-          _ <- concludeMissionInvocation controller.missionControllerInvocations invocation (MissionInvocationRefused detail) concluded
-          consumeMissionCommand command
-          pure (MissionControllerFailed detail)
-        -- Signalled, which is not the same as ended. @terminateWorker@ asks a
-        -- worker to stop and returns; an ordinary one may be pending
-        -- termination for a while yet, and an issue action's child is a
-        -- queued command its host has still to act on. Closing the record
-        -- here would put in the durable journal, as fact, that a subtree
-        -- ended at the moment it was asked to.
-        --
-        -- So the record stays open whatever the driver reached, and
-        -- 'resolveOpenTermination' — which the very next iteration runs, and
-        -- which reads the sessions themselves — is what closes it: completed
-        -- once they have all ended, waiting while any is still ending, and
-        -- unknown if one cannot be shown to have ended at all.
-        Right unreached -> do
-          journalCommand
-            controller
-            command
-            ( "signalled "
-                <> Text.pack (show (length identities - length unreached))
-                <> " of "
-                <> Text.pack (show (length identities))
-                <> " registered session(s)"
-                <> ( if null unreached
-                       then ""
-                       else "; " <> Text.intercalate ", " (map (.unMissionSessionId) unreached) <> " could not be reached"
-                   )
-            )
-          consumeMissionCommand command
-          pure
-            ( MissionAdvanced
-                ( MissionCommandApplied
-                    command.missionCommandId
-                    ("signalled the subtree under " <> session.unMissionSessionId <> "; its end is not yet established")
-                )
-            )
+      now <- getCurrentTime
+      journaled <-
+        recordMissionInvocation
+          controller.missionControllerInvocations
+          MissionInvocation
+            { missionInvocationId = invocation,
+              missionInvocationMission = controller.missionControllerMission,
+              missionInvocationRepository = controller.missionControllerStore.missionStoreRepository,
+              missionInvocationStep = MissionStepId "-",
+              missionInvocationAction = "terminate_subtree",
+              missionInvocationTarget = Nothing,
+              missionInvocationVersion = Nothing,
+              missionInvocationEffect = MissionEffectTerminateSubtree session.unMissionSessionId,
+              missionInvocationParent = Nothing,
+              missionInvocationAt = now
+            }
+      case journaled of
+        Left detail -> pure (MissionControllerFailed detail)
+        Right () -> do
+          terminated <- controller.missionControllerDriver.missionDriverTerminate identities
+          concluded <- getCurrentTime
+          case terminated of
+            Left detail ->
+              -- The command is consumed over a driver that refused, because
+              -- this record has a recovery path of its own: the conclusion
+              -- beside it says the effect did not happen, and a replay is
+              -- answered from exactly that. Leaving the request as well would
+              -- trade a recoverable record for two.
+              --
+              -- The conclusion's own failure is propagated rather than
+              -- discarded, and then nothing is consumed: a record left open by
+              -- a conclusion that never landed is one 'resolveOpenTermination'
+              -- reads on the next run and reconciles from the sessions
+              -- themselves.
+              closing controller invocation (MissionInvocationRefused detail) concluded $ do
+                consumeMissionCommand command
+                pure (MissionControllerFailed detail)
+            -- Signalled, which is not the same as ended. @terminateWorker@ asks
+            -- a worker to stop and returns; an ordinary one may be pending
+            -- termination for a while yet, and an issue action's child is a
+            -- queued command its host has still to act on. Closing the record
+            -- here would put in the durable journal, as fact, that a subtree
+            -- ended at the moment it was asked to.
+            --
+            -- So the record stays open whatever the driver reached, and
+            -- 'resolveOpenTermination' — which the very next iteration runs,
+            -- and which reads the sessions themselves — is what closes it:
+            -- completed once they have all ended, waiting while any is still
+            -- ending, and unknown if one cannot be shown to have ended at all.
+            Right unreached -> do
+              let signalled =
+                    "signalled "
+                      <> Text.pack (show (length identities - length unreached))
+                      <> " of "
+                      <> Text.pack (show (length identities))
+                      <> " registered session(s)"
+                      <> ( if null unreached
+                             then ""
+                             else "; " <> Text.intercalate ", " (map (.unMissionSessionId) unreached) <> " could not be reached"
+                         )
+                  applied = "signalled the subtree under " <> session.unMissionSessionId <> "; its end is not yet established"
+              -- Not 'answerCommand', because a journal line lost /here/ leaves
+              -- a different situation behind. The subtree has been signalled
+              -- and the record that accounts for it is open, so
+              -- 'resolveOpenTermination' closes it from the sessions on a
+              -- later iteration whether or not this line was written; there is
+              -- nothing for the command to be met again for. Saying otherwise
+              -- would be worse than unhelpful: this command is authenticated,
+              -- so it has no request file, and the resubmission the ordinary
+              -- wording asks for mints a fresh identifier.
+              accounted <- journalCommand controller command signalled
+              consumeMissionCommand command
+              pure $ case accounted of
+                Left failure -> MissionControllerFailed (commandPerformedJournalFailure command applied failure)
+                Right () -> MissionAdvanced (MissionCommandApplied command.missionCommandId applied)
 
 -- | Requirement 12's registered child request.
 --
 -- Four checks, and the order matters. The channel decides whether the request
--- may be believed at all; the mission it names decides whether it is this
--- mission's request; the parent it names is checked against the live
--- registered session tree; and only then is the request identity looked up, so
--- a replay returns the child it already produced instead of launching a second
--- one.
+-- may be believed at all, and the mission it names decides whether it is this
+-- mission's request; those two are about the request itself, so nothing is
+-- read or answered before them. The request identity is looked up next, and
+-- the parent checks come after it.
+--
+-- That is the order because the two groups answer different questions. The
+-- parent checks decide whether a /new/ child may be launched under it; the
+-- identity decides whether one already was. Asking the parent first makes a
+-- replay depend on the parent still being live, and a parent that ends between
+-- a launch and the retry of the request that made it is not hypothetical: the
+-- launch's own session write is exactly what may have failed, and the retry is
+-- what repairs it. Refusing there would acknowledge the request while leaving
+-- the child it already produced outside the session tree for good.
 registerChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> IO MissionIteration
 registerChild controller snapshot command request
   | not (overrideAuthorized command.missionCommandAuthority) =
@@ -1533,6 +1746,29 @@ registerChild controller snapshot command request
             <> " rather than "
             <> controller.missionControllerMission.unMissionId
         )
+  | otherwise = do
+      recorded <-
+        readMissionInvocations
+          controller.missionControllerMission
+          controller.missionControllerStore.missionStoreRepository
+          controller.missionControllerInvocations
+      case recorded of
+        Left detail -> pure (MissionControllerFailed detail)
+        Right states -> case missionInvocationFor childInvocation states of
+          Just existing -> replayChildRequest controller snapshot command request existing
+          Nothing -> launchFreshChild controller snapshot command request childInvocation
+  where
+    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
+    refuseChild detail =
+      answerCommand controller command ("refused child request: " <> detail) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+
+-- | The parent checks, which only a request with no launch of its own reaches.
+--
+-- Each of them is about whether this mission may start new external work under
+-- that parent, which is a question a replay has already had answered for it.
+launchFreshChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
+launchFreshChild controller snapshot command request childInvocation
   | not parentIsRegistered =
       refuseChild
         ( "its parent session "
@@ -1573,9 +1809,8 @@ registerChild controller snapshot command request
                 <> " is not currently live: "
                 <> maybe "it has ended" id observation.missionObservationDetail
             )
-        Right Nothing -> registerChildUnderLiveParent controller snapshot command request childInvocation
+        Right Nothing -> launchChild controller snapshot command request childInvocation
   where
-    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
     -- This mission's own tree, and nothing wider: a session another mission
     -- registered is not one this request may name.
     parentIsRegistered = any ((== request.missionChildRequestParent) . (.missionSessionId)) registered
@@ -1588,47 +1823,99 @@ registerChild controller snapshot command request
         registered
     registered = concatMap (missionSessionSubtree snapshot) roots
     roots = map (.missionSessionId) [node | node <- snapshot.missionSnapshotSessions, node.missionSessionParent == Nothing]
-    refuseChild detail = do
-      journalCommand controller command ("refused child request: " <> detail)
-      consumeMissionCommand command
-      pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+    refuseChild detail =
+      answerCommand controller command ("refused child request: " <> detail) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
 
--- | The request identity's own check, once the parent has been shown to be
--- live: a replay returns the child it already produced rather than launching a
--- second one.
-registerChildUnderLiveParent :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
-registerChildUnderLiveParent controller snapshot command request childInvocation = do
-      recorded <-
-        readMissionInvocations
-          controller.missionControllerMission
-          controller.missionControllerStore.missionStoreRepository
-          controller.missionControllerInvocations
-      case recorded of
-        Left detail -> pure (MissionControllerFailed detail)
-        Right states -> case missionInvocationFor childInvocation states of
-          Just existing -> do
-            journalCommand
-              controller
-              command
-              ( "replay of child request "
-                  <> request.missionChildRequestId
-                  <> "; returning "
-                  <> renderExisting existing
-              )
-            consumeMissionCommand command
-            pure
-              ( MissionAdvanced
-                  ( MissionCommandApplied
-                      command.missionCommandId
-                      ("child request already answered: " <> renderExisting existing)
-                  )
-              )
-          Nothing -> launchChild controller snapshot command request childInvocation
+-- | Answers a replayed child request, and finishes the registration the first
+-- application may not have.
+--
+-- A dispatched record and a registered session are two writes, and the launch
+-- makes them in that order: the record is what proves the child exists, and
+-- the session node is what makes it this mission's — the thing a termination
+-- reaches, a parent waits for, and a further child may name as its parent. A
+-- crash or a failed snapshot write between them leaves a child the record
+-- knows about and the tree does not.
+--
+-- The pass that normally repairs exactly that runs only once no command is
+-- queued, so an iteration that consumed this request while the tree still
+-- lacked the child would be the last one in a position to notice. So the
+-- repair happens here, from the record's own lineage and with no second
+-- dispatch, and the acknowledgement is given only once the tree holds the
+-- child it acknowledges.
+--
+-- Every other outcome is answered as what it records rather than as an answer.
+-- A launch the owning authority refused, one a moved precondition stopped, and
+-- one the operator resolved as never having happened are all refusals, and
+-- reporting them as an applied command would turn a request that produced no
+-- child into one that did. An open or unknown record establishes nothing
+-- either way — the effect may have happened — so it is answered with neither:
+-- 'resolveOpenInvocation' adopts the launch or halts the mission for
+-- authenticated direction, and it runs on the iteration this one's consumption
+-- makes room for.
+replayChildRequest :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationState -> IO MissionIteration
+replayChildRequest controller snapshot command request existing = case existing.missionInvocationOutcome of
+  Just (MissionInvocationDispatched worker)
+    | not (registered (MissionSessionId worker)) -> do
+        written <-
+          writeStep
+            controller
+            snapshot
+            existing.missionInvocationRecord.missionInvocationStep
+            MissionStepRunning
+            ("registered child " <> worker <> " from its invocation record")
+            (Just (MissionSessionId worker, Just request.missionChildRequestParent, Nothing))
+        case written of
+          Left detail -> pure (MissionControllerFailed detail)
+          Right () -> answered ("child " <> worker)
+    | otherwise -> answered ("child " <> worker)
+  Just (MissionInvocationCompleted detail) -> answered detail
+  Just (MissionInvocationRefused detail) -> refused detail
+  Just (MissionInvocationStale stale) -> refused (missionStaleVersionMessage stale)
+  Just (MissionInvocationAbandoned detail) -> refused ("it was resolved as never having happened: " <> detail)
+  -- The one outcome no later pass revisits: it is recorded, so the recovery
+  -- scans skip it, and the halt that should sit beside it is a separate write
+  -- that can be missing. This writes it.
+  Just (MissionInvocationUnknown detail) ->
+    haltForDirection
+      controller
+      snapshot
+      command
+      (replayOf ("its launch cannot be shown to have happened: " <> detail))
+      ( "child request "
+          <> request.missionChildRequestId
+          <> " cannot be shown to have launched: "
+          <> detail
+      )
+  -- Still open, which 'resolveOpenInvocation' reads on the iteration this
+  -- one's consumption makes room for: it adopts the launch, or closes it
+  -- unknown and halts the mission itself.
+  Nothing -> unresolved "its launch is journaled and its outcome is not yet recorded"
   where
-    renderExisting existing = case existing.missionInvocationOutcome of
-      Just (MissionInvocationDispatched worker) -> "child " <> worker
-      Just outcome -> Text.pack (show outcome)
-      Nothing -> "an invocation whose outcome is not yet recorded"
+    registered identity = any ((== identity) . (.missionSessionId)) snapshot.missionSnapshotSessions
+    replayOf rendered = "replay of child request " <> request.missionChildRequestId <> "; " <> rendered
+    answered rendered =
+      answerCommand controller command (replayOf ("returning " <> rendered)) $
+        pure
+          ( MissionAdvanced
+              ( MissionCommandApplied
+                  command.missionCommandId
+                  ("child request already answered: " <> rendered)
+              )
+          )
+    refused detail =
+      answerCommand controller command (replayOf ("its launch was refused: " <> detail)) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+    unresolved detail =
+      answerCommand controller command (replayOf ("its launch has no established outcome: " <> detail)) $
+        pure
+          ( MissionAwaiting
+              ( "child request "
+                  <> request.missionChildRequestId
+                  <> " cannot be answered while its launch has no established outcome: "
+                  <> detail
+              )
+          )
 
 -- | The step a registered child's launch invents for it, named by the pair
 -- that asked for it.
@@ -1682,10 +1969,9 @@ launchChild controller snapshot command request invocation = do
           }
   planned <- observePlannedVersion controller step
   case planned of
-    Left detail -> do
-      journalCommand controller command ("the child's target could not be read: " <> detail)
-      consumeMissionCommand command
-      pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+    Left detail ->
+      answerCommand controller command ("the child's target could not be read: " <> detail) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
     Right plannedVersion -> launchPlannedChild controller snapshot command request invocation step plannedVersion
 
 launchPlannedChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> MissionPlanStep -> Maybe MissionTargetVersion -> IO MissionIteration
@@ -1736,10 +2022,9 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
               }
       concluded <- getCurrentTime
       case accepted of
-        Left failure -> closing controller invocation (MissionInvocationRefused (missionStepFailureMessage failure)) concluded $ do
-          journalCommand controller command ("child request failed: " <> missionStepFailureMessage failure)
-          consumeMissionCommand command
-          pure (MissionAdvanced (MissionCommandRefused command.missionCommandId (missionStepFailureMessage failure)))
+        Left failure -> closing controller invocation (MissionInvocationRefused (missionStepFailureMessage failure)) concluded $
+          answerCommand controller command ("child request failed: " <> missionStepFailureMessage failure) $
+            pure (MissionAdvanced (MissionCommandRefused command.missionCommandId (missionStepFailureMessage failure)))
         -- The same action that answers as it is asked, reached through a
         -- child request instead of a plan step. Registering the invented
         -- session a worker-owning launch produces would leave the parent
@@ -1747,16 +2032,15 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
         -- that already exists.
         Right acceptance
           | Just conclusion <- acceptance.missionAcceptedOutcome ->
-              closing controller invocation (MissionInvocationCompleted (missionConclusionDetail conclusion)) concluded $ do
-                journalCommand controller command ("child request answered: " <> missionConclusionDetail conclusion)
-                consumeMissionCommand command
-                pure
-                  ( MissionAdvanced
-                      ( MissionCommandApplied
-                          command.missionCommandId
-                          ("child request answered: " <> missionConclusionDetail conclusion)
-                      )
-                  )
+              closing controller invocation (MissionInvocationCompleted (missionConclusionDetail conclusion)) concluded $
+                answerCommand controller command ("child request answered: " <> missionConclusionDetail conclusion) $
+                  pure
+                    ( MissionAdvanced
+                        ( MissionCommandApplied
+                            command.missionCommandId
+                            ("child request answered: " <> missionConclusionDetail conclusion)
+                        )
+                    )
         Right acceptance -> closing controller invocation (MissionInvocationDispatched acceptance.missionAcceptedWorker) concluded $ do
           -- The child joins the session tree under the parent that asked for
           -- it. Without the lineage it would be a session nothing accounts
@@ -1774,16 +2058,23 @@ launchPlannedChild controller snapshot command request invocation step plannedVe
                     acceptance.missionAcceptedProviderSession
                   )
               )
-          journalCommand controller command ("registered child " <> acceptance.missionAcceptedWorker)
-          consumeMissionCommand command
-          pure $ case written of
-            Left detail -> MissionControllerFailed detail
+          case written of
+            -- The dispatch happened and the tree does not know it yet, which
+            -- is a repair rather than a loss: the record carries the child and
+            -- its lineage. Consuming the request here would hand that repair
+            -- to a pass that only runs once nothing is queued; leaving it
+            -- keeps it with 'replayChildRequest', which finishes this very
+            -- write before acknowledging anything.
+            Left detail -> pure (MissionControllerFailed detail)
             Right () ->
-              MissionAdvanced
-                ( MissionCommandApplied
-                    command.missionCommandId
-                    ("registered child " <> acceptance.missionAcceptedWorker)
-                )
+              answerCommand controller command ("registered child " <> acceptance.missionAcceptedWorker) $
+                pure
+                  ( MissionAdvanced
+                      ( MissionCommandApplied
+                          command.missionCommandId
+                          ("registered child " <> acceptance.missionAcceptedWorker)
+                      )
+                  )
 
 -- ---------------------------------------------------------------------------
 -- Writing the record
@@ -1986,27 +2277,32 @@ writeStep controller snapshot step lifecycle detail registration = do
           )
       pure (Right ())
 
-journalCommand :: MissionController -> MissionSubmittedCommand -> Text -> IO ()
+-- | Writes one command's account into the journal, and reports a write that
+-- did not happen.
+--
+-- The result is the whole point of this function having one. This line is the
+-- durable answer a command is consumed against, so discarding a failure to
+-- write it would report a command as answered in the one place nothing
+-- records what it did.
+journalCommand :: MissionController -> MissionSubmittedCommand -> Text -> IO (Either Text ())
 journalCommand controller command detail = do
   now <- getCurrentTime
-  _ <-
-    recordMissionEvent
-      controller.missionControllerStore
-      ( missionEvent
-          controller.missionControllerMission
-          controller.missionControllerStore.missionStoreRepository
-          now
-          ("command_" <> missionCommandPayloadTag command.missionCommandPayload)
-          ( Just
-              ( command.missionCommandId
-                  <> " ("
-                  <> missionCommandAuthorityTag command.missionCommandAuthority
-                  <> "): "
-                  <> detail
-              )
-          )
-      )
-  pure ()
+  recordMissionEvent
+    controller.missionControllerStore
+    ( missionEvent
+        controller.missionControllerMission
+        controller.missionControllerStore.missionStoreRepository
+        now
+        ("command_" <> missionCommandPayloadTag command.missionCommandPayload)
+        ( Just
+            ( command.missionCommandId
+                <> " ("
+                <> missionCommandAuthorityTag command.missionCommandAuthority
+                <> "): "
+                <> detail
+            )
+        )
+    )
 
 -- | Journals an unusable command file the first time this run meets it.
 journalRejectionOnce :: MissionController -> MissionCommandRejection -> IO ()
