@@ -1540,10 +1540,10 @@ commandSpec = describe "the runner-owned control channel" $ do
   -- subtree a second time would journal a second account of one operator
   -- command.
   --
-  -- What the replay is answered with is what the record says, and an open
-  -- record says the subtree was signalled and has not been shown to have
-  -- ended. Calling that an already-terminated subtree would report an end
-  -- 'resolveOpenTermination' has yet to establish.
+  -- What the replay is answered with is not the record's existence. An open
+  -- record covers both a signal that was sent and one that never was, so the
+  -- replay hands it to the pass that reads the sessions themselves rather than
+  -- reporting an end nothing has established.
   it "answers a replayed termination from its own record instead of repeating it" $ do
     let root = MissionSessionId "solve-844-0001"
         sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" root]
@@ -1561,8 +1561,8 @@ commandSpec = describe "the runner-owned control channel" $ do
           submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand root "operator asked")
           second <- missionControllerIteration controller
           case second of
-            MissionAdvanced (MissionCommandApplied "c-end" detail) ->
-              Text.unpack detail `shouldSatisfy` isInfixOf "already signalled; its end is not yet established"
+            MissionAwaiting detail ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "has not finished ending"
             other -> expectationFailure ("unexpected replay iteration: " <> show other)
           stopMissionController controller
       length <$> readIORef stage.stageTerminated `shouldReturn` 1
@@ -1832,6 +1832,103 @@ durableCommandSpec = describe "answering a command durably" $ do
           node.missionSessionParent /= Nothing
         ]
         `shouldBe` [(childSessionFor theParent "r-1", Just theParent)]
+
+  -- The invocation record is written before the driver is asked for anything,
+  -- so an open one covers the signal that was sent and the one a crash stopped
+  -- ever being sent alike. Nothing in the record tells them apart, and the
+  -- replay does not guess: it hands the record to the pass that reads the
+  -- sessions themselves.
+  it "resolves a replayed termination whose record predates any signal from the sessions" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      -- The durable state a crash between the opening record and the driver
+      -- leaves: a termination identity on disk with no signal under it.
+      openTerminationInvocation store "c-end"
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          replayed <- missionControllerIteration controller
+          case replayed of
+            MissionAwaiting detail -> Text.unpack detail `shouldSatisfy` isInfixOf "has not finished ending"
+            other -> expectationFailure ("an unsignalled termination was reported as done: " <> show other)
+          -- Established from evidence rather than from the marker: the answer
+          -- arrives when the sessions are observed to have ended, and never
+          -- from the record alone.
+          writeIORef stage.stageSessions [theParent, MissionSessionId "child-1"]
+          settled <- iterateUntil controller (isSubtreeTerminated theParent)
+          settled `shouldBe` MissionAdvanced (MissionSubtreeTerminated theParent 2)
+          stopMissionController controller
+      -- And the subtree was never signalled: the replay reached no driver.
+      readIORef stage.stageTerminated `shouldReturn` []
+
+  -- A child request's replay is answered by what its launch recorded, not by
+  -- the launch having a record. A refused launch produced no child.
+  it "answers a replayed child request its record refused as a refusal" $
+    withLiveParent $ \_ stage controller -> do
+      writeIORef
+        stage.stageTargets
+        [Right (issueVersion ["reviewed:approve"]), Right (issueVersion ["reviewed:approve", "blocked"])]
+      submitConsoleCommand controller "c-stale" (targetedChildRequest "r-20" theMission theParent)
+      refused <- missionControllerIteration controller
+      case refused of
+        MissionAdvanced (MissionCommandRefused "c-stale" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "stale version"
+        other -> expectationFailure ("a moved target did not refuse the launch: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+      submitConsoleCommand controller "c-stale-again" (targetedChildRequest "r-20" theMission theParent)
+      replayed <- missionControllerIteration controller
+      case replayed of
+        MissionAdvanced (MissionCommandRefused "c-stale-again" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "stale version"
+        other -> expectationFailure ("a replayed refusal became a success: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  -- An open child launch establishes nothing either way, so the replay is
+  -- neither an answer nor a refusal: the pass that adopts the launch or halts
+  -- the mission for direction is what resolves it.
+  it "leaves a replayed child request unanswered while its launch has no outcome" $
+    withLiveParent $ \store stage controller -> do
+      openChildInvocation store "r-30"
+      submitConsoleCommand controller "c-open" (childRequest "r-30" theMission theParent)
+      replayed <- missionControllerIteration controller
+      case replayed of
+        MissionAwaiting detail -> Text.unpack detail `shouldSatisfy` isInfixOf "no established outcome"
+        other -> expectationFailure ("an unresolved launch was reported as answered: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+      -- Requirement 7's answer to a launch nothing records: the mission stops
+      -- for authenticated direction rather than trying again.
+      halted <- missionControllerIteration controller
+      halted `shouldSatisfy` isWaitingInput
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  -- The parent checks decide whether a new child may be launched, and a replay
+  -- has had that decided for it. Asking them first would refuse the one retry
+  -- that can still put an already-dispatched child into the session tree.
+  it "repairs a dispatched child whose parent ended before the request was retried" $
+    withLiveParent $ \store stage controller -> do
+      submitConsoleCommand controller "c-child" (childRequest "r-40" theMission theParent)
+      failed <- withUnreplaceableSnapshot store (missionControllerIteration controller)
+      case failed of
+        MissionControllerFailed detail -> Text.unpack detail `shouldSatisfy` isInfixOf "snapshot.json"
+        other -> expectationFailure ("an unregistered child was reported as registered: " <> show other)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      -- The parent finishes in the window between the failure and the retry.
+      writeIORef stage.stageSessions [theParent]
+      submitConsoleCommand controller "c-child-again" (childRequest "r-40" theMission theParent)
+      replayed <- missionControllerIteration controller
+      case replayed of
+        MissionAdvanced (MissionCommandApplied "c-child-again" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "already answered"
+        other -> expectationFailure ("an ended parent blocked the repair: " <> show other)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      snapshot <- currentSnapshot store
+      [ (node.missionSessionId, node.missionSessionParent)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [(childSessionFor theParent "r-40", Just theParent)]
 
 -- ---------------------------------------------------------------------------
 -- Child requests

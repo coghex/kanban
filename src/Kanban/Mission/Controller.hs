@@ -1468,7 +1468,7 @@ terminateSubtree controller snapshot command session reason = do
       -- the subtree again would journal a second account of one operator
       -- command, which is the duplicate the invocation identity exists to
       -- prevent.
-      Just existing -> replayTermination controller command session existing
+      Just existing -> replayTermination controller snapshot command session existing
       Nothing -> performTermination controller snapshot command session reason
 
 -- | Answers a replayed termination from what its record says, not from the
@@ -1476,21 +1476,34 @@ terminateSubtree controller snapshot command session reason = do
 --
 -- The invocation identity stops one operator command reaching the driver
 -- twice; it establishes nothing about whether the first attempt worked, and
--- the two are separate questions. A record that is still open belongs to a
--- subtree that was signalled and whose end 'resolveOpenTermination' has yet to
--- establish — the same answer the signalling iteration itself gave. A record
--- closed as anything but completed belongs to a termination that did not
--- happen, or that nobody could show happened, and reporting either of those as
--- an already-terminated subtree would hand the operator a success no effect
--- produced and section 16 forbids inventing.
+-- the two are separate questions. A record closed as anything but completed
+-- belongs to a termination that did not happen, or that nobody could show
+-- happened, and reporting either as an already-terminated subtree would hand
+-- the operator a success no effect produced and section 16 forbids inventing.
 --
--- No branch attempts the effect again. An outcome nobody could establish is
--- resolved by authenticated direction and by nothing here, and one recorded as
--- refused or abandoned is answered as the refusal it was; an operator who
--- wants another attempt submits another command, which mints another identity.
-replayTermination :: MissionController -> MissionSubmittedCommand -> MissionSessionId -> MissionInvocationState -> IO MissionIteration
-replayTermination controller command session existing = case existing.missionInvocationOutcome of
-  Nothing -> applied "was already signalled; its end is not yet established"
+-- An /open/ record is the one that says least of all. It is written before the
+-- driver is asked for anything, so it covers both the signal that was sent and
+-- the one a crash or a failure stopped ever being sent, and no reading of the
+-- record can tell those apart. So this branch answers nothing itself: it hands
+-- the record to 'resolveOpenTermination', which is the pass that resolves it
+-- from the sessions themselves — completed once they have all ended, waiting
+-- while any is still ending, and closed as unknown with the mission halted for
+-- authenticated direction if one cannot be shown to have ended at all. Every
+-- answer that comes back is fresh evidence rather than an inference from the
+-- marker, which is exactly what requirement 7 asks of an unresolved effect.
+--
+-- Reaching it takes consuming the request, because that pass runs only once no
+-- command is queued — so it is run here, in this iteration, rather than left to
+-- a later one that would find the same request in the way.
+--
+-- No branch attempts the effect again. One recorded as refused or abandoned is
+-- answered as the refusal it was; an operator who wants another attempt
+-- submits another command, which mints another identity.
+replayTermination :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionSessionId -> MissionInvocationState -> IO MissionIteration
+replayTermination controller snapshot command session existing = case existing.missionInvocationOutcome of
+  Nothing ->
+    answerCommand controller command ("replay of " <> subject <> "whose outcome is not established; resolving it from the sessions") $
+      resolveOpenTermination controller snapshot existing.missionInvocationRecord.missionInvocationId session
   Just (MissionInvocationCompleted detail) -> applied ("was already terminated: " <> detail)
   Just (MissionInvocationDispatched worker) -> unperformed ("recorded " <> worker <> " rather than an ended subtree")
   Just (MissionInvocationRefused detail) -> unperformed ("was refused before it reached the subtree: " <> detail)
@@ -1611,11 +1624,19 @@ performTermination controller snapshot command session reason = do
 -- | Requirement 12's registered child request.
 --
 -- Four checks, and the order matters. The channel decides whether the request
--- may be believed at all; the mission it names decides whether it is this
--- mission's request; the parent it names is checked against the live
--- registered session tree; and only then is the request identity looked up, so
--- a replay returns the child it already produced instead of launching a second
--- one.
+-- may be believed at all, and the mission it names decides whether it is this
+-- mission's request; those two are about the request itself, so nothing is
+-- read or answered before them. The request identity is looked up next, and
+-- the parent checks come after it.
+--
+-- That is the order because the two groups answer different questions. The
+-- parent checks decide whether a /new/ child may be launched under it; the
+-- identity decides whether one already was. Asking the parent first makes a
+-- replay depend on the parent still being live, and a parent that ends between
+-- a launch and the retry of the request that made it is not hypothetical: the
+-- launch's own session write is exactly what may have failed, and the retry is
+-- what repairs it. Refusing there would acknowledge the request while leaving
+-- the child it already produced outside the session tree for good.
 registerChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> IO MissionIteration
 registerChild controller snapshot command request
   | not (overrideAuthorized command.missionCommandAuthority) =
@@ -1627,6 +1648,29 @@ registerChild controller snapshot command request
             <> " rather than "
             <> controller.missionControllerMission.unMissionId
         )
+  | otherwise = do
+      recorded <-
+        readMissionInvocations
+          controller.missionControllerMission
+          controller.missionControllerStore.missionStoreRepository
+          controller.missionControllerInvocations
+      case recorded of
+        Left detail -> pure (MissionControllerFailed detail)
+        Right states -> case missionInvocationFor childInvocation states of
+          Just existing -> replayChildRequest controller snapshot command request existing
+          Nothing -> launchFreshChild controller snapshot command request childInvocation
+  where
+    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
+    refuseChild detail =
+      answerCommand controller command ("refused child request: " <> detail) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+
+-- | The parent checks, which only a request with no launch of its own reaches.
+--
+-- Each of them is about whether this mission may start new external work under
+-- that parent, which is a question a replay has already had answered for it.
+launchFreshChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
+launchFreshChild controller snapshot command request childInvocation
   | not parentIsRegistered =
       refuseChild
         ( "its parent session "
@@ -1667,9 +1711,8 @@ registerChild controller snapshot command request
                 <> " is not currently live: "
                 <> maybe "it has ended" id observation.missionObservationDetail
             )
-        Right Nothing -> registerChildUnderLiveParent controller snapshot command request childInvocation
+        Right Nothing -> launchChild controller snapshot command request childInvocation
   where
-    childInvocation = childInvocationId request.missionChildRequestParent request.missionChildRequestId
     -- This mission's own tree, and nothing wider: a session another mission
     -- registered is not one this request may name.
     parentIsRegistered = any ((== request.missionChildRequestParent) . (.missionSessionId)) registered
@@ -1685,22 +1728,6 @@ registerChild controller snapshot command request
     refuseChild detail =
       answerCommand controller command ("refused child request: " <> detail) $
         pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
-
--- | The request identity's own check, once the parent has been shown to be
--- live: a replay returns the child it already produced rather than launching a
--- second one.
-registerChildUnderLiveParent :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
-registerChildUnderLiveParent controller snapshot command request childInvocation = do
-      recorded <-
-        readMissionInvocations
-          controller.missionControllerMission
-          controller.missionControllerStore.missionStoreRepository
-          controller.missionControllerInvocations
-      case recorded of
-        Left detail -> pure (MissionControllerFailed detail)
-        Right states -> case missionInvocationFor childInvocation states of
-          Just existing -> replayChildRequest controller snapshot command request existing
-          Nothing -> launchChild controller snapshot command request childInvocation
 
 -- | Answers a replayed child request, and finishes the registration the first
 -- application may not have.
@@ -1718,6 +1745,16 @@ registerChildUnderLiveParent controller snapshot command request childInvocation
 -- repair happens here, from the record's own lineage and with no second
 -- dispatch, and the acknowledgement is given only once the tree holds the
 -- child it acknowledges.
+--
+-- Every other outcome is answered as what it records rather than as an answer.
+-- A launch the owning authority refused, one a moved precondition stopped, and
+-- one the operator resolved as never having happened are all refusals, and
+-- reporting them as an applied command would turn a request that produced no
+-- child into one that did. An open or unknown record establishes nothing
+-- either way — the effect may have happened — so it is answered with neither:
+-- 'resolveOpenInvocation' adopts the launch or halts the mission for
+-- authenticated direction, and it runs on the iteration this one's consumption
+-- makes room for.
 replayChildRequest :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationState -> IO MissionIteration
 replayChildRequest controller snapshot command request existing = case existing.missionInvocationOutcome of
   Just (MissionInvocationDispatched worker)
@@ -1732,26 +1769,39 @@ replayChildRequest controller snapshot command request existing = case existing.
             (Just (MissionSessionId worker, Just request.missionChildRequestParent, Nothing))
         case written of
           Left detail -> pure (MissionControllerFailed detail)
-          Right () -> answer ("child " <> worker)
-  _ -> answer (renderExisting existing)
+          Right () -> answered ("child " <> worker)
+    | otherwise -> answered ("child " <> worker)
+  Just (MissionInvocationCompleted detail) -> answered detail
+  Just (MissionInvocationRefused detail) -> refused detail
+  Just (MissionInvocationStale stale) -> refused (missionStaleVersionMessage stale)
+  Just (MissionInvocationAbandoned detail) -> refused ("it was resolved as never having happened: " <> detail)
+  Just (MissionInvocationUnknown detail) -> unresolved detail
+  Nothing -> unresolved "its launch is journaled and its outcome is not yet recorded"
   where
     registered identity = any ((== identity) . (.missionSessionId)) snapshot.missionSnapshotSessions
-    answer rendered =
-      answerCommand
-        controller
-        command
-        ("replay of child request " <> request.missionChildRequestId <> "; returning " <> rendered)
-        $ pure
+    replayOf rendered = "replay of child request " <> request.missionChildRequestId <> "; " <> rendered
+    answered rendered =
+      answerCommand controller command (replayOf ("returning " <> rendered)) $
+        pure
           ( MissionAdvanced
               ( MissionCommandApplied
                   command.missionCommandId
                   ("child request already answered: " <> rendered)
               )
           )
-    renderExisting state = case state.missionInvocationOutcome of
-      Just (MissionInvocationDispatched worker) -> "child " <> worker
-      Just outcome -> Text.pack (show outcome)
-      Nothing -> "an invocation whose outcome is not yet recorded"
+    refused detail =
+      answerCommand controller command (replayOf ("its launch was refused: " <> detail)) $
+        pure (MissionAdvanced (MissionCommandRefused command.missionCommandId detail))
+    unresolved detail =
+      answerCommand controller command (replayOf ("its launch has no established outcome: " <> detail)) $
+        pure
+          ( MissionAwaiting
+              ( "child request "
+                  <> request.missionChildRequestId
+                  <> " cannot be answered while its launch has no established outcome: "
+                  <> detail
+              )
+          )
 
 -- | The step a registered child's launch invents for it, named by the pair
 -- that asked for it.
