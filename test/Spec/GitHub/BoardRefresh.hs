@@ -2,7 +2,7 @@
 module Spec.GitHub.BoardRefresh (spec) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (finally)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (void)
 import Data.Aeson (eitherDecode)
 import qualified Data.ByteString.Char8 as ByteString
@@ -80,35 +80,60 @@ import System.Process
     createProcess,
     getPid,
     proc,
+    terminateProcess,
     waitForProcess
   )
 import System.Timeout (timeout)
 import Test.Hspec
 
--- | A registered @gh@ group whose handle has already been reaped, which is the
--- state 'collect' is in between waiting on its own child and dropping that
--- child's entry.
+-- | A registered @gh@ group, handed to @action@ in whatever state @process@
+-- leaves its child.
 --
 -- The entry is written by 'registerSpawnedGh' rather than by hand, so what an
 -- example asserts about is an entry the production registration actually
--- produced. @true@ stands in for @gh@: what matters here is a real child that
--- leads its own group and then exits, not anything it prints.
-withReapedRegistration ::
+-- produced. The child is torn down afterwards whatever the example did with
+-- it, since one that is still running when the example ends outlives the
+-- temporary root it was registered under.
+withRegisteredGroup ::
+  CreateProcess ->
   (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
   IO ()
-withReapedRegistration action =
+withRegisteredGroup process action =
   withTemporaryCacheRoot $ \temporaryRoot ->
     withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
       let repository = Repository temporaryRoot "coghex" "kanban"
       guard <- newGhRecordLock >>= newGhFetchGuard
       spawned@(_, _, _, processHandle) <-
-        createProcess (proc "true" []) {std_in = CreatePipe, create_group = True}
+        createProcess process {std_in = CreatePipe, create_group = True}
       registered <- registerSpawnedGh guard repository spawned
       case registered of
         Left message -> expectationFailure ("the group could not be registered: " <> Data.Text.unpack message)
-        Right groupPid -> do
-          _ <- waitForProcess processHandle
+        Right groupPid ->
           action repository guard groupPid spawned
+            `finally` ( do
+                          void (try @IOException (terminateProcess processHandle))
+                          void (try @IOException (waitForProcess processHandle))
+                      )
+
+-- | A registered group whose handle has already been reaped, which is the
+-- state 'collect' is in between waiting on its own child and dropping that
+-- child's entry. @true@ stands in for @gh@: what matters is a real child that
+-- leads its own group and then exits, not anything it prints.
+withReapedRegistration ::
+  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  IO ()
+withReapedRegistration action =
+  withRegisteredGroup (proc "true" []) $ \repository guard groupPid spawned@(_, _, _, processHandle) -> do
+    _ <- waitForProcess processHandle
+    action repository guard groupPid spawned
+
+-- | A registered group whose child is still running and still unreaped, which
+-- is the state the run is in from the instant the entry is persisted until it
+-- is finally waited on.
+withLiveRegistration ::
+  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  IO ()
+withLiveRegistration = withRegisteredGroup (proc "sleep" ["30"])
 
 -- | Runs @action@ with the directory holding the durable record sealed against
 -- writes, and puts it back afterwards so the temporary tree can still be torn
@@ -220,6 +245,19 @@ spec = do
               -- merely conservative: the next fetch re-checks that entry.
               cleanup.ghCleanupGuard `shouldBe` GuardRecorded
           ghGroupIsRecorded guard repository groupPid `shouldReturn` True
+
+    -- Persisting the entry and publishing the pgid the cleanup will name it by
+    -- are two steps with an interruptible gap between them, so a deadline can
+    -- land after the record is on disk and before the cleanup was ever told
+    -- which group it covers. Nothing has reaped the handle that early, so the
+    -- drop has to fall back to the pid it still reports -- otherwise this is
+    -- the same defect again, one window earlier.
+    it "drops the persisted entry when cleanup was never told the pgid" $
+      withLiveRegistration $ \repository guard groupPid spawned -> do
+        ghGroupIsRecorded guard repository groupPid `shouldReturn` True
+        abandonGh guard repository Nothing spawned
+        ghGroupIsRecorded guard repository groupPid `shouldReturn` False
+        ghFetchCleanupFailure guard `shouldReturn` Nothing
 
     it "leaves a fast gh's decoded page untouched" $
       withTemporaryCacheRoot $ \temporaryRoot ->

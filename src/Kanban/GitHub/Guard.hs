@@ -30,6 +30,7 @@ module Kanban.GitHub.Guard
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (forkIOWithUnmask)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar, withMVar)
 import Control.Exception (IOException, finally, try, uninterruptibleMask_)
@@ -216,16 +217,25 @@ clearCleanupFailure guard = writeIORef guard.ghGuardCleanupFailure Nothing
 -- not happen is recorded on the guard too, as 'GuardRecorded', since the
 -- record is precisely what survived.
 --
--- @recordedGroup@ is the pgid the registration wrote the entry under, carried
--- in rather than asked for, and the two identities here are deliberately not
--- the same one. Signalling uses the pid the handle still reports, because a
--- pid is only safe to signal while the handle holds it unreaped — once it is
--- reaped that number can name anything. The record needs the opposite: an
--- interruption arriving after the run reaped its own handle leaves 'getPid'
--- empty, and a cleanup that could not name the entry would skip the drop and
--- go on to report an ordinary timeout over an entry still on disk. The
--- registration's pgid is never signalled, so remembering it costs nothing and
--- is the only thing that survives the reap.
+-- Two identities are in play and they are deliberately not merged.
+-- /Signalling/ uses the pid the handle still reports, because a pid is only
+-- safe to signal while the handle holds it unreaped — once reaped, that number
+-- can name anything, and 'forceKillGhGroup' must never be pointed at it. The
+-- /record/ needs the opposite property: it is looked up and never signalled,
+-- so a stale number costs nothing there and an absent one costs everything —
+-- a cleanup that cannot name the entry skips the drop and goes on to report an
+-- ordinary timeout over an entry still on disk.
+--
+-- So the record identity is @recordedGroup@ — the pgid the registration wrote
+-- the entry under, carried in rather than asked for — falling back to the
+-- handle's own pid. Between them they answer at every instant the entry can
+-- exist, which is what makes the drop unconditional. Registration persists the
+-- entry and publishes that pgid as two steps with an interruptible gap between
+-- them, so an interruption landing in that gap carries no @recordedGroup@; but
+-- nothing has reaped the handle that early, so 'getPid' still answers, with the
+-- same number. Later, once 'Kanban.GitHub.Run.runGh' reaps its own handle
+-- before dropping the entry, 'getPid' goes empty — and by then the pgid was
+-- published long ago. Neither window is open at the same time as the other.
 abandonGh :: GhFetchGuard -> Repository -> Maybe Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
 abandonGh guard repository recordedGroup (input, _, _, processHandle) = do
   let cleanupFailure = guard.ghGuardCleanupFailure
@@ -274,7 +284,7 @@ abandonGh guard repository recordedGroup (input, _, _, processHandle) = do
     -- block this thread and the refresh would never report anything at all.
     Right proven -> do
       void (try @IOException (waitForProcess processHandle))
-      undropped <- dropRecordedGroup recordedGroup
+      undropped <- dropRecordedGroup (recordedGroup <|> spawnedPid)
       case undropped of
         -- Killed, confirmed, and still named on disk. That is not a clean
         -- cleanup: the entry the next fetch will re-verify is precisely the
@@ -299,10 +309,9 @@ abandonGh guard repository recordedGroup (input, _, _, processHandle) = do
       void (recordGhGroup guard repository unconfirmed)
       ghGroupIsRecorded guard repository unconfirmed.ownedProcessGroupPid
 
-    -- 'Nothing' when there is nothing to drop. The registration writes the
-    -- entry and reports the pgid in one step, so no pgid means no entry was
-    -- ever written under one — a run that failed before registering has
-    -- nothing on disk for this to remove.
+    -- 'Nothing' only when neither identity was available, which is a run that
+    -- never had a live child: no process was spawned, so no entry was ever
+    -- written under a pgid and there is nothing on disk for this to remove.
     dropRecordedGroup Nothing = pure Nothing
     dropRecordedGroup (Just groupPid) = do
       dropped <- dropGhGroup guard repository groupPid
