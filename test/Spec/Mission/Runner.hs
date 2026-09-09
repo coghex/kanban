@@ -2101,6 +2101,30 @@ durableCommandSpec = describe "answering a command durably" $ do
       map (missionIntendedEffectTag . (.missionInvocationEffect) . (.missionInvocationRecord)) recorded
         `shouldBe` ["terminate:solve-844-0001"]
 
+  -- Durable state outlives the release that wrote it, so this store is one a
+  -- run without the halt above could have left: it closed a launch as unknown,
+  -- lost the waiting-input write behind it, carried on past the record it had
+  -- just written, and settled the mission. A reader that let a terminal
+  -- lifecycle answer first would call that a successful run.
+  it "refuses to call a settled mission a success over an unaccounted effect" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-70"
+      concludeInvocation store (childInvocationFor "r-70") (MissionInvocationUnknown "no worker records it")
+      advanced <- currentSnapshot store
+      written <- writeMissionSnapshot store advanced {missionSnapshotLifecycle = MissionCompleted}
+      written `shouldBe` Right ()
+      report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
+      case report of
+        Left detail -> expectationFailure (Text.unpack detail)
+        Right run -> do
+          run.missionRunConclusion
+            `shouldBe` Right
+              (MissionHaltIndeterminate MissionCompleted "an effect it may have had is recorded as unaccounted for")
+          -- Section 16's own sentence: an indeterminate result is never a
+          -- success, and a completed plan is not evidence the effect happened.
+          missionRunSucceeded run `shouldBe` False
+      readIORef stage.stageDispatches `shouldReturn` []
+
 -- ---------------------------------------------------------------------------
 -- Child requests
 -- ---------------------------------------------------------------------------
