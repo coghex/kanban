@@ -29,6 +29,7 @@ module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (bracket_)
 import Control.Monad (forM_, join, void)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
@@ -126,6 +127,7 @@ spec = describe "the foreground mission runner" $ do
   preconditionSpec
   continuationSpec
   commandSpec
+  durableCommandSpec
   childRequestSpec
   consoleSpec
   preconditionBoundarySpec
@@ -320,7 +322,9 @@ data Stage = Stage
     -- that cares about an unverifiable reading chooses its own.
     stageObservation :: IORef MissionTerminalObservation,
     -- | The worker each invocation will be found to have launched.
-    stageAdoptions :: IORef [(MissionInvocationId, MissionSessionId)]
+    stageAdoptions :: IORef [(MissionInvocationId, MissionSessionId)],
+    -- | The failure a termination reports instead of signalling anything.
+    stageTerminateFailure :: IORef (Maybe Text)
   }
 
 newStage :: IO Stage
@@ -336,6 +340,7 @@ newStage =
     <*> newIORef []
     <*> newIORef endedObservation
     <*> newIORef []
+    <*> newIORef Nothing
 
 endedObservation :: MissionTerminalObservation
 endedObservation =
@@ -395,8 +400,10 @@ stagedDriver stage _ _ =
           ($ request) <$> readIORef stage.stageDispatchResult,
         missionDriverTerminate = \sessions -> do
           atomicModifyIORef' stage.stageTerminated (\seen -> (seen <> [sessions], ()))
-          unreached <- readIORef stage.stageUnreached
-          pure (Right unreached)
+          refusal <- readIORef stage.stageTerminateFailure
+          case refusal of
+            Just detail -> pure (Left detail)
+            Nothing -> Right <$> readIORef stage.stageUnreached
       }
 
 -- | A store, a specification, and a snapshot, under a state root nothing else
@@ -1532,6 +1539,11 @@ commandSpec = describe "the runner-owned control channel" $ do
   -- died between journaling the answer and removing the file. Signalling the
   -- subtree a second time would journal a second account of one operator
   -- command.
+  --
+  -- What the replay is answered with is what the record says, and an open
+  -- record says the subtree was signalled and has not been shown to have
+  -- ended. Calling that an already-terminated subtree would report an end
+  -- 'resolveOpenTermination' has yet to establish.
   it "answers a replayed termination from its own record instead of repeating it" $ do
     let root = MissionSessionId "solve-844-0001"
         sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" root]
@@ -1550,7 +1562,7 @@ commandSpec = describe "the runner-owned control channel" $ do
           second <- missionControllerIteration controller
           case second of
             MissionAdvanced (MissionCommandApplied "c-end" detail) ->
-              Text.unpack detail `shouldSatisfy` isInfixOf "already terminated"
+              Text.unpack detail `shouldSatisfy` isInfixOf "already signalled; its end is not yet established"
             other -> expectationFailure ("unexpected replay iteration: " <> show other)
           stopMissionController controller
       length <$> readIORef stage.stageTerminated `shouldReturn` 1
@@ -1594,6 +1606,232 @@ attachToMissionAsClient store = do
   case attached of
     Left message -> fail (Text.unpack message)
     Right endpoint -> pure endpoint
+
+-- ---------------------------------------------------------------------------
+-- Commands answered durably
+-- ---------------------------------------------------------------------------
+
+-- | Issue #644: a command is consumed only once both its transition and its
+-- journal entry are on disk.
+--
+-- The two halves of one answer, and each of them can fail on its own. A
+-- transition that never landed leaves nothing for the journal to describe; a
+-- journal that could not be appended to leaves a transition nobody can account
+-- for. In either case the request file is the last remaining evidence the
+-- command was ever asked for, so removing it is what turns a repairable fault
+-- into a lost operator instruction — and these examples are the two faults,
+-- with the repaired iteration after each.
+--
+-- Only a file-backed command can be retained, which is why the pause and the
+-- refusal below are submitted through an attached client's endpoint. An
+-- authenticated console command is taken off an in-memory queue before it is
+-- applied and has no durable spelling to go back to; section 5 forbids giving
+-- it one. What it still gets is the refusal to claim it was applied, which the
+-- termination examples assert.
+durableCommandSpec :: Spec
+durableCommandSpec = describe "answering a command durably" $ do
+  it "leaves a pause queued when the snapshot it writes cannot be replaced" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          let requests = controller.missionControllerControl.missionControlRequests
+          attached <- attachToMissionAsClient store
+          submitted <- submitMissionCommand attached "c-pause" (MissionPauseCommand "operator asked")
+          submitted `shouldBe` Right ()
+          failed <- withUnreplaceableSnapshot store (missionControllerIteration controller)
+          case failed of
+            MissionControllerFailed detail -> Text.unpack detail `shouldSatisfy` isInfixOf "snapshot.json"
+            other -> expectationFailure ("a pause that never landed was reported as applied: " <> show other)
+          -- Nothing was written anywhere: not the state the operator asked
+          -- for, not an account of a command that reached it, and not — the
+          -- one that matters — the removal of the request itself.
+          listDirectory requests `shouldReturn` ["c-pause.json"]
+          interrupted <- currentSnapshot store
+          interrupted.missionSnapshotLifecycle `shouldBe` MissionRunning
+          commandJournalEntries store `shouldReturn` []
+          -- The very same file, applied once the fault is repaired.
+          repaired <- missionControllerIteration controller
+          case repaired of
+            MissionAdvanced (MissionCommandApplied "c-pause" _) -> pure ()
+            other -> expectationFailure ("the repaired pause was not applied: " <> show other)
+          listDirectory requests `shouldReturn` []
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionPaused
+      map fst <$> commandJournalEntries store `shouldReturn` ["command_pause"]
+
+  it "leaves a pause queued when its journal entry cannot be written" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          let requests = controller.missionControllerControl.missionControlRequests
+          attached <- attachToMissionAsClient store
+          submitted <- submitMissionCommand attached "c-pause" (MissionPauseCommand "operator asked")
+          submitted `shouldBe` Right ()
+          sealed <- sealMissionJournal store
+          failed <- missionControllerIteration controller
+          case failed of
+            MissionControllerFailed detail ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-pause"
+            other -> expectationFailure ("an unjournaled pause was reported as applied: " <> show other)
+          -- The transition did land, and that is exactly why the command must
+          -- stay: the state moved and no durable line says what moved it, so
+          -- the only way that line ever gets written is the command being read
+          -- again.
+          listDirectory requests `shouldReturn` ["c-pause.json"]
+          unsealMissionJournal sealed
+          commandJournalEntries store `shouldReturn` []
+          repaired <- missionControllerIteration controller
+          case repaired of
+            MissionAdvanced (MissionCommandApplied "c-pause" _) -> pure ()
+            other -> expectationFailure ("the repaired pause was not applied: " <> show other)
+          listDirectory requests `shouldReturn` []
+          stopMissionController controller
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionPaused
+      -- Once, from the iteration that consumed it, rather than twice from the
+      -- one that failed and the one that repaired it.
+      map fst <$> commandJournalEntries store `shouldReturn` ["command_pause"]
+
+  -- A refusal is an answer like any other, and its journal line is the whole
+  -- of that answer: there is no transition beside it to infer it from.
+  it "leaves a refused override queued when its journal entry cannot be written" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepOutcomeUnknown []] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          let requests = controller.missionControllerControl.missionControlRequests
+          attached <- attachToMissionAsClient store
+          submitted <- submitMissionCommand attached "c-forged" (MissionUserOverrideCommand theStep "resolve it")
+          submitted `shouldBe` Right ()
+          sealed <- sealMissionJournal store
+          failed <- missionControllerIteration controller
+          case failed of
+            MissionControllerFailed detail ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-forged"
+            other -> expectationFailure ("an unjournaled refusal was reported: " <> show other)
+          listDirectory requests `shouldReturn` ["c-forged.json"]
+          unsealMissionJournal sealed
+          repaired <- missionControllerIteration controller
+          case repaired of
+            MissionAdvanced (MissionCommandRefused "c-forged" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "cannot record a user_override"
+            other -> expectationFailure ("the repaired refusal was not reported: " <> show other)
+          listDirectory requests `shouldReturn` []
+          stopMissionController controller
+      -- The step the forged override named is untouched throughout.
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepOutcomeUnknown
+      entries <- commandJournalEntries store
+      map fst entries `shouldBe` ["command_user_override"]
+      concatMap (Text.unpack . snd) entries `shouldSatisfy` isInfixOf "refused:"
+
+  -- The pre-effect journal line, which is the one a termination is not allowed
+  -- to reach outside without. It is written before the invocation record so
+  -- that losing it leaves nothing behind at all: an identity on disk with no
+  -- signal under it is what a later replay would read as a termination already
+  -- in flight.
+  it "signals no subtree when the command that would order it cannot be journaled" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          sealed <- sealMissionJournal store
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          failed <- missionControllerIteration controller
+          case failed of
+            MissionControllerFailed detail ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "journal entry for command c-end"
+            other -> expectationFailure ("an unjournaled termination was reported: " <> show other)
+          readIORef stage.stageTerminated `shouldReturn` []
+          unsealMissionJournal sealed
+          currentInvocations store `shouldReturn` []
+          -- Retried, it performs the termination from the beginning rather
+          -- than meeting a record of itself.
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          applied <- missionControllerIteration controller
+          case applied of
+            MissionAdvanced (MissionCommandApplied "c-end" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "signalled the subtree"
+            other -> expectationFailure ("the retried termination was not performed: " <> show other)
+          stopMissionController controller
+      length <$> readIORef stage.stageTerminated `shouldReturn` 1
+      recorded <- currentInvocations store
+      map (missionIntendedEffectTag . (.missionInvocationEffect) . (.missionInvocationRecord)) recorded
+        `shouldBe` ["terminate:solve-844-0001"]
+
+  -- Requirement 4, qualified by the approving review: the invocation identity
+  -- stops one command reaching the driver twice, and says nothing about
+  -- whether the first attempt worked. A record closed as refused is a
+  -- termination that did not happen.
+  it "answers a replayed termination whose record refused it as a refusal" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          writeIORef stage.stageTerminateFailure (Just "the supervisor would not signal them")
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          refused <- missionControllerIteration controller
+          case refused of
+            MissionControllerFailed detail ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "would not signal"
+            other -> expectationFailure ("a refused termination was reported as done: " <> show other)
+          -- The same command again, with the driver willing this time. The
+          -- identity's record is what answers it, and what that record says is
+          -- that nothing was terminated.
+          writeIORef stage.stageTerminateFailure Nothing
+          submitConsoleCommand controller "c-end" (MissionTerminateSubtreeCommand theParent "operator asked")
+          replayed <- missionControllerIteration controller
+          case replayed of
+            MissionAdvanced (MissionCommandRefused "c-end" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "was refused before it reached the subtree"
+            other -> expectationFailure ("a replayed refusal became a success: " <> show other)
+          stopMissionController controller
+      -- And the replay reached nothing: one attempt, from the first command.
+      length <$> readIORef stage.stageTerminated `shouldReturn` 1
+
+  -- The dispatched record and the session tree are two writes, and the second
+  -- is the one that makes a child this mission's. A replay that acknowledged
+  -- the first without finishing the second would consume the last request in a
+  -- position to notice, because the pass that normally repairs this runs only
+  -- once no command is queued.
+  it "finishes a dispatched child's registration before answering its replay" $
+    withLiveParent $ \store stage controller -> do
+      submitConsoleCommand controller "c-child" (childRequest "r-1" theMission theParent)
+      failed <- withUnreplaceableSnapshot store (missionControllerIteration controller)
+      case failed of
+        MissionControllerFailed detail -> Text.unpack detail `shouldSatisfy` isInfixOf "snapshot.json"
+        other -> expectationFailure ("an unregistered child was reported as registered: " <> show other)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      -- The record carries the child; the tree does not.
+      interrupted <- currentSnapshot store
+      map (.missionSessionId) interrupted.missionSnapshotSessions `shouldBe` [theParent]
+      recorded <- currentInvocations store
+      map (.missionInvocationOutcome) recorded
+        `shouldBe` [Just (MissionInvocationDispatched (childSessionFor theParent "r-1").unMissionSessionId)]
+      -- The replay repairs the tree and launches nothing.
+      submitConsoleCommand controller "c-child-again" (childRequest "r-1" theMission theParent)
+      replayed <- missionControllerIteration controller
+      case replayed of
+        MissionAdvanced (MissionCommandApplied "c-child-again" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "already answered"
+        other -> expectationFailure ("the replay did not answer the request: " <> show other)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      snapshot <- currentSnapshot store
+      [ (node.missionSessionId, node.missionSessionParent)
+        | node <- snapshot.missionSnapshotSessions,
+          node.missionSessionParent /= Nothing
+        ]
+        `shouldBe` [(childSessionFor theParent "r-1", Just theParent)]
 
 -- ---------------------------------------------------------------------------
 -- Child requests
@@ -3418,6 +3656,71 @@ sealInvocationJournal store = case missionInvocationPath store.missionStoreDirec
 
 unsealInvocationJournal :: FilePath -> IO ()
 unsealInvocationJournal path = setFileMode path 0o600
+
+-- | Makes the mission's event journal unappendable, and gives back what is
+-- needed to undo it.
+--
+-- The file rather than the directory, because an append opens the journal
+-- itself: a mode that refuses a write reaches the appender exactly as a full
+-- filesystem or a revoked permission would. It is created first if this
+-- mission has not journaled anything yet, so what the seal denies is the
+-- write and never the file's absence.
+sealMissionJournal :: MissionStore -> IO FilePath
+sealMissionJournal store = case missionJournalPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> do
+    present <- doesFileExist path
+    if present then pure () else ByteString.writeFile path ""
+    setFileMode path 0o400
+    pure path
+
+unsealMissionJournal :: FilePath -> IO ()
+unsealMissionJournal path = setFileMode path 0o600
+
+-- | Runs an action with this mission's snapshot impossible to replace.
+--
+-- The directory rather than the file, which is the whole point: a snapshot is
+-- published by staging a new record beside the old one and renaming it into
+-- place, so a read-only @snapshot.json@ is replaced exactly as a writable one
+-- is. What that publication needs is the right to create a file in the
+-- mission's own directory, and taking that away is what fails it — at the
+-- replacement, which is the operation this is meant to seal.
+--
+-- Two things make the seal hold and stay narrow. The state root is moved out
+-- from under the directory for the duration, because the store reasserts
+-- @0700@ on every directory below that root before each write and would
+-- otherwise undo the seal a moment before it was tested; the paths the store
+-- resolved when it was opened do not move with it, so every record goes on
+-- being written where it was. And the two append-only journals are created
+-- first if this mission has not written them yet, so the seal denies a
+-- creation in the directory and not an append to a file that was never there:
+-- what an example sees fail is the snapshot alone.
+withUnreplaceableSnapshot :: MissionStore -> IO result -> IO result
+withUnreplaceableSnapshot store action =
+  case (,,)
+    <$> missionDirectory store.missionStoreDirectory theMission
+    <*> missionJournalPath store.missionStoreDirectory theMission
+    <*> missionInvocationPath store.missionStoreDirectory theMission of
+    Left message -> fail (Text.unpack message)
+    Right (directory, journal, invocations) -> do
+      forM_ [journal, invocations] $ \path -> do
+        present <- doesFileExist path
+        if present then pure () else ByteString.writeFile path ""
+      withEnvironmentValue "XDG_STATE_HOME" (directory </> "not-a-state-root") $
+        bracket_ (setFileMode directory 0o500) (setFileMode directory 0o700) action
+
+-- | Every command entry this mission's journal carries, kind and detail.
+commandJournalEntries :: MissionStore -> IO [(Text, Text)]
+commandJournalEntries store = do
+  journal <- readMissionJournal store theMission 0
+  case journal of
+    Left message -> fail (Text.unpack message)
+    Right (recorded, _) ->
+      pure
+        [ (event.missionEventKind, maybe "" id event.missionEventDetail)
+        | MissionJournalEvent event <- recorded,
+          "command_" `Text.isPrefixOf` event.missionEventKind
+        ]
 
 -- | The counter an invocation identity ends with, which is the part a mint
 -- taken from a moving number contributes.

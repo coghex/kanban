@@ -411,10 +411,14 @@ readMissionCommands endpoint = do
 
 -- | Removes a command's file once it has been answered durably.
 --
--- Answered /durably/ is the ordering that matters: the journal entry recording
--- what the command did is written first, so a crash here leaves a command that
--- is read again and recognized as already applied by its identity, rather than
--- one whose answer nobody can find.
+-- Answered /durably/ is the ordering that matters, and it is a precondition
+-- callers owe rather than something this can check: the transition the command
+-- asked for and the journal entry recording it are both written first, so a
+-- crash here leaves a command that is read again and recognized by its
+-- identity, rather than one whose answer nobody can find. A caller whose
+-- transition or journal entry failed must not reach this at all — the file is
+-- the only remaining record that the command was ever asked for, and the
+-- iteration reports the failure and leaves it where it is.
 consumeMissionCommand :: MissionSubmittedCommand -> IO ()
 consumeMissionCommand command =
   mapM_ (ignoreFileOperation . removeFile) command.missionCommandPath
