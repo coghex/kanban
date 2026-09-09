@@ -215,8 +215,19 @@ clearCleanupFailure guard = writeIORef guard.ghGuardCleanupFailure Nothing
 -- names is exactly what the next fetch holds back over — so a drop that did
 -- not happen is recorded on the guard too, as 'GuardRecorded', since the
 -- record is precisely what survived.
-abandonGh :: GhFetchGuard -> Repository -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
-abandonGh guard repository (input, _, _, processHandle) = do
+--
+-- @recordedGroup@ is the pgid the registration wrote the entry under, carried
+-- in rather than asked for, and the two identities here are deliberately not
+-- the same one. Signalling uses the pid the handle still reports, because a
+-- pid is only safe to signal while the handle holds it unreaped — once it is
+-- reaped that number can name anything. The record needs the opposite: an
+-- interruption arriving after the run reaped its own handle leaves 'getPid'
+-- empty, and a cleanup that could not name the entry would skip the drop and
+-- go on to report an ordinary timeout over an entry still on disk. The
+-- registration's pgid is never signalled, so remembering it costs nothing and
+-- is the only thing that survives the reap.
+abandonGh :: GhFetchGuard -> Repository -> Maybe Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
+abandonGh guard repository recordedGroup (input, _, _, processHandle) = do
   let cleanupFailure = guard.ghGuardCleanupFailure
   -- Captured before anything reaps the handle, since 'getPid' goes 'Nothing'
   -- the moment it is reaped and the guard entry is keyed by this PID.
@@ -263,7 +274,7 @@ abandonGh guard repository (input, _, _, processHandle) = do
     -- block this thread and the refresh would never report anything at all.
     Right proven -> do
       void (try @IOException (waitForProcess processHandle))
-      undropped <- dropRecordedGroup spawnedPid
+      undropped <- dropRecordedGroup recordedGroup
       case undropped of
         -- Killed, confirmed, and still named on disk. That is not a clean
         -- cleanup: the entry the next fetch will re-verify is precisely the
@@ -288,9 +299,10 @@ abandonGh guard repository (input, _, _, processHandle) = do
       void (recordGhGroup guard repository unconfirmed)
       ghGroupIsRecorded guard repository unconfirmed.ownedProcessGroupPid
 
-    -- 'Nothing' when there is nothing to drop: an entry is keyed by the pid
-    -- captured before the handle was reaped, and without one there is no entry
-    -- this cleanup wrote to remove.
+    -- 'Nothing' when there is nothing to drop. The registration writes the
+    -- entry and reports the pgid in one step, so no pgid means no entry was
+    -- ever written under one — a run that failed before registering has
+    -- nothing on disk for this to remove.
     dropRecordedGroup Nothing = pure Nothing
     dropRecordedGroup (Just groupPid) = do
       dropped <- dropGhGroup guard repository groupPid

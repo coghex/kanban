@@ -15,11 +15,19 @@ module Kanban.GitHub
     -- 'graphqlArguments' are internal, exported so the suite can assert the
     -- exact argv handed to gh, the way one decoded page advances the fetch,
     -- and how a failed one is classified and reported, all without a live
-    -- request. 'ghGroupIsRecorded' is internal for the same reason: the
-    -- durable record is where an abandoned group's cleanup is proved to have
-    -- finished, and asking it under the record lock is how the suite reads
-    -- that without a second reader of its own.
+    -- request.
+    --
+    -- 'abandonGh', 'registerSpawnedGh' and 'ghGroupIsRecorded' are internal
+    -- for a related reason. What an abandoned @gh@'s cleanup owes is settled
+    -- against the durable record, and some of what it owes is only reachable
+    -- at a moment a whole fetch cannot be steered into — after its own handle
+    -- has been reaped, say. Registering a group, abandoning it, and asking the
+    -- record what it still names are the three seams that let the suite stand
+    -- at exactly that moment, so no example has to build a record by hand or
+    -- race a real fetch to reach it.
     FetchState (..),
+    abandonGh,
+    registerSpawnedGh,
     GhCleanupFailure (..),
     GhCleanupGuard (..),
     ghBehindBarrier,
@@ -158,7 +166,7 @@ import Kanban.GitHub.History
     newHistoryTraversal,
     runCompletedHistoryPage,
   )
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, ghFetchCleanupFailure, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, setCleanupFailure)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, abandonGh, ghFetchCleanupFailure, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)

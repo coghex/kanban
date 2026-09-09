@@ -2,6 +2,7 @@
 module Spec.GitHub.BoardRefresh (spec) where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (finally)
 import Control.Monad (void)
 import Data.Aeson (eitherDecode)
 import qualified Data.ByteString.Char8 as ByteString
@@ -14,17 +15,22 @@ import Kanban.GitHub
   ( FetchState (..),
     GhCleanupFailure (..),
     GhCleanupGuard (..),
+    GhFetchGuard,
     GitHubResult (..),
+    abandonGh,
     advanceState,
     confirmsOwnGroupLeadership,
     ghBehindBarrier,
+    ghFetchCleanupFailure,
+    ghGroupIsRecorded,
     groupConfirmedEmpty,
     graphqlArguments,
     newGhFetchGuard,
     newGhRecordLock,
     newGhRecordLockOwnedBy,
     reclaimRecordedGhGroups,
-    recordGhGroup
+    recordGhGroup,
+    registerSpawnedGh
   )
 import Kanban.Process
   ( OwnedProcessGroup (..),
@@ -65,10 +71,11 @@ import Spec.Support.Process (withNonLeaderProcess, withSurvivingGroupLeader, wit
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
-import System.IO (hClose)
+import System.IO (Handle, hClose)
 import System.Posix.Files (setFileMode)
 import System.Process
   ( CreateProcess (..),
+    ProcessHandle,
     StdStream (CreatePipe),
     createProcess,
     getPid,
@@ -77,6 +84,43 @@ import System.Process
   )
 import System.Timeout (timeout)
 import Test.Hspec
+
+-- | A registered @gh@ group whose handle has already been reaped, which is the
+-- state 'collect' is in between waiting on its own child and dropping that
+-- child's entry.
+--
+-- The entry is written by 'registerSpawnedGh' rather than by hand, so what an
+-- example asserts about is an entry the production registration actually
+-- produced. @true@ stands in for @gh@: what matters here is a real child that
+-- leads its own group and then exits, not anything it prints.
+withReapedRegistration ::
+  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  IO ()
+withReapedRegistration action =
+  withTemporaryCacheRoot $ \temporaryRoot ->
+    withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+      let repository = Repository temporaryRoot "coghex" "kanban"
+      guard <- newGhRecordLock >>= newGhFetchGuard
+      spawned@(_, _, _, processHandle) <-
+        createProcess (proc "true" []) {std_in = CreatePipe, create_group = True}
+      registered <- registerSpawnedGh guard repository spawned
+      case registered of
+        Left message -> expectationFailure ("the group could not be registered: " <> Data.Text.unpack message)
+        Right groupPid -> do
+          _ <- waitForProcess processHandle
+          action repository guard groupPid spawned
+
+-- | Runs @action@ with the directory holding the durable record sealed against
+-- writes, and puts it back afterwards so the temporary tree can still be torn
+-- down.
+--
+-- Read and traverse are left alone, so the entry stays visible to whatever
+-- asserts it is still there; only unlinking and rewriting it are refused.
+withSealedRecordDirectory :: IO result -> IO result
+withSealedRecordDirectory action = do
+  directory <- takeDirectory <$> ghGroupRecordPath (Repository "" "coghex" "kanban")
+  setFileMode directory 0o500
+  action `finally` setFileMode directory 0o700
 
 spec :: Spec
 spec = do
@@ -141,6 +185,41 @@ spec = do
             case outcome of
               BoardRefreshCompleted (Left providerError) -> providerError.providerErrorKind `shouldBe` RequestTimedOut
               other -> expectationFailure ("expected a clean timeout, got " <> show other)
+
+    -- Issue #645. The entry is keyed by the pgid the registration wrote, and
+    -- 'getPid' stops answering the moment the handle is reaped -- so a cleanup
+    -- that asked the handle for it would skip the drop in exactly the window
+    -- 'collect' opens between reaping its own handle and dropping the entry.
+    -- An interruption landing there would clear the guard over an entry still
+    -- on disk, and the caller would publish an ordinary timeout for it.
+    --
+    -- Reached directly rather than by racing a real fetch into that window:
+    -- the reap and the drop are adjacent instructions, so nothing about a
+    -- fetch's timing can be arranged to land between them reliably.
+    it "drops the registered entry even when the handle was already reaped" $
+      withReapedRegistration $ \repository guard groupPid spawned -> do
+        ghGroupIsRecorded guard repository groupPid `shouldReturn` True
+        abandonGh guard repository (Just groupPid) spawned
+        ghGroupIsRecorded guard repository groupPid `shouldReturn` False
+        ghFetchCleanupFailure guard `shouldReturn` Nothing
+
+    -- And when that drop cannot happen, the same window must not be reported
+    -- as a clean anything: the record still names the group, which is what the
+    -- next fetch holds back over.
+    it "reports a reaped handle's entry it could not drop instead of clearing" $
+      withReapedRegistration $ \repository guard groupPid spawned ->
+        withSealedRecordDirectory $ do
+          abandonGh guard repository (Just groupPid) spawned
+          failure <- ghFetchCleanupFailure guard
+          case failure of
+            Nothing -> expectationFailure "an undropped record entry was reported as a clean cleanup"
+            Just cleanup -> do
+              cleanup.ghCleanupMessage
+                `shouldSatisfy` Data.Text.isInfixOf "durable record entry could not be dropped"
+              -- The record is what survived, so this is exact rather than
+              -- merely conservative: the next fetch re-checks that entry.
+              cleanup.ghCleanupGuard `shouldBe` GuardRecorded
+          ghGroupIsRecorded guard repository groupPid `shouldReturn` True
 
     it "leaves a fast gh's decoded page untouched" $
       withTemporaryCacheRoot $ \temporaryRoot ->

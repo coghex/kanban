@@ -18,6 +18,7 @@ where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Control.Exception (Exception, IOException, bracketOnError, throwIO, try)
 import Control.Monad (void)
 import Data.Bifunctor (first)
@@ -61,7 +62,18 @@ runGh guard repository arguments = afterLaunch $ do
   resolved <- duringLaunch (findExecutable "gh")
   case resolved of
     Nothing -> duringLaunch (ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh")))
-    Just ghPath -> bracketOnError (duringLaunch (createProcess (ghProcess ghPath))) cleanUp run
+    Just ghPath -> do
+      -- The pgid the durable entry is keyed by, remembered the instant the
+      -- registration reports it, because the cleanup cannot always ask for it
+      -- again. 'collect' reaps the handle before it drops the entry, and an
+      -- interruption arriving in or after that reap finds 'getPid' empty; a
+      -- cleanup that could not name the entry would leave it on disk and still
+      -- report an ordinary timeout over it.
+      registered <- newIORef Nothing
+      bracketOnError
+        (duringLaunch (createProcess (ghProcess ghPath)))
+        (cleanUp registered)
+        (run registered)
   where
     -- 'GhProcessFailed' is not an 'IOException', so a launch failure tagged
     -- here passes straight back out through 'afterLaunch' rather than being
@@ -73,7 +85,9 @@ runGh guard repository arguments = afterLaunch $ do
 
     taggedAs phase action = try @IOException action >>= either (throwIO . GhProcessFailed phase) pure
 
-    cleanUp spawned = uninterruptibleCleanup (abandonGh guard repository spawned)
+    cleanUp registered spawned = do
+      recordedGroup <- readIORef registered
+      uninterruptibleCleanup (abandonGh guard repository recordedGroup spawned)
 
     ghProcess ghPath =
       (uncurry proc (ghBehindBarrier ghPath arguments))
@@ -89,14 +103,17 @@ runGh guard repository arguments = afterLaunch $ do
     -- already cover. Losing the dashboard anywhere in here closes the pipe,
     -- the barrier reads EOF, and the child exits without ever having
     -- executed anything.
-    run spawned@(input, _, _, _) = do
-      registered <- registerSpawnedGh guard repository spawned
-      case registered of
+    run registered spawned@(input, _, _, _) = do
+      registration <- registerSpawnedGh guard repository spawned
+      case registration of
         Left message -> throwIO (GhGuardUnwritable message)
         -- The PID comes from the registration, captured while the child was
         -- still unreaped: 'collect' waits on the handle, and 'getPid' goes
         -- 'Nothing' the moment it does, which would leave the entry behind.
         Right groupPid -> do
+          -- Written before anything else can go wrong, so every path out of
+          -- here from this point on can name the entry that was just created.
+          writeIORef registered (Just groupPid)
           -- Asked while the child is alive and still parked on the barrier,
           -- which is the one moment it is guaranteed observable and has done
           -- nothing yet. Everything downstream reasons about the pgid as if
