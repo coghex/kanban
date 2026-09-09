@@ -4,7 +4,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Reconciles the manifest in docs/agent-workflow-contract.md against the
 solve, PR-flow, and canonical issue-review invocation surface, against
-the tracked Codex, Claude, Grok, and Kimi plugins' own packaged-workflow bash surfaces,
+the tracked Codex, Claude, Grok, Kimi, and Google plugins' own packaged-workflow bash surfaces,
 and against every non-test Python module under tools/, so a new external
 command or home-relative path cannot land undocumented.
 
@@ -41,7 +41,7 @@ covering nothing.
 Issue #493 added a second, non-manifest property over those same assets:
 every brand's solve workflow must state the art policy PR #251 landed in the
 Claude asset alone, so a missing texture, icon, sprite, or animation stops the
-run in Claude, Codex, Grok, or Kimi. Its issue-drafting half lives in
+run in Claude, Codex, Grok, Kimi, or Google. Its issue-drafting half lives in
 tools/test_drafting_workflow_contract.py.
 """
 
@@ -273,6 +273,7 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "google-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # The issue approval service's own owning sources
@@ -430,6 +431,14 @@ KIMI_PLUGIN_SURFACE_FILES = [
     "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
 ]
 
+GOOGLE_PLUGIN_SURFACE_FILES = [
+    "google-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "google-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "google-plugin/plugins/kanban/scripts/review_pr.py",
+    "google-plugin/plugins/kanban/scripts/kanban_models.py",
+    "google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+]
+
 # Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
 # already reconciled against the manifest; these four are named here so the
@@ -440,6 +449,7 @@ TRUSTED_SPEC_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py": {"gh"},
     "grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
     "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
+    "google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py": {"gh"},
 }
 
 # Issue #370's vendored document mechanism, covered exactly the way the
@@ -477,6 +487,7 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
     "grok-plugin/plugins/kanban/scripts/kanban_models.py": set(),
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py": set(),
+    "google-plugin/plugins/kanban/scripts/kanban_models.py": set(),
 }
 
 # Both shipped copies of the janitor census, and the manifest rows each one
@@ -1675,7 +1686,7 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # way the Haskell segments do.
 # The four solve assets that owe issue #493's art policy: the paired Kanban-
 # invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares,
-# plus the Grok and Kimi /solve skills that stamp their external-origin pull
+# plus the Grok, Kimi, and Google /solve skills that stamp their external-origin pull
 # requests. PR #251
 # made a missing texture, icon, sprite, or animation an explicit tracked
 # blocker with a user-owned supply-or-generate decision and landed it in the
@@ -1687,6 +1698,7 @@ ART_POLICY_SOLVE_ASSETS = (
     "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "google-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
@@ -1696,7 +1708,7 @@ ART_POLICY_SOLVE_ASSETS = (
 # autosolve assets each delegate the work itself to another workflow.
 #
 # The autosolve pair joined this tuple when issue #576 vendored it, and the
-# Grok and Kimi autosolve skills are the same classification: neither external
+# Grok, Kimi, and Google autosolve skills are the same classification: neither external
 # bundle ships an issue-review or autoissue workflow, but each /autosolve is
 # still an orchestrator. The art
 # policy binds the session that reads an issue's requirements and decides how
@@ -1719,6 +1731,7 @@ ART_POLICY_CONTROL_ASSETS = (
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "google-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 
 # Lowercase: compared against art_policy_canonical() output. Every fragment lies
@@ -1941,7 +1954,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             for row in self.manifest
             if row["kind"] == "executable"
         }
-        for relative_path in GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES:
+        for relative_path in GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES + GOOGLE_PLUGIN_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for name in discovered_commands_for_plugin_file(relative_path, content):
                 self.assertIn(
@@ -1973,6 +1986,13 @@ class AgentWorkflowContractTests(unittest.TestCase):
         found = discovered_python_commands(content)
         self.assertEqual(found, {"gh", "git", "codex", "claude"})
 
+    def test_google_review_pr_coordinator_command_invocations_are_documented(self):
+        # The Google plugin bundles a fifth coordinator copy for the same
+        # reason the Grok and Kimi ones do; pin its command surface identically.
+        content = (REPO_ROOT / "google-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
+        found = discovered_python_commands(content)
+        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+
     def test_every_trusted_issue_spec_helper_is_scanned_and_declared(self):
         # Issue #238's review requirement: the vendored helpers must reach a
         # surface list (an unlisted vendored asset is never scanned at all), and
@@ -1987,7 +2007,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2015,7 +2036,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2504,7 +2526,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2539,7 +2562,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # drafting loop does not -- that the DECLARING row actually names the
         # asset, so a documented token is not mistaken for a documented asset.
         rows = [row for row in self.manifest if row["kind"] == "personal-path"]
-        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES + GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES:
+        for relative_path in PLUGIN_SURFACE_FILES + CLAUDE_PLUGIN_SURFACE_FILES + GROK_PLUGIN_SURFACE_FILES + KIMI_PLUGIN_SURFACE_FILES + GOOGLE_PLUGIN_SURFACE_FILES:
             if not relative_path.endswith(".md"):
                 continue
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2641,7 +2664,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2674,7 +2698,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2725,7 +2750,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2774,7 +2800,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2816,7 +2843,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2856,7 +2884,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2898,7 +2927,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -2967,7 +2997,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -3039,7 +3070,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -3211,7 +3243,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 relative_path in PLUGIN_SURFACE_FILES
                 or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
                 or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES,
+                or relative_path in KIMI_PLUGIN_SURFACE_FILES
+                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES,
                 f"{relative_path} is not scanned by any plugin surface list",
             )
 
@@ -3697,7 +3730,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_issue_review_discovery_record_grounds_every_reader(self):
         # Same coupling as the drainer's record, for the canonical reviewer:
-        # tools/install_issue_review.py writes it and seventeen consumers across
+        # tools/install_issue_review.py writes it and nineteen consumers across
         # three languages read it, none of which can see each other's
         # constants. The manifest names every side that spells the path, and
         # the writer is absent on purpose -- it imports the location from
@@ -3706,7 +3739,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # record and the drainer's alike; src/Kanban/Review/Canonical.hs asks
         # it rather than spelling a location, so the count is unchanged.
         #
-        # Both platform rows are pinned to the *same* seventeen files, and
+        # Both platform rows are pinned to the *same* nineteen files, and
         # against the same list rather than against each other: since issue
         # #445 every one of these readers probes both locations, so each
         # spells both literals. Asserting one row alone would let the XDG
@@ -3719,6 +3752,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "claude-plugin/plugins/kanban/scripts/review_pr.py",
             "grok-plugin/plugins/kanban/scripts/review_pr.py",
             "kimi-plugin/plugins/kanban/scripts/review_pr.py",
+            "google-plugin/plugins/kanban/scripts/review_pr.py",
             "codex-plugin/plugins/kanban/skills/issue-review/SKILL.md",
             "claude-plugin/plugins/kanban/commands/issue-review.md",
             "codex-plugin/plugins/kanban/skills/solve/SKILL.md",
@@ -3731,6 +3765,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             "claude-plugin/plugins/kanban/commands/retriage.md",
             "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
             "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+            "google-plugin/plugins/kanban/skills/solve/SKILL.md",
         ]
         for row_id in (
             "issue-review-discovery-record",

@@ -1582,6 +1582,10 @@ class BundledRosterReaderTests(unittest.TestCase):
                 "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
                 REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "kanban_models.py",
             ),
+            (
+                "google-plugin/plugins/kanban/scripts/kanban_models.py",
+                REPO_ROOT / "google-plugin" / "plugins" / "kanban" / "scripts" / "kanban_models.py",
+            ),
         )
 
     def test_every_bundled_reader_is_identical_to_its_tracked_source(self):
@@ -1591,7 +1595,7 @@ class BundledRosterReaderTests(unittest.TestCase):
                     copy.read_bytes(),
                     TRACKED_ROSTER_READER.read_bytes(),
                     f"{relative_path} has drifted from tools/kanban_models.py; "
-                    "the five copies are the same reader, not a fork. Repair: "
+                    "the six copies are the same reader, not a fork. Repair: "
                     f"cp tools/kanban_models.py {relative_path}",
                 )
 

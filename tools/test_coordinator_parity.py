@@ -118,6 +118,9 @@ GROK_COORDINATOR = (
 KIMI_COORDINATOR = (
     REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
+GOOGLE_COORDINATOR = (
+    REPO_ROOT / "google-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
 # Claude-only (`+`) lines grouped into units by a bare `@@`, each unit wrapped
@@ -986,7 +989,7 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
     """The Grok coordinator differs from Claude in expected-origin/route,
     in not vendoring kanban_config.py beside the coordinator, and in
     reading external-origin markers on cross-repository pull requests. The
-    Kimi bundle is held byte-identical to this copy by test_kimi_plugin.py."""
+    Kimi and Google bundles are held byte-identical to this copy by test_kimi_plugin.py and test_google_plugin.py."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -1031,6 +1034,17 @@ class KimiCoordinatorIdentityTests(unittest.TestCase):
             KIMI_COORDINATOR.read_bytes(),
             GROK_COORDINATOR.read_bytes(),
             "The Kimi coordinator must remain byte-for-byte identical to Grok's",
+        )
+
+
+class GoogleCoordinatorIdentityTests(unittest.TestCase):
+    """Google, Kimi, and Grok deliberately execute one identical coordinator."""
+
+    def test_google_coordinator_is_byte_identical_to_grok(self):
+        self.assertEqual(
+            GOOGLE_COORDINATOR.read_bytes(),
+            GROK_COORDINATOR.read_bytes(),
+            "The Google coordinator must remain byte-for-byte identical to Grok's",
         )
 
 

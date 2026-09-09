@@ -111,7 +111,7 @@ python3 -m unittest tools.test_source_distribution
 That check builds the real archive into a temporary directory, unpacks it, and
 compares the result against the repository's tracked file set. Adding a tracked
 file under `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
-`claude-plugin/`, `grok-plugin/`, or `kimi-plugin/` requires no manifest change only when an existing
+`claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, or `google-plugin/` requires no manifest change only when an existing
 `kanban.cabal` glob already covers its extension; anything else — a new
 top-level file, a new document under `docs/`, a new file extension — fails the
 check until `kanban.cabal` declares it and `tools/test_source_distribution.py`
@@ -124,11 +124,11 @@ the toolchain-free job that runs the rest of the Python suite.
 ## Changing a workflow bundle
 
 A change that touches tracked content under `claude-plugin/`, `codex-plugin/`,
-`grok-plugin/`, or `kimi-plugin/` must raise that bundle's declared manifest
+`grok-plugin/`, `kimi-plugin/`, or `google-plugin/` must raise that bundle's declared manifest
 version in the
 same change, and must leave the manifest still naming exactly the workflows
 the bundle ships. `tools/test_claude_plugin.py`, `tools/test_codex_plugin.py`,
-`tools/test_grok_plugin.py`, and `tools/test_kimi_plugin.py` enforce both through
+`tools/test_grok_plugin.py`, `tools/test_kimi_plugin.py`, and `tools/test_google_plugin.py` enforce both through
 `tools/plugin_bundle_gate.py`, so they fail in the required `build-test` job
 rather than after the fact.
 
@@ -141,18 +141,21 @@ rather than after the fact.
   `grok-plugin/.grok-plugin/marketplace.json`, which must agree,
   or — for Kimi, which declares it twice as well — both
   `kimi-plugin/plugins/kanban/plugin.json` and the plugin entry in
-  `kimi-plugin/.github/plugin/marketplace.json`, which must agree.
+  `kimi-plugin/.github/plugin/marketplace.json`, which must agree,
+  or — for Google, which declares it twice as well — both
+  `google-plugin/plugins/kanban/plugin.json` and the plugin entry in
+  `google-plugin/.github/plugin/marketplace.json`, which must agree.
   Codex caches a local-source bundle under exactly that version
   (`$CODEX_HOME/plugins/cache/kanban/kanban/<version>/`), so an unchanged
   version makes a stale cache indistinguishable from a current one. Grok
-  installs under `$GROK_HOME/installed-plugins/kanban-<hash>/`. Kimi loads
-  live from a local marketplace path or `--plugin-dir`, and copies into
+  installs under `$GROK_HOME/installed-plugins/kanban-<hash>/`. Kimi and Google load
+  live from a local marketplace path or `--plugin-dir`, and copy into
   `$COPILOT_HOME/installed-plugins/` only for git-sourced marketplaces.
 - **Listing.** Add the workflow to every manifest field that enumerates them:
   the description on the Claude side (in both manifests), the description,
   keywords, `interface.shortDescription`, `interface.longDescription`, and
-  `interface.defaultPrompt` on the Codex side, and the description on the Grok
-  and Kimi sides (plugin.json and both marketplace description fields).
+  `interface.defaultPrompt` on the Codex side, and the description on the Grok,
+  Kimi, and Google sides (plugin.json and both marketplace description fields).
 
 The change unit is one pull request: the candidate tracked tree compared with
 its default-branch merge base, counting committed, staged, and tracked
@@ -195,7 +198,7 @@ proved. A command rendered into `claude-plugin/.../commands/` or
 - `test/` — Haskell tests.
 - `tools/` — PR drainer, issue approval service, both of their controllers,
   installers, workflow setup, and Python tests.
-- `codex-plugin/`, `claude-plugin/`, `grok-plugin/`, `kimi-plugin/` — the tracked workflow bundles. Claude and Codex each ship the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, plus the drafting and document workflows you invoke yourself in a session, which no Kanban action spawns. Grok and Kimi are not spawned providers: each ships `/solve` and `/autosolve` so its session can open a grok-origin or kimi-origin pull request and obtain a Codex review. The Kimi bundle is a Copilot CLI marketplace, loaded in a Kimi-model session via `--plugin-dir` or `kanban@kanban-kimi`.
+- `codex-plugin/`, `claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/` — the tracked workflow bundles. Claude and Codex each ship the solve, PR-review, PR-rereview, PR-revise, and repair workflows Kanban's AI actions spawn by name, plus the drafting and document workflows you invoke yourself in a session, which no Kanban action spawns. Grok, Kimi, and Google are not spawned providers: each ships `/solve` and `/autosolve` so its session can open a grok-origin, kimi-origin, or google-origin pull request and obtain a Codex review. The Kimi and Google bundles are Copilot CLI marketplaces, loaded in a Kimi-model or Gemini-model session via `--plugin-dir` or `kanban@kanban-kimi` / `kanban@kanban-google`.
 - `.github/workflows/` — continuous integration.
 
 ## Further detail

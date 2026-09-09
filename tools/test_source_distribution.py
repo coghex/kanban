@@ -24,7 +24,7 @@ Every tracked file gets a stated release decision, and
 tracked file has none:
 
 * In, as a whole tree: `app/`, `src/`, `test/`, `tools/`, `codex-plugin/`,
-  `claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, and `docs/media/` ship every tracked file they contain.
+  `claude-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`, and `docs/media/` ship every tracked file they contain.
   `docs/media/` is a tree rather than a list of files because the packaged
   `README.md` shows `docs/media/board-wide.png` through a repository-relative
   path: an asset that document names has to be in the archive or
@@ -166,6 +166,7 @@ RELEASE_TREES = (
     "claude-plugin",
     "codex-plugin",
     "docs/media",
+    "google-plugin",
     "grok-plugin",
     "kimi-plugin",
     "src",
@@ -295,6 +296,8 @@ PROVIDER_MANIFESTS = (
     "grok-plugin/plugins/kanban/plugin.json",
     "kimi-plugin/.github/plugin/marketplace.json",
     "kimi-plugin/plugins/kanban/plugin.json",
+    "google-plugin/.github/plugin/marketplace.json",
+    "google-plugin/plugins/kanban/plugin.json",
 )
 
 # Issue #370's vendored document mechanism, asserted by exact name rather than
@@ -303,10 +306,10 @@ PROVIDER_MANIFESTS = (
 # and "the tree ships" is the guarantee that was already true while these files
 # existed only under tools/. Naming them here is what makes an unpacked release
 # prove it carries them.
-# The model-roster reader joins them for all four bundles since issue #572:
+# The model-roster reader joins them for all five bundles since issue #572:
 # each coordinator loads a copy from beside itself to read the roster's loaded
 # provider set, which is what decides who reviews a pull request. What they
-# do with it still differs -- the Claude, Grok, and Kimi copies resolve the
+# do with it still differs -- the Claude, Grok, Kimi, and Google copies resolve the
 # `pr_review` cells and pin them, the Codex copy resolves no cell and passes
 # no model or effort (D-2) -- but a release that shipped a coordinator without
 # its reader would install a workflow that cannot route at all.
@@ -316,14 +319,15 @@ PROVIDER_MANIFESTS = (
 # census without that sibling would resolve no drainer at all. The Codex bundle
 # needs its own second copy of `kanban_config.py` because it has no shared
 # scripts root -- each skill carries what it loads.
-# Thirteen modules: five in the Claude bundle, six in the Codex bundle, and
-# the Grok and Kimi coordinators' roster readers.
+# Fourteen modules: five in the Claude bundle, six in the Codex bundle, and
+# the Grok, Kimi, and Google coordinators' roster readers.
 BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "google-plugin/plugins/kanban/scripts/kanban_models.py",
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
@@ -379,7 +383,7 @@ MARKDOWN_LINK = re.compile(r"\[[^\]\n]*\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 # Paths into the packaged trees named as literal text by the documentation --
 # `python3 tools/setup_workflows.py`, and so on.
 DOCUMENTED_TREE_PATH = re.compile(
-    r"\b((?:tools|codex-plugin|claude-plugin|grok-plugin|kimi-plugin)/[\w./-]+\.(?:py|json|md))"
+    r"\b((?:tools|codex-plugin|claude-plugin|grok-plugin|kimi-plugin|google-plugin)/[\w./-]+\.(?:py|json|md))"
 )
 
 # A `tools/` module named the way a document tells the reader to run it --

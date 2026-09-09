@@ -916,9 +916,9 @@ is a rebuild worth paying for. In this repository the authoritative set is the
 `test-parsed` rows of
 [agent-workflow-contract §7](agent-workflow-contract.md#7-document-publication-classification),
 which is where a newly parsed document gets classified, so consult it rather
-than any list repeated here. Six of those rows are directories —
+than any list repeated here. Seven of those rows are directories —
 `.github/ISSUE_TEMPLATE/`, `claude-plugin/`, `codex-plugin/`, `grok-plugin/`,
-`kimi-plugin/`, and `tools/` —
+`kimi-plugin/`, `google-plugin/`, and `tools/` —
 and each covers every tracked Markdown file beneath it, so the documents those
 rows reach are more numerous than the rows themselves.
 

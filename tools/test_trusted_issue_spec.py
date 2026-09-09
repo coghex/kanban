@@ -53,18 +53,33 @@ CODEX_PLUGIN_ROOT = REPO_ROOT / "codex-plugin" / "plugins" / "kanban"
 CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
 GROK_PLUGIN_ROOT = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
 KIMI_PLUGIN_ROOT = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
+GOOGLE_PLUGIN_ROOT = REPO_ROOT / "google-plugin" / "plugins" / "kanban"
 
 CODEX_HELPER = CODEX_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 CLAUDE_HELPER = CLAUDE_PLUGIN_ROOT / "scripts" / "trusted_issue_spec.py"
 GROK_HELPER = GROK_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 KIMI_HELPER = KIMI_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
-HELPERS = {"codex": CODEX_HELPER, "claude": CLAUDE_HELPER, "grok": GROK_HELPER, "kimi": KIMI_HELPER}
+GOOGLE_HELPER = GOOGLE_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+HELPERS = {
+    "codex": CODEX_HELPER,
+    "claude": CLAUDE_HELPER,
+    "grok": GROK_HELPER,
+    "kimi": KIMI_HELPER,
+    "google": GOOGLE_HELPER,
+}
 
 CODEX_SOLVE = CODEX_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 CLAUDE_SOLVE = CLAUDE_PLUGIN_ROOT / "commands" / "solve.md"
 GROK_SOLVE = GROK_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 KIMI_SOLVE = KIMI_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
-SOLVE_WORKFLOWS = {"codex": CODEX_SOLVE, "claude": CLAUDE_SOLVE, "grok": GROK_SOLVE, "kimi": KIMI_SOLVE}
+GOOGLE_SOLVE = GOOGLE_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
+SOLVE_WORKFLOWS = {
+    "codex": CODEX_SOLVE,
+    "claude": CLAUDE_SOLVE,
+    "grok": GROK_SOLVE,
+    "kimi": KIMI_SOLVE,
+    "google": GOOGLE_SOLVE,
+}
 
 # The exact lookup each solve workflow uses to find its own installed copy. The
 # Codex bundle searches under $CODEX_HOME the way its PR-flow skills locate the
@@ -158,6 +173,67 @@ print(matches[0])
 KIMI_HELPER_LOOKUP = (
     'python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
     + KIMI_HELPER_PYTHON
+    + "PY"
+)
+
+GOOGLE_HELPER_PYTHON = '''import json, os, sys
+from pathlib import Path
+
+plugin_root, copilot_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+def finish(candidate):
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+if plugin_root:
+    finish(Path(plugin_root) / relative)
+settings = Path(copilot_home) / "settings.json"
+if os.path.lexists(settings):
+    try:
+        document = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and "kanban-google" in marketplaces:
+        entry = marketplaces["kanban-google"]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed kanban-google entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name kanban-google as a directory source."
+            )
+        recorded = source.get("path")
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name an absolute kanban-google path: {recorded!r}."
+            )
+        finish(Path(recorded) / "plugins" / "kanban" / relative)
+matches = sorted(
+    candidate
+    for candidate in (Path(copilot_home) / "installed-plugins").glob(
+        "kanban-*/" + relative.as_posix()
+    )
+    if candidate.is_file()
+)
+if not matches:
+    raise SystemExit("trusted helper was not found: $GOOGLE_PLUGIN_ROOT is unset, the kanban-google marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
+if len(matches) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
+print(matches[0])
+'''
+GOOGLE_HELPER_LOOKUP = (
+    'python3 - "${GOOGLE_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
+    + GOOGLE_HELPER_PYTHON
     + "PY"
 )
 
@@ -290,9 +366,9 @@ def imported_modules(path):
 
 
 def load_helper(brand: str):
-    """Import one vendored copy by file path. None of the four lives under
+    """Import one vendored copy by file path. None of the five lives under
     tools/, so none is ever on sys.path via `-s tools` discovery, and the
-    four must be loaded under distinct module names so importing one cannot
+    five must be loaded under distinct module names so importing one cannot
     serve another's assertions from sys.modules."""
     path = HELPERS[brand]
     spec = importlib.util.spec_from_file_location(
@@ -1089,6 +1165,239 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("self-test passed", run.stdout)
 
+    def install_google_bundle(self, home: Path) -> Path:
+        installed = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "kanban-c0441dc7"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(GOOGLE_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def install_google_marketplace_source(self, root: Path) -> Path:
+        installed = (
+            root
+            / "marketplace"
+            / "plugins"
+            / "kanban"
+            / "skills"
+            / "solve"
+            / "scripts"
+        )
+        installed.mkdir(parents=True)
+        target = installed / "trusted_issue_spec.py"
+        target.write_bytes(GOOGLE_HELPER.read_bytes())
+        target.chmod(0o755)
+        return target
+
+    def register_google_local_marketplace(self, home: Path, marketplace: Path) -> None:
+        copilot_home = home / ".copilot"
+        copilot_home.mkdir(parents=True, exist_ok=True)
+        (copilot_home / "settings.json").write_text(
+            json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-google": {
+                            "source": {"source": "directory", "path": str(marketplace)}
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def run_google_locator(self, plugin_root: str, copilot_home: str):
+        return subprocess.run(
+            ["python3", "-", plugin_root, copilot_home],
+            input=GOOGLE_HELPER_PYTHON,
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+        )
+
+    def test_the_google_skill_declares_the_lookup_it_is_tested_with(self):
+        self.assertIn(
+            GOOGLE_HELPER_PYTHON,
+            GOOGLE_SOLVE.read_text(encoding="utf-8"),
+            "the Google solve skill must prefer $GOOGLE_PLUGIN_ROOT, then the "
+            "recorded local marketplace path, else one hashed install",
+        )
+
+    def test_the_google_lookup_resolves_from_an_explicit_copilot_home(self):
+        home = self.root / "google-home"
+        expected = self.install_google_bundle(home)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_google_lookup_resolves_from_the_recorded_local_marketplace(self):
+        home = self.root / "google-local"
+        expected = self.install_google_marketplace_source(self.root)
+        self.register_google_local_marketplace(home, self.root / "marketplace")
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_google_settings_without_its_marketplace_fall_through_to_the_copy(self):
+        home = self.root / "google-unrelated-marketplace"
+        expected = self.install_google_bundle(home)
+        (home / ".copilot" / "settings.json").write_text(
+            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
+            encoding="utf-8",
+        )
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_malformed_google_settings_refuse_without_copy_fallback(self):
+        cases = {
+            "invalid-json": "{",
+            "non-object": json.dumps([]),
+            "marketplaces-not-object": json.dumps({"extraKnownMarketplaces": []}),
+            "entry-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-google": []}}
+            ),
+            "source-not-directory": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-google": {"source": {"source": "github"}}
+                    }
+                }
+            ),
+            "relative-path": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-google": {
+                            "source": {"source": "directory", "path": "relative"}
+                        }
+                    }
+                }
+            ),
+        }
+        for name, contents in cases.items():
+            with self.subTest(case=name):
+                home = self.root / f"google-malformed-{name}"
+                self.install_google_bundle(home)
+                settings = home / ".copilot" / "settings.json"
+                settings.write_text(contents + "\n", encoding="utf-8")
+                proc = self.run_google_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("Copilot settings", proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_dangling_google_settings_symlink_refuses_without_copy_fallback(self):
+        home = self.root / "google-dangling-settings"
+        self.install_google_bundle(home)
+        settings = home / ".copilot" / "settings.json"
+        settings.symlink_to(settings.with_name("missing-settings.json"))
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("Copilot settings", proc.stderr)
+        self.assertIn("unreadable", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_google_marketplace_missing_the_helper_refuses_without_fallback(self):
+        home = self.root / "google-marketplace-missing-helper"
+        self.install_google_bundle(home)
+        marketplace = self.root / "empty-google-marketplace"
+        marketplace.mkdir()
+        self.register_google_local_marketplace(home, marketplace)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_google_lookup_uses_plugin_root_for_a_plugin_dir_launch(self):
+        home = self.root / "google-empty-home"
+        home.mkdir()
+        expected = self.install_google_marketplace_source(self.root)
+        plugin_root = expected.parents[3]  # .../plugins/kanban
+        proc = self.run_google_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_missing_helper_under_google_plugin_root_refuses_without_fallback(self):
+        home = self.root / "google-plugin-root-missing"
+        self.install_google_bundle(home)
+        plugin_root = self.root / "empty-google-plugin"
+        plugin_root.mkdir()
+        proc = self.run_google_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_google_lookup_fails_closed_when_two_kanban_installs_match(self):
+        home = self.root / "google-ambiguous"
+        first = self.install_google_bundle(home)
+        second = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "kanban-aaaaaaaa"
+            / "skills"
+            / "solve"
+            / "scripts"
+            / "trusted_issue_spec.py"
+        )
+        second.parent.mkdir(parents=True, exist_ok=True)
+        second.write_bytes(GOOGLE_HELPER.read_bytes())
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertTrue(first.is_file())
+
+    def test_the_google_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
+        home = self.root / "google-competitor"
+        expected = self.install_google_bundle(home)
+        other = (
+            home
+            / ".copilot"
+            / "installed-plugins"
+            / "otherplugin-deadbeef"
+            / "skills"
+            / "solve"
+            / "scripts"
+            / "trusted_issue_spec.py"
+        )
+        other.parent.mkdir(parents=True)
+        other.write_bytes(GOOGLE_HELPER.read_bytes())
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_google_lookup_fails_closed_when_nothing_matches(self):
+        home = self.root / "google-empty"
+        (home / ".copilot" / "installed-plugins").mkdir(parents=True)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_the_resolved_google_copy_runs_from_the_worked_repository(self):
+        home = self.root / "google-runnable-home"
+        expected = self.install_google_bundle(home)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        run = subprocess.run(
+            ["python3", str(expected), "--self-test"],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("self-test passed", run.stdout)
+
     def test_the_grok_skill_declares_the_lookup_it_is_tested_with(self):
         self.assertIn(
             GROK_HELPER_PYTHON,
@@ -1194,6 +1503,10 @@ class SolveWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
             KIMI_SOLVE.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
+            GOOGLE_SOLVE.read_text(encoding="utf-8"),
         )
 
     def test_each_workflow_forbids_every_unfiltered_comment_source(self):
@@ -1443,10 +1756,12 @@ class SolveRepositoryScopeTests(unittest.TestCase):
             self.assertIn("are forbidden here", squashed, brand)
 
     def test_the_gate_check_and_the_helper_both_receive_the_identity(self):
-        # The four bundles resolve the helper differently — `$TRUSTED_SPEC`
+        # The five bundles resolve the helper differently — `$TRUSTED_SPEC`
         # under `$CODEX_HOME`, `${CLAUDE_PLUGIN_ROOT}`,
         # `$GROK_PLUGIN_ROOT` / `$GROK_HOME/installed-plugins/kanban-<hash>`,
-        # or `$KIMI_PLUGIN_ROOT` / the recorded `kanban-kimi` marketplace path /
+        # `$KIMI_PLUGIN_ROOT` / the recorded `kanban-kimi` marketplace path /
+        # `$COPILOT_HOME/installed-plugins/kanban-<hash>`,
+        # or `$GOOGLE_PLUGIN_ROOT` / the recorded `kanban-google` marketplace path /
         # `$COPILOT_HOME/installed-plugins/kanban-<hash>` — so the invocation is
         # matched by what it targets rather than by any one literal spelling, and
         # every match found must carry the identity.

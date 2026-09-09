@@ -38,11 +38,14 @@ extra-source-files:
   kimi-plugin/**/*.json
   kimi-plugin/**/*.md
   kimi-plugin/**/*.py
+  google-plugin/**/*.json
+  google-plugin/**/*.md
+  google-plugin/**/*.py
 
-  -- The eight files `plugin marketplace add` actually reads. Cabal 3.16's
+  -- The ten files `plugin marketplace add` actually reads. Cabal 3.16's
   -- recursive globs do reach them under their dot-prefixed directories, so
   -- these lines are redundant today; they are kept because that is the one
-  -- glob-semantics detail whose silent change would strand all four bundles
+  -- glob-semantics detail whose silent change would strand all five bundles
   -- while every other bundle file still shipped.
   codex-plugin/.agents/plugins/marketplace.json
   codex-plugin/plugins/kanban/.codex-plugin/plugin.json
@@ -52,6 +55,8 @@ extra-source-files:
   grok-plugin/plugins/kanban/plugin.json
   kimi-plugin/.github/plugin/marketplace.json
   kimi-plugin/plugins/kanban/plugin.json
+  google-plugin/.github/plugin/marketplace.json
+  google-plugin/plugins/kanban/plugin.json
 
 extra-doc-files:
   .github/pull_request_template.md

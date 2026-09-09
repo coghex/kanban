@@ -58,6 +58,7 @@ MARKDOWN_RESOLVER_ASSETS = (
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "google-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
 REPRESENTATIVE_MARKDOWN_ASSET = "claude-plugin/plugins/kanban/commands/solve.md"
@@ -67,6 +68,7 @@ COORDINATORS = (
     ("codex", "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py"),
     ("grok", "grok-plugin/plugins/kanban/scripts/review_pr.py"),
     ("kimi", "kimi-plugin/plugins/kanban/scripts/review_pr.py"),
+    ("google", "google-plugin/plugins/kanban/scripts/review_pr.py"),
 )
 
 BASH_FENCE_RE = re.compile(r"```bash\n(.*?)\n[ \t]*```", re.DOTALL)
@@ -379,14 +381,14 @@ class EveryPackagedResolverProbesTests(unittest.TestCase):
             relative_path: record_resolver_fence(relative_path)
             for relative_path in MARKDOWN_RESOLVER_ASSETS
         }
-        self.assertEqual(len(fences), 12)
+        self.assertEqual(len(fences), 13)
         reference = fences[REPRESENTATIVE_MARKDOWN_ASSET]
         for relative_path, fence in fences.items():
             self.assertEqual(fence, reference, relative_path)
 
     def test_every_packaged_resolver_prefers_the_xdg_installation(self):
         resolvers = every_resolver()
-        self.assertEqual(len(resolvers), 16)
+        self.assertEqual(len(resolvers), 18)
         with tempfile.TemporaryDirectory() as scratch:
             home = Path(scratch) / "home"
             xdg_backend = install(home / XDG_RECORD_DIR)
