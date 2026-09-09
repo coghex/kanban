@@ -6,6 +6,7 @@ module Spec.Support.Render
     frameRowText,
     renderDetails,
     renderDetailsAt,
+    renderDetailsForState,
     detailsHeadings,
     detailsRows,
     detailsText,
@@ -31,28 +32,61 @@ import Graphics.Vty.Span (SpanOp (..))
 import Kanban.CLI (Options (..))
 import Kanban.Domain
 import Kanban.UI.Board (CardEnv (..), drawCardFrame)
-import Kanban.UI.Details (DetailsEnv (..), drawDetails)
+import Kanban.UI.Details (DetailsEnv (..), detailsEnv, drawDetails)
 import Kanban.UI.Theme (themeFor)
-import Kanban.UI.Types (Name (..))
+import Kanban.UI.Types (AppState, Name (..))
+import Kanban.Workflow (entryItem)
 import Spec.Support.Fixtures (detailsFixtureUpdatedAt, epoch, testOptions, testResolvedConfig)
 
 -- | Draw the details overlay at the width the real overlay gives its content
 -- and read it back as plain text.
 renderDetails :: Board -> BoardItem -> [Text]
-renderDetails = renderDetailsAt 84
+renderDetails = renderDetailsAt detailsOverlayWidth
+
+-- | The width the real overlay gives its content, shared by both projections
+-- so neither can drift into measuring a different overlay from the other.
+detailsOverlayWidth :: Int
+detailsOverlayWidth = 84
 
 renderDetailsAt :: Int -> Board -> BoardItem -> [Text]
-renderDetailsAt width board item = renderWidgetLines (themeFor testOptions) width (hLimit width (drawDetails environment item))
+renderDetailsAt width board item = renderDetailsEnv width environment item
   where
     environment =
       DetailsEnv
         { detailsConfig = testResolvedConfig,
           detailsBoard = board,
+          -- The undivided case an unfiltered session is in: everything on the
+          -- board is retained, so naming one board says both. A test about
+          -- the divide between the two -- a criteria set that hides a pull
+          -- request the session still holds -- builds an 'AppState' and
+          -- renders through 'renderDetailsForState' instead, so the
+          -- production 'detailsEnv' wiring is what decides which side each
+          -- section reads.
+          detailsRetainedPullRequests =
+            [ pullRequest
+              | entry <- concat (Map.elems board.boardColumns),
+                PullRequestItem pullRequest <- [entryItem entry]
+            ],
           -- Three hours after the fixtures were updated, so the relative age
           -- is computed from this redraw rather than stored with the item.
           detailsNow = addUTCTime (3 * 3600) detailsFixtureUpdatedAt,
           detailsTimeZone = utc
         }
+
+-- | The overlay drawn through the production 'detailsEnv', so a test sees
+-- exactly the environment "Kanban.UI.Overlay" hands it: the retained datasets
+-- and the filtered visible board arrive as separate fields of the dashboard
+-- state, and the overlay itself chooses which one each section reads.
+--
+-- The renderer-only projections above cannot reach that choice -- they build
+-- a 'DetailsEnv' directly -- so a regression about the state-to-overlay
+-- boundary has to come through here.
+renderDetailsForState :: AppState -> BoardItem -> [Text]
+renderDetailsForState state = renderDetailsEnv detailsOverlayWidth (detailsEnv state)
+
+renderDetailsEnv :: Int -> DetailsEnv -> BoardItem -> [Text]
+renderDetailsEnv width environment item =
+  renderWidgetLines (themeFor testOptions) width (hLimit width (drawDetails environment item))
 
 -- | Every heading the overlay can draw, so a section can be read back as the
 -- rows between its own heading and the next one.

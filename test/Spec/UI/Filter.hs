@@ -55,7 +55,16 @@ import Kanban.Worker
   )
 import Kanban.Workflow (deriveBoard, entryItem, itemLifecycleBadge)
 import Spec.Support.App (testAppState)
-import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, itemNumber)
+import Spec.Support.Fixtures
+  ( baseIssue,
+    basePullRequest,
+    detailsFixtureIssue,
+    detailsFixtureSnapshot,
+    detailsFixtureUpdatedAt,
+    epoch,
+    itemNumber
+  )
+import Spec.Support.Render (detailsText, renderDetailsForState)
 import Test.Hspec
 
 spec :: Spec
@@ -67,6 +76,7 @@ spec = do
   refusalSpec
   openAuthoritySpec
   addressingSpec
+  detailsLinkSpec
 
 -- ---------------------------------------------------------------------------
 
@@ -555,6 +565,103 @@ addressingSpec = describe "row addressing under criteria" $
                     appSelectedRows = Map.insert column row state.appSelectedRows
                   }
       ]
+
+-- ---------------------------------------------------------------------------
+
+-- | Issue #647. An issue's linked pull requests are a property of the data
+-- the session retains, so no criteria set may take one away.
+--
+-- Every case renders through the production
+-- 'Kanban.UI.Details.detailsEnv' wiring rather than a hand-built environment.
+-- The defect was exactly at that boundary — the overlay was handed
+-- 'appVisibleBoard' and had nothing else to scan — so a renderer-only test
+-- naming one board could not have caught it, and could not catch its return.
+detailsLinkSpec :: Spec
+detailsLinkSpec = describe "an issue's linked pull requests under the criteria" $ do
+  it "lists both retained pull requests with the pull-request kind unchecked" $ do
+    state <-
+      detailsState
+        detailsFixtureSnapshot
+        Nothing
+        defaultFilterCriteria {filterKind = Set.singleton KindIssues}
+    -- The criteria really did take them off the view, so the section can only
+    -- be answering from the retained generation.
+    boardPullRequestNumbers state.appVisibleBoard `shouldBe` Set.empty
+    linkedPullRequestsText state `shouldBe` Just "#823, #851"
+    -- Requirement 4: tracker context still resolves against that same view.
+    renderDetailsForState state (IssueItem detailsFixtureIssue)
+      `shouldSatisfy` any (Text.isInfixOf "under #900")
+
+  it "lists a pull request a workflow facet hid, without disturbing the tracker context" $ do
+    let hidden = basePullRequest 861 [36] False [Label "reviewed:changes" "d93f0b"]
+        snapshot = detailsFixtureSnapshot {snapshotPullRequests = [hidden]}
+    -- Named rather than assumed: the facet the criteria below uncheck is the
+    -- one this pull request is classified into, and it is a facet the issue
+    -- and its tracker are not in, so only the pull request leaves the view.
+    itemWorkflowFacet workflow (PullRequestItem hidden) `shouldBe` WorkflowChanges
+    state <-
+      detailsState
+        snapshot
+        Nothing
+        defaultFilterCriteria {filterWorkflow = Set.delete WorkflowChanges everyFacetValue}
+    boardPullRequestNumbers state.appVisibleBoard `shouldBe` Set.empty
+    linkedPullRequestsText state `shouldBe` Just "#861"
+    renderDetailsForState state (IssueItem detailsFixtureIssue)
+      `shouldSatisfy` any (Text.isInfixOf "under #900")
+
+  it "lists a merged pull request retained only as completed history, with Closed unchecked" $ do
+    let merged = (basePullRequest 851 [36] False []) {pullRequestState = PullRequestMerged}
+        snapshot = detailsFixtureSnapshot {snapshotPullRequests = []}
+    state <- detailsState snapshot (Just (CompletedHistory [] [merged] epoch)) defaultFilterCriteria
+    -- Closed is unchecked under the defaults, so that history reaches no
+    -- column at all — and the link survives anyway.
+    state.appFilterCriteria.filterLifecycle `shouldBe` Set.singleton LifecycleOpen
+    boardPullRequestNumbers state.appVisibleBoard `shouldBe` Set.empty
+    linkedPullRequestsText state `shouldBe` Just "#851"
+
+  it "keeps listing it while that completed generation is stale rather than current" $ do
+    let merged = (basePullRequest 851 [36] False []) {pullRequestState = PullRequestMerged}
+        snapshot = detailsFixtureSnapshot {snapshotPullRequests = []}
+    state <- detailsState snapshot (Just (CompletedHistory [] [merged] epoch)) defaultFilterCriteria
+    -- §15 keeps a complete history exactly where it was when a later
+    -- generation fails, and the overlay reads it on the same terms.
+    linkedPullRequestsText state {appCompletedStatus = CompletedHistoryStale "generation failed"}
+      `shouldBe` Just "#851"
+
+  it "contributes nothing from a completed generation that is not retained" $ do
+    state <- detailsState (detailsFixtureSnapshot {snapshotPullRequests = []}) Nothing defaultFilterCriteria
+    linkedPullRequestsText state `shouldBe` Just "none"
+
+  it "presents both retained generations as one ascending list" $ do
+    let merged = (basePullRequest 700 [36] False []) {pullRequestState = PullRequestMerged}
+    state <-
+      detailsState
+        detailsFixtureSnapshot
+        (Just (CompletedHistory [] [merged] epoch))
+        defaultFilterCriteria {filterKind = Set.singleton KindIssues}
+    linkedPullRequestsText state `shouldBe` Just "#700, #823, #851"
+
+-- | A dashboard holding one open generation and an optional completed one,
+-- with the criteria applied by the production 'refreshVisibleBoard' rather
+-- than by a board a test filtered itself.
+detailsState :: RepoSnapshot -> Maybe CompletedHistory -> FilterCriteria -> IO AppState
+detailsState snapshot history criteria = do
+  state <- testAppState (deriveBoard workflow snapshot)
+  pure
+    ( refreshVisibleBoard
+        state
+          { appOpenSnapshot = Just snapshot,
+            appCompletedHistory = history,
+            appFilterCriteria = criteria,
+            -- The instant the details fixtures' relative ages are quoted
+            -- from, so the overlay's other sections read as they do elsewhere.
+            appNow = addUTCTime (3 * 3600) detailsFixtureUpdatedAt
+          }
+    )
+
+linkedPullRequestsText :: AppState -> Maybe Text
+linkedPullRequestsText state =
+  detailsText (renderDetailsForState state (IssueItem detailsFixtureIssue)) "Linked pull requests"
 
 -- ---------------------------------------------------------------------------
 -- Fixtures

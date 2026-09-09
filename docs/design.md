@@ -1552,6 +1552,18 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 - Creation and update timestamps.
 - GitHub URL.
 
+An issue's linked pull requests are derived from the retained datasets — the
+open generation, together with a retained completed generation — rather than
+from the board the §7 criteria admit. GitHub reports the relationship on the
+pull-request side only, so the reverse direction is a lookup, and it reads the
+same whatever is checked: unchecking Pull requests, hiding the linking pull
+request behind a workflow facet, or leaving it retained only as completed
+history takes it off the board without taking it out of this section. No
+request is made to fill the section, and a relationship GitHub omitted stays
+omitted. Every other section — tracker context and the structural diagnostics
+included — keeps resolving against the board the overlay was opened from, so a
+completed card's presentation still matches the view it was drawn in.
+
 The overlay presents this content without editing any of it. The board actions
 that act on the selected card — `r`, `S`, `A`, `x`, and `m` — dispatch from it
 as well, against the item it is showing.

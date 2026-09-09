@@ -30,6 +30,7 @@ module Spec.Support.Fixtures
     detailsFixturePullRequest,
     detailsFixtureIssue,
     detailsFixtureUpdatedAt,
+    detailsFixtureSnapshot,
     detailsFixtureBoard,
     testOptions,
     testResolvedConfig,
@@ -292,23 +293,29 @@ detailsFixtureIssue =
 detailsFixtureUpdatedAt :: UTCTime
 detailsFixtureUpdatedAt = addUTCTime 86400 epoch
 
--- | A board holding both fixtures, a tracker that owns the issue, and a
--- second pull request linking the same issue, so the reverse-link derivation
--- has more than one PR to find.
+-- | The open generation 'detailsFixtureBoard' derives from, kept beside it
+-- so a test can hand a dashboard the retained dataset and the filtered view
+-- separately -- which is what the two are in production.
+--
+-- It holds both details fixtures, a tracker that owns the issue, and a second
+-- pull request linking the same issue, so the reverse-link derivation has
+-- more than one PR to find.
+detailsFixtureSnapshot :: RepoSnapshot
+detailsFixtureSnapshot =
+  RepoSnapshot
+    [ (baseIssue 900 [])
+        { issueLabels = [Label "epic" "5319e7"],
+          issueBody = "## Children\n- [ ] #36 — A1: Details overlay fields"
+        },
+      detailsFixtureIssue
+    ]
+    [detailsFixturePullRequest, basePullRequest 851 [36] False []]
+    epoch
+
+-- | That generation as the board it derives, which is the whole of what an
+-- unfiltered session shows.
 detailsFixtureBoard :: Board
-detailsFixtureBoard =
-  deriveBoard
-    defaultWorkflowConfig
-    ( RepoSnapshot
-        [ (baseIssue 900 [])
-            { issueLabels = [Label "epic" "5319e7"],
-              issueBody = "## Children\n- [ ] #36 — A1: Details overlay fields"
-            },
-          detailsFixtureIssue
-        ]
-        [detailsFixturePullRequest, basePullRequest 851 [36] False []]
-        epoch
-    )
+detailsFixtureBoard = deriveBoard defaultWorkflowConfig detailsFixtureSnapshot
 
 testOptions :: Options
 testOptions =
