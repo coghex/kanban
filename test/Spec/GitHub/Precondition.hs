@@ -14,24 +14,42 @@
 -- result rather than only by its argv: outside a checkout an unbound read
 -- fails, and inside a checkout naming a different repository it succeeds with
 -- the wrong item's answer.
+--
+-- The deadline examples need a live @gh@ for the same kind of reason. What
+-- @timeouts.github_seconds@ has to bound is a process that has stopped
+-- answering, and no pure test has one. The two overrun examples run a fake
+-- that ignores TERM and never replies, and assert the three facts a bound read
+-- owes -- it ended, it said it timed out, and the process group it walked away
+-- from is gone from the machine and from the durable record; the example
+-- beside them runs one that replies late but inside the budget, which is the
+-- half a bound must leave alone. A regression in the first two does not
+-- return a wrong answer, it returns none at all, so each carries an outer
+-- deadline of its own: on a reader without the bound it must fail rather than
+-- hang the suite.
 module Spec.GitHub.Precondition (spec) where
 
+import Control.Exception (finally)
+import Control.Monad (when)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), diffUTCTime, fromGregorian, getCurrentTime, secondsToDiffTime)
 import Kanban.Domain (ItemId (..), Repository (..), TargetPrecondition (..))
-import Kanban.GitHub (newGhFetchGuard, newGhRecordLock, observeTargetPrecondition)
+import Kanban.GitHub (GhFetchGuard, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, observeTargetPrecondition)
+import Kanban.Process (defaultProcessSnapshot, identityForPid)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
+import Spec.Support.Board (readMarkerPid)
 import Spec.Support.Env
   ( withEnvironmentValue,
     withFakeOnPath,
     withTemporaryCacheRoot
   )
-import System.Directory (createDirectoryIfMissing, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, withCurrentDirectory)
+import System.Posix.Files (setFileMode)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
 import System.Process (callProcess, readProcessWithExitCode)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -110,7 +128,98 @@ spec = describe "the one-item precondition read" $ do
   -- one; only the message differs.
   it "refuses an issue response whose number is missing, null, or not a number" $
     mapM_ refusesUnidentifiedIssue ["", "\"number\": null,", "\"number\": \"844\","]
+
+  -- Issue #645, requirements 1, 2 and 5. Both item forms, because they are two
+  -- argument vectors and a bound applied to only one of them is a bound on
+  -- neither in practice.
+  it "ends a non-answering issue read within the configured timeout, cleaned up" $
+    boundsANonAnsweringRead (IssueId 844) "issue #844"
+
+  it "ends a non-answering pull-request read within the configured timeout, cleaned up" $
+    boundsANonAnsweringRead (PullRequestId 655) "pull request #655"
+
+  -- The other half of requirement 1. The entry going is what makes a timeout
+  -- clean, so a drop that could not happen must not be published as one --
+  -- otherwise the caller reports an ordinary timeout while the record still
+  -- names a group, which is the state the record exists to prevent anything
+  -- spawning beside.
+  it "refuses to call it a clean timeout when the record entry could not be dropped" $
+    withFixtureRunning recordSealingGh $ \fixture ->
+      withRestoredRecordDirectory fixture $ do
+        bounded <- timeout outerDeadlineMicros (observingWithin 1 fixture (IssueId 844))
+        case bounded of
+          Nothing -> expectationFailure "the read never ended; it is not bounded by the configured timeout"
+          Just (guard, observed) -> do
+            case observed of
+              Right precondition ->
+                expectationFailure ("a gh that never answered produced " <> show precondition)
+              Left failure -> do
+                -- Not RequestTimedOut, and it says which half failed: the
+                -- group was killed, the entry naming it was not removed.
+                failure.providerErrorKind `shouldBe` RequestFailed
+                failure.providerErrorMessage
+                  `shouldSatisfy` Text.isInfixOf "durable record entry could not be dropped"
+            -- And the evidence is still there, because nothing may delete it
+            -- to make the read look bounded.
+            leaderPid <- readMarkerPid (fixtureRoot fixture </> "gh.pid")
+            ghGroupIsRecorded guard (readRepository fixture) leaderPid `shouldReturn` True
+
+  -- Requirement 4, with teeth. This gh answers a whole second after it is
+  -- asked -- comfortably inside a ten-second budget and comfortably outside a
+  -- budget computed in milliseconds -- so a bound applied at the wrong scale
+  -- fails here rather than passing on an instant fixture.
+  it "leaves a read that answers inside the budget untouched" $
+    withFixtureRunning slowResolvingGh $ \fixture -> do
+      writeResponse fixture "coghex/kanban" liveIssueBody
+      outsideAnyCheckout $ do
+        observed <- observeWithin 10 fixture (IssueId 844)
+        observed `shouldBe` Right liveIssuePrecondition
   where
+    -- One non-answering read, and everything it owes afterwards.
+    --
+    -- The outer deadline is this example's own, not the reader's: on a reader
+    -- that never gives up, the read below returns nothing at all, and without
+    -- this the suite would stop here rather than report it. It is set far
+    -- above the bound being asserted so that only an unbounded read can reach
+    -- it.
+    boundsANonAnsweringRead item subject =
+      withFixtureRunning hangingGh $ \fixture -> do
+        bounded <- timeout outerDeadlineMicros $ do
+          startedAt <- getCurrentTime
+          (guard, observed) <- observingWithin 1 fixture item
+          finishedAt <- getCurrentTime
+          pure (realToFrac (diffUTCTime finishedAt startedAt) :: Double, guard, observed)
+        case bounded of
+          Nothing -> expectationFailure "the read never ended; it is not bounded by the configured timeout"
+          Just (elapsed, guard, observed) -> do
+            -- The budget plus the cleanup that follows it, which section 13
+            -- allows to finish afterwards. Well under it rather than at it,
+            -- because a cleanup that has to escalate is still nothing like an
+            -- unbounded wait.
+            elapsed `shouldSatisfy` (< 15)
+            case observed of
+              Right precondition ->
+                expectationFailure ("a gh that never answered produced " <> show precondition)
+              Left failure -> do
+                -- RequestTimedOut and not RequestFailed: requirement 2 keeps
+                -- this apart from the target having moved or gone, and the
+                -- kind is what a caller reads.
+                failure.providerErrorKind `shouldBe` RequestTimedOut
+                failure.providerErrorMessage `shouldSatisfy` Text.isInfixOf subject
+                failure.providerErrorMessage `shouldSatisfy` Text.isInfixOf "1 seconds"
+            -- Cleaned up the way an interrupted page's group is: gone from the
+            -- machine, leader and the descendant that inherited its group
+            -- alike, and gone from the durable record with it.
+            leaderPid <- readMarkerPid (fixtureRoot fixture </> "gh.pid")
+            descendantPid <- readMarkerPid (fixtureRoot fixture </> "helper.pid")
+            snapshot <- defaultProcessSnapshot
+            case snapshot of
+              Left message -> expectationFailure ("could not snapshot processes: " <> Text.unpack message)
+              Right identities -> do
+                identityForPid leaderPid identities `shouldBe` Nothing
+                identityForPid descendantPid identities `shouldBe` Nothing
+            ghGroupIsRecorded guard (readRepository fixture) leaderPid `shouldReturn` False
+
     refusesUnidentifiedIssue numberField =
       withFixture $ \fixture -> do
         writeResponse fixture "coghex/kanban" (issueBodyWithNumberField numberField)
@@ -131,7 +240,16 @@ data Fixture = Fixture
   }
 
 withFixture :: (Fixture -> IO ()) -> IO ()
-withFixture action =
+withFixture = withFixtureRunning resolvingGh
+
+-- | The same fixture with the fake @gh@ chosen by the example.
+--
+-- The scratch root is bracketed by 'withTemporaryCacheRoot' and the @PATH@
+-- entry by 'withFakeOnPath', so a deadline example that fails -- or whose own
+-- outer deadline fires -- still tears both down rather than leaving a fake
+-- @gh@ ahead of the real one for whatever runs next.
+withFixtureRunning :: [ByteString.ByteString] -> (Fixture -> IO ()) -> IO ()
+withFixtureRunning ghBody action =
   withTemporaryCacheRoot $ \root -> do
     let responses = root </> "responses"
         argv = root </> "argv"
@@ -142,8 +260,76 @@ withFixture action =
     withEnvironmentValue "XDG_CACHE_HOME" cache
       . withEnvironmentValue "KANBAN_TEST_GH_RESPONSES" responses
       . withEnvironmentValue "KANBAN_TEST_GH_ARGV" argv
-      . withFakeOnPath root ("gh", resolvingGh)
+      . withEnvironmentValue "KANBAN_TEST_GH_ROOT" root
+      . withFakeOnPath root ("gh", ghBody)
       $ action Fixture {fixtureRoot = root, fixtureResponses = responses, fixtureArgv = argv}
+
+-- | 'hangingGh', which additionally seals the directory the durable @gh@
+-- record lives in against writes.
+--
+-- Read and traverse are left alone, so the entry stays visible to an example
+-- and to the cleanup; only unlinking and rewriting it are refused. The kill
+-- therefore succeeds and only the removal fails, which is the one combination
+-- this is for.
+recordSealingGh :: [ByteString.ByteString]
+recordSealingGh =
+  hangingGhThen
+    [ByteString.pack ("chmod 500 \"$KANBAN_TEST_GH_ROOT/" <> recordDirectorySuffix <> "\"")]
+
+-- | Where 'withFixtureRunning' puts the durable record, relative to the
+-- fixture root: @$XDG_CACHE_HOME@ is @<root>\/cache@ and 'Kanban.Cache' keys
+-- the record under @kanban\/gh-groups@ beneath it.
+recordDirectorySuffix :: String
+recordDirectorySuffix = "cache" </> "kanban" </> "gh-groups"
+
+-- | Puts the record directory back the way it was found, so the fixture's own
+-- teardown can still delete the tree it sealed.
+withRestoredRecordDirectory :: Fixture -> IO result -> IO result
+withRestoredRecordDirectory fixture =
+  (`finally` restore)
+  where
+    directory = fixtureRoot fixture </> recordDirectorySuffix
+    restore = do
+      sealed <- doesDirectoryExist directory
+      when sealed (setFileMode directory 0o700)
+
+-- | 'resolvingGh', a whole second late.
+slowResolvingGh :: [ByteString.ByteString]
+slowResolvingGh = "sleep 1" : resolvingGh
+
+-- | How long an example waits before declaring the reader unbounded. Three
+-- times the elapsed bound it asserts, so a read that merely took its cleanup's
+-- full allowance still reports the assertion rather than this.
+outerDeadlineMicros :: Int
+outerDeadlineMicros = 45 * 1000 * 1000
+
+-- | A @gh@ that answers nothing, ignores TERM, and leaves a descendant in its
+-- own process group doing the same -- the wedged request the deadline exists
+-- to catch, and the group cleanup has to account for both members.
+--
+-- 'Spec.Support.Board.termIgnoringGh' with the two pids written down, which is
+-- the only thing added: both are recorded before it settles in to wait, so an
+-- example can ask the process table about them after the read has reported.
+hangingGh :: [ByteString.ByteString]
+hangingGh = hangingGhThen []
+
+-- | The same, running @afterRecording@ in the window between writing those
+-- pids down and settling in to wait.
+--
+-- That window is the useful one, and it is named rather than reached by
+-- counting lines: the record entry is written before the child is released
+-- from its spawn barrier, and the deadline that abandons the read cannot fire
+-- until after that, so anything here happens with the entry on disk and the
+-- cleanup still ahead.
+hangingGhThen :: [ByteString.ByteString] -> [ByteString.ByteString]
+hangingGhThen afterRecording =
+  [ "trap '' TERM",
+    "sh -c 'trap \"\" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &",
+    "printf '%s\\n' \"$!\" > \"$KANBAN_TEST_GH_ROOT/helper.pid\"",
+    "printf '%s\\n' \"$$\" > \"$KANBAN_TEST_GH_ROOT/gh.pid\""
+  ]
+    <> afterRecording
+    <> ["while :; do sleep 1; done"]
 
 -- | A @gh@ that resolves its repository the way the real one does: from
 -- @--repo@ when it is given one, and otherwise from the invoking directory's
@@ -178,11 +364,27 @@ resolvingGh =
 
 -- | The read itself, against the identity the dashboard resolved -- which is
 -- deliberately not the identity of any directory the example runs in.
+--
+-- Thirty seconds is the shipped default, so the examples that are not about
+-- the deadline read under exactly the budget a stock installation gives them.
 observe :: Fixture -> ItemId -> IO (Either ProviderError TargetPrecondition)
-observe fixture item = do
+observe = observeWithin 30
+
+observeWithin :: Int -> Fixture -> ItemId -> IO (Either ProviderError TargetPrecondition)
+observeWithin readSeconds fixture item = snd <$> observingWithin readSeconds fixture item
+
+-- | The same, handing back the guard the read ran under, because what its
+-- cleanup did to the durable record is half of what an interrupted read owes.
+observingWithin :: Int -> Fixture -> ItemId -> IO (GhFetchGuard, Either ProviderError TargetPrecondition)
+observingWithin readSeconds fixture item = do
   recordLock <- newGhRecordLock
   guard <- newGhFetchGuard recordLock
-  observeTargetPrecondition guard (Repository (fixtureRoot fixture) "coghex" "kanban") item
+  observed <- observeTargetPrecondition guard readSeconds (readRepository fixture) item
+  pure (guard, observed)
+
+-- | The identity every read in this module is asked about.
+readRepository :: Fixture -> Repository
+readRepository fixture = Repository (fixtureRoot fixture) "coghex" "kanban"
 
 writeResponse :: Fixture -> String -> String -> IO ()
 writeResponse fixture repository body =

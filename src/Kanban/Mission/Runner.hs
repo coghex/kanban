@@ -460,10 +460,22 @@ liveMissionDriver options config repository store _ =
     -- spellings 'targetPreconditionForItem' produces from a board item, so
     -- every comparison in the chain is between two readings that agree about
     -- what "unchanged" means.
+    --
+    -- Bounded by the same configured value 'readBoard' bounds a page with,
+    -- read off the same resolved configuration rather than from a second
+    -- setting of its own (issue #645, requirement 3). A read that never
+    -- answers is not merely this step waiting: 'runMissionForeground' takes
+    -- its iterations one at a time and drains queued console commands only
+    -- between them, so an unbounded one stops the whole run responding.
     observeTarget target = do
       recordLock <- newGhRecordLock
       guard <- newGhFetchGuard recordLock
-      observed <- observeTargetPrecondition guard repository (itemIdFor target)
+      observed <-
+        observeTargetPrecondition
+          guard
+          config.resolvedTimeouts.timeoutsGithubSeconds
+          repository
+          (itemIdFor target)
       pure $ case observed of
         Left failure -> Left (missionStepFailureText (missionFailureFromProviderError failure))
         Right precondition -> Right (missionVersionOf precondition)

@@ -36,7 +36,7 @@ import Data.List (intercalate, isInfixOf, nub)
 import Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Data.Time (UTCTime (..), addUTCTime, defaultTimeLocale, formatTime, fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, defaultTimeLocale, diffUTCTime, formatTime, fromGregorian, getCurrentTime, secondsToDiffTime)
 import Kanban.Action
   ( ActionAttribution (..),
     ActionHandle (..),
@@ -90,13 +90,14 @@ import Kanban.Worker
     workerDirectory,
     writePrivateJson,
     writeState,
+    preconditionReadSeconds,
     preconditionStillHolds,
     workerDeadlineReason,
     workerPreconditionRefusal,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
   )
-import Spec.Support.Board (withFakeGh)
+import Spec.Support.Board (termIgnoringGh, withFakeGh)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Json (emptyAssigneesJson, emptyLabelsJson, emptySubIssuesJson, githubIndependentPage, issueNodeJson)
 import Spec.Support.Fixtures (testOptions, testResolvedConfig)
@@ -133,6 +134,7 @@ spec = describe "the foreground mission runner" $ do
   preconditionBoundarySpec
   deadlineSpec
   workerPreconditionSpec
+  preconditionDeadlineSpec
   failureVocabularySpec
   openEffectRecoverySpec
   directionSpec
@@ -504,8 +506,13 @@ iterateUntil controller reached = go (12 :: Int) []
 
 -- | One controller iteration against a staged driver.
 oneIteration :: MissionStore -> Stage -> IO MissionIteration
-oneIteration store stage = do
-  started <- startMissionController store boardRepository theMission (stagedDriver stage)
+oneIteration store stage = oneIterationOf (stagedDriver stage) store
+
+-- | The same, against a driver the example builds -- which is how a live
+-- reader is put under an otherwise staged run.
+oneIterationOf :: (MissionStore -> MissionId -> IO MissionDriver) -> MissionStore -> IO MissionIteration
+oneIterationOf driver store = do
+  started <- startMissionController store boardRepository theMission driver
   case started of
     Left refusal -> fail ("the controller refused to start: " <> Text.unpack (missionStartRefusalMessage refusal))
     Right controller -> do
@@ -2533,15 +2540,24 @@ workerPreconditionSpec = describe "the precondition a worker carries" $ do
     (missionStepFailureTag <$> missionFailureFromOutcome (settledWorkerFailure (workerStaleTargetReason <> ": #844 changed")))
       `shouldBe` Just "stale_version"
 
--- | A temporary root with @$XDG_CACHE_HOME@ redirected into it.
+-- | A temporary root with @$XDG_CACHE_HOME@ and @$XDG_CONFIG_HOME@ redirected
+-- into it.
 --
 -- Running @gh@ at all writes this repository's durable process-group record
 -- under the cache root, and a record left in the real one is read by every
 -- later board refresh as a previous board's leftover — which is a failure in
 -- another group entirely, arriving long after the example that caused it.
+--
+-- The configuration root is redirected for the same kind of reason. A
+-- precondition read resolves @timeouts.github_seconds@ for the repository it
+-- is reading, and a launch that selected no file resolves the default path —
+-- so without this an example would read whatever @config.toml@ the developer
+-- running it happens to keep, and be bounded by a budget the suite never
+-- chose.
 withIsolatedGh :: (FilePath -> IO result) -> IO result
 withIsolatedGh action = withTemporaryCacheRoot $ \root ->
-  withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") (action root)
+  withEnvironmentValue "XDG_CACHE_HOME" (root </> "cache") $
+    withEnvironmentValue "XDG_CONFIG_HOME" (root </> "config") (action root)
 
 -- | A fake @gh issue view --json@ answering with these labels.
 --
@@ -2570,6 +2586,145 @@ ghItemIn state labels =
   ]
   where
     iso8601 = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" fixedTime
+
+-- ---------------------------------------------------------------------------
+-- The deadline both precondition readers run under
+-- ---------------------------------------------------------------------------
+
+-- | Issue #645. The reader's own bound is asserted in "Spec.GitHub.Precondition";
+-- what is asserted here is that both of its callers actually apply one, apply
+-- the configured one, and report the overrun through the path they already
+-- have for a precondition they could not verify.
+--
+-- Both examples run a real @gh@ that never answers, because a bound on a
+-- process that always replies is not a bound. Both therefore carry an outer
+-- deadline: unbounded, these do not fail, they hang, and a regression the
+-- suite cannot report is not a regression the suite catches.
+preconditionDeadlineSpec :: Spec
+preconditionDeadlineSpec = describe "the deadline a precondition read runs under" $ do
+  -- The runner's half. 'runMissionForeground' takes its iterations one at a
+  -- time and drains queued console commands only between them, so an
+  -- unbounded read here stops the whole run answering -- and the run must end
+  -- rather than dispatch anything or write a lifecycle over somebody's
+  -- network.
+  it "bounds the production driver's read, and neither dispatches nor blocks over it" $
+    withIsolatedGh $ \root ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage ->
+        withFakeGh root termIgnoringGh $ do
+          bounded <- timeout preconditionOuterDeadlineMicros $ do
+            startedAt <- getCurrentTime
+            iteration <- oneIterationOf (boundReadingDriver stage) store
+            finishedAt <- getCurrentTime
+            pure (elapsedSeconds startedAt finishedAt, iteration)
+          case bounded of
+            Nothing ->
+              expectationFailure
+                "the driver's precondition read never ended; it is not bounded by the configured timeout"
+            Just (elapsed, iteration) -> do
+              elapsed `shouldSatisfy` (< 15)
+              case iteration of
+                MissionControllerFailed detail -> do
+                  Text.unpack detail `shouldSatisfy` isInfixOf "issue #844"
+                  Text.unpack detail `shouldSatisfy` isInfixOf "1 seconds"
+                other -> expectationFailure ("the overrun was not reported as a stopped run: " <> show other)
+          -- Nothing was mutated over a reading nobody took, and the mission is
+          -- exactly where the iteration found it, so the next run plans again
+          -- rather than resuming from a state this one wrote about a timeout.
+          readIORef stage.stageDispatches `shouldReturn` []
+          snapshot <- currentSnapshot store
+          stepLifecycle snapshot `shouldBe` Just MissionStepPending
+          snapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
+
+  -- The worker's half, and the configuration plumbing with it. The file this
+  -- launch selected sets a five-minute global budget and a one-second override
+  -- for the repository being read: a reread that took the global one would
+  -- outlast this example's own deadline, so only the resolved value passes.
+  it "bounds the worker's reread by the repository's own configured value" $
+    withIsolatedGh $ \root -> do
+      configPath <- writeSplitTimeoutConfig root
+      let launched =
+            (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
+              { workerExpectedTarget = Just (preconditionOf (issueVersion ["reviewed:approve"])),
+                workerConfigPath = Just configPath
+              }
+      withFakeGh root termIgnoringGh $ do
+        bounded <- timeout preconditionOuterDeadlineMicros $ do
+          startedAt <- getCurrentTime
+          refusal <- preconditionStillHolds launched
+          finishedAt <- getCurrentTime
+          pure (elapsedSeconds startedAt finishedAt, refusal)
+        case bounded of
+          Nothing ->
+            expectationFailure
+              "the worker's reread never ended; it is not bounded by the configured timeout"
+          Just (elapsed, refusal) -> do
+            elapsed `shouldSatisfy` (< 15)
+            case refusal of
+              Nothing -> expectationFailure "an unreadable target was allowed to start its turn"
+              -- Unverified and not stale: a read that never answered has shown
+              -- nothing about the target, and the two refusals call for
+              -- different repairs.
+              Just detail -> do
+                workerPreconditionRefusal detail `shouldBe` Just workerUnverifiedTargetReason
+                Text.unpack detail `shouldSatisfy` isInfixOf "1 seconds"
+
+  -- And the resolution itself, without a process in it: the repository's
+  -- override, the global it overrides, and the shipped default a launch that
+  -- selected no file falls back to. One setting, resolved the way the board
+  -- fetch resolves it, rather than a second one for precondition reads.
+  it "resolves that budget for the repository being read, and defaults with no file" $
+    withIsolatedGh $ \root -> do
+      configPath <- writeSplitTimeoutConfig root
+      let selecting repository = (workerFixtureSpec repository (WorkerId "solve-844-0001") 844) {workerConfigPath = Just configPath}
+      preconditionReadSeconds (selecting boardRepository) `shouldReturn` 1
+      preconditionReadSeconds (selecting otherRepository) `shouldReturn` 300
+      preconditionReadSeconds (workerFixtureSpec boardRepository (WorkerId "solve-844-0001") 844)
+        `shouldReturn` defaultTimeoutsConfig.timeoutsGithubSeconds
+
+-- | A staged driver whose one live part is the read under test, so the overrun
+-- is the production reader's and everything the run then does with it stays
+-- observable.
+boundReadingDriver :: Stage -> MissionStore -> MissionId -> IO MissionDriver
+boundReadingDriver stage store mission = do
+  staged <- stagedDriver stage store mission
+  live <- liveMissionDriver testOptions oneSecondGithubConfig boardRepository store mission
+  pure staged {missionDriverObserveTarget = live.missionDriverObserveTarget}
+
+oneSecondGithubConfig :: ResolvedConfig
+oneSecondGithubConfig =
+  testResolvedConfig {resolvedTimeouts = defaultTimeoutsConfig {timeoutsGithubSeconds = 1}}
+
+-- | A repository no table in 'writeSplitTimeoutConfig' names, so it resolves
+-- the global value the override exists to differ from.
+otherRepository :: Repository
+otherRepository = Repository {repositoryRoot = "/tmp/other", repositoryOwner = "audit-owner", repositoryName = "audit-target"}
+
+-- | A selected @config.toml@ whose repository override differs from its own
+-- global timeout, which is the only shape that can tell the two apart.
+writeSplitTimeoutConfig :: FilePath -> IO FilePath
+writeSplitTimeoutConfig root = do
+  let configPath = root </> "selected-config.toml"
+  writeFile
+    configPath
+    ( unlines
+        [ "[timeouts]",
+          "github_seconds = 300",
+          "",
+          "[repositories.\"coghex/kanban\".timeouts]",
+          "github_seconds = 1"
+        ]
+    )
+  pure configPath
+
+-- | How long an example waits before declaring a caller unbounded. Far above
+-- the one-second budget it asserts and far below the five-minute global one
+-- that budget overrides, so it is reached by an unbounded read and by one
+-- bounded by the wrong value alike.
+preconditionOuterDeadlineMicros :: Int
+preconditionOuterDeadlineMicros = 60 * 1000 * 1000
+
+elapsedSeconds :: UTCTime -> UTCTime -> Double
+elapsedSeconds startedAt finishedAt = realToFrac (diffUTCTime finishedAt startedAt)
 
 -- ---------------------------------------------------------------------------
 -- The failure vocabulary

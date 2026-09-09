@@ -66,6 +66,7 @@ module Kanban.Worker
     defaultIssueHostTuning,
     runIssueReviewHostWith,
     preconditionStillHolds,
+    preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
     workerPreconditionRefusal,
@@ -138,7 +139,8 @@ import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Repository, TargetPrecondition, WorkflowConfig)
 import Kanban.Worker.Precondition
-  ( preconditionStillHolds,
+  ( preconditionReadSeconds,
+    preconditionStillHolds,
     workerPreconditionRefusal,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,

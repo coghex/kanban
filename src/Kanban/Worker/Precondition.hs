@@ -20,9 +20,18 @@
 -- moved target is replanned against a new reading, an unreadable one is waited
 -- on. Collapsing them would send the first repair to the second problem.
 --
+-- The read is bounded by @timeouts.github_seconds@, resolved for the
+-- repository being read out of the launch's own selected configuration file.
+-- This is the last thing standing between a launch and an agent session, and
+-- it runs on the supervisor's own thread: a @gh@ that never answers would hold
+-- the turn open with nothing started and nothing refused. An overrun is the
+-- unreadable refusal, never the moved one -- a read that never answered has
+-- shown nothing about the target.
+--
 -- This module is internal — "Kanban.Worker" re-exports it.
 module Kanban.Worker.Precondition
   ( preconditionStillHolds,
+    preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
     workerPreconditionRefusal,
@@ -31,8 +40,17 @@ where
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Config
+  ( ResolvedConfig (..),
+    TimeoutsConfig (..),
+    defaultTimeoutsConfig,
+    loadRawConfig,
+    repositoryIdentity,
+    resolveConfig,
+  )
 import Kanban.Domain
-  ( TargetPrecondition (..),
+  ( Repository (..),
+    TargetPrecondition (..),
     targetPreconditionHolds,
     targetPreconditionMessage,
   )
@@ -51,14 +69,42 @@ preconditionStillHolds :: WorkerSpec -> IO (Maybe Text)
 preconditionStillHolds spec = case spec.workerExpectedTarget of
   Nothing -> pure Nothing
   Just expected -> do
+    readSeconds <- preconditionReadSeconds spec
     recordLock <- newGhRecordLock
     guard <- newGhFetchGuard recordLock
-    observed <- observeTargetPrecondition guard spec.workerRepository expected.preconditionItem
+    observed <- observeTargetPrecondition guard readSeconds spec.workerRepository expected.preconditionItem
     pure $ case observed of
       Left failure -> Just (workerUnverifiedTargetReason <> ": " <> failure.providerErrorMessage)
       Right live
         | targetPreconditionHolds expected live -> Nothing
         | otherwise -> Just (workerStaleTargetReason <> ": " <> targetPreconditionMessage expected live)
+
+-- | How long this worker's reread may take: @timeouts.github_seconds@,
+-- resolved for the repository being read out of the launch's own selected
+-- configuration file (issue #645, requirement 3).
+--
+-- The same setting the board fetch bounds a page with, resolved the same way,
+-- because a precondition read is one @gh@ request like any other and a second
+-- setting for it would be a second thing to get wrong. The specification is
+-- what says which file: 'workerConfigPath' records the @--config@ the launch
+-- selected, already absolute, so a detached supervisor started from another
+-- directory resolves the same file the dashboard did, and 'Nothing' means the
+-- default path exactly as it does everywhere else.
+--
+-- A configuration that will not load falls back to the shipped default rather
+-- than refusing the turn. A malformed file is not evidence about the target,
+-- and the failure it would have to be reported as -- an unverified
+-- precondition -- is indistinguishable from the network one, while the read it
+-- would replace is the unbounded wait this bound exists to prevent.
+preconditionReadSeconds :: WorkerSpec -> IO Int
+preconditionReadSeconds spec = do
+  loaded <- loadRawConfig spec.workerConfigPath
+  pure $ case loaded of
+    Left _ -> defaultTimeoutsConfig.timeoutsGithubSeconds
+    Right (raw, _) -> (resolveConfig identity raw).resolvedTimeouts.timeoutsGithubSeconds
+  where
+    identity =
+      repositoryIdentity spec.workerRepository.repositoryOwner spec.workerRepository.repositoryName
 
 -- | The canonical opening of the sentence a worker refuses its turn with when
 -- its recorded target has demonstrably moved.
