@@ -37,6 +37,8 @@ import Kanban.CLI (Options (..))
 import Kanban.Domain
 import Kanban.Layout (responsiveColumnWidths)
 import Kanban.UI (drawApplication)
+import Kanban.Card (displayWidth)
+import Kanban.Config (ResolvedConfig (..))
 import Kanban.UI.Board
   ( ColumnPiece (..),
     columnBody,
@@ -45,18 +47,24 @@ import Kanban.UI.Board
     columnScrollStep,
     columnWindowFor,
     drawColumnItem,
+    pullRequestPhaseGlyphFor,
     refreshColumnWindows,
+    reviewPhaseGlyphFor,
+    solvePhaseGlyphFor,
   )
 import Kanban.UI.Events (BoardMouseAction (..), boardMousePress)
+import Kanban.GitHub (GitHubResult (..))
 import Kanban.UI.Filter (refreshVisibleBoard)
+import Kanban.UI.Reconcile (reconcilePullRequestSessions, reconcileReviewSessions)
 import Kanban.UI.Search (columnCountText, columnItemsIn, entriesFor, expandedTrackersFor)
 import Kanban.UI.Selection (toggleTrackerState)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
 import Kanban.UI.Util (allColumns, relativeAge, showText)
-import Spec.Support.App (testAppState, withSolveSession)
-import Spec.Support.Dashboard (DashboardRun (..), quitKey, runDashboardScript)
-import Spec.Support.Fixtures (baseIssue, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
+import Kanban.Workflow (entryItem)
+import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession, testSolveSession, withSolveSession)
+import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
+import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
 import Spec.Support.Render (FrameCell, renderFrameCells, renderWidgetLines)
 import Test.Hspec
 
@@ -188,24 +196,54 @@ spec = describe "board frame cost" $ do
 
   describe "a dashboard driven through brick's own event loop" $ do
     it "draws what an unmeasured one draws while the wheel scrolls a column" $
-      scriptAgrees (replicate 12 wheelDown)
+      scriptAgrees (replicate 12 wheelDown) >>= \run ->
+        -- A positive control on every script below: the wheel really moved the
+        -- viewport, so these are comparisons of scrolled frames.
+        take 1 run.runFrames `shouldNotBe` take 1 (reverse run.runFrames)
 
-    it "draws what an unmeasured one draws when a query shrinks a column under a scrolled viewport" $
+    it "draws what an unmeasured one draws when a query shrinks a column under a scrolled viewport" $ do
       -- The offset is most of the way down eight hundred cards when the query
       -- leaves a handful. The settle re-measures the shorter column against
       -- the offset the taller one ended at, which is the offset brick is about
       -- to clamp away from.
-      scriptAgrees (replicate 30 wheelDown <> map key "sCard 123")
+      _ <- scriptAgrees (replicate 30 wheelDown <> map key "sCard 123")
+      pure ()
 
-    it "draws what an unmeasured one draws when an epic collapses under a scrolled viewport" $
-      scriptAgrees (replicate 20 wheelDown <> [key 'g', key 'e'])
+    it "draws what an unmeasured one draws when an epic collapses under a scrolled viewport" $ do
+      _ <- scriptAgrees (replicate 20 wheelDown <> [key 'g', key 'e'])
+      pure ()
 
-    it "draws what an unmeasured one draws when the filter panel gives a scrolled column its rows back" $
+    it "draws what an unmeasured one draws when criteria filtering empties a scrolled column" $ do
+      -- The panel takes the keyboard and Space toggles the box it focuses,
+      -- which is a criteria edit: the admitted board is rebuilt and every
+      -- column re-seated, under a viewport sitting well down the old one.
+      measured <- scriptAgrees (replicate 30 wheelDown <> [key 'F', space])
+      -- The edit reached the criteria rather than being swallowed by the
+      -- panel: the column is showing something other than what it held.
+      shownIn measured Issues `shouldNotBe` scriptedColumnLength
+
+    it "draws what an unmeasured one draws when a refresh shrinks a column under a viewport near its bottom" $ do
+      -- Eight hundred cards become twelve while the viewport is hundreds of
+      -- rows down. The settle measures the short column against the offset the
+      -- tall one ended at, which is past everything there now is to show.
+      measured <- scriptAgrees (replicate 130 wheelDown <> [refreshTo 12])
+      shownIn measured Issues `shouldBe` 12
+
+    it "draws what an unmeasured one draws when the terminal is resized under a scrolled column" $ do
+      -- A resize changes the width every card wraps at and the rows the
+      -- viewport shows at once, so no measurement taken before it describes
+      -- the column any more.
+      measured <- scriptAgrees (replicate 12 wheelDown <> [Resize resizedTo, wheelDown, wheelDown])
+      -- The terminal really did change size: the last frame is the new one.
+      map length (take 1 (reverse measured.runFrames)) `shouldBe` [snd resizedTo]
+
+    it "draws what an unmeasured one draws when the filter panel gives a scrolled column its rows back" $ do
       -- The panel takes rows from every column while it is up, so hiding it
       -- again leaves the columns taller than they were when brick last
       -- reported their geometry. Those extra rows are cropped from a
       -- measurement that never saw them.
-      scriptAgrees (replicate 12 wheelDown <> [key 'F', key 'F'])
+      _ <- scriptAgrees (replicate 12 wheelDown <> [key 'F', key 'F'])
+      pure ()
 
     it "resolves a click after scrolling to the same card an unmeasured one does" $ do
       let script = replicate 12 wheelDown <> [press cardPoint]
@@ -230,6 +268,42 @@ spec = describe "board frame cost" $ do
       -- The click reached the epic: its group is no longer open.
       measured.runState.appExpandedTrackers `shouldBe` Set.empty
       measured.runFrames `shouldBe` whole.runFrames
+
+  describe "what a badge costs a card" $ do
+    -- The measurement stands on this: every badge is the same width, so which
+    -- cards carry one decides the geometry and which phase they are in does
+    -- not. Asked of every phase of every kind in both glyph sets, so a new
+    -- phase or a re-spelled glyph of another width fails here rather than by
+    -- drawing a card at a height nothing measured.
+    forM_ [("box glyphs", False), ("ascii glyphs", True)] $ \(label, useAscii) ->
+      it ("is two cells wide in every phase, in " <> label) $ do
+        let solveWidths = [displayWidth (solvePhaseGlyphFor useAscii (testSolveSession (baseIssue 1 []) phase)) | phase <- [minBound .. maxBound]]
+            reviewWidths = [displayWidth (reviewPhaseGlyphFor useAscii (testReviewSession (baseIssue 1 []) phase)) | phase <- [minBound .. maxBound]]
+            pullRequestWidths =
+              [ displayWidth (pullRequestPhaseGlyphFor useAscii (testPullRequestSession (basePullRequest 1 [] False []) phase))
+                | phase <- [minBound .. maxBound]
+              ]
+        solveWidths `shouldSatisfy` ((>= 8) . length)
+        reviewWidths `shouldSatisfy` ((>= 8) . length)
+        (solveWidths <> reviewWidths <> pullRequestWidths) `shouldSatisfy` all (== badgeCellWidth)
+
+    it "changes a roster's size when a card starts carrying one" $ do
+      -- Which is what lets three sizes stand for the whole badge geometry.
+      state <- unmeasuredState 20
+      let running = withSolveSession (baseIssue 4 []) SolveRunning state
+      Map.size running.appSolveSessions `shouldNotBe` Map.size state.appSolveSessions
+
+    it "keeps a roster's keys through the reconciliations that rebuild one" $ do
+      -- The other half of that: a size stands for a membership only while
+      -- nothing removes a key, and these two are the only paths that rebuild
+      -- a roster at all.
+      state <- unmeasuredState 20
+      let sessions = (withSolveSession (baseIssue 4 []) SolveRunning state).appSolveSessions
+          reviews = Map.fromList [(4, testReviewSession (baseIssue 4 []) ReviewRunning)]
+          pullRequests = Map.fromList [(9, testPullRequestSession (basePullRequest 9 [] False []) SolveRunning)]
+      Map.keys (reconcileReviewSessions state.appConfig.resolvedWorkflow [] reviews) `shouldBe` Map.keys reviews
+      Map.keys (reconcilePullRequestSessions [] pullRequests) `shouldBe` Map.keys pullRequests
+      Map.keys sessions `shouldBe` [4]
 
   describe "what invalidates a measurement" $ do
     it "keeps one taken from the state that is still current" $ do
@@ -460,17 +534,27 @@ drawnRuns pieces = filter (not . null) (foldr collect [[]] pieces)
 -- dispatch with the preparation taken away -- the board before issue #640.
 -- Anything the windowing gets wrong about where brick will crop shows up as a
 -- frame that differs.
-scriptAgrees :: [Vty.Event] -> Expectation
+scriptAgrees :: [ScriptStep] -> IO DashboardRun
 scriptAgrees script = do
   measured <- runScript script id
   whole <- runScript script unmeasure
   length measured.runFrames `shouldBe` length whole.runFrames
   measured.runFrames `shouldBe` whole.runFrames
+  pure measured
 
-runScript :: [Vty.Event] -> (AppState -> AppState) -> IO DashboardRun
+-- | How many entries a run's dashboard ended up showing in @column@.
+shownIn :: DashboardRun -> BoardColumn -> Int
+shownIn run column = length (entriesFor run.runState column)
+
+-- | The terminal the resize script ends on: narrower, so every card rewraps,
+-- and taller, so the viewport shows rows no measurement before it covered.
+resizedTo :: (Int, Int)
+resizedTo = (frameWidth - 24, frameHeight + 14)
+
+runScript :: [ScriptStep] -> (AppState -> AppState) -> IO DashboardRun
 runScript script adjust = do
   state <- unmeasuredState scriptedColumnLength
-  runDashboardScript (frameWidth, frameHeight) adjust state (script <> [quitKey])
+  runDashboardScript (frameWidth, frameHeight) adjust state (script <> [quitStep])
 
 -- | Long enough that a scrolled viewport is nowhere near either end, short
 -- enough that the unmeasured half of each comparison stays quick.
@@ -489,16 +573,34 @@ cardPoint = (10, 10)
 epicPoint = (10, 4)
 
 -- | A wheel press over a card of the Issues column.
-wheelDown, wheelUp :: Vty.Event
-wheelDown = Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollDown []
+wheelDown, wheelUp :: ScriptStep
+wheelDown = Press (Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollDown [])
 
-wheelUp = Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollUp []
+wheelUp = Press (Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollUp [])
 
-press :: (Int, Int) -> Vty.Event
-press (x, y) = Vty.EvMouseDown x y Vty.BLeft []
+press :: (Int, Int) -> ScriptStep
+press (x, y) = Press (Vty.EvMouseDown x y Vty.BLeft [])
 
-key :: Char -> Vty.Event
-key character = Vty.EvKey (Vty.KChar character) []
+key :: Char -> ScriptStep
+key character = Press (Vty.EvKey (Vty.KChar character) [])
+
+space :: ScriptStep
+space = Press (Vty.EvKey (Vty.KChar ' ') [])
+
+-- | A finished refresh publishing @count@ standalone issues, which is how a
+-- board shrinks underneath a viewport that is nowhere near the top.
+refreshTo :: Int -> ScriptStep
+refreshTo count =
+  Deliver
+    ( BoardRefreshFinished
+        0
+        (BoardRefreshCompleted (Right (GitHubResult (RepoSnapshot issues [] epoch) [])))
+    )
+  where
+    issues = [issueOf (varyingEntry number) | number <- [4 .. 3 + count]]
+    issueOf entry = case entryItem entry of
+      IssueItem issue -> issue
+      PullRequestItem _ -> baseIssue 0 []
 
 -- | How much more a frame of a five-thousand-card column costs than one of a
 -- hundred-card column, in bytes the production frame allocates with every cell
@@ -523,6 +625,10 @@ frameAllocations state = do
   closing <- getRTSStats
   _ <- evaluate (length measured)
   pure (closing.allocated_bytes - opening.allocated_bytes)
+
+-- | The cells every badge takes, whatever its phase or glyph set.
+badgeCellWidth :: Int
+badgeCellWidth = 2
 
 -- | The epic every one of these columns opens with.
 epicNumber :: Int

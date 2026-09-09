@@ -573,7 +573,8 @@ selection movement, and wheel scrolling reuse it rather than rebuilding it,
 which is what makes the cost a property of the viewport rather than of the
 column. Whether a frame may reuse it is decided by comparing counters rather
 than the collections they stand for, so that check is the same size on a board
-of five items and a board of five thousand. The layout is presentation state
+of five items and a board of five thousand, and on a session that has run one
+agent and one that has run a thousand. The layout is presentation state
 like every other: never cached, never part of a board snapshot, and never
 restored on restart.
 

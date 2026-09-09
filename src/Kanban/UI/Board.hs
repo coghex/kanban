@@ -1107,16 +1107,16 @@ columnSignature state column columnWidth =
 
 -- | The board-wide inputs a column measurement is taken under.
 --
--- Collected once per event rather than per frame. The badge maps are the
--- reason: a badge takes cells from the width a card wraps at, so its presence
--- belongs to a measurement, and reading it costs the sessions a dashboard is
--- holding. That is a handful even after a long run, and never a function of
--- the repository -- but it is not constant, so a frame reads
--- 'appLayoutEpoch' instead and this is what moves it.
+-- Every part of it is read in constant time -- three roster sizes and two
+-- settings -- so collecting it costs the same on a dashboard holding one
+-- agent session and one holding a thousand. It is still collected here rather
+-- than in a frame's own check so that a frame compares one 'Int'
+-- ('appLayoutEpoch') rather than a record, and so that the reasoning behind
+-- the counts ('Kanban.UI.Types.ColumnBadges') lives in one place.
 layoutInputs :: AppState -> LayoutInputs
 layoutInputs state =
   LayoutInputs
-    { layoutBadges = columnBadgeWidths state,
+    { layoutBadges = columnBadgeCounts state,
       layoutAscii = state.appOptions.optionAscii,
       layoutExcerptLines = cardExcerptLimit state.appConfig
     }
@@ -1130,17 +1130,17 @@ layoutInputs state =
 unmeasuredLayoutInputs :: Options -> ResolvedConfig -> LayoutInputs
 unmeasuredLayoutInputs options config =
   LayoutInputs
-    { layoutBadges = ColumnBadges Map.empty Map.empty Map.empty,
+    { layoutBadges = ColumnBadges 0 0 0,
       layoutAscii = options.optionAscii,
       layoutExcerptLines = cardExcerptLimit config
     }
 
-columnBadgeWidths :: AppState -> ColumnBadges
-columnBadgeWidths state =
+columnBadgeCounts :: AppState -> ColumnBadges
+columnBadgeCounts state =
   ColumnBadges
-    { badgeSolve = Map.map (displayWidth . solvePhaseGlyph state) state.appSolveSessions,
-      badgeReview = Map.map (displayWidth . reviewPhaseGlyph state) state.appReviewSessions,
-      badgePullRequest = Map.map (displayWidth . pullRequestPhaseGlyph state) state.appPullRequestReviewSessions
+    { badgeSolveCount = Map.size state.appSolveSessions,
+      badgeReviewCount = Map.size state.appReviewSessions,
+      badgePullRequestCount = Map.size state.appPullRequestReviewSessions
     }
 
 -- | Lay one column out: what it draws, how tall each of those is, and where

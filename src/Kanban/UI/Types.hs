@@ -241,7 +241,9 @@ data SolvePhase
   | SolveFailedPhase
   | SolveKilledPhase
   | SolveOrphanedPhase
-  deriving stock (Eq, Show)
+  -- 'Bounded' and 'Enum' so a test can ask every phase the same question at
+  -- once; 'Kanban.UI.Types.ColumnBadges' rests on one such answer.
+  deriving stock (Bounded, Enum, Eq, Show)
 
 data AutoSolveStage
   = AutoImplementing
@@ -391,7 +393,7 @@ data ReviewPhase
   | ReviewFailed
   | ReviewRevised
   | ReviewInterrupted
-  deriving stock (Eq, Show)
+  deriving stock (Bounded, Enum, Eq, Show)
 
 data PendingReviewInteraction
   = PendingReviewQuestion ReviewRequestId ReviewQuestion
@@ -1031,21 +1033,28 @@ data ColumnContentKey = ColumnContentKey
   }
   deriving stock (Eq, Show)
 
--- | How wide the badges a column's cards carry are, by item number.
+-- | How many cards carry a badge of each kind: one count per session roster.
 --
--- Badge /width/ rather than badge glyph, deliberately. A badge takes cells
--- from the width the card frame is laid out at, and a narrower frame wraps
--- differently, so the width belongs in a measurement; the glyph does not, and
--- a running session's spinner changes it several times a second. Recording
--- the glyph would remeasure every column on every animation tick and measure
--- exactly the same heights each time.
+-- A badge takes cells from the width the card frame beside it is laid out at,
+-- and a narrower frame wraps differently, so it belongs in a measurement. What
+-- does not belong is the glyph: a running session's spinner changes it several
+-- times a second and measures exactly the same heights each time. Nor does the
+-- phase, because every badge -- every phase of every kind, in either glyph set
+-- -- is exactly two cells wide, which @Spec.UI.ColumnWindow@ asserts over the
+-- whole of both enumerations.
 --
--- Only the sessions carrying a badge appear, so this stays the size of the
--- live work rather than the size of the board.
+-- So the geometry is decided by which cards carry a badge, and nothing else.
+-- Three counts stand for that: a roster is only ever added to -- nothing
+-- anywhere removes a session, and the two reconciliations that rebuild one
+-- rebuild it with 'Data.Map.mapWithKey', which cannot -- so its size changes
+-- exactly when its membership does. Comparing three 'Int's is what keeps the
+-- badge half of a measurement's validity from costing the sessions a
+-- long-lived dashboard has accumulated. A future path that removed a session
+-- would have to be answered here.
 data ColumnBadges = ColumnBadges
-  { badgeSolve :: Map Int Int,
-    badgeReview :: Map Int Int,
-    badgePullRequest :: Map Int Int
+  { badgeSolveCount :: Int,
+    badgeReviewCount :: Int,
+    badgePullRequestCount :: Int
   }
   deriving stock (Eq, Show)
 
