@@ -1500,6 +1500,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appLayoutInputs = unmeasuredLayoutInputs testOptions testResolvedConfig,
       appFilterCriteria = defaultFilterCriteria,
       appFilterPanel = Nothing,
+      appFacetCounts = Nothing,
       appUsage = fixtureUsage,
       appUsageFreshness = Map.map (Fresh . (.usageFetchedAt)) fixtureUsage,
       appSelectedColumn = Issues,

@@ -356,10 +356,7 @@ test-suite kanban-test
     Spec.UI.SolveChooser
     Spec.UI.Text
     Spec.UI.Usage
-  -- -T enables the allocation counters Spec.UI.ColumnWindow reads to hold one
-  -- board frame to the cards its viewport can show rather than to the cards the
-  -- column holds.
-  ghc-options: -threaded "-with-rtsopts=-N1 -T"
+  ghc-options: -threaded -with-rtsopts=-N1
   build-depends:
     aeson,
     base,

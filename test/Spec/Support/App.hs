@@ -82,6 +82,7 @@ testAppState board = do
         appLayoutInputs = unmeasuredLayoutInputs testOptions testResolvedConfig,
         appFilterCriteria = defaultFilterCriteria,
         appFilterPanel = Nothing,
+        appFacetCounts = Nothing,
         appUsage = Map.empty,
         appUsageFreshness = Map.empty,
         appSelectedColumn = Issues,

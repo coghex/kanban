@@ -20,6 +20,9 @@ module Kanban.UI.Types
     CompletedHistoryStatus (..),
     DirectMergeReport (..),
     DrainerSourceState (..),
+    FacetCount (..),
+    FacetCounts (..),
+    FacetKey (..),
     FilterPanel (..),
     IncidentClickOutcome (..),
     IncidentEntry (..),
@@ -778,6 +781,12 @@ data AppState = AppState
     -- Hiding it leaves 'appFilterCriteria' exactly as it was, which is what
     -- makes a non-default filter something the footer has to announce.
     appFilterPanel :: Maybe FilterPanel,
+    -- | The figures that panel is showing, and what they were counted from.
+    --
+    -- Held only while the panel is up, because nothing else reads them and
+    -- counting them costs the whole of every dataset.
+    -- 'Kanban.UI.Filter.settleFacetCounts' is the one place it is written.
+    appFacetCounts :: Maybe (FacetKey, FacetCounts),
     appUsage :: Map UsageProvider UsageSnapshot,
     appUsageFreshness :: Map UsageProvider Freshness,
     appSelectedColumn :: BoardColumn,
@@ -1104,6 +1113,13 @@ data ColumnWindow = ColumnWindow
     windowItems :: Vector ColumnItem,
     -- | Each item's entry row, so a selected row can be found by bisection.
     windowItemRows :: Vector Int,
+    -- | The rows this column offers the selection, ascending.
+    --
+    -- Prepared with the rest rather than derived per press, because moving the
+    -- selection used to rebuild it -- and then walk it twice, for the current
+    -- row's position and for the length -- on every @j@ and @k@. Ascending, so
+    -- both of those are a bisection here.
+    windowSelectableRows :: Vector Int,
     -- | Each item's first row, counted from the first body row.
     windowTops :: Vector Int,
     -- | Each item's height in rows.
@@ -1131,6 +1147,47 @@ data ColumnWindow = ColumnWindow
     -- -- the filter panel closing, a wrapped footer shrinking -- crops rows
     -- past anything a recorded height would have covered.
     windowTop :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | What a count over the current datasets can honestly say.
+--
+-- Only 'FacetCountExact' is a number. The other two are the whole of §13's
+-- rule that no count stands for more than it says: a figure that would depend
+-- on an open generation that has not published, or on a completed generation
+-- still being traversed, is reported as unknown or as progress rather than as
+-- a total the data cannot support.
+data FacetCount
+  = FacetCountExact Int
+  | -- | A completed generation is in flight, with its loaded/total figures
+    -- when both connections have reported one.
+    FacetCountLoading (Maybe (Int, Int))
+  | FacetCountUnknown
+  deriving stock (Eq, Show)
+
+-- | Every figure the card filter panel shows: one beside each checkbox, and
+-- the two the panel states about itself.
+--
+-- Each is a count over the complete datasets, so working them out is sixteen
+-- passes over everything the board holds. That is a fair price for opening the
+-- panel or editing the criteria and no price at all for moving the focus
+-- between two checkboxes, which is why they are prepared once rather than
+-- counted per frame ('Kanban.UI.Filter.settleFacetCounts').
+data FacetCounts = FacetCounts
+  { facetBoxCounts :: Map FilterBox FacetCount,
+    facetShownCount :: FacetCount,
+    facetAdmittedCount :: FacetCount
+  }
+  deriving stock (Eq, Show)
+
+-- | What those figures were counted from: the datasets and criteria, through
+-- the epoch that stands for both, and the freshness that decides whether a
+-- count may be stated at all.
+data FacetKey = FacetKey
+  { facetKeyEpoch :: Int,
+    facetKeyOpenFetched :: Bool,
+    facetKeyCompleted :: CompletedHistoryStatus,
+    facetKeyProgress :: CompletedProgress
   }
   deriving stock (Eq, Show)
 

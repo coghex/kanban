@@ -28,6 +28,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Vector as Vector
 import Data.Text (Text)
 import Kanban.Domain
 import Kanban.Workflow (entryItem )
@@ -118,8 +119,11 @@ moveColumn delta = modify $ \state ->
 selectBoundary :: Bool -> EventM Name AppState ()
 selectBoundary selectLast = modify $ \state ->
   let column = state.appSelectedColumn
-      rows = selectableRows state column
-      target = if selectLast then safeLast rows else safeIndex 0 rows
+      -- Both ends by index rather than by walking to them: the rows are
+      -- prepared with the column, and @G@ on a five-thousand-card column has
+      -- no more reason to read all of it than @j@ does.
+      rows = selectableRowsIn state column
+      target = rows Vector.!? (if selectLast then Vector.length rows - 1 else 0)
    in case target of
         Nothing -> noticeCleared state {appEnsureSelectionVisible = True}
         Just row -> noticeCleared state {appSelectedRows = Map.insert column row state.appSelectedRows, appEnsureSelectionVisible = True}

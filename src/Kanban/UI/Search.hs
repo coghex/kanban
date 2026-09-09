@@ -39,6 +39,8 @@ module Kanban.UI.Search
     columnItemsIn,
     columnContentKey,
     selectableRows,
+    selectableRowsIn,
+    selectablePosition,
     visibleRowsIn,
     columnCountText,
 
@@ -69,6 +71,8 @@ where
 
 import Data.Char (isPrint)
 import Data.List (findIndex)
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -239,7 +243,43 @@ visibleRowsIn expandedTrackers entries = collect (zip [0 ..] entries)
 -- | The rows @column@ offers the selection right now, in the view it is
 -- showing.
 selectableRows :: AppState -> BoardColumn -> [Int]
-selectableRows state column = visibleRowsIn (expandedTrackersFor state column) (entriesFor state column)
+selectableRows state column = Vector.toList (selectableRowsIn state column)
+
+-- | The same rows, as something a selection move can be resolved through
+-- without walking them.
+--
+-- Read off the column's measurement when one was taken from this board, this
+-- query, and these open epics -- which is what stops @j@ and @k@ costing the
+-- column. A press with no measurement to read still gets the right answer, by
+-- deriving it here as it always did.
+--
+-- Only the content half of the signature is asked. Which rows a column offers
+-- the selection is a property of what it is showing; no width, glyph, or
+-- relative age can change it.
+selectableRowsIn :: AppState -> BoardColumn -> Vector Int
+selectableRowsIn state column = case preparedColumn state column of
+  Just window -> window.windowSelectableRows
+  Nothing -> Vector.fromList (visibleRowsIn (expandedTrackersFor state column) (entriesFor state column))
+
+-- | Where @row@ sits among a column's selectable rows, or 'Nothing' when it
+-- offers no such row. Bisection: the rows ascend.
+selectablePosition :: Vector Int -> Int -> Maybe Int
+selectablePosition rows row = go 0 (Vector.length rows)
+  where
+    go low high
+      | low >= high = Nothing
+      | rows Vector.! middle == row = Just middle
+      | rows Vector.! middle < row = go (middle + 1) high
+      | otherwise = go low middle
+      where
+        middle = (low + high) `div` 2
+
+-- | The measurement of @column@, when it was taken from the board, query, and
+-- open epics the state has now.
+preparedColumn :: AppState -> BoardColumn -> Maybe ColumnWindow
+preparedColumn state column = do
+  window <- Map.lookup column state.appColumnWindows
+  if window.windowSignature.signatureContent == columnContentKey state column then Just window else Nothing
 
 -- | What decides which entries @column@ shows, and in what shape: the board
 -- the criteria admit, the query narrowing it, and the epics the view has
@@ -295,10 +335,8 @@ columnCountText state column = case activeQueryFor state column of
 -- and no width, glyph, or relative age can change how many there are.
 countedColumn :: AppState -> BoardColumn -> Maybe (Int, Int)
 countedColumn state column = do
-  window <- Map.lookup column state.appColumnWindows
-  if window.windowSignature.signatureContent == columnContentKey state column
-    then Just (window.windowShownCount, window.windowAdmittedCount)
-    else Nothing
+  window <- preparedColumn state column
+  pure (window.windowShownCount, window.windowAdmittedCount)
 
 -- | What a selected row is, for the purpose of finding it again once the view
 -- has changed.
@@ -367,13 +405,11 @@ seatColumnOn column anchor state =
       appEnsureSelectionVisible = True
     }
   where
-    rows = selectableRows state column
+    rows = selectableRowsIn state column
     located = anchor >>= anchorRow (entriesFor state column)
     seated = case located of
-      Just row | row `elem` rows -> row
-      _ -> case rows of
-        row : _ -> row
-        [] -> 0
+      Just row | Just _ <- selectablePosition rows row -> row
+      _ -> maybe 0 id (rows Vector.!? 0)
 
 -- | Re-seat the search target column after anything that can change what its
 -- query leaves visible. A no-op with no search live, so every other path keeps
@@ -386,7 +422,7 @@ reseatSearch anchor state = case state.appSearch of
 -- | Move the selected column's selection by @amount@ rows among the ones that
 -- column offers.
 moveSelectionBy :: Int -> AppState -> AppState
-moveSelectionBy amount state = case safeIndex nextPosition rows of
+moveSelectionBy amount state = case rows Vector.!? nextPosition of
   Nothing -> noticeCleared state {appEnsureSelectionVisible = True}
   Just nextRow ->
     noticeCleared
@@ -396,9 +432,9 @@ moveSelectionBy amount state = case safeIndex nextPosition rows of
         }
   where
     column = state.appSelectedColumn
-    rows = selectableRows state column
-    currentPosition = maybe 0 id (findIndex (== selectedRow state column) rows)
-    nextPosition = max 0 (min (length rows - 1) (currentPosition + amount))
+    rows = selectableRowsIn state column
+    currentPosition = maybe 0 id (selectablePosition rows (selectedRow state column))
+    nextPosition = max 0 (min (Vector.length rows - 1) (currentPosition + amount))
 
 -- | The board column a mouse press landed in, for the one question a live
 -- search asks of a press: which column was it aimed at?

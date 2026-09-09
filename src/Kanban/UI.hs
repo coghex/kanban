@@ -189,6 +189,7 @@ runHeldDashboard authority options config repository roster = do
             -- not part of them, so nothing about a previous session restores
             -- it either.
             appFilterPanel = Nothing,
+            appFacetCounts = Nothing,
             appUsage = initialUsage,
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,

@@ -29,9 +29,10 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Vector as Vector
 import Data.Time (UTCTime, addUTCTime)
-import Data.Word (Word64)
-import GHC.Stats (RTSStats (..), getRTSStats, getRTSStatsEnabled)
+import Data.Int (Int64)
+import GHC.Conc (getAllocationCounter)
 import qualified Graphics.Vty as Vty
 import Kanban.CLI (Options (..))
 import Kanban.Domain
@@ -54,18 +55,19 @@ import Kanban.UI.Board
   )
 import Kanban.UI.Events (BoardMouseAction (..), boardMousePress)
 import Kanban.GitHub (GitHubResult (..))
-import Kanban.UI.Filter (refreshVisibleBoard)
+import Kanban.Filter (FilterBox (..), KindFacet (..), everyFilterBox, toggleFilterBox)
+import Kanban.UI.Filter (applyCriteriaChange, facetCount, filteredCount, focusFilterPanel, rawEntryCount, refreshVisibleBoard, settleFacetCounts)
 import Kanban.UI.Reconcile (reconcilePullRequestSessions, reconcileReviewSessions)
-import Kanban.UI.Search (columnCountText, columnItemsIn, entriesFor, expandedTrackersFor)
+import Kanban.UI.Search (columnCountText, columnItemsIn, entriesFor, expandedTrackersFor, moveSelectionBy, selectableRowsIn)
 import Kanban.UI.Selection (toggleTrackerState)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
-import Kanban.UI.Util (allColumns, relativeAge, showText)
+import Kanban.UI.Util (allColumns, relativeAge, selectedRow, showText)
 import Kanban.Workflow (entryItem)
 import Spec.Support.App (testAppState, testPullRequestSession, testReviewSession, testSolveSession, withSolveSession)
 import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
 import Spec.Support.Fixtures (baseIssue, basePullRequest, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
-import Spec.Support.Render (FrameCell, renderFrameCells, renderWidgetLines)
+import Spec.Support.Render (FrameCell (..), renderFrameCells, renderWidgetLines)
 import Test.Hspec
 
 spec :: Spec
@@ -222,11 +224,18 @@ spec = describe "board frame cost" $ do
       -- panel: the column is showing something other than what it held.
       shownIn measured Issues `shouldNotBe` scriptedColumnLength
 
-    it "draws what an unmeasured one draws when a refresh shrinks a column under a viewport near its bottom" $ do
-      -- Eight hundred cards become twelve while the viewport is hundreds of
-      -- rows down. The settle measures the short column against the offset the
-      -- tall one ended at, which is past everything there now is to show.
-      measured <- scriptAgrees (replicate 130 wheelDown <> [refreshTo 12])
+    it "draws what an unmeasured one draws when a refresh shrinks a column under a viewport at its very bottom" $ do
+      -- @G@ selects the column's last entry and reveals it, which puts the
+      -- viewport at the end of eight hundred cards rather than merely a long
+      -- way down them. Then the board comes back holding twelve, and the
+      -- settle measures that against the offset the tall column ended at --
+      -- which is past everything there now is to show.
+      atEnd <- runScript [key 'G'] id
+      -- The viewport really is at the bottom: the last card of the column is
+      -- on screen and the first is not.
+      lastFrameHas atEnd (lastCardHeading scriptedColumnLength) `shouldBe` True
+      lastFrameHas atEnd firstCardHeading `shouldBe` False
+      measured <- scriptAgrees [key 'G', refreshTo 12]
       shownIn measured Issues `shouldBe` 12
 
     it "draws what an unmeasured one draws when the terminal is resized under a scrolled column" $ do
@@ -373,22 +382,90 @@ spec = describe "board frame cost" $ do
       scrolled.appEnsureSelectionVisible `shouldBe` False
       scrolled.appSelectedRows `shouldBe` state.appSelectedRows
 
+  describe "what a selection move costs" $ do
+    it "stops growing with the column it moves through" $ do
+      -- Moving the selection used to rebuild the column's selectable rows and
+      -- then walk them twice, for the current position and for the length. It
+      -- reads the prepared ones now, and a bisection of five thousand rows is
+      -- not meaningfully longer than one of a hundred.
+      small <- measuredState 100 0
+      large <- measuredState 5000 0
+      smallCost <- movementAllocations small
+      largeCost <- movementAllocations large
+      (fromIntegral largeCost / fromIntegral (max 1 smallCost) :: Double) `shouldSatisfy` (< 3)
+
+    it "stops growing at either end of the column it moves through" $ do
+      small <- measuredState 100 0
+      large <- measuredState 5000 0
+      smallCost <- boundaryAllocations small
+      largeCost <- boundaryAllocations large
+      (fromIntegral largeCost / fromIntegral (max 1 smallCost) :: Double) `shouldSatisfy` (< 3)
+
+    it "moves the selection to the same rows a column with no measurement does" $ do
+      -- Bounded and identical: the prepared rows are the rows the column
+      -- always offered, so a move resolves the same way with or without them.
+      measured <- measuredState 300 0
+      let whole = unmeasure measured
+          walk state = scanl (\current amount -> moveSelectionBy amount current) state movements
+          rowsOf state = [Map.lookup Issues value.appSelectedRows | value <- walk state]
+      rowsOf measured `shouldBe` rowsOf whole
+      rowsOf measured `shouldSatisfy` ((> 3) . length . filter (/= Just 0))
+
+  describe "what a filter-panel frame costs" $ do
+    it "stops growing with the board once the panel's figures are worked out" $ do
+      -- Every checkbox shows a count over the complete datasets and the panel
+      -- states two more, so a frame that worked them out cost sixteen passes
+      -- over everything the board holds -- on every redraw the panel was up
+      -- for, including one that only moved the focus.
+      small <- panelState 100
+      large <- panelState 5000
+      smallCost <- frameAllocations small
+      largeCost <- frameAllocations large
+      (fromIntegral largeCost / fromIntegral (max 1 smallCost) :: Double) `shouldSatisfy` (< 3)
+
+    it "shows the figures a panel that counted them per frame would show" $ do
+      -- Prepared and identical: the same counts, from the same function.
+      prepared <- panelState 300
+      let counted = prepared {appFacetCounts = Nothing}
+      map (facetCount prepared) everyFilterBox `shouldBe` map (facetCount counted) everyFilterBox
+      filteredCount prepared `shouldBe` filteredCount counted
+      rawEntryCount prepared `shouldBe` rawEntryCount counted
+      map (facetCount prepared) everyFilterBox `shouldSatisfy` any (/= FacetCountExact 0)
+
+    it "works them out again when the criteria they were counted under change" $ do
+      prepared <- panelState 300
+      let edited = settleFacetCounts (applyCriteriaChange (toggleFilterBox (KindBox KindPullRequests)) prepared)
+      edited.appFacetCounts `shouldNotBe` prepared.appFacetCounts
+
+    it "keeps none while the panel is hidden" $ do
+      prepared <- panelState 300
+      (settleFacetCounts prepared {appFilterPanel = Nothing}).appFacetCounts `shouldBe` Nothing
+
+  describe "what a settle costs" $
+    it "stops growing with the sessions a dashboard has kept" $ do
+      -- Deciding whether a measurement still holds must not cost the agent
+      -- sessions a long-lived dashboard has accumulated. Both settles below
+      -- find everything current and rebuild nothing, so what they differ by is
+      -- exactly the cost of asking.
+      few <- withRetainedSessions 2 <$> measuredState 200 0
+      many <- withRetainedSessions 2000 <$> measuredState 200 0
+      fewCost <- settleAllocations few
+      manyCost <- settleAllocations many
+      Map.size many.appSolveSessions `shouldBe` 2000
+      manyCost `shouldBe` fewCost
+
   describe "what a frame costs" $
     forM_ selectionCases $ \(label, row) ->
       it ("stops growing with the column a measurement covers, with the selection " <> label) $ do
-        enabled <- getRTSStatsEnabled
-        if not enabled
-          then expectationFailure "the suite must run with RTS statistics enabled for this bound to be measurable"
-          else do
-            measuredGrowth <- costGrowth row id
-            wholeGrowth <- costGrowth row unmeasure
-            -- The baseline is the same production frame with nothing measured,
-            -- which is what the board did before this: fifty times the cards
-            -- allocate tens of times as much. Measured, both frames allocate
-            -- about the same few megabytes.
-            wholeGrowth `shouldSatisfy` (> 10)
-            measuredGrowth `shouldSatisfy` (< 3)
-            wholeGrowth / measuredGrowth `shouldSatisfy` (> 10)
+        measuredGrowth <- costGrowth row id
+        wholeGrowth <- costGrowth row unmeasure
+        -- The baseline is the same production frame with nothing measured,
+        -- which is what the board did before this: fifty times the cards
+        -- allocate tens of times as much. Measured, both frames allocate about
+        -- the same few megabytes.
+        wholeGrowth `shouldSatisfy` (> 10)
+        measuredGrowth `shouldSatisfy` (< 3)
+        wholeGrowth / measuredGrowth `shouldSatisfy` (> 10)
 
 -- | The selections the cost of a frame is measured at: the row a column opens
 -- on, a child inside its epic, and the row at its far end.
@@ -546,6 +623,20 @@ scriptAgrees script = do
 shownIn :: DashboardRun -> BoardColumn -> Int
 shownIn run column = length (entriesFor run.runState column)
 
+-- | Whether the last frame a run painted has @needle@ anywhere on it.
+lastFrameHas :: DashboardRun -> Text -> Bool
+lastFrameHas run needle = any (Text.isInfixOf needle) (concatMap frameRows (take 1 (reverse run.runFrames)))
+  where
+    frameRows = map (Text.pack . map (.frameCellCharacter))
+
+-- | The heading a card draws, which is how a frame is asked whether that card
+-- is on it.
+firstCardHeading :: Text
+firstCardHeading = "#1 "
+
+lastCardHeading :: Int -> Text
+lastCardHeading count = "#" <> showText count <> " "
+
 -- | The terminal the resize script ends on: narrower, so every card rewraps,
 -- and taller, so the viewport shows rows no measurement before it covered.
 resizedTo :: (Int, Int)
@@ -615,16 +706,102 @@ costGrowth row adjust = do
   large <- selectedState 5000 (row 5000) 0 >>= frameAllocations . adjust
   pure (fromIntegral large / fromIntegral (max 1 small))
 
-frameAllocations :: AppState -> IO Word64
+-- | A dashboard holding @count@ finished sessions of each kind, none of which
+-- any card on these boards is for.
+withRetainedSessions :: Int -> AppState -> AppState
+withRetainedSessions count state =
+  state
+    { appSolveSessions = Map.fromList [(number, testSolveSession (baseIssue number []) SolveFinished) | number <- numbers],
+      appReviewSessions = Map.fromList [(number, testReviewSession (baseIssue number []) ReviewFinished) | number <- numbers],
+      appPullRequestReviewSessions =
+        Map.fromList [(number, testPullRequestSession (basePullRequest number [] False []) SolveFinished) | number <- numbers]
+    }
+  where
+    numbers = [100000 .. 100000 + count - 1]
+
+-- | Bytes one settle allocates once everything it could prepare is already
+-- prepared -- which is what every selection, wheel, and animation event pays.
+settleAllocations :: AppState -> IO Int64
+settleAllocations state = do
+  -- Two settles first: the first notices the sessions and measures every
+  -- column against them, the second finds that measurement current. What is
+  -- measured is a third, which has nothing left to do but ask whether the
+  -- measurement still holds.
+  settled <- evaluate (settleAt 0 (settleAt 0 state))
+  _ <- evaluate (measurementSize settled)
+  allocationsDuring (evaluate (measurementSize (settleAt 0 settled)))
+
+-- | Everything a settle decides, forced. 'AppState' holds channels and
+-- mutable cells and so cannot be forced whole; this is the part a settle
+-- writes, and reading it is what makes the measurement above the settle's own
+-- work rather than a thunk's.
+measurementSize :: AppState -> Int
+measurementSize state =
+  state.appLayoutEpoch
+    + sum
+      [ window.windowTotal
+          + window.windowLeading
+          + window.windowShownCount
+          + window.windowAdmittedCount
+          + window.windowTop
+          + Vector.length window.windowItems
+          + Vector.sum window.windowTops
+          + Vector.sum window.windowHeights
+          + Vector.sum window.windowItemRows
+        | window <- Map.elems state.appColumnWindows
+      ]
+
+frameAllocations :: AppState -> IO Int64
 frameAllocations state = do
   -- A first frame, discarded: it forces whatever in the board itself was still
   -- a thunk, so what the second one allocates is the frame's own work.
   _ <- evaluate (force (frameCells frameHeight state))
-  opening <- getRTSStats
-  measured <- evaluate (force (frameCells frameHeight state))
-  closing <- getRTSStats
-  _ <- evaluate (length measured)
-  pure (closing.allocated_bytes - opening.allocated_bytes)
+  allocationsDuring (evaluate (force (frameCells frameHeight state)))
+
+-- | A measured dashboard with the filter panel up and its figures worked out,
+-- which is the frame this bound is about.
+panelState :: Int -> IO AppState
+panelState count = do
+  state <- unmeasuredState count
+  pure (settleFacetCounts (settleAt 0 (focusFilterPanel state)))
+
+-- | The moves the selection regressions walk: down through the column, back
+-- up, and past both ends.
+movements :: [Int]
+movements = [1, 1, 1, 5, 40, -3, -1, 500, -500, 1, -1]
+
+-- | Bytes a run of selection moves allocates.
+movementAllocations :: AppState -> IO Int64
+movementAllocations state = do
+  _ <- evaluate (movedRows state)
+  allocationsDuring (evaluate (movedRows state))
+
+movedRows :: AppState -> Int
+movedRows state = sum [selectedRow current Issues | current <- scanl (flip moveSelectionBy) state movements]
+
+-- | Bytes selecting each end of a column allocates.
+boundaryAllocations :: AppState -> IO Int64
+boundaryAllocations state = do
+  _ <- evaluate (boundaryRows state)
+  allocationsDuring (evaluate (boundaryRows state))
+
+boundaryRows :: AppState -> Int
+boundaryRows state = sum [maybe 0 id (rows Vector.!? index) | index <- [0, Vector.length rows - 1]]
+  where
+    rows = selectableRowsIn state Issues
+
+-- | Bytes @action@ allocates, exactly.
+--
+-- The per-thread allocation counter rather than the runtime's own total: that
+-- total moves only when a nursery block is retired, so work of a few hundred
+-- bytes reads as either nothing or four megabytes depending on where that
+-- boundary happens to fall, which is not a measurement.
+allocationsDuring :: IO value -> IO Int64
+allocationsDuring action = do
+  opening <- getAllocationCounter
+  _ <- action
+  closing <- getAllocationCounter
+  pure (opening - closing)
 
 -- | The cells every badge takes, whatever its phase or glyph set.
 badgeCellWidth :: Int

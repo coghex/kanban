@@ -1156,6 +1156,7 @@ measureColumnWindow state column columnWidth top =
     { windowSignature = columnSignature state column columnWidth,
       windowItems = Vector.fromList items,
       windowItemRows = Vector.fromList (map columnItemRow items),
+      windowSelectableRows = Vector.fromList (visibleRowsIn expanded entries),
       windowTops = Vector.fromList (take (length heights) (scanl (+) 0 heights)),
       windowHeights = Vector.fromList heights,
       windowTotal = if null items then emptyColumnRows else sum heights,
@@ -1167,7 +1168,8 @@ measureColumnWindow state column columnWidth top =
     }
   where
     entries = entriesFor state column
-    items = columnItemsIn (expandedTrackersFor state column) entries
+    expanded = expandedTrackersFor state column
+    items = columnItemsIn expanded entries
     heights = map (columnItemHeight state columnWidth) items
     deadline = case [nextRelativeAgeChange state.appNow (itemUpdatedAt (entryItem entry)) | ColumnCard _ entry _ <- items] of
       [] -> Nothing

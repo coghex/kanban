@@ -571,12 +571,21 @@ appearing beside a card, or the earliest relative age on it changing wording —
 and that layout is what every frame in between is cut from. Repeated frames,
 selection movement, and wheel scrolling reuse it rather than rebuilding it,
 which is what makes the cost a property of the viewport rather than of the
-column. Whether a frame may reuse it is decided by comparing counters rather
-than the collections they stand for, so that check is the same size on a board
-of five items and a board of five thousand, and on a session that has run one
-agent and one that has run a thousand. The layout is presentation state
-like every other: never cached, never part of a board snapshot, and never
-restored on restart.
+column. Moving the selection reads it too, so `j`, `k`, `g`, and `G` cost the
+same on a column of five cards and a column of five thousand. Whether a frame
+may reuse it is decided by comparing counters rather than the collections they
+stand for, so that check is the same size on a board of five items and a board
+of five thousand, and on a session that has run one agent and one that has run
+a thousand. The layout is presentation state like every other: never cached,
+never part of a board snapshot, and never restored on restart.
+
+The card filter panel's figures are prepared the same way and for the same
+reason. Each checkbox states a count over the complete datasets and the panel
+states two more, so working them out is sixteen passes over everything the
+board holds. They are worked out when the panel opens and again when the
+datasets, the criteria, or what the data can honestly say change — not when a
+frame draws them, and not when the focus moves from one checkbox to the next.
+Hiding the panel discards them.
 
 Nothing about this is visible. The rows outside the viewport are held open at
 exactly the height their cards would have taken, so variable card heights, a

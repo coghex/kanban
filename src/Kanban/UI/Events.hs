@@ -79,6 +79,7 @@ import Kanban.UI.Filter
     focusedSearch,
     readOnlyHistoryRefusal,
     readOnlyHistoryRefusalFor,
+    settleFacetCounts,
     toggleFilterBoxFromClick,
     toggleFilterPanel,
   )
@@ -154,7 +155,10 @@ handleEvent event = do
 settleColumnWindows :: EventM Name AppState ()
 settleColumnWindows = do
   geometry <- traverse columnGeometry allColumns
-  modify (refreshColumnWindows geometry)
+  -- The filter panel's figures settle with them, and for the same reason:
+  -- each is a count over the complete datasets, and a frame that worked them
+  -- out would pay for the whole board on every redraw the panel is up for.
+  modify (settleFacetCounts . refreshColumnWindows geometry)
   where
     columnGeometry column = do
       measured <- lookupViewport (ColumnViewport column)
