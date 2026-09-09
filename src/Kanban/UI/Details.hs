@@ -9,8 +9,8 @@ where
 
 import Brick
 import qualified Brick.Types as BrickTypes
-import Data.List (intersperse, sort )
-import qualified Data.Map.Strict as Map
+import Data.List (intersperse)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime )
@@ -23,7 +23,6 @@ import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
 import Kanban.Text (sanitizeText)
 import Kanban.Tracker (renderTrackerDiagnostic, trackerDiagnosticsForIssue)
-import Kanban.Workflow (entryItem )
 import Kanban.UI.Types
 import Kanban.UI.Util
 import Kanban.UI.Theme
@@ -35,6 +34,14 @@ import Kanban.UI.Selection
 data DetailsEnv = DetailsEnv
   { detailsConfig :: ResolvedConfig,
     detailsBoard :: Board,
+    -- | Every pull request the session retains, whatever the criteria admit:
+    -- the open generation's, and a retained completed generation's as well.
+    --
+    -- Held apart from 'detailsBoard' because the two answer different
+    -- questions. The board is the view a section that presents a card must
+    -- agree with; this is the data the session holds, which is what an item's
+    -- relationships are a property of (issue #647).
+    detailsRetainedPullRequests :: [PullRequest],
     detailsNow :: UTCTime,
     detailsTimeZone :: TimeZone
   }
@@ -46,6 +53,14 @@ detailsEnv state =
       -- The view the overlay was opened from, so a completed card's tracker
       -- context and structural diagnostics resolve exactly as they drew.
       detailsBoard = state.appVisibleBoard,
+      -- Both retained generations rather than that view. Reconciliation keeps
+      -- the two disjoint ('Kanban.Domain.historyWithoutOpen' and
+      -- 'Kanban.Domain.openWithoutHistory'), so this is a concatenation and
+      -- not a merge, and neither one is fetched for: an absent completed
+      -- generation simply contributes nothing.
+      detailsRetainedPullRequests =
+        foldMap (.snapshotPullRequests) state.appOpenSnapshot
+          <> foldMap (.historyPullRequests) state.appCompletedHistory,
       detailsNow = state.appNow,
       detailsTimeZone = state.appTimeZone
     }
@@ -66,7 +81,7 @@ drawDetails env item =
       ]
         <> drawPeopleDetails item
         <> drawBranchDetails item
-        <> drawLinkDetails env.detailsBoard item
+        <> drawLinkDetails env.detailsRetainedPullRequests item
         <> drawMergeDetails item
         <> drawCheckDetails item
         <> drawTimestampDetails env item
@@ -155,7 +170,7 @@ drawBranchDetails (PullRequestItem pullRequest) =
     "Branches"
     [txtWrap (sanitizeText pullRequest.pullRequestHead <> " → " <> sanitizeText pullRequest.pullRequestBase)]
 
-drawLinkDetails :: Board -> BoardItem -> [Widget Name]
+drawLinkDetails :: [PullRequest] -> BoardItem -> [Widget Name]
 drawLinkDetails _ (PullRequestItem pullRequest) =
   detailsSection
     "Linked issues"
@@ -168,10 +183,10 @@ drawLinkDetails _ (PullRequestItem pullRequest) =
                 pullRequest.pullRequestLinkedIssueOverflow
         )
     ]
-drawLinkDetails board (IssueItem issue) =
+drawLinkDetails retained (IssueItem issue) =
   detailsSection
     "Linked pull requests"
-    [txtWrap (linkedRefsText (map (("#" <>) . showText) (linkedPullRequests board issue.issueNumber)) 0)]
+    [txtWrap (linkedRefsText (map (("#" <>) . showText) (linkedPullRequests retained issue.issueNumber)) 0)]
 
 linkedRefsText :: [Text] -> Int -> Text
 linkedRefsText [] overflow
@@ -183,18 +198,29 @@ linkedRefsText refs overflow
 
 -- | The pull requests that close an issue. GitHub reports this relationship
 -- only on the PR side, so the reverse direction is a lookup over the pull
--- requests the snapshot already retained rather than another request.
--- Relationships GitHub omitted -- from a truncated PR page, or from a capped
--- closing-issue list -- stay omitted here; the board's existing truncation and
--- @+N@ warnings are what disclose them.
-linkedPullRequests :: Board -> Int -> [Int]
-linkedPullRequests board issueNumber =
-  sort
-    [ pullRequest.pullRequestNumber
-      | entry <- concat (Map.elems board.boardColumns),
-        PullRequestItem pullRequest <- [entryItem entry],
-        issueNumber `elem` pullRequest.pullRequestLinkedIssues
-    ]
+-- requests the session already retained rather than another request.
+--
+-- Over the retained generations, not over the board the overlay was opened
+-- from. The §7 criteria choose which cards are drawn and say nothing about
+-- which relationships the session holds, so scanning the visible board made a
+-- retained link disappear whenever a checkbox happened to hide the pull
+-- request carrying it -- reported as the same @none@ an issue with no links
+-- at all gets (issue #647). The answer now reads the same with Pull requests
+-- unchecked, with a workflow facet hiding the linking pull request, and with
+-- that pull request retained only as completed history.
+--
+-- Relationships GitHub omitted -- a capped closing-issue list -- stay omitted
+-- here; the board's existing @+N@ warnings are what disclose them, and
+-- nothing is fetched to fill them in.
+linkedPullRequests :: [PullRequest] -> Int -> [Int]
+linkedPullRequests retained issueNumber =
+  Set.toAscList
+    ( Set.fromList
+        [ pullRequest.pullRequestNumber
+          | pullRequest <- retained,
+            issueNumber `elem` pullRequest.pullRequestLinkedIssues
+        ]
+    )
 
 drawMergeDetails :: BoardItem -> [Widget Name]
 drawMergeDetails (IssueItem _) = []
