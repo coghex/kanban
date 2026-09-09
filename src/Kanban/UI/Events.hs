@@ -65,6 +65,7 @@ import Kanban.Workflow (entryItem )
 import Kanban.Worker
   ( terminateWorker
     )
+import Kanban.UI.Board (columnScrollStep, refreshColumnWindows)
 import Kanban.UI.Notice (NoticeActivity (..))
 import Kanban.UI.Types
 import Kanban.UI.Util
@@ -127,6 +128,33 @@ handleEvent event = do
   -- armed here, once, rather than beside every one of the many sites that
   -- produce a notice ('Kanban.UI.State.settleNoticeExpiry').
   settleNoticeExpiry before.appNotice
+  -- And the board's own settle, for a third time the same shape: every event
+  -- can change what a column shows, and the column layout each frame draws
+  -- from is prepared here once rather than rebuilt by the frame (issue #640).
+  settleColumnWindows
+
+-- | Prepare each column's layout for the frame this event is about to
+-- produce.
+--
+-- The geometry is brick's own, read back from the frame before this one:
+-- 'lookupViewport' answers with the width a column was given, the rows its
+-- viewport showed, and the offset it ended at. Taking it from brick rather
+-- than recomputing it is what keeps the measurement at the width the column
+-- is actually drawn at -- a responsive width this would otherwise have to
+-- derive a second time, and could derive differently.
+--
+-- Reading it back is also why the frame widens the range it draws for real:
+-- this is the previous frame's offset, and the frame it prepares can be
+-- cropped one wheel press or one scroll-into-view away from it.
+settleColumnWindows :: EventM Name AppState ()
+settleColumnWindows = do
+  geometry <- traverse columnGeometry allColumns
+  modify (refreshColumnWindows geometry)
+  where
+    columnGeometry column = do
+      measured <- lookupViewport (ColumnViewport column)
+      pure (column, fmap dimensions measured)
+    dimensions measured = (fst (_vpSize measured), snd (_vpSize measured), _vpTop measured)
 
 dispatchEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 dispatchEvent event = do
@@ -302,15 +330,15 @@ boardMouseAction state name button modifiers = case (name, button, modifiers) of
   (FilterBoxTarget box, Vty.BLeft, _) -> Just (ToggleFilterBoxFromClick box)
   _ | completedCardsBlocked state -> Nothing
   _ | Just column <- searchMouseTransfer state name button -> Just (TransferSearch column)
-  (EpicTarget column _ _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
-  (EpicTarget column _ _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
+  (EpicTarget column _ _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-columnScrollStep))
+  (EpicTarget column _ _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column columnScrollStep)
   (EpicTarget column row trackerNumber, Vty.BLeft, _) -> Just (ToggleEpicFromClick column row trackerNumber)
   (CardTarget column row, Vty.BRight, _) -> Just (OpenRunningProcessAt column row)
   (CardTarget column row, Vty.BLeft, _) -> Just (SelectOrOpenCardAt column row)
-  (CardTarget column _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
-  (CardTarget column _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
-  (ColumnViewport column, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-3))
-  (ColumnViewport column, Vty.BScrollDown, _) -> Just (ScrollColumnBy column 3)
+  (CardTarget column _, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-columnScrollStep))
+  (CardTarget column _, Vty.BScrollDown, _) -> Just (ScrollColumnBy column columnScrollStep)
+  (ColumnViewport column, Vty.BScrollUp, _) -> Just (ScrollColumnBy column (-columnScrollStep))
+  (ColumnViewport column, Vty.BScrollDown, _) -> Just (ScrollColumnBy column columnScrollStep)
   _ -> Nothing
 
 -- | What one decided press does to the dashboard. Total in

@@ -638,7 +638,9 @@ recordedDependencies =
     "transformers",
     "unicode-transforms",
     "unix",
-    "vty"
+    "vector",
+    "vty",
+    "word-wrap"
   ]
 
 -- | Each component stanza of kanban.cabal with the packages it depends on.

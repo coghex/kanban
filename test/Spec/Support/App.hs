@@ -72,6 +72,10 @@ testAppState board = do
         -- board. A test about the criteria themselves builds both sides with
         -- 'Kanban.UI.Filter.refreshVisibleBoard'.
         appVisibleBoard = board,
+        appBoardEpoch = 0,
+        -- Unmeasured, so every column draws in full: a test about the windowed
+        -- body says so by applying 'Kanban.UI.Board.refreshColumnWindows'.
+        appColumnWindows = Map.empty,
         appFilterCriteria = defaultFilterCriteria,
         appFilterPanel = Nothing,
         appUsage = Map.empty,

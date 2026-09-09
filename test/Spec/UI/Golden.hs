@@ -1490,6 +1490,10 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       -- The default criteria admit the open board unchanged, so every golden
       -- frame is drawn from exactly the board it always was.
       appVisibleBoard = fixtureBoard,
+      appBoardEpoch = 0,
+      -- Unmeasured on purpose: a golden frame is the whole column laid out,
+      -- which is what makes it the reference the windowed body is held to.
+      appColumnWindows = Map.empty,
       appFilterCriteria = defaultFilterCriteria,
       appFilterPanel = Nothing,
       appUsage = fixtureUsage,

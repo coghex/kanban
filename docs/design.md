@@ -90,6 +90,11 @@ other explicit mutations.
   remote.
 - Configuration: TOML via the maintained `toml-parser` package. The format is
   committed now and treated as stable.
+- Column layout: `vector` for the measured column a frame is cut from, so a
+  viewport near the end of a long column is found by bisection rather than by
+  walking to it, and `word-wrap` — the wrapper Brick's own `txtWrap` uses — so
+  measuring an epic header and drawing one cannot disagree about where it
+  wraps.
 
 Brick supplies declarative layout, connected Unicode borders, scrollable
 viewports, resize handling, and an event loop that can receive custom worker
@@ -551,6 +556,31 @@ Mouse interaction is intentionally complete but narrow:
 
 Cards, columns, and overlays do not otherwise acquire hover, drag, context-menu,
 or pointer-only behavior.
+
+#### What one frame costs
+
+The board is uncapped (section 13), so a column can hold every open item a
+repository has and a completed history besides. Drawing one frame costs the
+cards that column's viewport can show, not the cards it holds. Every key press,
+mouse event, and refresh outcome redraws the frame, so the alternative is a
+board whose every interaction gets slower as the repository grows.
+
+A column is laid out once per change to what it shows — a refresh, a criteria
+edit, a query edit, an epic expanding or collapsing, a resize, a badge
+appearing beside a card, or the earliest relative age on it changing wording —
+and that layout is what every frame in between is cut from. Repeated frames,
+selection movement, and wheel scrolling reuse it rather than rebuilding it,
+which is what makes the cost a property of the viewport rather than of the
+column. The layout is presentation state like every other: never cached, never
+part of a board snapshot, and never restored on restart.
+
+Nothing about this is visible. The rows outside the viewport are held open at
+exactly the height their cards would have taken, so variable card heights, a
+partially clipped card at either edge, the search box, tracker expansion, the
+selection's scroll-into-view, three-row wheel scrolling, and the click targets
+on cards, epic headers, and column whitespace are all exactly what they were.
+A layout that no longer describes what the frame would draw is not used at all:
+that frame lays the column out itself, which is slower and identical.
 
 ### Column card search
 
@@ -1512,6 +1542,9 @@ room:
 The card's height is then the number of rows those budgets produced, so cards
 in a column vary in height and no interior row is ever cropped. A resize
 re-lays out every card from the new width on the next redraw, with no refresh.
+Those same budgets are what a column is measured by when a frame decides which
+cards its viewport can reach (section 7): the rows a card is measured at and
+the rows it draws at come from one calculation, so they cannot disagree.
 
 ### External text sanitization
 
@@ -4049,7 +4082,10 @@ advancement lease, reconciles its durable record against live worker and
 GitHub state, journals every effect before attempting it, and makes at most
 one transition per pass through the workflow action registry until the mission
 is terminal, paused, or blocked. Repository-wide mission selection, capacity
-arbitration, and unattended scheduling are not implemented. The
+arbitration, and unattended scheduling are not implemented. Board frames are
+bounded as section 7 describes: each column is laid out once per change to what
+it shows, and a frame builds the cards its viewport can reach rather than every
+card the column holds. The
 external usage-command escape hatch is also implemented. Broader
 provider-version fixtures remain for subsequent slices.
 

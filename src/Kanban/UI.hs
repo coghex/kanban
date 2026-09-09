@@ -167,6 +167,13 @@ runHeldDashboard authority options config repository roster = do
             -- 'refreshVisibleBoard' below, which is what admits a seeded
             -- history under criteria that ask for one.
             appVisibleBoard = startupBoard config.resolvedWorkflow now,
+            -- The first admitted board is generation zero; every rebuild after
+            -- it goes through 'refreshVisibleBoard', which is what moves this.
+            appBoardEpoch = 0,
+            -- Nothing has been drawn yet, so nothing has been measured. The
+            -- first frame lays every column out in full and the settle after
+            -- the event that produced it records the measurement.
+            appColumnWindows = Map.empty,
             -- Criteria are process-lifetime state: every launch starts at the
             -- defaults, and nothing restores a previous session's.
             appFilterCriteria = defaultFilterCriteria,

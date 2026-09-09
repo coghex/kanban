@@ -6,6 +6,14 @@ module Kanban.UI.Board
     boardHintLine,
     cardExcerptLimit,
     cardStatusAttribute,
+    ColumnPiece (..),
+    columnBody,
+    columnBodyItems,
+    columnItemHeight,
+    columnScrollStep,
+    columnWindowFor,
+    drawColumnItem,
+    refreshColumnWindows,
     completedLoadingHeading,
     completedUnavailableHeading,
     drainerLabel,
@@ -57,14 +65,16 @@ import Brick.Widgets.Border.Style
   )
 import qualified Brick.Types as BrickTypes
 import qualified Graphics.Vty as Vty
-import Data.List (intersperse )
+import Data.List (intersperse, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (TimeZone, UTCTime, diffUTCTime)
+import Data.Time (TimeZone, UTCTime, addUTCTime, diffUTCTime)
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Text.Wrap (defaultWrapSettings, wrapTextToLines)
 import Kanban.CLI (Options (..))
 import Kanban.ApprovalService
   ( ApprovalStatus (..)
@@ -743,6 +753,22 @@ drawBoardBottom state columnWidths =
         txt (if index == length allColumns - 1 then boardBottomRight state else boardBottomJunction state)
       ]
 
+-- | One column, drawn as the entries its viewport can show rather than as
+-- every entry it holds.
+--
+-- The body is still laid out complete. Every stretch of it this frame skipped
+-- is held open by a blank run of exactly the height those entries would have
+-- taken, so the viewport's content is as tall as it always was, every drawn
+-- item is at the row it always was, and brick's own offset, wheel scrolling,
+-- and scroll-into-view keep working against it unchanged (issue #640). What
+-- changes is only how much is built: a stretch of some thousands of cards
+-- becomes one image.
+--
+-- The measurement the runs come from is 'appColumnWindows', prepared after the
+-- event that produced the last frame. A frame that finds none, or finds one
+-- taken at a different width or from a different board, lays the column out in
+-- full instead -- correct, and as slow as it always was -- which is what keeps
+-- a stale measurement from ever drawing a wrong frame.
 drawColumn :: AppState -> Int -> BoardColumn -> Widget Name
 drawColumn state columnWidth column =
   columnVisibility
@@ -753,15 +779,390 @@ drawColumn state columnWidth column =
     . vBox
     $ searchRows <> entryRows
   where
-    entries = entriesFor state column
     -- The box is part of this column's ordinary layout flow rather than an
     -- overlay: it is drawn first, so the cards below move down by exactly its
     -- rendered height and a resize rewraps both.
     searchRows = maybe [] (pure . drawSearchBox state columnWidth) (searchQueryFor state column)
+    body = columnBody state column columnWidth
     entryRows
-      | null entries = [padAll 1 (withAttr dimAttr (txt (emptyColumnText state column)))]
-      | otherwise = drawColumnEntries state (expandedTrackersFor state column) column (zip [0 ..] entries)
+      | null body = [emptyColumnRow state column]
+      | otherwise = map drawPiece body
+    drawPiece = \case
+      ColumnBlank rows -> blankRows rows
+      ColumnDrawn item -> drawColumnItem state column item
     columnVisibility = if state.appSelectedColumn == column then visible else id
+
+-- | One stretch of a column's body as a frame draws it: either an item built
+-- for real, or the rows the items a frame skipped would have taken.
+data ColumnPiece
+  = ColumnBlank Int
+  | ColumnDrawn ColumnItem
+  deriving stock (Eq, Show)
+
+-- | The body one frame of @column@ draws, in order.
+--
+-- This is the frame's own decision rather than a description of it:
+-- 'drawColumn' draws this and nothing else, so how many items it names /is/
+-- what a frame costs, and a regression can hold that to the viewport by
+-- reading it.
+--
+-- Without a measurement it names every item, which is what the board always
+-- did. With one it names the items the viewport can reach and blank runs of
+-- exactly the height of everything it skipped, so the body stays exactly as
+-- tall as it was and every drawn item stays at exactly the row it was at.
+columnBody :: AppState -> BoardColumn -> Int -> [ColumnPiece]
+columnBody state column columnWidth = case columnWindowFor state column columnWidth of
+  Nothing -> map ColumnDrawn (columnItemsIn (expandedTrackersFor state column) (entriesFor state column))
+  Just window
+    | Vector.null window.windowItems -> []
+    | otherwise -> laidOut window (drawnItemRanges state column window)
+
+-- | The pieces covering a whole body, given the item ranges to build.
+laidOut :: ColumnWindow -> [(Int, Int)] -> [ColumnPiece]
+laidOut window = walk 0
+  where
+    walk cursor [] = blank (window.windowTotal - cursor)
+    walk cursor ((firstItem, lastItem) : remaining) =
+      blank (itemTop firstItem - cursor)
+        <> [ColumnDrawn (window.windowItems Vector.! index) | index <- [firstItem .. lastItem]]
+        <> walk (itemTop lastItem + (window.windowHeights Vector.! lastItem)) remaining
+    itemTop index = window.windowTops Vector.! index
+    blank rows = [ColumnBlank rows | rows > 0]
+
+-- | The items one frame of @column@ builds for real.
+columnBodyItems :: AppState -> BoardColumn -> Int -> [ColumnItem]
+columnBodyItems state column columnWidth = [item | ColumnDrawn item <- columnBody state column columnWidth]
+
+-- | A blank run exactly @rows@ rows tall, at the width the column gives it.
+--
+-- One image, whatever its height. Brick's own 'fill' draws the same blank, but
+-- vty builds a character fill one row at a time, so a run standing in for five
+-- thousand cards would cost five thousand rows of it -- which is the shape of
+-- the cost this whole measurement exists to avoid. A background fill is a
+-- single node of any size.
+--
+-- It is drawn at the full width it is offered so the box beside it has no
+-- secondary padding to add: that padding /is/ a character fill, and one row of
+-- it per row of this would put the cost straight back.
+blankRows :: Int -> Widget Name
+blankRows rows
+  | rows <= 0 = emptyWidget
+  | otherwise = BrickTypes.Widget BrickTypes.Fixed BrickTypes.Fixed $ do
+      context <- BrickTypes.getContext
+      pure BrickTypes.emptyResult {BrickTypes.image = Vty.backgroundFill (BrickTypes.availWidth context) rows}
+
+-- | The row a column with nothing to show draws instead of cards.
+emptyColumnRow :: AppState -> BoardColumn -> Widget Name
+emptyColumnRow state column = padAll 1 (withAttr dimAttr (txt (emptyColumnText state column)))
+
+-- | Rows an empty column's own row takes: the text, and 'padAll'\'s row
+-- either side of it.
+emptyColumnRows :: Int
+emptyColumnRows = 3
+
+-- | The items a frame builds for real, as disjoint closed ranges into the
+-- measurement, in order.
+--
+-- Two reaches, because two different things can move the viewport between the
+-- measurement and the crop this frame is about to be given.
+--
+-- The first is the viewport where the last frame left it, widened by one
+-- wheel step either way. A wheel press is dispatched as a brick scroll
+-- request and applied inside the very render this range is chosen for, so the
+-- offset this frame is cropped at can be one step away from the one that was
+-- read back.
+--
+-- The second is everywhere a pending scroll-into-view can put the viewport.
+-- Brick honors a 'visible' request by moving the offset just far enough to
+-- show the widget that asked, so the reachable rows run from a viewport
+-- ending at the selected card to one starting at it. Making all of them real
+-- is what keeps the card the selection just moved to from arriving in a blank
+-- run.
+--
+-- Kept apart rather than spanned. A selection at the far end of a long column
+-- from the viewport is exactly the case a single covering range would answer
+-- with the whole column -- which is the cost this whole measurement exists to
+-- avoid -- so the two are merged only where they actually meet.
+drawnItemRanges :: AppState -> BoardColumn -> ColumnWindow -> [(Int, Int)]
+drawnItemRanges state column window = mergeRanges (scrollReach : selectionReach)
+  where
+    viewTop = window.windowTop - window.windowLeading
+    viewRows = max 1 window.windowViewportRows
+    scrollReach = itemsBetween window (viewTop - columnScrollStep) (viewTop + viewRows + columnScrollStep)
+    selectionReach = case selectedItemExtent state column window of
+      Nothing -> []
+      Just (top, bottom) -> [itemsBetween window (top - viewRows) (bottom + viewRows)]
+
+-- | Ranges in ascending order, with overlapping and touching ones joined, so
+-- no item is drawn twice and the blank runs between them are the rows nothing
+-- claimed.
+mergeRanges :: [(Int, Int)] -> [(Int, Int)]
+mergeRanges = foldr join [] . sortOn fst
+  where
+    join range [] = [range]
+    join (first, final) ((nextFirst, nextFinal) : remaining)
+      | final + 1 >= nextFirst = (first, max final nextFinal) : remaining
+      | otherwise = (first, final) : (nextFirst, nextFinal) : remaining
+
+-- | The items covering the rows @[low, high)@, clamped to the measurement.
+itemsBetween :: ColumnWindow -> Int -> Int -> (Int, Int)
+itemsBetween window low high = (first, max first final)
+  where
+    first = itemCoveringRow window.windowTops low
+    final = itemCoveringRow window.windowTops (high - 1)
+
+-- | The item whose rows contain @row@: the last one starting at or before it,
+-- and the first item for anything above the body.
+--
+-- Bisection rather than a walk, so finding the window near the end of a long
+-- column costs no more than finding it near the beginning -- which is the
+-- other half of the bound, and the half a linear index would quietly lose.
+itemCoveringRow :: Vector Int -> Int -> Int
+itemCoveringRow tops row = go 0 (Vector.length tops - 1)
+  where
+    go low high
+      | low >= high = low
+      | otherwise =
+          let middle = (low + high + 1) `div` 2
+           in if tops Vector.! middle <= row then go middle high else go low (middle - 1)
+
+-- | The rows the selected entry occupies, when this column is the one a
+-- pending scroll-into-view would move.
+--
+-- 'Nothing' when nothing is going to move: another column is selected, or the
+-- selection is already where the user left it and no path asked for it to be
+-- revealed.
+selectedItemExtent :: AppState -> BoardColumn -> ColumnWindow -> Maybe (Int, Int)
+selectedItemExtent state column window
+  | state.appSelectedColumn /= column = Nothing
+  | not state.appEnsureSelectionVisible = Nothing
+  | first >= Vector.length window.windowItemRows = Nothing
+  | window.windowItemRows Vector.! first /= selected = Nothing
+  | otherwise = Just (window.windowTops Vector.! first, (window.windowTops Vector.! final) + (window.windowHeights Vector.! final))
+  where
+    selected = selectedRow state column
+    first = firstItemAtRow window.windowItemRows selected
+    final = lastWhile first
+    lastWhile index
+      | next < Vector.length window.windowItemRows, window.windowItemRows Vector.! next == selected = lastWhile next
+      | otherwise = index
+      where
+        next = index + 1
+
+-- | The first item drawing entry row @row@, or one past the end when none
+-- does.
+firstItemAtRow :: Vector Int -> Int -> Int
+firstItemAtRow rows row = go 0 (Vector.length rows)
+  where
+    go low high
+      | low >= high = low
+      | otherwise =
+          let middle = (low + high) `div` 2
+           in if rows Vector.! middle < row then go (middle + 1) high else go low middle
+
+-- | One item of a column body, drawn.
+drawColumnItem :: AppState -> BoardColumn -> ColumnItem -> Widget Name
+drawColumnItem state column = \case
+  ColumnTrackerHeader row tracker expanded -> drawTrackerHeader state column row tracker expanded
+  ColumnStandaloneLabel _ -> padLeftRight 2 (withAttr dimAttr (txt standaloneLabel))
+  ColumnCard row entry lastInTracker -> drawCard state column row entry lastInTracker
+
+-- | The label above a run of untracked cards.
+standaloneLabel :: Text
+standaloneLabel = "STANDALONE"
+
+-- | The rows the same item takes once drawn.
+--
+-- Every arm is read off the widget beside it rather than restated: a card is
+-- its interior lines plus the frame and the row beneath it, a header is its
+-- wrapped text plus the row above it. That is the whole reason the interior
+-- lines are a function of their own -- measuring and drawing a card cannot
+-- disagree about its height while both ask 'cardLines'.
+columnItemHeight :: AppState -> Int -> ColumnItem -> Int
+columnItemHeight state columnWidth = \case
+  ColumnTrackerHeader _ tracker expanded -> trackerHeaderHeight state columnWidth tracker expanded
+  ColumnStandaloneLabel _ -> 1
+  ColumnCard _ entry _ -> cardHeight state columnWidth entry
+
+-- | A card's rows: the frame's two border rows, the interior it sizes itself
+-- to, and 'drawCard'\'s row of padding beneath it.
+cardHeight :: AppState -> Int -> ColumnEntry -> Int
+cardHeight state columnWidth entry =
+  length (cardLines (cardEnv state) False entry (cardInnerWidth state columnWidth entry)) + 3
+
+-- | An epic header's rows: the row 'drawTrackerHeader' pads above it, and the
+-- rows its text wraps to at the width the marker and badges leave.
+trackerHeaderHeight :: AppState -> Int -> Tracker -> Bool -> Int
+trackerHeaderHeight state columnWidth tracker expanded =
+  1 + max 1 (length (wrapTextToLines defaultWrapSettings headerWidth headerText))
+  where
+    headerWidth = max 0 (columnWidth - columnRowOverhead - badgeCells state (IssueItem tracker.trackerIssue))
+    headerText = trackerHeaderText state.appOptions.optionAscii expanded tracker
+
+-- | Cells every card and header row spends before its own content: the
+-- padding a column keeps either side, and the one-cell selection marker.
+columnRowOverhead :: Int
+columnRowOverhead = 3
+
+-- | Cells the branch glyph beside a tracked card takes. Both the last-child
+-- and the continuing glyph are three cells wide in either glyph set, so a
+-- card is laid out at the same width wherever in its group it sits.
+branchPrefixWidth :: Int
+branchPrefixWidth = 3
+
+-- | The width a card lays its interior out at, once the marker, the badges,
+-- the branch glyph, and the frame have taken theirs.
+cardInnerWidth :: AppState -> Int -> ColumnEntry -> Int
+cardInnerWidth state columnWidth entry = max 0 (cardFrameWidth - cardFrameOverhead)
+  where
+    cardFrameWidth =
+      max 0 (columnWidth - columnRowOverhead - badgeCells state (entryItem entry) - branchCells)
+    branchCells = case entry of
+      Tracked _ _ -> branchPrefixWidth
+      Standalone _ -> 0
+      TrackerHeader _ -> 0
+
+-- | Cells the solve and review badges beside one item take together.
+badgeCells :: AppState -> BoardItem -> Int
+badgeCells state item = badgeWidth (solveBadgePart state item) + badgeWidth (reviewBadgePart state item)
+
+badgeWidth :: Maybe (AttrName, Text) -> Int
+badgeWidth = maybe 0 (displayWidth . snd)
+
+-- | Rows one wheel press moves a column, as
+-- "Kanban.UI.Events" dispatches it. Named here because the frame has to know
+-- it: the offset a frame is cropped at can be one press away from the one it
+-- chose its range against, so the range is widened by exactly this.
+columnScrollStep :: Int
+columnScrollStep = 3
+
+-- | The measurement this frame may draw @column@ from, or 'Nothing' when it
+-- must lay the column out itself.
+--
+-- Recomputing the signature is a handful of comparisons -- an 'Int', a query,
+-- the expanded set, and the badge widths of the live sessions -- and never a
+-- pass over the column, which is what makes checking cheaper than trusting.
+-- The deadline is the other half: every card was measured with one @now@, and
+-- a measurement outlives its own relative ages only until the earliest of
+-- them changes wording.
+columnWindowFor :: AppState -> BoardColumn -> Int -> Maybe ColumnWindow
+columnWindowFor state column columnWidth = do
+  window <- Map.lookup column state.appColumnWindows
+  if window.windowSignature == columnSignature state column columnWidth && not (measurementExpired state window)
+    then Just window
+    else Nothing
+
+measurementExpired :: AppState -> ColumnWindow -> Bool
+measurementExpired state window = maybe False (state.appNow >=) window.windowDeadline
+
+-- | Everything the measurement of one column at one width was taken from.
+columnSignature :: AppState -> BoardColumn -> Int -> ColumnSignature
+columnSignature state column columnWidth =
+  ColumnSignature
+    { signatureContent = columnContentKey state column,
+      signatureWidth = columnWidth,
+      signatureAscii = state.appOptions.optionAscii,
+      signatureExcerptLines = cardExcerptLimit state.appConfig,
+      signatureBadges = columnBadgeWidths state
+    }
+
+columnBadgeWidths :: AppState -> ColumnBadges
+columnBadgeWidths state =
+  ColumnBadges
+    { badgeSolve = Map.map (displayWidth . solvePhaseGlyph state) state.appSolveSessions,
+      badgeReview = Map.map (displayWidth . reviewPhaseGlyph state) state.appReviewSessions,
+      badgePullRequest = Map.map (displayWidth . pullRequestPhaseGlyph state) state.appPullRequestReviewSessions
+    }
+
+-- | Lay one column out: what it draws, how tall each of those is, and where
+-- the viewport was when this was taken.
+--
+-- This is the pass over the column the frames after it reuse. It costs the
+-- column once per change to what it shows -- a refresh, a criteria or query
+-- edit, an expansion, a resize, a badge appearing, or the earliest relative
+-- age on it changing wording -- and nothing per frame in between.
+measureColumnWindow :: AppState -> BoardColumn -> Int -> Int -> Int -> ColumnWindow
+measureColumnWindow state column columnWidth viewportRows top =
+  ColumnWindow
+    { windowSignature = columnSignature state column columnWidth,
+      windowItems = Vector.fromList items,
+      windowItemRows = Vector.fromList (map columnItemRow items),
+      windowTops = Vector.fromList (take (length heights) (scanl (+) 0 heights)),
+      windowHeights = Vector.fromList heights,
+      windowTotal = if null items then emptyColumnRows else sum heights,
+      windowLeading = columnTopPadding + searchBoxHeight state column columnWidth,
+      windowShownCount = length entries,
+      windowAdmittedCount = length (entriesForBoard state.appVisibleBoard column),
+      windowDeadline = deadline,
+      windowTop = top,
+      windowViewportRows = viewportRows
+    }
+  where
+    entries = entriesFor state column
+    items = columnItemsIn (expandedTrackersFor state column) entries
+    heights = map (columnItemHeight state columnWidth) items
+    deadline = case [nextRelativeAgeChange state.appNow (itemUpdatedAt (entryItem entry)) | ColumnCard _ entry _ <- items] of
+      [] -> Nothing
+      changes -> Just (minimum changes)
+
+-- | Rows 'drawColumn' pads above its body.
+columnTopPadding :: Int
+columnTopPadding = 1
+
+-- | Rows the search box takes at the top of a column, or none when no box is
+-- open there.
+searchBoxHeight :: AppState -> BoardColumn -> Int -> Int
+searchBoxHeight state column columnWidth = case searchQueryFor state column of
+  Nothing -> 0
+  Just query -> length (searchBoxLines (max 0 (columnWidth - searchBoxOverhead)) query) + searchBoxFrameRows
+
+-- | Rows the search box spends on itself: its two border rows, and the row of
+-- padding beneath it.
+searchBoxFrameRows :: Int
+searchBoxFrameRows = 3
+
+-- | When a card's @updated N ago@ next changes wording.
+--
+-- 'Kanban.UI.Util.relativeAge' counts in whole minutes below an hour, whole
+-- hours below a day, and whole days above it, so a card's rows are settled
+-- until the boundary of whichever unit it is currently reported in. The
+-- earliest such boundary in a column is what dates that column's measurement:
+-- before it no card's wording -- and so no card's wrapping, and so no card's
+-- height -- can have moved.
+nextRelativeAgeChange :: UTCTime -> UTCTime -> UTCTime
+nextRelativeAgeChange now updatedAt = addUTCTime (fromIntegral (step - (seconds `mod` step))) now
+  where
+    seconds = max 0 (floor (diffUTCTime now updatedAt) :: Int)
+    step
+      | seconds < 3600 = 60
+      | seconds < 86400 = 3600
+      | otherwise = 86400
+
+-- | Record what every column measured to, given the geometry brick reported
+-- for each after the last frame.
+--
+-- The one writer of 'appColumnWindows', applied by
+-- 'Kanban.UI.Events.handleEvent' after every event. A column whose geometry
+-- brick cannot report has never been drawn -- before the first frame, or
+-- after a layer covered the board -- and drops its measurement rather than
+-- keeping one taken against a width nothing confirms.
+--
+-- A measurement whose signature still holds is kept and only re-aimed: the
+-- offset and viewport height move with the frame, which is what a wheel
+-- press and a resize of the terminal's height cost, and neither is a reason
+-- to lay the column out again.
+refreshColumnWindows :: [(BoardColumn, Maybe (Int, Int, Int))] -> AppState -> AppState
+refreshColumnWindows geometry state = state {appColumnWindows = foldl settle state.appColumnWindows geometry}
+  where
+    settle windows (column, Nothing) = Map.delete column windows
+    settle windows (column, Just (columnWidth, viewportRows, top)) =
+      Map.insert column (settled column columnWidth viewportRows top (Map.lookup column windows)) windows
+    settled column columnWidth viewportRows top existing = case existing of
+      Just window
+        | window.windowSignature == columnSignature state column columnWidth,
+          not (measurementExpired state window) ->
+            window {windowTop = top, windowViewportRows = viewportRows}
+      _ -> measureColumnWindow state column columnWidth viewportRows top
 
 -- | What a column with nothing in it says, in §7's declared precedence.
 --
@@ -819,24 +1220,6 @@ drawSearchBox state columnWidth query =
     . vBox
     $ map (withAttr cardTitleAttr . txt) (searchBoxLines (max 0 (columnWidth - searchBoxOverhead)) query)
 
-drawColumnEntries :: AppState -> Set.Set Int -> BoardColumn -> [(Int, ColumnEntry)] -> [Widget Name]
-drawColumnEntries _ _ _ [] = []
-drawColumnEntries state expandedTrackers column indexedEntries@((row, entry) : remainingEntries) = case entry of
-  TrackerHeader tracker ->
-    let expanded = tracker.trackerIssue.issueNumber `Set.member` expandedTrackers
-     in drawTrackerHeader state column row tracker expanded : drawColumnEntries state expandedTrackers column remainingEntries
-  Tracked trackingContext _ ->
-    let trackerNumber = primaryTrackerNumber trackingContext
-        (groupEntries, remaining) = span ((== Just trackerNumber) . entryPrimaryTrackerNumber . snd) indexedEntries
-        tracker = trackingContext.trackingPrimary.membershipTracker
-        expanded = trackerNumber `Set.member` expandedTrackers
-        children = if expanded then map (uncurry (drawCard state column)) groupEntries else []
-     in drawTrackerHeader state column row tracker expanded : children <> drawColumnEntries state expandedTrackers column remaining
-  Standalone _ ->
-    let (standaloneEntries, remaining) = span ((== Nothing) . entryPrimaryTrackerNumber . snd) indexedEntries
-        header = padLeftRight 2 (withAttr dimAttr (txt "STANDALONE"))
-     in header : map (uncurry (drawCard state column)) standaloneEntries <> drawColumnEntries state expandedTrackers column remaining
-
 boardTopLeft, boardTopRight, boardTopJunction :: AppState -> Text
 boardBottomLeft, boardBottomRight, boardBottomJunction :: AppState -> Text
 boardTopLeft state = structuralGlyph state "┏"
@@ -851,8 +1234,11 @@ structuralGlyph state boxGlyph
   | state.appOptions.optionAscii = "+"
   | otherwise = boxGlyph
 
-drawCard :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
-drawCard state column row entry =
+-- | One card. @lastInTracker@ is whether it is the last child of its group,
+-- which is the only thing about the rest of the column a card needs and is
+-- decided once for the whole column by 'Kanban.UI.Search.columnItemsIn'.
+drawCard :: AppState -> BoardColumn -> Int -> ColumnEntry -> Bool -> Widget Name
+drawCard state column row entry lastInTracker =
   padLeftRight 1
     . padBottom (Pad 1)
     . clickable (CardTarget column row)
@@ -862,9 +1248,9 @@ drawCard state column row entry =
     visibility = if selected && state.appEnsureSelectionVisible then visible else id
     card =
       (if selected then withAttr selectedAttr (txt marker) else txt " ")
-        <+> solveBadge state (entryItem entry)
-        <+> reviewBadge state (entryItem entry)
-        <+> branchPrefix state column row entry
+        <+> drawBadge (solveBadgePart state (entryItem entry))
+        <+> drawBadge (reviewBadgePart state (entryItem entry))
+        <+> branchPrefix state entry lastInTracker
         <+> drawCardFrame (cardEnv state) selected entry
     marker = if state.appOptions.optionAscii then ">" else "▌"
 
@@ -982,7 +1368,10 @@ drawTrackerHeader state column row tracker expanded =
     . clickable (EpicTarget column row tracker.trackerIssue.issueNumber)
     . padLeftRight 1
     . padTop (Pad 1)
-    $ marker <+> solveBadge state (IssueItem tracker.trackerIssue) <+> reviewBadge state (IssueItem tracker.trackerIssue) <+> withAttr headerAttribute (txtWrap headerText)
+    $ marker
+      <+> drawBadge (solveBadgePart state (IssueItem tracker.trackerIssue))
+      <+> drawBadge (reviewBadgePart state (IssueItem tracker.trackerIssue))
+      <+> withAttr headerAttribute (txtWrap headerText)
   where
     selected = not expanded && state.appSelectedColumn == column && selectedRow state column == row
     visibility = if selected && state.appEnsureSelectionVisible then visible else id
@@ -1041,17 +1430,22 @@ drawTrackingLine innerWidth context
     referenceRows = map (withAttr trackerAttr . txt) (wrappedLines innerWidth referenceText)
     inlineWarning = " · MULTI-TRACKED"
 
-branchPrefix :: AppState -> BoardColumn -> Int -> ColumnEntry -> Widget Name
-branchPrefix state column row entry = case entry of
+-- | The branch glyph a tracked card draws under its epic.
+--
+-- Whether this is the group's last child arrives from the caller. It used to
+-- be answered here by indexing the column's entry list at @row + 1@ -- which,
+-- through a 'drop', walked the column once per card and made drawing one
+-- quadratic in its length. The grouping already knows, so it says.
+branchPrefix :: AppState -> ColumnEntry -> Bool -> Widget Name
+branchPrefix state entry lastInTracker = case entry of
   Standalone _ -> emptyWidget
   Tracked _ _ -> withAttr trackerAttr (txt branch)
   TrackerHeader _ -> emptyWidget
   where
     branch
-      | state.appOptions.optionAscii = if isLastInTracker then "`- " else "+- "
-      | isLastInTracker = "└─ "
+      | state.appOptions.optionAscii = if lastInTracker then "`- " else "+- "
+      | lastInTracker = "└─ "
       | otherwise = "├─ "
-    isLastInTracker = entryPrimaryTrackerNumber entry /= (entryPrimaryTrackerNumber =<< safeIndex (row + 1) (entriesFor state column))
 
 -- | Label chips as whole rows. 'labelChipRows' decides what fits; every chip
 -- it returns is drawn complete, and the @+N@ it appends counts both the labels
@@ -1064,11 +1458,21 @@ cardLabelRows env item innerWidth = map drawRow (labelChipRows innerWidth cardLa
     drawChip (LabelChip name) = withAttr (labelAttribute env.cardConfig.resolvedWorkflow name) (txt (" " <> name <> " "))
     drawChip (OverflowChip count) = withAttr pendingAttr (txt (overflowChipText count))
 
-solveBadge :: AppState -> BoardItem -> Widget Name
-solveBadge _ (PullRequestItem _) = emptyWidget
-solveBadge state (IssueItem issue) = case Map.lookup issue.issueNumber state.appSolveSessions of
-  Nothing -> emptyWidget
-  Just session -> withAttr (solveSessionAttribute session) (txt (solvePhaseGlyph state session))
+-- | The badge one item's live solve draws beside its card, as the attribute
+-- and the glyph rather than as the widget.
+--
+-- Split out because a badge is part of a card's /geometry/: it takes cells
+-- from the width the frame lays its interior out at. Measuring a column asks
+-- for the width and drawing asks for the widget, and both read this, so
+-- neither can assume a badge the other did not.
+solveBadgePart :: AppState -> BoardItem -> Maybe (AttrName, Text)
+solveBadgePart _ (PullRequestItem _) = Nothing
+solveBadgePart state (IssueItem issue) = do
+  session <- Map.lookup issue.issueNumber state.appSolveSessions
+  pure (solveSessionAttribute session, solvePhaseGlyph state session)
+
+drawBadge :: Maybe (AttrName, Text) -> Widget Name
+drawBadge = maybe emptyWidget (\(attribute, glyph) -> withAttr attribute (txt glyph))
 
 -- | What each 'SolvePhase' looks like as a badge. Solve and PR sessions
 -- disagree about one arm only -- a finished solve has nothing left to do
@@ -1114,13 +1518,15 @@ pullRequestPhaseGlyph state = pullRequestPhaseGlyphFor state.appOptions.optionAs
 reviewPhaseGlyph :: AppState -> ReviewSession -> Text
 reviewPhaseGlyph state = reviewPhaseGlyphFor state.appOptions.optionAscii
 
-reviewBadge :: AppState -> BoardItem -> Widget Name
-reviewBadge state (PullRequestItem pullRequest) = case Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions of
-  Nothing -> emptyWidget
-  Just session -> withAttr (pullRequestSessionAttribute session) (txt (pullRequestPhaseGlyph state session))
-reviewBadge state (IssueItem issue) = case Map.lookup issue.issueNumber state.appReviewSessions of
-  Nothing -> emptyWidget
-  Just session -> withAttr (reviewPhaseAttribute session.sessionPhase) (txt (reviewPhaseGlyph state session))
+-- | 'solveBadgePart' for the review half: the pull-request review badge on a
+-- pull request, and the issue review badge on an issue.
+reviewBadgePart :: AppState -> BoardItem -> Maybe (AttrName, Text)
+reviewBadgePart state (PullRequestItem pullRequest) = do
+  session <- Map.lookup pullRequest.pullRequestNumber state.appPullRequestReviewSessions
+  pure (pullRequestSessionAttribute session, pullRequestPhaseGlyph state session)
+reviewBadgePart state (IssueItem issue) = do
+  session <- Map.lookup issue.issueNumber state.appReviewSessions
+  pure (reviewPhaseAttribute session.sessionPhase, reviewPhaseGlyph state session)
 
 -- | The animated activity line a live solve or PR overlay shows. A session
 -- kind with no activity clock ('sessionActivityStartedAt' absent) simply

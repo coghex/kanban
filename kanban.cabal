@@ -248,7 +248,9 @@ library kanban-internal
     transformers          >= 0.6 && < 0.7,
     unicode-transforms    >= 0.4 && < 0.5,
     unix                  >= 2.8 && < 2.9,
-    vty                   >= 6.2 && < 6.6
+    vector                >= 0.13 && < 0.14,
+    vty                   >= 6.2 && < 6.6,
+    word-wrap             >= 0.5 && < 0.6
 
 executable kanban
   import: warnings
@@ -335,6 +337,7 @@ test-suite kanban-test
     Spec.Suite.Assignment
     Spec.UI.AutoSolve
     Spec.UI.Cards
+    Spec.UI.ColumnWindow
     Spec.UI.CompletedHistory
     Spec.UI.Filter
     Spec.UI.FilterPanel
@@ -352,7 +355,10 @@ test-suite kanban-test
     Spec.UI.SolveChooser
     Spec.UI.Text
     Spec.UI.Usage
-  ghc-options: -threaded -with-rtsopts=-N1
+  -- -T enables the allocation counters Spec.UI.ColumnWindow reads to hold one
+  -- board frame to the cards its viewport can show rather than to the cards the
+  -- column holds.
+  ghc-options: -threaded "-with-rtsopts=-N1 -T"
   build-depends:
     aeson,
     base,

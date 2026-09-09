@@ -8,7 +8,13 @@ module Kanban.UI.Types
     AutoSolveStage (..),
     BoardRefreshOutcome (..),
     ChatTranscript (..),
+    ColumnBadges (..),
+    ColumnContentKey (..),
+    ColumnItem (..),
     ColumnSearch (..),
+    ColumnSignature (..),
+    ColumnWindow (..),
+    columnItemRow,
     CompletedGeneration,
     CompletedHistoryStatus (..),
     DirectMergeReport (..),
@@ -52,6 +58,7 @@ import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (TimeZone, UTCTime )
+import Data.Vector (Vector)
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
@@ -726,6 +733,23 @@ data AppState = AppState
     -- whole repository's history that often would cost more than holding it.
     -- 'Kanban.UI.Filter.refreshVisibleBoard' is the one place it is set.
     appVisibleBoard :: Board,
+    -- | How many times 'appVisibleBoard' has been rebuilt.
+    --
+    -- 'Kanban.UI.Filter.refreshVisibleBoard' is the one place that board is
+    -- written and the one place this is bumped, which is what lets a column
+    -- measurement be validated against it by comparing an 'Int' rather than
+    -- by walking two boards.
+    appBoardEpoch :: Int,
+    -- | Each column's laid-out body, as the last event left it.
+    --
+    -- Kept beside the board for the same reason 'appVisibleBoard' is kept
+    -- beside the criteria: a column's rows are laid out once per change and
+    -- read once per frame, and re-deriving them per frame is what made a
+    -- large repository's every key press redraw the whole column (issue
+    -- #640). 'Kanban.UI.Board.refreshColumnWindows' is the one place it is
+    -- written, from 'Kanban.UI.Events.handleEvent'; a frame that finds it
+    -- stale measures the column itself rather than trusting it.
+    appColumnWindows :: Map BoardColumn ColumnWindow,
     -- | Which cards the board is showing, as four independent facets
     -- ("Kanban.Filter"). Process-lifetime state: it starts at
     -- 'Kanban.Filter.defaultFilterCriteria' every launch, survives every
@@ -941,6 +965,124 @@ data AppState = AppState
     appOptions :: Options,
     appConfig :: ResolvedConfig
   }
+
+-- | One widget a column's body draws, as a value rather than as the widget
+-- itself.
+--
+-- Deciding the sequence once is what lets a frame measure a column without
+-- drawing it. 'Kanban.UI.Board.drawColumnItem' turns one of these into the
+-- widget it names and 'Kanban.UI.Board.columnItemHeight' says how many rows
+-- that widget takes, so the rows a card is measured at and the rows it draws
+-- at cannot disagree -- they are read off the same item.
+--
+-- The row each carries is a raw index into the column's visible entries, the
+-- same index @CardTarget@ and @EpicTarget@ dispatch through
+-- ("Kanban.UI.Search"). The @STANDALONE@ label draws no entry of its own and
+-- carries the row of the first card beneath it, which keeps the sequence's
+-- rows non-decreasing so a row can be found in it by bisection.
+data ColumnItem
+  = -- | An epic's header: the row it is drawn at, the tracker it names, and
+    -- whether its group is expanded.
+    ColumnTrackerHeader Int Tracker Bool
+  | -- | The @STANDALONE@ label above a run of untracked cards.
+    ColumnStandaloneLabel Int
+  | -- | One card: its row, the entry, and whether it is the last child of its
+    -- tracker group, which is what decides the branch glyph beside it.
+    ColumnCard Int ColumnEntry Bool
+  deriving stock (Eq, Show)
+
+-- | The entry row an item belongs to.
+columnItemRow :: ColumnItem -> Int
+columnItemRow = \case
+  ColumnTrackerHeader row _ _ -> row
+  ColumnStandaloneLabel row -> row
+  ColumnCard row _ _ -> row
+
+-- | What decides which entries a column shows, and in what shape.
+--
+-- 'contentEpoch' stands for the admitted board itself:
+-- 'Kanban.UI.Filter.refreshVisibleBoard' is the one writer of
+-- 'appVisibleBoard' and bumps it there, so comparing one 'Int' answers the
+-- question comparing two boards would.
+data ColumnContentKey = ColumnContentKey
+  { contentEpoch :: Int,
+    contentQuery :: Maybe Text,
+    contentExpanded :: Set Int
+  }
+  deriving stock (Eq, Show)
+
+-- | How wide the badges a column's cards carry are, by item number.
+--
+-- Badge /width/ rather than badge glyph, deliberately. A badge takes cells
+-- from the width the card frame is laid out at, and a narrower frame wraps
+-- differently, so the width belongs in a measurement; the glyph does not, and
+-- a running session's spinner changes it several times a second. Recording
+-- the glyph would remeasure every column on every animation tick and measure
+-- exactly the same heights each time.
+--
+-- Only the sessions carrying a badge appear, so this stays the size of the
+-- live work rather than the size of the board.
+data ColumnBadges = ColumnBadges
+  { badgeSolve :: Map Int Int,
+    badgeReview :: Map Int Int,
+    badgePullRequest :: Map Int Int
+  }
+  deriving stock (Eq, Show)
+
+-- | Everything a cached column measurement was taken from.
+--
+-- A frame recomputes this -- which costs a handful of comparisons, never a
+-- pass over the column -- and measures the column itself when it differs, so
+-- a stale cache can only cost a slow frame and never draw a wrong one.
+data ColumnSignature = ColumnSignature
+  { signatureContent :: ColumnContentKey,
+    signatureWidth :: Int,
+    signatureAscii :: Bool,
+    signatureExcerptLines :: Int,
+    signatureBadges :: ColumnBadges
+  }
+  deriving stock (Eq, Show)
+
+-- | One column's laid-out body: what it draws, how tall each of those is, and
+-- where the last frame left the viewport.
+--
+-- This is the preparation a repeated frame reuses. Building it costs a pass
+-- over the column's entries and happens only when 'windowSignature' stops
+-- describing the state -- a refresh, a criteria or query edit, an expansion,
+-- a resize, a badge appearing, or 'windowDeadline' passing. Drawing from it
+-- costs the entries the viewport can show.
+data ColumnWindow = ColumnWindow
+  { windowSignature :: ColumnSignature,
+    -- | The widgets the body draws, in order.
+    windowItems :: Vector ColumnItem,
+    -- | Each item's entry row, so a selected row can be found by bisection.
+    windowItemRows :: Vector Int,
+    -- | Each item's first row, counted from the first body row.
+    windowTops :: Vector Int,
+    -- | Each item's height in rows.
+    windowHeights :: Vector Int,
+    -- | Every body row together.
+    windowTotal :: Int,
+    -- | Rows the body starts below the top of the viewport's content: the
+    -- column's own top padding, plus a search box when one is open.
+    windowLeading :: Int,
+    -- | How many entries the column is showing, and how many the criteria
+    -- admit, for the heading count. Both are counted while measuring rather
+    -- than per frame.
+    windowShownCount :: Int,
+    windowAdmittedCount :: Int,
+    -- | When the earliest relative age on a card next changes its wording.
+    -- Until then every measured height still describes what would be drawn;
+    -- after it, the column is measured again.
+    windowDeadline :: Maybe UTCTime,
+    -- | The viewport offset and height the last frame ended at, read back
+    -- from brick after the event that produced it. A frame widens the range
+    -- it draws for real around both, so the one frame either can be stale
+    -- for still draws real content.
+    windowTop :: Int,
+    windowViewportRows :: Int
+  }
+  deriving stock (Eq, Show)
 
 -- | A live card search over one board column: which column it filters, and
 -- the query typed into that column's search box so far.

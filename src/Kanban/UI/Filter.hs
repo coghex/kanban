@@ -79,6 +79,12 @@ import Kanban.UI.Util (allColumns, noticeCleared, showText)
 import Kanban.Worker (WorkerDeadline (..))
 
 -- | Recompute what the criteria admit from the datasets currently held.
+--
+-- The epoch beside it moves with it. Every column measurement records the
+-- epoch it was taken at ('Kanban.UI.Types.ColumnContentKey'), so a rebuild
+-- here is what tells the next frame that a measurement of the previous board
+-- no longer describes what it would draw. Bumping it here rather than beside
+-- each caller is the same single-writer rule the field above already has.
 refreshVisibleBoard :: AppState -> AppState
 refreshVisibleBoard state =
   state
@@ -88,7 +94,8 @@ refreshVisibleBoard state =
           state.appFilterCriteria
           state.appBoard
           state.appOpenSnapshot
-          state.appCompletedHistory
+          state.appCompletedHistory,
+      appBoardEpoch = state.appBoardEpoch + 1
     }
 
 -- | One criteria edit, complete: the new criteria, the board they admit, and
