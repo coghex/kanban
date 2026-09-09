@@ -324,7 +324,10 @@ data Stage = Stage
     -- | The worker each invocation will be found to have launched.
     stageAdoptions :: IORef [(MissionInvocationId, MissionSessionId)],
     -- | The failure a termination reports instead of signalling anything.
-    stageTerminateFailure :: IORef (Maybe Text)
+    stageTerminateFailure :: IORef (Maybe Text),
+    -- | Run inside the driver's termination, which is the one moment between
+    -- the signal and the account of what was signalled.
+    stageOnTerminate :: IORef (IO ())
   }
 
 newStage :: IO Stage
@@ -341,6 +344,7 @@ newStage =
     <*> newIORef endedObservation
     <*> newIORef []
     <*> newIORef Nothing
+    <*> newIORef (pure ())
 
 endedObservation :: MissionTerminalObservation
 endedObservation =
@@ -400,6 +404,7 @@ stagedDriver stage _ _ =
           ($ request) <$> readIORef stage.stageDispatchResult,
         missionDriverTerminate = \sessions -> do
           atomicModifyIORef' stage.stageTerminated (\seen -> (seen <> [sessions], ()))
+          join (readIORef stage.stageOnTerminate)
           refusal <- readIORef stage.stageTerminateFailure
           case refusal of
             Just detail -> pure (Left detail)
@@ -1989,6 +1994,112 @@ durableCommandSpec = describe "answering a command durably" $ do
       readIORef stage.stageTerminated `shouldReturn` []
       snapshot <- currentSnapshot store
       snapshot.missionSnapshotLifecycle `shouldBe` MissionWaitingInput
+
+  -- The pair these two are about is not one a replay has to be prompted to
+  -- repair, because nothing may rely on an operator happening to submit the
+  -- same instruction twice. A run that closes an effect as unknown writes the
+  -- halt beside it as a second, separate write, and when that write is the one
+  -- that fails the store holds a resolved record beside an advancing mission —
+  -- which the recovery scans pass over, because they read unresolved records.
+  -- So the record itself stops the run, on the very next start, with no
+  -- command involved at all.
+  it "stops a restarted run on an unknown launch whose waiting-input write was lost" $
+    withRegisteredParent $ \store stage -> do
+      openChildInvocation store "r-60"
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          -- The conclusion lands and the lifecycle behind it does not.
+          failed <- withUnreplaceableSnapshot store (missionControllerIteration controller)
+          case failed of
+            MissionControllerFailed detail -> Text.unpack detail `shouldSatisfy` isInfixOf "snapshot.json"
+            other -> expectationFailure ("the lost halt was not reported: " <> show other)
+          stopMissionController controller
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+      advancing <- currentSnapshot store
+      advancing.missionSnapshotLifecycle `shouldBe` MissionRunning
+      -- A fresh run, the fault repaired, and nothing queued to prompt it.
+      stopped <- oneIteration store stage
+      stopped
+        `shouldBe` MissionStopped
+          (MissionHaltIndeterminate MissionRunning "an effect it may have had is recorded as unaccounted for")
+      readIORef stage.stageDispatches `shouldReturn` []
+      -- And no work was done under it: the step is where the failed iteration
+      -- left it.
+      settled <- currentSnapshot store
+      stepLifecycle settled `shouldBe` Just MissionStepRunning
+
+  it "stops a restarted run on an unknown termination whose waiting-input write was lost" $ do
+    let sessions =
+          [ (sessionNode "solve-844-0001" Nothing (Just unverifiableObservation)),
+            unverifiableChild "child-1" theParent
+          ]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      openTerminationInvocation store "c-end"
+      -- Both members read back as unverifiable, and both already carry that
+      -- reading, so the session pass has nothing to record and the open
+      -- termination is what this iteration reaches.
+      writeIORef stage.stageSessions [theParent, MissionSessionId "child-1"]
+      writeIORef stage.stageObservation unverifiableObservation
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          failed <- withUnreplaceableSnapshot store (missionControllerIteration controller)
+          case failed of
+            MissionControllerFailed detail -> Text.unpack detail `shouldSatisfy` isInfixOf "snapshot.json"
+            other -> expectationFailure ("the lost halt was not reported: " <> show other)
+          stopMissionController controller
+      outcomeTags store `shouldReturn` [Just "outcome_unknown"]
+      advancing <- currentSnapshot store
+      advancing.missionSnapshotLifecycle `shouldBe` MissionRunning
+      stopped <- oneIteration store stage
+      stopped
+        `shouldBe` MissionStopped
+          (MissionHaltIndeterminate MissionRunning "an effect it may have had is recorded as unaccounted for")
+      readIORef stage.stageTerminated `shouldReturn` []
+
+  -- A console submission mints a fresh identifier for every line, and a
+  -- termination's invocation identity is derived from that identifier. So the
+  -- one instruction an operator would naturally repeat is exactly the one a
+  -- command-shaped identity cannot deduplicate — and the effect's own identity,
+  -- the subtree it names, is what does.
+  it "signals a subtree once when its account is lost and the retry is a fresh identifier" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing, liveChild "child-1" theParent]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] sessions) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          -- Sealed inside the driver: after the pre-effect line and the signal,
+          -- and before the account of what was signalled.
+          writeIORef stage.stageOnTerminate (() <$ sealMissionJournal store)
+          submitConsoleCommand controller "c-end-1" (MissionTerminateSubtreeCommand theParent "operator asked")
+          failed <- missionControllerIteration controller
+          case failed of
+            MissionControllerFailed detail -> do
+              Text.unpack detail `shouldSatisfy` isInfixOf "signalled"
+              -- The effect stands, so the instruction must not be to repeat it.
+              Text.unpack detail `shouldSatisfy` isInfixOf "do not submit the command again"
+              Text.unpack detail `shouldSatisfy` not . isInfixOf "so submit it again"
+            other -> expectationFailure ("a lost account of a signal was not reported: " <> show other)
+          length <$> readIORef stage.stageTerminated `shouldReturn` 1
+          writeIORef stage.stageOnTerminate (pure ())
+          unsealMissionJournalOf store
+          -- The retry a console really makes: the same instruction under a new
+          -- identifier.
+          submitConsoleCommand controller "c-end-2" (MissionTerminateSubtreeCommand theParent "operator asked")
+          retried <- missionControllerIteration controller
+          case retried of
+            MissionAwaiting detail -> Text.unpack detail `shouldSatisfy` isInfixOf "has not finished ending"
+            other -> expectationFailure ("a fresh identifier signalled the subtree again: " <> show other)
+          stopMissionController controller
+      -- One signal for one subtree, whatever the command was called.
+      length <$> readIORef stage.stageTerminated `shouldReturn` 1
+      recorded <- currentInvocations store
+      map (missionIntendedEffectTag . (.missionInvocationEffect) . (.missionInvocationRecord)) recorded
+        `shouldBe` ["terminate:solve-844-0001"]
 
 -- ---------------------------------------------------------------------------
 -- Child requests
@@ -3833,6 +3944,23 @@ sealMissionJournal store = case missionJournalPath store.missionStoreDirectory t
 
 unsealMissionJournal :: FilePath -> IO ()
 unsealMissionJournal path = setFileMode path 0o600
+
+-- | The same, for a seal applied inside a driver call where the path it gave
+-- back had nowhere to go.
+unsealMissionJournalOf :: MissionStore -> IO ()
+unsealMissionJournalOf store = case missionJournalPath store.missionStoreDirectory theMission of
+  Left message -> fail (Text.unpack message)
+  Right path -> unsealMissionJournal path
+
+-- | A reading that establishes nothing: the session's record is gone and
+-- nothing says how it went.
+unverifiableObservation :: MissionTerminalObservation
+unverifiableObservation =
+  MissionTerminalObservation
+    { missionObservationAt = fixedTime,
+      missionObservationOutcome = MissionObservedUnknown,
+      missionObservationDetail = Just "its worker record has been collected"
+    }
 
 -- | Runs an action with this mission's snapshot impossible to replace.
 --

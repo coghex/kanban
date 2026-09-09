@@ -1324,6 +1324,23 @@ commandJournalFailure command detail =
       Just _ -> "the command stays queued"
       Nothing -> "the command was not applied; it came from this run's own console and has no request file to stay queued in, so submit it again"
 
+-- | The failure a command reports when its account was lost /after/ its effect
+-- had already happened.
+--
+-- Deliberately not 'commandJournalFailure'. That one tells a console operator
+-- to submit the command again, which is the right instruction while nothing
+-- has reached outside and the wrong one the moment something has. The effect
+-- itself is not lost — the invocation record opened before it is what accounts
+-- for it, and the pass that closes that record reads the sessions rather than
+-- this line — so what a resubmission would add is not a repair but a repeat.
+commandPerformedJournalFailure :: MissionSubmittedCommand -> Text -> Text -> Text
+commandPerformedJournalFailure command performed detail =
+  performed
+    <> ", and the journal entry for command "
+    <> command.missionCommandId
+    <> " could not be written; the effect stands and its own record accounts for it, so do not submit the command again: "
+    <> detail
+
 -- | Journals what a command did and consumes it only if that entry landed.
 --
 -- The ordering matters because the two steps can be separated by a crash, and
@@ -1505,7 +1522,37 @@ terminateSubtree controller snapshot command session reason = do
       -- command, which is the duplicate the invocation identity exists to
       -- prevent.
       Just existing -> replayTermination controller snapshot command session existing
-      Nothing -> performTermination controller snapshot command session reason
+      Nothing -> case openTerminationOf session states of
+        -- A different command asking for a termination this run has already
+        -- signalled and whose end nothing has established yet.
+        Just inFlight -> replayTermination controller snapshot command session inFlight
+        Nothing -> performTermination controller snapshot command session reason
+
+-- | An unresolved termination of this very subtree, whatever command asked for
+-- it.
+--
+-- The command's identity is not the effect's identity, and the difference
+-- shows the moment one instruction is submitted twice. A console submission
+-- mints a fresh identifier for every line, and a termination's invocation
+-- identity is derived from that identifier — so two @terminate x@ lines are
+-- two identities for one subtree, and the second would signal a subtree the
+-- first has already signalled. What is actually unique is the root, so an open
+-- record naming it answers the second command as the replay it is.
+--
+-- Open records only. A termination that completed is an ended subtree and says
+-- nothing about a later one, and a record closed as refused or unknown is
+-- answered by its own identity rather than standing in the way of a fresh
+-- attempt the operator is entitled to make.
+openTerminationOf :: MissionSessionId -> [MissionInvocationState] -> Maybe MissionInvocationState
+openTerminationOf session states =
+  case [ state
+       | state <- states,
+         state.missionInvocationOutcome == Nothing,
+         state.missionInvocationRecord.missionInvocationEffect
+           == MissionEffectTerminateSubtree session.unMissionSessionId
+       ] of
+    (state : _) -> Just state
+    [] -> Nothing
 
 -- | Answers a replayed termination from what its record says, not from the
 -- fact that the record exists.
@@ -1645,27 +1692,32 @@ performTermination controller snapshot command session reason = do
             -- and which reads the sessions themselves — is what closes it:
             -- completed once they have all ended, waiting while any is still
             -- ending, and unknown if one cannot be shown to have ended at all.
-            Right unreached ->
-              answerCommand
-                controller
-                command
-                ( "signalled "
-                    <> Text.pack (show (length identities - length unreached))
-                    <> " of "
-                    <> Text.pack (show (length identities))
-                    <> " registered session(s)"
-                    <> ( if null unreached
-                           then ""
-                           else "; " <> Text.intercalate ", " (map (.unMissionSessionId) unreached) <> " could not be reached"
-                       )
-                )
-                $ pure
-                  ( MissionAdvanced
-                      ( MissionCommandApplied
-                          command.missionCommandId
-                          ("signalled the subtree under " <> session.unMissionSessionId <> "; its end is not yet established")
-                      )
-                  )
+            Right unreached -> do
+              let signalled =
+                    "signalled "
+                      <> Text.pack (show (length identities - length unreached))
+                      <> " of "
+                      <> Text.pack (show (length identities))
+                      <> " registered session(s)"
+                      <> ( if null unreached
+                             then ""
+                             else "; " <> Text.intercalate ", " (map (.unMissionSessionId) unreached) <> " could not be reached"
+                         )
+                  applied = "signalled the subtree under " <> session.unMissionSessionId <> "; its end is not yet established"
+              -- Not 'answerCommand', because a journal line lost /here/ leaves
+              -- a different situation behind. The subtree has been signalled
+              -- and the record that accounts for it is open, so
+              -- 'resolveOpenTermination' closes it from the sessions on a
+              -- later iteration whether or not this line was written; there is
+              -- nothing for the command to be met again for. Saying otherwise
+              -- would be worse than unhelpful: this command is authenticated,
+              -- so it has no request file, and the resubmission the ordinary
+              -- wording asks for mints a fresh identifier.
+              accounted <- journalCommand controller command signalled
+              consumeMissionCommand command
+              pure $ case accounted of
+                Left failure -> MissionControllerFailed (commandPerformedJournalFailure command applied failure)
+                Right () -> MissionAdvanced (MissionCommandApplied command.missionCommandId applied)
 
 -- | Requirement 12's registered child request.
 --

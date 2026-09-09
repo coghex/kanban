@@ -429,7 +429,7 @@ missionHaltMessage (MissionHaltTerminal lifecycle) = "mission " <> missionLifecy
 missionHaltMessage (MissionHaltBlocked lifecycle detail) =
   "mission " <> missionLifecycleTag lifecycle <> ": " <> detail
 missionHaltMessage (MissionHaltIndeterminate lifecycle detail) =
-  "mission " <> missionLifecycleTag lifecycle <> ": " <> detail <> ", and a step's outcome is unknown"
+  "mission " <> missionLifecycleTag lifecycle <> ": " <> detail <> ", and an outcome it may have produced is unknown"
 
 -- | Whether this halt leaves something nobody has established.
 --
@@ -492,15 +492,34 @@ missionRunnerHalt snapshot states
   -- exit zero over exactly the effects nobody can account for.
   | missionLifecycleBlocks lifecycle, indeterminate = Just (MissionHaltIndeterminate lifecycle blockedDetail)
   | missionLifecycleBlocks lifecycle = Just (MissionHaltBlocked lifecycle blockedDetail)
+  -- An invocation recorded as unknown stops the run whatever the lifecycle
+  -- says, and this is the only halt that does not consult it first.
+  --
+  -- The reason is that the two are written separately and the second one can
+  -- be missing. A run that closes a launch as unknown writes @waiting_input@
+  -- immediately afterwards, and a store where that snapshot write failed holds
+  -- a resolved record beside an advancing mission — which every other reader
+  -- here lets through. The recovery scans read /unresolved/ records, so they
+  -- pass over it; the blocked guards above never look at the record at all.
+  -- Nothing would stop the next run carrying on past an effect that may have
+  -- happened, which is the one thing section 16 does not permit.
+  --
+  -- A step's unknown outcome is deliberately not treated this way: the pass
+  -- that derives a blocked lifecycle rereads the step records every iteration,
+  -- so a lifecycle write it lost is one it makes again. This record is the one
+  -- nothing revisits.
+  | unknownInvocation = Just (MissionHaltIndeterminate lifecycle unaccountedDetail)
   | otherwise = Nothing
   where
     lifecycle = snapshot.missionSnapshotLifecycle
     indeterminate =
       any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
-        || any unknownOutcome states
+        || unknownInvocation
+    unknownInvocation = any unknownOutcome states
     unknownOutcome state = case state.missionInvocationOutcome of
       Just (MissionInvocationUnknown _) -> True
       _ -> False
+    unaccountedDetail = "an effect it may have had is recorded as unaccounted for"
     blockedDetail = case lifecycle of
       MissionWaitingInput -> "it is waiting for an answer this runner cannot supply"
       MissionWaitingBarrier -> "it is waiting on a barrier outside this runner"
