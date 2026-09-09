@@ -1673,9 +1673,10 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # loudly, which is the safe direction. The captured segment keeps its leading
 # slash so it compares against a `personal-path` manifest token exactly the
 # way the Haskell segments do.
-# The three solve assets that owe issue #493's art policy: the paired Kanban-
+# The four solve assets that owe issue #493's art policy: the paired Kanban-
 # invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares,
-# plus the Grok /solve skill that stamps grok-origin pull requests. PR #251
+# plus the Grok and Kimi /solve skills that stamp their external-origin pull
+# requests. PR #251
 # made a missing texture, icon, sprite, or animation an explicit tracked
 # blocker with a user-owned supply-or-generate decision and landed it in the
 # Claude asset alone, adding no regression assertion, so nothing held the Codex
@@ -1689,14 +1690,15 @@ ART_POLICY_SOLVE_ASSETS = (
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
-# match every Markdown file cannot pass vacuously. These seven qualify by
+# match every Markdown file cannot pass vacuously. These eight qualify by
 # orchestrating or judging rather than implementing: the issue-review pair
 # judges a filed issue and never drafts or implements, and the autoissue and
 # autosolve assets each delegate the work itself to another workflow.
 #
 # The autosolve pair joined this tuple when issue #576 vendored it, and the
-# Grok autosolve skill is the same classification: Grok ships no issue-review
-# or autoissue workflow, but its /autosolve is still an orchestrator. The art
+# Grok and Kimi autosolve skills are the same classification: neither external
+# bundle ships an issue-review or autoissue workflow, but each /autosolve is
+# still an orchestrator. The art
 # policy binds the session that reads an issue's requirements and decides how
 # to satisfy them, and the shipped assets place it exactly there -- at step 6
 # of solve's `## Work In Isolation`, between "implement the smallest solution"

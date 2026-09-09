@@ -184,7 +184,7 @@ arithmetic, which §2.3 owns.
   spawned provider, so board revision and repair of a grok-origin or
   kimi-origin pull
   request are refused in every operating mode; the session that opened
-  the pull request revises it itself. All three bundled
+  the pull request revises it itself. All four bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
@@ -2120,7 +2120,7 @@ markdown counterpart of the Haskell home-relative-path check.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
 - `kind`: `executable` (a literal command Kanban's Haskell source, the tracked
-  Codex, Claude, or Grok plugin's packaged workflows, or a non-test module under
+  Codex, Claude, Grok, or Kimi plugin's packaged workflows, or a non-test module under
   `tools/` spawns or resolves) or `personal-path` (a home-relative path
   Kanban's Haskell source, a packaged markdown workflow, or one of the
   issue-approval modules scanned below builds or depends on).
@@ -3172,12 +3172,13 @@ runs) parses the manifest in §4 and:
   `Ping.hs` and `Worker.hs` ultimately run carry `executable` rows grounded in
   the scanned modules that do spell them;
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files, the
-  tracked Claude plugin's packaged `commands/*.md` files, or the tracked Grok
-  plugin's packaged `SKILL.md` files invoke a command,
+  tracked Claude plugin's packaged `commands/*.md` files, the tracked Grok
+  plugin's packaged `SKILL.md` files, or the tracked Kimi plugin's packaged
+  `SKILL.md` files invoke a command,
   inside a fenced ```` ```bash ```` block, that has no matching `executable`
-  manifest entry — each of those three surfaces is the enumerated list named in
-  §4 (`PLUGIN_SURFACE_FILES`, `CLAUDE_PLUGIN_SURFACE_FILES`, and
-  `GROK_PLUGIN_SURFACE_FILES` in that module)
+  manifest entry — each of those four surfaces is the enumerated list named in
+  §4 (`PLUGIN_SURFACE_FILES`, `CLAUDE_PLUGIN_SURFACE_FILES`,
+  `GROK_PLUGIN_SURFACE_FILES`, and `KIMI_PLUGIN_SURFACE_FILES` in that module)
   rather than a directory glob, so a newly packaged asset is scanned only once
   it is added to its list;
 - fails if any packaged plugin's own bundled coordinator

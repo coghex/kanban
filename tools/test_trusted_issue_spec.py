@@ -100,7 +100,7 @@ GROK_HELPER_LOOKUP = (
     + "PY"
 )
 
-KIMI_HELPER_PYTHON = '''import json, sys
+KIMI_HELPER_PYTHON = '''import json, os, sys
 from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
@@ -113,7 +113,7 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.exists():
+if os.path.lexists(settings):
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -984,6 +984,17 @@ class InstalledResolutionTests(unittest.TestCase):
                 self.assertNotEqual(proc.returncode, 0, proc.stdout)
                 self.assertIn("Copilot settings", proc.stderr)
                 self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_dangling_kimi_settings_symlink_refuses_without_copy_fallback(self):
+        home = self.root / "kimi-dangling-settings"
+        self.install_kimi_bundle(home)
+        settings = home / ".copilot" / "settings.json"
+        settings.symlink_to(settings.with_name("missing-settings.json"))
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("Copilot settings", proc.stderr)
+        self.assertIn("unreadable", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
 
     def test_a_kimi_marketplace_missing_the_helper_refuses_without_fallback(self):
         home = self.root / "kimi-marketplace-missing-helper"

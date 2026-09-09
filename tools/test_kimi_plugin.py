@@ -63,7 +63,7 @@ COORDINATOR_LOOKUP = 'Path("scripts") / "review_pr.py"'
 # The exact Python locator /autosolve's coordinator fence runs. Asserted to
 # appear in the skill AND executed against a simulated install below, so a
 # rewrite that keeps the prose and breaks the resolution fails here.
-KIMI_COORDINATOR_PYTHON = '''import json, sys
+KIMI_COORDINATOR_PYTHON = '''import json, os, sys
 from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
@@ -76,7 +76,7 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.exists():
+if os.path.lexists(settings):
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -496,6 +496,17 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
                 self.assertNotEqual(proc.returncode, 0, proc.stdout)
                 self.assertIn("Copilot settings", proc.stderr)
                 self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_dangling_settings_symlink_refuses_without_glob_fallback(self):
+        home = self.root / "copilot-dangling-settings"
+        self.install_hashed(home)
+        settings = home / ".copilot" / "settings.json"
+        settings.symlink_to(settings.with_name("missing-settings.json"))
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("Copilot settings", proc.stderr)
+        self.assertIn("unreadable", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
 
     def test_a_recorded_marketplace_missing_the_helper_refuses_without_fallback(self):
         home = self.root / "copilot-marketplace-missing-helper"

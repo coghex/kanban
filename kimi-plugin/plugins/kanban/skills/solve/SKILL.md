@@ -98,7 +98,7 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
    ```bash
    TRUSTED_SPEC="$(python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
@@ -111,7 +111,7 @@ def finish(candidate):
 if plugin_root:
     finish(Path(plugin_root) / relative)
 settings = Path(copilot_home) / "settings.json"
-if settings.exists():
+if os.path.lexists(settings):
     try:
         document = json.loads(settings.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
