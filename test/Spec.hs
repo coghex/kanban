@@ -73,6 +73,7 @@ import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
 import qualified Spec.UI.AutoSolve as AutoSolve
 import qualified Spec.UI.Cards as Cards
+import qualified Spec.UI.ColumnWindow as ColumnWindow
 import qualified Spec.UI.CompletedHistory as CompletedHistory
 import qualified Spec.UI.Filter as Filter
 import qualified Spec.UI.FilterPanel as FilterPanel
@@ -223,6 +224,7 @@ suiteGroups =
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
     SuiteGroup "Spec.UI.Cards" PingLane Cards.spec,
+    SuiteGroup "Spec.UI.ColumnWindow" PingLane ColumnWindow.spec,
     SuiteGroup "Spec.UI.AutoSolve" PingLane AutoSolve.spec,
     -- Beside the preflight group rather than spread for cost: its dispatch
     -- examples install fake providers on a temporary PATH and let a launch

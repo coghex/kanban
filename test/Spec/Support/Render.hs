@@ -10,6 +10,7 @@ module Spec.Support.Render
     detailsHeadings,
     detailsRows,
     detailsText,
+    pictureCells,
     renderCard,
     renderWidgetLines,
     cardInterior,
@@ -19,6 +20,7 @@ where
 
 import Brick (AttrMap, Widget, hLimit)
 import Brick.Main (renderWidget)
+import Control.DeepSeq (NFData (..))
 import Data.List (dropWhileEnd)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -27,6 +29,7 @@ import qualified Data.Text.Lazy as LazyText
 import Data.Time (addUTCTime, utc)
 import qualified Data.Vector as Vector
 import qualified Graphics.Vty.Attributes as Vty
+import Graphics.Vty.Picture (Picture)
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp (..))
 import Kanban.CLI (Options (..))
@@ -143,6 +146,12 @@ data FrameCell = FrameCell
   }
   deriving stock (Eq, Show)
 
+-- | So a frame can be forced to normal form. A test that measures what
+-- rendering costs has to evaluate the cells themselves, not just the spine of
+-- the list holding them.
+instance NFData FrameCell where
+  rnf cell = rnf cell.frameCellCharacter `seq` rnf cell.frameCellAttribute
+
 -- | Render @layers@ (topmost first, as 'Kanban.UI.drawApplication' returns
 -- them) into exactly the rows and cells a terminal of @region@ would show.
 --
@@ -150,10 +159,15 @@ data FrameCell = FrameCell
 -- a golden frame has to record what the whole viewport held, including the
 -- part a caller might otherwise mistake for absent content.
 renderFrameCells :: AttrMap -> (Int, Int) -> [Widget Name] -> [[FrameCell]]
-renderFrameCells theme region layers =
+renderFrameCells theme region layers = pictureCells region (renderWidget (Just theme) layers region)
+
+-- | The same projection, for a picture that was painted rather than rendered
+-- here: what a dashboard driven through brick's own event loop actually put on
+-- the terminal.
+pictureCells :: (Int, Int) -> Picture -> [[FrameCell]]
+pictureCells region picture =
   map rowCells (Vector.toList (displayOpsForPic picture region))
   where
-    picture = renderWidget (Just theme) layers region
     rowCells = concatMap spanCells . Vector.toList
     spanCells (TextSpan attribute _ _ value) =
       [FrameCell character attribute | character <- LazyText.unpack value]
