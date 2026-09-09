@@ -1221,7 +1221,7 @@ class ApproverPathResolutionTests(unittest.TestCase):
     issue #445 made this coordinator probe. Which of the two it selects, and
     what it reports when neither is occupied, is
     `tools/test_packaged_issue_review_probe.py`'s -- it asserts that against
-    the three coordinators and the markdown fences together, because all fourteen
+    the four coordinators and the markdown fences together, because all sixteen
     owe the same answers."""
 
     def setUp(self):
@@ -1554,15 +1554,15 @@ class NumberKindGuardTests(unittest.TestCase):
 
 
 class BundledRosterReaderTests(unittest.TestCase):
-    """The reader ships in four homes, held identical the way
+    """The reader ships in five homes, held identical the way
     kanban_config.py's copies are.
 
-    Byte equality is what keeps four copies one reader: each coordinator
+    Byte equality is what keeps five copies one reader: each coordinator
     reads the roster through the copy beside itself and every other Python
     consumer through the tracked original, and a copy whose compiled defaults
     or loaded-provider semantics had drifted would route -- and, for the
     Claude copy, spawn -- differently from the backend that gates the same
-    pipeline. All four are compared here rather than only the two that
+    pipeline. All five are compared here rather than only the two that
     existed before #572, and the diagnostic names the copy that drifted so a
     failure says which file to repair.
     """
@@ -1578,6 +1578,10 @@ class BundledRosterReaderTests(unittest.TestCase):
                 "grok-plugin/plugins/kanban/scripts/kanban_models.py",
                 REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "kanban_models.py",
             ),
+            (
+                "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+                REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "kanban_models.py",
+            ),
         )
 
     def test_every_bundled_reader_is_identical_to_its_tracked_source(self):
@@ -1587,7 +1591,7 @@ class BundledRosterReaderTests(unittest.TestCase):
                     copy.read_bytes(),
                     TRACKED_ROSTER_READER.read_bytes(),
                     f"{relative_path} has drifted from tools/kanban_models.py; "
-                    "the four copies are the same reader, not a fork. Repair: "
+                    "the five copies are the same reader, not a fork. Repair: "
                     f"cp tools/kanban_models.py {relative_path}",
                 )
 

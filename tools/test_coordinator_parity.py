@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the three tracked review coordinators.
+"""Bounded-divergence gate for the four tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -114,6 +114,9 @@ CODEX_COORDINATOR = (
 )
 GROK_COORDINATOR = (
     REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
+KIMI_COORDINATOR = (
+    REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
@@ -525,7 +528,7 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        help=(
 +            "Refuse before spawning if the live reviewer route is not this "
 +            "value (for example codex). Combined with --expected-origin this "
-+            "is how a grok-origin autosolve refuses a Claude spawn."
++            "is how an external-origin autosolve refuses a Claude spawn."
 +        ),
 +    )
 +    parser.add_argument(
@@ -982,7 +985,8 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
 class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
     """The Grok coordinator differs from Claude in expected-origin/route,
     in not vendoring kanban_config.py beside the coordinator, and in
-    reading a grok marker on a cross-repository pull request."""
+    reading external-origin markers on cross-repository pull requests. The
+    Kimi bundle is held byte-identical to this copy by test_kimi_plugin.py."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -1018,6 +1022,16 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         )
         report = divergence_report(self.claude_source, drifted, self.units)
         self.assertIsNotNone(report)
+
+class KimiCoordinatorIdentityTests(unittest.TestCase):
+    """Kimi and Grok deliberately execute one identical coordinator."""
+
+    def test_kimi_coordinator_is_byte_identical_to_grok(self):
+        self.assertEqual(
+            KIMI_COORDINATOR.read_bytes(),
+            GROK_COORDINATOR.read_bytes(),
+            "The Kimi coordinator must remain byte-for-byte identical to Grok's",
+        )
 
 
 class SharedEditStabilityTests(unittest.TestCase):

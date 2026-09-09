@@ -1,0 +1,22 @@
+{
+  "name": "kanban-kimi",
+  "owner": {
+    "name": "Kanban"
+  },
+  "metadata": {
+    "description": "Kanban's tracked Kimi marketplace, packaging the Kimi-side /solve and /autosolve workflows. Kimi-origin pull requests are reviewed by Codex only.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "kanban",
+      "version": "1.0.0",
+      "description": "Kanban's Kimi-side workflow bundle: /solve claims and implements a GitHub issue through a kimi-origin pull request, and /autosolve drives Codex review of that pull request until approval. Never invokes Claude.",
+      "author": {
+        "name": "Kanban"
+      },
+      "source": "./plugins/kanban",
+      "category": "development"
+    }
+  ]
+}

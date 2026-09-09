@@ -1,11 +1,12 @@
-"""Structural coverage for the tracked Grok plugin.
+"""Structural coverage for the tracked Kimi plugin.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
-The Grok bundle is not a Kanban-spawned provider. It packages /solve and
-/autosolve so a Grok session can open a grok-origin pull request and obtain a
-Codex review without invoking Claude. These tests pin that origin, that
-reviewer, the vendored helpers, and the self-review prohibition.
+The Kimi bundle is not a Kanban-spawned provider. It packages /solve and
+/autosolve so a Kimi session (the Copilot CLI running a Kimi model) can open
+a kimi-origin pull request and obtain a Codex review without invoking Claude.
+These tests pin that origin, that reviewer, the vendored helpers, and the
+self-review prohibition.
 """
 
 from __future__ import annotations
@@ -23,44 +24,96 @@ from unittest import mock
 import plugin_bundle_gate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GROK_PLUGIN = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
+KIMI_PLUGIN = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
 CLAUDE_PLUGIN = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
-SOLVE = GROK_PLUGIN / "skills" / "solve" / "SKILL.md"
-AUTOSOLVE = GROK_PLUGIN / "skills" / "autosolve" / "SKILL.md"
-TRUSTED_SPEC = GROK_PLUGIN / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
-COORDINATOR = GROK_PLUGIN / "scripts" / "review_pr.py"
-MODELS = GROK_PLUGIN / "scripts" / "kanban_models.py"
-PLUGIN_JSON = GROK_PLUGIN / "plugin.json"
-MARKETPLACE = REPO_ROOT / "grok-plugin" / ".grok-plugin" / "marketplace.json"
-PLUGIN_MANIFEST_PATH = "grok-plugin/plugins/kanban/plugin.json"
-MARKETPLACE_MANIFEST_PATH = "grok-plugin/.grok-plugin/marketplace.json"
-SKILLS_PREFIX = "grok-plugin/plugins/kanban/skills"
+GROK_COORDINATOR = (
+    REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
+SOLVE = KIMI_PLUGIN / "skills" / "solve" / "SKILL.md"
+AUTOSOLVE = KIMI_PLUGIN / "skills" / "autosolve" / "SKILL.md"
+TRUSTED_SPEC = KIMI_PLUGIN / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+COORDINATOR = KIMI_PLUGIN / "scripts" / "review_pr.py"
+MODELS = KIMI_PLUGIN / "scripts" / "kanban_models.py"
+PLUGIN_JSON = KIMI_PLUGIN / "plugin.json"
+MARKETPLACE = REPO_ROOT / "kimi-plugin" / ".github" / "plugin" / "marketplace.json"
+README = REPO_ROOT / "kimi-plugin" / "README.md"
+PLUGIN_MANIFEST_PATH = "kimi-plugin/plugins/kanban/plugin.json"
+MARKETPLACE_MANIFEST_PATH = "kimi-plugin/.github/plugin/marketplace.json"
+SKILLS_PREFIX = "kimi-plugin/plugins/kanban/skills"
 COMMAND_SIGIL = "/"
 EXPECTED_SKILL_NAMES = {"solve", "autosolve"}
+EXPECTED_BUNDLE_FILES = {
+    "kimi-plugin/.github/plugin/marketplace.json",
+    "kimi-plugin/README.md",
+    "kimi-plugin/plugins/kanban/plugin.json",
+    "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
+    "kimi-plugin/plugins/kanban/scripts/review_pr.py",
+    "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
+}
 
-GROK_ORIGIN = "<!-- pr-origin:grok -->"
+KIMI_ORIGIN = "<!-- pr-origin:kimi -->"
 CLAUDE_ORIGIN = "<!-- pr-origin:claude -->"
 CODEX_ORIGIN = "<!-- pr-origin:codex -->"
+GROK_ORIGIN = "<!-- pr-origin:grok -->"
 
 COORDINATOR_LOOKUP = 'Path("scripts") / "review_pr.py"'
 
 # The exact Python locator /autosolve's coordinator fence runs. Asserted to
 # appear in the skill AND executed against a simulated install below, so a
 # rewrite that keeps the prose and breaks the resolution fails here.
-GROK_COORDINATOR_PYTHON = '''import sys
+KIMI_COORDINATOR_PYTHON = '''import json, os, sys
 from pathlib import Path
 
-plugin_root, grok_home = sys.argv[1], sys.argv[2]
+plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("scripts") / "review_pr.py"
-if plugin_root:
-    candidate = Path(plugin_root) / relative
+def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"coordinator was not found at {candidate}")
     print(candidate)
     raise SystemExit(0)
-matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
+if plugin_root:
+    finish(Path(plugin_root) / relative)
+settings = Path(copilot_home) / "settings.json"
+if os.path.lexists(settings):
+    try:
+        document = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and "kanban-kimi" in marketplaces:
+        entry = marketplaces["kanban-kimi"]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed kanban-kimi entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "directory":
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name kanban-kimi as a directory source."
+            )
+        recorded = source.get("path")
+        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name an absolute kanban-kimi path: {recorded!r}."
+            )
+        finish(Path(recorded) / "plugins" / "kanban" / relative)
+matches = sorted(
+    candidate
+    for candidate in (Path(copilot_home) / "installed-plugins").glob(
+        "kanban-*/" + relative.as_posix()
+    )
+    if candidate.is_file()
+)
 if not matches:
-    raise SystemExit("coordinator was not found under $GROK_HOME/installed-plugins/kanban-*")
+    raise SystemExit("coordinator was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
 if len(matches) != 1:
     raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
 print(matches[0])
@@ -70,16 +123,32 @@ BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
 
 class PluginLayoutTests(unittest.TestCase):
+    def test_the_tracked_bundle_inventory_is_exact(self):
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", "kimi-plugin"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        )
+        tracked = {
+            path.decode("utf-8") for path in proc.stdout.split(b"\0") if path
+        }
+        self.assertEqual(tracked, EXPECTED_BUNDLE_FILES)
+
     def test_the_marketplace_lists_the_kanban_plugin(self):
         document = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+        # The marketplace name differs from the plugin's on purpose: two
+        # same-named user marketplaces collide at registration, and the
+        # claude-plugin tree is a valid Copilot marketplace too.
+        self.assertEqual(document["name"], "kanban-kimi")
         names = [plugin["name"] for plugin in document["plugins"]]
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_1_0(self):
+    def test_the_plugin_manifest_declares_version_1_0_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.2.0")
+        self.assertEqual(document["version"], "1.0.0")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -107,7 +176,9 @@ class ManifestListingParityTests(unittest.TestCase):
             f"{PLUGIN_MANIFEST_PATH} description": json.loads(
                 PLUGIN_JSON.read_text(encoding="utf-8")
             )["description"],
-            f"{MARKETPLACE_MANIFEST_PATH} description": marketplace["description"],
+            f"{MARKETPLACE_MANIFEST_PATH} metadata description": marketplace[
+                "metadata"
+            ]["description"],
             f"{MARKETPLACE_MANIFEST_PATH} plugin-entry description": marketplace[
                 "plugins"
             ][0]["description"],
@@ -156,6 +227,32 @@ class ManifestListingParityTests(unittest.TestCase):
                 )
 
 
+class DocumentationTests(unittest.TestCase):
+    def setUp(self):
+        self.text = README.read_text(encoding="utf-8")
+
+    def test_readme_pins_the_verified_copilot_install_mechanisms(self):
+        self.assertIn("GitHub Copilot CLI 1.0.83", self.text)
+        self.assertIn("--plugin-dir kimi-plugin/plugins/kanban", self.text)
+        self.assertIn('plugin marketplace add "$PWD/kimi-plugin"', self.text)
+        self.assertIn("plugin install kanban@kanban-kimi", self.text)
+        self.assertIn(
+            "extraKnownMarketplaces.kanban-kimi.source.path", self.text
+        )
+
+    def test_readme_explains_argument_and_shadowing_behavior(self):
+        self.assertIn("do not substitute a `$ARGUMENTS` variable", self.text)
+        self.assertIn("/solve 652", self.text)
+        self.assertIn("first-found-wins", self.text)
+        self.assertIn("shadow", self.text)
+        self.assertIn("dedicated\n`COPILOT_HOME`", self.text)
+        self.assertIn("Claude model is a canonical Claude participant", self.text)
+
+    def test_readme_states_the_review_safety_boundary(self):
+        self.assertIn("without**\n`--self-review`", self.text)
+        self.assertIn("route other than `codex` is a stop", self.text)
+
+
 class VendoredHelperTests(unittest.TestCase):
     def test_trusted_issue_spec_matches_the_claude_copy(self):
         self.assertEqual(
@@ -169,6 +266,9 @@ class VendoredHelperTests(unittest.TestCase):
         self.assertIn("--expected-route", text)
         self.assertIn("route_mismatch", text)
 
+    def test_review_pr_is_byte_identical_to_the_grok_coordinator(self):
+        self.assertEqual(COORDINATOR.read_bytes(), GROK_COORDINATOR.read_bytes())
+
     def test_kanban_models_matches_the_claude_copy(self):
         self.assertEqual(
             MODELS.read_bytes(),
@@ -177,13 +277,20 @@ class VendoredHelperTests(unittest.TestCase):
 
 
 class SolveOriginTests(unittest.TestCase):
-    def test_solve_stamps_grok_origin_and_not_the_other_brands(self):
+    def test_solve_stamps_kimi_origin_and_not_the_other_brands(self):
         text = SOLVE.read_text(encoding="utf-8")
-        self.assertIn(GROK_ORIGIN, text)
+        self.assertIn(KIMI_ORIGIN, text)
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
-        self.assertIn("Never stamp a Claude or Codex origin marker from this session", text)
-        self.assertIn("$ARGUMENTS", text)
+        self.assertNotIn(GROK_ORIGIN, text)
+        self.assertIn(
+            "Never stamp a Claude, Codex, or Grok origin marker from this session",
+            text,
+        )
+        # Copilot skills receive no substituted arguments; the skill must say
+        # so rather than read a $ARGUMENTS nothing sets.
+        self.assertNotIn("$ARGUMENTS", text)
+        self.assertIn("no substituted arguments", text)
 
     def test_solve_forbids_reviewing_the_pull_request(self):
         text = SOLVE.read_text(encoding="utf-8")
@@ -192,17 +299,18 @@ class SolveOriginTests(unittest.TestCase):
 
 
 class AutosolveReviewerTests(unittest.TestCase):
-    def test_autosolve_requires_grok_origin_and_codex_route(self):
+    def test_autosolve_requires_kimi_origin_and_codex_route(self):
         text = AUTOSOLVE.read_text(encoding="utf-8")
-        self.assertIn(GROK_ORIGIN, text)
-        self.assertIn('"origin": "grok"', text)
+        self.assertIn(KIMI_ORIGIN, text)
+        self.assertIn('"origin": "kimi"', text)
         self.assertIn('"route": "codex"', text)
         self.assertIn("reviewers=codex", text)
-        self.assertIn("ISSUE=\"$ARGUMENTS\"", text)
-        self.assertIn("--expected-origin grok", text)
+        self.assertNotIn('"$ARGUMENTS"', text)
+        self.assertIn("--expected-origin kimi", text)
         self.assertIn("--expected-route codex", text)
         self.assertNotIn(CLAUDE_ORIGIN, text)
         self.assertNotIn(CODEX_ORIGIN, text)
+        self.assertNotIn(GROK_ORIGIN, text)
         self.assertIn("does not package /push-docs", text)
         self.assertNotIn("land it\n  with /push-docs", text)
         self.assertIn("Do\n  not reclaim the issue", text)
@@ -231,19 +339,21 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn('python3 "$COORDINATOR"', text)
         self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text)
         self.assertNotIn("$CODEX_HOME", text)
-        self.assertIn("Never fall back to a\nClaude or Codex plugin path", text)
+        self.assertNotIn("$GROK_HOME", text)
+        self.assertIn("Never fall back to a\nClaude, Codex, or Grok plugin path", text)
         self.assertIn("installed-plugins/kanban-<hash>", text)
-        self.assertIn("$GROK_PLUGIN_ROOT", text)
+        self.assertIn("$KIMI_PLUGIN_ROOT", text)
         self.assertIn("ambiguous Kanban installs", text)
-        self.assertIn('glob("kanban-*/" + relative.as_posix())', text)
-        self.assertIn(GROK_COORDINATOR_PYTHON, text)
+        self.assertIn('"kanban-*/" + relative.as_posix()', text)
+        self.assertIn(KIMI_COORDINATOR_PYTHON, text)
 
 
 class AutosolveCoordinatorLookupTests(unittest.TestCase):
     """The autosolve coordinator locator is the same fail-closed Python as
     /solve's helper lookup, with a different relative path. String search
-    cannot prove it prefers $GROK_PLUGIN_ROOT, finds one hashed install, or
-    refuses two kanban-* matches — these run the fenced locator itself."""
+    cannot prove it prefers $KIMI_PLUGIN_ROOT, reads the recorded local
+    marketplace path, finds one hashed install, or refuses two kanban-*
+    matches — these run the fenced locator itself."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -253,7 +363,7 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.workdir.mkdir()
 
     def install_hashed(self, home: Path, name: str = "kanban-b0441dc6") -> Path:
-        installed = home / ".grok" / "installed-plugins" / name / "scripts"
+        installed = home / ".copilot" / "installed-plugins" / name / "scripts"
         installed.mkdir(parents=True)
         target = installed / "review_pr.py"
         target.write_text("print('coordinator')\n", encoding="utf-8")
@@ -266,10 +376,27 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         target.write_text("print('coordinator')\n", encoding="utf-8")
         return target
 
-    def run_locator(self, plugin_root: str, grok_home: str):
+    def register_local_marketplace(self, home: Path, marketplace: Path) -> None:
+        copilot_home = home / ".copilot"
+        copilot_home.mkdir(parents=True, exist_ok=True)
+        (copilot_home / "settings.json").write_text(
+            json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "directory", "path": str(marketplace)}
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def run_locator(self, plugin_root: str, copilot_home: str):
         return subprocess.run(
-            ["python3", "-", plugin_root, grok_home],
-            input=GROK_COORDINATOR_PYTHON,
+            ["python3", "-", plugin_root, copilot_home],
+            input=KIMI_COORDINATOR_PYTHON,
             capture_output=True,
             text=True,
             cwd=str(self.workdir),
@@ -278,52 +405,154 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
 
     def test_the_autosolve_skill_declares_the_lookup_it_is_tested_with(self):
         self.assertIn(
-            GROK_COORDINATOR_PYTHON,
+            KIMI_COORDINATOR_PYTHON,
             AUTOSOLVE.read_text(encoding="utf-8"),
-            "the Grok autosolve skill must prefer $GROK_PLUGIN_ROOT, else one hashed install",
+            "the Kimi autosolve skill must prefer $KIMI_PLUGIN_ROOT, then the "
+            "recorded local marketplace path, else one hashed install",
         )
 
     def test_the_lookup_resolves_from_a_hashed_install(self):
-        home = self.root / "grok-home"
+        home = self.root / "copilot-home"
         expected = self.install_hashed(home)
-        proc = self.run_locator("", str(home / ".grok"))
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_the_lookup_resolves_from_the_recorded_local_marketplace(self):
+        home = self.root / "copilot-local"
+        expected = self.install_marketplace_source(self.root)
+        self.register_local_marketplace(home, self.root / "marketplace")
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_non_directory_marketplace_source_refuses_without_glob_fallback(self):
+        home = self.root / "copilot-remote"
+        self.install_hashed(home)
+        copilot_home = home / ".copilot"
+        (copilot_home).mkdir(parents=True, exist_ok=True)
+        (copilot_home / "settings.json").write_text(
+            json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "github", "repo": "coghex/kanban"}
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        proc = self.run_locator("", str(copilot_home))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("do not name kanban-kimi as a directory source", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_settings_without_a_kimi_entry_fall_through_to_the_glob(self):
+        home = self.root / "copilot-unrelated-marketplace"
+        expected = self.install_hashed(home)
+        copilot_home = home / ".copilot"
+        (copilot_home / "settings.json").write_text(
+            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
+            encoding="utf-8",
+        )
+        proc = self.run_locator("", str(copilot_home))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_malformed_settings_refuse_without_glob_fallback(self):
+        cases = {
+            "invalid-json": "{",
+            "non-object": json.dumps([]),
+            "marketplaces-not-object": json.dumps({"extraKnownMarketplaces": []}),
+            "entry-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-kimi": []}}
+            ),
+            "source-not-directory": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {"source": {"source": "github"}}
+                    }
+                }
+            ),
+            "relative-path": json.dumps(
+                {
+                    "extraKnownMarketplaces": {
+                        "kanban-kimi": {
+                            "source": {"source": "directory", "path": "relative"}
+                        }
+                    }
+                }
+            ),
+        }
+        for name, contents in cases.items():
+            with self.subTest(case=name):
+                home = self.root / f"copilot-malformed-{name}"
+                self.install_hashed(home)
+                settings = home / ".copilot" / "settings.json"
+                settings.write_text(contents + "\n", encoding="utf-8")
+                proc = self.run_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("Copilot settings", proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_dangling_settings_symlink_refuses_without_glob_fallback(self):
+        home = self.root / "copilot-dangling-settings"
+        self.install_hashed(home)
+        settings = home / ".copilot" / "settings.json"
+        settings.symlink_to(settings.with_name("missing-settings.json"))
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("Copilot settings", proc.stderr)
+        self.assertIn("unreadable", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_recorded_marketplace_missing_the_helper_refuses_without_fallback(self):
+        home = self.root / "copilot-marketplace-missing-helper"
+        self.install_hashed(home)
+        marketplace = self.root / "empty-marketplace"
+        marketplace.mkdir()
+        self.register_local_marketplace(home, marketplace)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_the_lookup_uses_plugin_root_for_a_marketplace_source_outside_home(self):
-        home = self.root / "grok-empty-home"
+        home = self.root / "copilot-empty-home"
         home.mkdir()
         expected = self.install_marketplace_source(self.root)
         plugin_root = expected.parents[1]  # .../plugins/kanban
-        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        proc = self.run_locator(str(plugin_root), str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_plugin_root_wins_over_a_hashed_install(self):
-        home = self.root / "grok-both"
+        home = self.root / "copilot-both"
         self.install_hashed(home)
         expected = self.install_marketplace_source(self.root)
         plugin_root = expected.parents[1]
-        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        proc = self.run_locator(str(plugin_root), str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_the_lookup_fails_closed_when_two_kanban_installs_match(self):
-        home = self.root / "grok-ambiguous"
+        home = self.root / "copilot-ambiguous"
         first = self.install_hashed(home)
         self.install_hashed(home, "kanban-aaaaaaaa")
-        proc = self.run_locator("", str(home / ".grok"))
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("ambiguous Kanban installs", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
         self.assertTrue(first.is_file())
 
     def test_the_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
-        home = self.root / "grok-competitor"
+        home = self.root / "copilot-competitor"
         expected = self.install_hashed(home)
         other = (
             home
-            / ".grok"
+            / ".copilot"
             / "installed-plugins"
             / "otherplugin-deadbeef"
             / "scripts"
@@ -331,35 +560,33 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         )
         other.parent.mkdir(parents=True)
         other.write_text("print('other')\n", encoding="utf-8")
-        proc = self.run_locator("", str(home / ".grok"))
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_the_lookup_fails_closed_when_no_install_matches(self):
-        home = self.root / "grok-empty"
-        (home / ".grok" / "installed-plugins").mkdir(parents=True)
-        proc = self.run_locator("", str(home / ".grok"))
+        home = self.root / "copilot-empty"
+        (home / ".copilot" / "installed-plugins").mkdir(parents=True)
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn(
-            "coordinator was not found under $GROK_HOME/installed-plugins/kanban-*",
-            proc.stderr,
-        )
+        self.assertIn("coordinator was not found:", proc.stderr)
+        self.assertIn("$KIMI_PLUGIN_ROOT is unset", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
     def test_plugin_root_fails_closed_when_the_relative_path_is_missing(self):
-        home = self.root / "grok-missing"
+        home = self.root / "copilot-missing"
         home.mkdir()
         plugin_root = self.root / "marketplace" / "plugins" / "kanban"
         plugin_root.mkdir(parents=True)
-        proc = self.run_locator(str(plugin_root), str(home / ".grok"))
+        proc = self.run_locator(str(plugin_root), str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("coordinator was not found at", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
 
-def load_grok_review_pr():
+def load_kimi_review_pr():
     spec = importlib.util.spec_from_file_location(
-        "kanban_grok_plugin_review_pr", COORDINATOR
+        "kanban_kimi_plugin_review_pr", COORDINATOR
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -377,7 +604,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.module = load_grok_review_pr()
+        self.module = load_kimi_review_pr()
         self.calls = []
         dual = self.module.kanban_models().DUAL_MODE
         self.operating = mock.patch.object(
@@ -464,16 +691,28 @@ class ExpectedRouteBindingTests(unittest.TestCase):
 
     def test_a_drifted_origin_refuses_before_spawning_claude(self):
         code, result = self.run_workflow(
-            origin="claude", expected_origin="grok", expected_route="codex"
+            origin="claude", expected_origin="kimi", expected_route="codex"
         )
         self.assert_mismatch(code, result, "claude", "codex")
         self.assertIn("no reviewer was spawned", result["error"])
 
     def test_an_unknown_origin_refuses_before_the_dual_route_can_spawn_claude(self):
         code, result = self.run_workflow(
-            origin=None, expected_origin="grok", expected_route="codex"
+            origin=None, expected_origin="kimi", expected_route="codex"
         )
         self.assert_mismatch(code, result, "unknown", "codex+claude")
+        self.assertIn("no reviewer was spawned", result["error"])
+
+    def test_a_route_only_drift_refuses_before_spawning_claude(self):
+        single = self.module.kanban_models().SINGLE_AGENT_MODE
+        with mock.patch.object(
+            self.module, "operating_mode", return_value=(single, ("claude",))
+        ):
+            code, result = self.run_workflow(
+                origin="kimi", expected_origin="kimi", expected_route="codex"
+            )
+        self.assert_mismatch(code, result, "kimi", "claude")
+        self.assertIn("does not match --expected-route", result["error"])
         self.assertIn("no reviewer was spawned", result["error"])
 
     def test_publication_refuses_if_origin_drifts_after_review(self):
@@ -498,13 +737,13 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                         Path("/fake-repo"),
                         "coghex/kanban",
                         7,
-                        self.pr("grok"),
+                        self.pr("kimi"),
                         gate,
                         [self.module.CODEX_REVIEWER],
                         [{"verdict": "APPROVE", "summary": "ok", "blocking_concerns": []}],
                         {"pr": 7},
                         allow_no_issue=True,
-                        expected_origin="grok",
+                        expected_origin="kimi",
                         expected_route="codex",
                     )
         self.assertEqual(code, 1)
@@ -512,8 +751,56 @@ class ExpectedRouteBindingTests(unittest.TestCase):
         self.assertEqual(result["origin"], "unknown")
         self.assertEqual(self.calls, [])
 
+    def test_publication_refuses_a_route_only_drift_before_writing(self):
+        kimi_pr = self.pr("kimi")
+        gate = {
+            "allow_no_issue": True,
+            "approved": True,
+            "checks": [],
+            "invalid_links": [],
+            "issues": [],
+            "key": "deadbeef",
+            "overridden_issues": [],
+            "override_issue_gate": False,
+            "override_reason": None,
+        }
+        single = self.module.kanban_models().SINGLE_AGENT_MODE
+        with mock.patch.object(self.module, "pr_view", return_value=kimi_pr):
+            with mock.patch.object(
+                self.module, "operating_mode", return_value=(single, ("claude",))
+            ):
+                with mock.patch.object(self.module, "gate_status", return_value=gate):
+                    with mock.patch.object(
+                        self.module, "resolve_workflow_labels", return_value=("a", "c")
+                    ):
+                        code, result = self.module.publish_results(
+                            Path("/fake-repo"),
+                            "coghex/kanban",
+                            7,
+                            kimi_pr,
+                            gate,
+                            [self.module.CODEX_REVIEWER],
+                            [
+                                {
+                                    "verdict": "APPROVE",
+                                    "summary": "ok",
+                                    "blocking_concerns": [],
+                                }
+                            ],
+                            {"pr": 7},
+                            allow_no_issue=True,
+                            expected_origin="kimi",
+                            expected_route="codex",
+                        )
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "route_mismatch")
+        self.assertEqual(result["origin"], "kimi")
+        self.assertEqual(result["route"], "claude")
+        self.assertIn("does not match --expected-route", result["error"])
+        self.assertEqual(self.calls, [])
+
     def test_publication_refuses_origin_drift_on_a_later_reread(self):
-        grok_pr = self.pr("grok")
+        kimi_pr = self.pr("kimi")
         drifted = self.pr(None)
         gate = {
             "allow_no_issue": True,
@@ -527,7 +814,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
             "override_reason": None,
         }
         with mock.patch.object(
-            self.module, "pr_view", side_effect=[grok_pr, drifted]
+            self.module, "pr_view", side_effect=[kimi_pr, drifted]
         ):
             with mock.patch.object(self.module, "gate_status", return_value=gate):
                 with mock.patch.object(
@@ -538,7 +825,7 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                             Path("/fake-repo"),
                             "coghex/kanban",
                             7,
-                            grok_pr,
+                            kimi_pr,
                             gate,
                             [self.module.CODEX_REVIEWER],
                             [
@@ -552,14 +839,14 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                             ],
                             {"pr": 7},
                             allow_no_issue=True,
-                            expected_origin="grok",
+                            expected_origin="kimi",
                             expected_route="codex",
                         )
         self.assertIn("does not match --expected-origin", str(raised.exception))
         self.assertEqual(self.calls, [])
 
-    def test_a_matching_grok_codex_binding_is_not_a_mismatch(self):
-        with mock.patch.object(self.module, "pr_view", return_value=self.pr("grok")):
+    def test_a_matching_kimi_codex_binding_is_not_a_mismatch(self):
+        with mock.patch.object(self.module, "pr_view", return_value=self.pr("kimi")):
             with mock.patch.object(self.module, "collect_context") as collect:
                 collect.side_effect = RuntimeError("stop after the binding check")
                 with self.assertRaises(RuntimeError):
@@ -569,15 +856,15 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                         rereview=False,
                         dry_run=False,
                         allow_no_issue=True,
-                        expected_origin="grok",
+                        expected_origin="kimi",
                         expected_route="codex",
                     )
                 collect.assert_called()
 
-    def test_pr_origin_keeps_a_cross_repository_grok_marker(self):
+    def test_pr_origin_keeps_cross_repository_external_markers(self):
         self.assertEqual(
-            self.module.pr_origin(self.pr("grok", cross_repository=True)),
-            "grok",
+            self.module.pr_origin(self.pr("kimi", cross_repository=True)),
+            "kimi",
         )
         self.assertIsNone(
             self.module.pr_origin(self.pr("claude", cross_repository=True))
@@ -586,18 +873,22 @@ class ExpectedRouteBindingTests(unittest.TestCase):
             self.module.pr_origin(self.pr("codex", cross_repository=True))
         )
         self.assertEqual(
-            self.module.pr_origin(self.pr("grok", cross_repository=False)),
+            self.module.pr_origin(self.pr("grok", cross_repository=True)),
             "grok",
         )
+        self.assertEqual(
+            self.module.pr_origin(self.pr("kimi", cross_repository=False)),
+            "kimi",
+        )
 
-    def test_a_cross_repository_grok_origin_still_routes_to_codex(self):
+    def test_a_cross_repository_kimi_origin_still_routes_to_codex(self):
         # /solve opens a fork PR with --head <push-owner>:<branch>, which GitHub
-        # reports as isCrossRepository. That must not wipe a grok marker: the
+        # reports as isCrossRepository. That must not wipe a kimi marker: the
         # unknown dual-mode route is codex+claude, and /autosolve refuses it.
         with mock.patch.object(
             self.module,
             "pr_view",
-            return_value=self.pr("grok", cross_repository=True),
+            return_value=self.pr("kimi", cross_repository=True),
         ):
             with mock.patch.object(self.module, "collect_context") as collect:
                 collect.side_effect = RuntimeError("stop after the binding check")
@@ -608,15 +899,15 @@ class ExpectedRouteBindingTests(unittest.TestCase):
                         rereview=False,
                         dry_run=False,
                         allow_no_issue=True,
-                        expected_origin="grok",
+                        expected_origin="kimi",
                         expected_route="codex",
                     )
                 collect.assert_called()
                 self.assertEqual(self.calls, [])
 
-    def test_a_cross_repository_non_grok_marker_stays_unknown(self):
+    def test_a_cross_repository_non_kimi_marker_stays_unknown(self):
         code, result = self.run_workflow_cross(
-            origin="claude", expected_origin="grok", expected_route="codex"
+            origin="claude", expected_origin="kimi", expected_route="codex"
         )
         self.assert_mismatch(code, result, "unknown", "codex+claude")
         self.assertIn("no reviewer was spawned", result["error"])
@@ -638,11 +929,11 @@ class ExpectedRouteBindingTests(unittest.TestCase):
             )
 
 
-# The whole tracked Grok tree, not just plugins/kanban/: marketplace.json
-# and grok-plugin/README.md live outside that inner prefix and still ship.
-BUNDLE_PREFIX = "grok-plugin"
+# The whole tracked Kimi tree, not just plugins/kanban/: marketplace.json
+# and kimi-plugin/README.md live outside that inner prefix and still ship.
+BUNDLE_PREFIX = "kimi-plugin"
 ORIGINAL_BUNDLE_VERSION = "1.0.0"
-BUNDLE_README_PATH = "grok-plugin/README.md"
+BUNDLE_README_PATH = "kimi-plugin/README.md"
 
 
 class BundleVersionGateTests(unittest.TestCase):
@@ -678,7 +969,7 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.marketplace.write_text(
             json.dumps(
                 {
-                    "name": "kanban",
+                    "name": "kanban-kimi",
                     "plugins": [{"name": "kanban", "version": ORIGINAL_BUNDLE_VERSION}],
                 }
             )
@@ -718,13 +1009,13 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.assertIn(f"{SKILLS_PREFIX}/solve/SKILL.md", failures[0])
 
     def test_an_outer_tree_marketplace_change_without_a_bump_fails(self):
-        # marketplace.json lives under grok-plugin/.grok-plugin/, outside
+        # marketplace.json lives under kimi-plugin/.github/plugin/, outside
         # plugins/kanban/. A prefix that stopped at the inner plugin directory
         # would miss this edit and leave the gate green.
         self.marketplace.write_text(
             json.dumps(
                 {
-                    "name": "kanban",
+                    "name": "kanban-kimi",
                     "description": "revised",
                     "plugins": [{"name": "kanban", "version": ORIGINAL_BUNDLE_VERSION}],
                 }
@@ -755,7 +1046,7 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         self.marketplace.write_text(
             json.dumps(
                 {
-                    "name": "kanban",
+                    "name": "kanban-kimi",
                     "description": "revised",
                     "plugins": [{"name": "kanban", "version": "1.1.0"}],
                 }
@@ -765,3 +1056,7 @@ class PlantedBundleVersionGateTests(unittest.TestCase):
         )
         self.write_manifest("1.1.0")
         self.assertEqual(self.failures(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
