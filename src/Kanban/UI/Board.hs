@@ -12,6 +12,7 @@ module Kanban.UI.Board
     columnItemHeight,
     columnScrollStep,
     columnWindowFor,
+    unmeasuredLayoutInputs,
     drawColumnItem,
     refreshColumnWindows,
     completedLoadingHeading,
@@ -771,6 +772,19 @@ drawBoardBottom state columnWidths =
 -- a stale measurement from ever drawing a wrong frame.
 drawColumn :: AppState -> Int -> BoardColumn -> Widget Name
 drawColumn state columnWidth column =
+  BrickTypes.Widget BrickTypes.Fixed BrickTypes.Greedy $ do
+    context <- BrickTypes.getContext
+    BrickTypes.render (drawColumnRows state columnWidth (BrickTypes.availHeight context) column)
+
+-- | The column, given the rows its viewport will show.
+--
+-- The height is read from the context rather than from the measurement: it is
+-- the rows this very frame has, and the viewport inside takes exactly them.
+-- Recording it with the measurement instead would leave the one number a
+-- stale value cannot be widened around, since a viewport that grew between
+-- two frames crops rows past anything the older height could have covered.
+drawColumnRows :: AppState -> Int -> Int -> BoardColumn -> Widget Name
+drawColumnRows state columnWidth viewportRows column =
   columnVisibility
     . hLimit columnWidth
     . clickable (ColumnViewport column)
@@ -783,7 +797,7 @@ drawColumn state columnWidth column =
     -- overlay: it is drawn first, so the cards below move down by exactly its
     -- rendered height and a resize rewraps both.
     searchRows = maybe [] (pure . drawSearchBox state columnWidth) (searchQueryFor state column)
-    body = columnBody state column columnWidth
+    body = columnBody state column columnWidth viewportRows
     entryRows
       | null body = [emptyColumnRow state column]
       | otherwise = map drawPiece body
@@ -810,12 +824,17 @@ data ColumnPiece
 -- did. With one it names the items the viewport can reach and blank runs of
 -- exactly the height of everything it skipped, so the body stays exactly as
 -- tall as it was and every drawn item stays at exactly the row it was at.
-columnBody :: AppState -> BoardColumn -> Int -> [ColumnPiece]
-columnBody state column columnWidth = case columnWindowFor state column columnWidth of
+columnBody :: AppState -> BoardColumn -> Int -> Int -> [ColumnPiece]
+columnBody state column columnWidth viewportRows = case columnWindowFor state column columnWidth of
   Nothing -> map ColumnDrawn (columnItemsIn (expandedTrackersFor state column) (entriesFor state column))
   Just window
     | Vector.null window.windowItems -> []
-    | otherwise -> laidOut window (drawnItemRanges state column window)
+    -- Brick resets a viewport whose content is shorter than itself to the top,
+    -- which is the one offset the ranges do not enumerate. A body that short
+    -- is at most a viewport's worth of items, so drawing it whole both covers
+    -- that reset and stays inside the bound.
+    | contentRows window <= viewportRows -> map ColumnDrawn (Vector.toList window.windowItems)
+    | otherwise -> laidOut window (drawnItemRanges state column window viewportRows)
 
 -- | The pieces covering a whole body, given the item ranges to build.
 laidOut :: ColumnWindow -> [(Int, Int)] -> [ColumnPiece]
@@ -830,8 +849,9 @@ laidOut window = walk 0
     blank rows = [ColumnBlank rows | rows > 0]
 
 -- | The items one frame of @column@ builds for real.
-columnBodyItems :: AppState -> BoardColumn -> Int -> [ColumnItem]
-columnBodyItems state column columnWidth = [item | ColumnDrawn item <- columnBody state column columnWidth]
+columnBodyItems :: AppState -> BoardColumn -> Int -> Int -> [ColumnItem]
+columnBodyItems state column columnWidth viewportRows =
+  [item | ColumnDrawn item <- columnBody state column columnWidth viewportRows]
 
 -- | A blank run exactly @rows@ rows tall, at the width the column gives it.
 --
@@ -863,35 +883,55 @@ emptyColumnRows = 3
 -- | The items a frame builds for real, as disjoint closed ranges into the
 -- measurement, in order.
 --
--- Two reaches, because two different things can move the viewport between the
--- measurement and the crop this frame is about to be given.
+-- The offset this frame is cropped at is not the one that was read back:
+-- brick chooses it during this very render, after the measurement was taken.
+-- So the ranges cover every offset it can choose, which is a closed set.
 --
--- The first is the viewport where the last frame left it, widened by one
--- wheel step either way. A wheel press is dispatched as a brick scroll
--- request and applied inside the very render this range is chosen for, so the
--- offset this frame is cropped at can be one step away from the one that was
--- read back.
+--   * The recorded offset itself, when nothing moves it. Brick leaves an
+--     untouched offset exactly where it is, even one the content has since
+--     shrunk past.
+--   * The recorded offset one wheel step either way, clamped the way
+--     'Brick.Widgets.Core.viewport' clamps a scroll request -- to zero, and to
+--     the last offset the content can be shown at. That clamp is what makes a
+--     press after the content shrank land somewhere other than beside the
+--     recorded offset.
+--   * Everywhere a pending scroll-into-view can put it. Brick honors a
+--     'visible' request by moving the offset just far enough to show the
+--     widget that asked, so the reachable offsets run from a viewport ending
+--     at the selected card to one starting at it. Covering them is what keeps
+--     the card the selection just moved to from arriving in a blank run.
 --
--- The second is everywhere a pending scroll-into-view can put the viewport.
--- Brick honors a 'visible' request by moving the offset just far enough to
--- show the widget that asked, so the reachable rows run from a viewport
--- ending at the selected card to one starting at it. Making all of them real
--- is what keeps the card the selection just moved to from arriving in a blank
--- run.
+-- The one offset brick chooses that is not in that set is the reset to the top
+-- it performs when the whole content is shorter than the viewport -- and a
+-- body that short is drawn complete by the caller, so it is covered by not
+-- being windowed at all.
 --
 -- Kept apart rather than spanned. A selection at the far end of a long column
 -- from the viewport is exactly the case a single covering range would answer
 -- with the whole column -- which is the cost this whole measurement exists to
--- avoid -- so the two are merged only where they actually meet.
-drawnItemRanges :: AppState -> BoardColumn -> ColumnWindow -> [(Int, Int)]
-drawnItemRanges state column window = mergeRanges (scrollReach : selectionReach)
+-- avoid -- so the reaches are merged only where they actually meet.
+drawnItemRanges :: AppState -> BoardColumn -> ColumnWindow -> Int -> [(Int, Int)]
+drawnItemRanges state column window viewportRows = mergeRanges (scrollReaches <> selectionReach)
   where
-    viewTop = window.windowTop - window.windowLeading
-    viewRows = max 1 window.windowViewportRows
-    scrollReach = itemsBetween window (viewTop - columnScrollStep) (viewTop + viewRows + columnScrollStep)
+    viewRows = max 1 viewportRows
+    lastOffset = max 0 (contentRows window - viewRows)
+    clampOffset value = max 0 (min lastOffset value)
+    offsets =
+      [ window.windowTop,
+        clampOffset (window.windowTop + columnScrollStep),
+        clampOffset (window.windowTop - columnScrollStep)
+      ]
+    scrollReaches = map reachFrom offsets
+    reachFrom offset =
+      itemsBetween window (offset - window.windowLeading) (offset - window.windowLeading + viewRows)
     selectionReach = case selectedItemExtent state column window of
       Nothing -> []
       Just (top, bottom) -> [itemsBetween window (top - viewRows) (bottom + viewRows)]
+
+-- | The rows a measured column's viewport content occupies: its body, and the
+-- padding and search box above it.
+contentRows :: ColumnWindow -> Int
+contentRows window = window.windowLeading + window.windowTotal
 
 -- | Ranges in ascending order, with overlapping and touching ones joined, so
 -- no item is drawn twice and the blank runs between them are the rows nothing
@@ -1055,15 +1095,44 @@ columnWindowFor state column columnWidth = do
 measurementExpired :: AppState -> ColumnWindow -> Bool
 measurementExpired state window = maybe False (state.appNow >=) window.windowDeadline
 
--- | Everything the measurement of one column at one width was taken from.
+-- | Everything the measurement of one column at one width was taken from,
+-- as three values a frame compares in constant time.
 columnSignature :: AppState -> BoardColumn -> Int -> ColumnSignature
 columnSignature state column columnWidth =
   ColumnSignature
     { signatureContent = columnContentKey state column,
       signatureWidth = columnWidth,
-      signatureAscii = state.appOptions.optionAscii,
-      signatureExcerptLines = cardExcerptLimit state.appConfig,
-      signatureBadges = columnBadgeWidths state
+      signatureLayout = state.appLayoutEpoch
+    }
+
+-- | The board-wide inputs a column measurement is taken under.
+--
+-- Collected once per event rather than per frame. The badge maps are the
+-- reason: a badge takes cells from the width a card wraps at, so its presence
+-- belongs to a measurement, and reading it costs the sessions a dashboard is
+-- holding. That is a handful even after a long run, and never a function of
+-- the repository -- but it is not constant, so a frame reads
+-- 'appLayoutEpoch' instead and this is what moves it.
+layoutInputs :: AppState -> LayoutInputs
+layoutInputs state =
+  LayoutInputs
+    { layoutBadges = columnBadgeWidths state,
+      layoutAscii = state.appOptions.optionAscii,
+      layoutExcerptLines = cardExcerptLimit state.appConfig
+    }
+
+-- | The layout inputs a dashboard has before anything has been measured or
+-- any agent session started: no badges, and whatever glyph set and excerpt
+-- budget it launched under.
+--
+-- The one place a fresh 'appLayoutInputs' is spelled, so a launch and a test
+-- seat it identically and the first settle finds nothing to move.
+unmeasuredLayoutInputs :: Options -> ResolvedConfig -> LayoutInputs
+unmeasuredLayoutInputs options config =
+  LayoutInputs
+    { layoutBadges = ColumnBadges Map.empty Map.empty Map.empty,
+      layoutAscii = options.optionAscii,
+      layoutExcerptLines = cardExcerptLimit config
     }
 
 columnBadgeWidths :: AppState -> ColumnBadges
@@ -1081,8 +1150,8 @@ columnBadgeWidths state =
 -- column once per change to what it shows -- a refresh, a criteria or query
 -- edit, an expansion, a resize, a badge appearing, or the earliest relative
 -- age on it changing wording -- and nothing per frame in between.
-measureColumnWindow :: AppState -> BoardColumn -> Int -> Int -> Int -> ColumnWindow
-measureColumnWindow state column columnWidth viewportRows top =
+measureColumnWindow :: AppState -> BoardColumn -> Int -> Int -> ColumnWindow
+measureColumnWindow state column columnWidth top =
   ColumnWindow
     { windowSignature = columnSignature state column columnWidth,
       windowItems = Vector.fromList items,
@@ -1094,8 +1163,7 @@ measureColumnWindow state column columnWidth viewportRows top =
       windowShownCount = length entries,
       windowAdmittedCount = length (entriesForBoard state.appVisibleBoard column),
       windowDeadline = deadline,
-      windowTop = top,
-      windowViewportRows = viewportRows
+      windowTop = top
     }
   where
     entries = entriesFor state column
@@ -1129,8 +1197,14 @@ searchBoxFrameRows = 3
 -- earliest such boundary in a column is what dates that column's measurement:
 -- before it no card's wording -- and so no card's wrapping, and so no card's
 -- height -- can have moved.
+--
+-- Counted forward from @updatedAt@ rather than from @now@. The boundaries are
+-- whole steps from the timestamp and an age is a fraction of a second wide, so
+-- adding a whole number of seconds to @now@ instead would put the deadline up
+-- to a second past the boundary and let an event in that gap reuse heights the
+-- wording had already outgrown.
 nextRelativeAgeChange :: UTCTime -> UTCTime -> UTCTime
-nextRelativeAgeChange now updatedAt = addUTCTime (fromIntegral (step - (seconds `mod` step))) now
+nextRelativeAgeChange now updatedAt = addUTCTime (fromIntegral ((seconds `div` step + 1) * step)) updatedAt
   where
     seconds = max 0 (floor (diffUTCTime now updatedAt) :: Int)
     step
@@ -1151,18 +1225,30 @@ nextRelativeAgeChange now updatedAt = addUTCTime (fromIntegral (step - (seconds 
 -- offset and viewport height move with the frame, which is what a wheel
 -- press and a resize of the terminal's height cost, and neither is a reason
 -- to lay the column out again.
-refreshColumnWindows :: [(BoardColumn, Maybe (Int, Int, Int))] -> AppState -> AppState
-refreshColumnWindows geometry state = state {appColumnWindows = foldl settle state.appColumnWindows geometry}
+refreshColumnWindows :: [(BoardColumn, Maybe (Int, Int))] -> AppState -> AppState
+refreshColumnWindows geometry state = settled {appColumnWindows = foldl settle settled.appColumnWindows geometry}
   where
+    -- The board-wide inputs first, because every column signature below reads
+    -- the epoch this decides.
+    settled = settleLayoutEpoch state
     settle windows (column, Nothing) = Map.delete column windows
-    settle windows (column, Just (columnWidth, viewportRows, top)) =
-      Map.insert column (settled column columnWidth viewportRows top (Map.lookup column windows)) windows
-    settled column columnWidth viewportRows top existing = case existing of
+    settle windows (column, Just (columnWidth, top)) =
+      Map.insert column (settleColumn column columnWidth top (Map.lookup column windows)) windows
+    settleColumn column columnWidth top existing = case existing of
       Just window
-        | window.windowSignature == columnSignature state column columnWidth,
-          not (measurementExpired state window) ->
-            window {windowTop = top, windowViewportRows = viewportRows}
-      _ -> measureColumnWindow state column columnWidth viewportRows top
+        | window.windowSignature == columnSignature settled column columnWidth,
+          not (measurementExpired settled window) ->
+            window {windowTop = top}
+      _ -> measureColumnWindow settled column columnWidth top
+
+-- | Move 'appLayoutEpoch' when the board-wide inputs to a column measurement
+-- have moved, and record what they are now.
+settleLayoutEpoch :: AppState -> AppState
+settleLayoutEpoch state
+  | inputs == state.appLayoutInputs = state
+  | otherwise = state {appLayoutEpoch = state.appLayoutEpoch + 1, appLayoutInputs = inputs}
+  where
+    inputs = layoutInputs state
 
 -- | What a column with nothing in it says, in §7's declared precedence.
 --

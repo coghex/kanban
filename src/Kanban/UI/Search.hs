@@ -249,16 +249,18 @@ selectableRows state column = visibleRowsIn (expandedTrackersFor state column) (
 -- empty narrows nothing and still takes rows from the top of the column.
 --
 -- This is what a column measurement is validated against
--- ("Kanban.UI.Types.ColumnSignature"), so it is deliberately built from
--- inputs rather than from anything derived: comparing the raw expanded set
--- and an epoch costs nothing, while comparing what a query left visible would
--- cost the pass the measurement exists to avoid.
+-- ("Kanban.UI.Types.ColumnSignature") on every frame, so it is built from
+-- inputs rather than from anything derived, and from counters rather than
+-- from the collections they stand for. Comparing what a query left visible
+-- would cost the pass the measurement exists to avoid; comparing the expanded
+-- set itself would cost a walk over every epic the user has open, which on a
+-- board of epics is a walk over the board.
 columnContentKey :: AppState -> BoardColumn -> ColumnContentKey
 columnContentKey state column =
   ColumnContentKey
     { contentEpoch = state.appBoardEpoch,
       contentQuery = searchQueryFor state column,
-      contentExpanded = state.appExpandedTrackers
+      contentExpansion = state.appExpansionEpoch
     }
 
 -- | The count in a column's heading.

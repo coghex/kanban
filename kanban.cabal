@@ -320,6 +320,7 @@ test-suite kanban-test
     Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe
+    Spec.Support.Dashboard
     Spec.Support.Env
     Spec.Support.Expect
     Spec.Support.Fixtures
@@ -365,6 +366,7 @@ test-suite kanban-test
     brick                 >= 2.6 && < 2.11,
     bytestring,
     containers,
+    deepseq               >= 1.5 && < 1.7,
     directory,
     filepath,
     hspec                 >= 2.11 && < 2.12,
@@ -372,6 +374,7 @@ test-suite kanban-test
     kanban:kanban-internal,
     optparse-applicative,
     process,
+    stm                   >= 2.5 && < 2.6,
     text,
     time,
     unix,

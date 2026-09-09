@@ -80,6 +80,7 @@ import Kanban.UI.Board
     drainerLabel,
     openDataLoadingHeading,
     openDataUnavailableHeading,
+    unmeasuredLayoutInputs,
     updateLabel,
     usageSidebarInterior,
     usageSidebarWidth,
@@ -1494,6 +1495,9 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       -- Unmeasured on purpose: a golden frame is the whole column laid out,
       -- which is what makes it the reference the windowed body is held to.
       appColumnWindows = Map.empty,
+      appExpansionEpoch = 0,
+      appLayoutEpoch = 0,
+      appLayoutInputs = unmeasuredLayoutInputs testOptions testResolvedConfig,
       appFilterCriteria = defaultFilterCriteria,
       appFilterPanel = Nothing,
       appUsage = fixtureUsage,

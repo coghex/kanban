@@ -137,15 +137,20 @@ handleEvent event = do
 -- produce.
 --
 -- The geometry is brick's own, read back from the frame before this one:
--- 'lookupViewport' answers with the width a column was given, the rows its
--- viewport showed, and the offset it ended at. Taking it from brick rather
--- than recomputing it is what keeps the measurement at the width the column
--- is actually drawn at -- a responsive width this would otherwise have to
--- derive a second time, and could derive differently.
+-- 'lookupViewport' answers with the width a column was given and the offset
+-- it ended at. Taking it from brick rather than recomputing it is what keeps
+-- the measurement at the width the column is actually drawn at -- a
+-- responsive width this would otherwise have to derive a second time, and
+-- could derive differently.
 --
--- Reading it back is also why the frame widens the range it draws for real:
--- this is the previous frame's offset, and the frame it prepares can be
--- cropped one wheel press or one scroll-into-view away from it.
+-- The rows the viewport shows are deliberately not taken from here. That one
+-- number the frame reads from its own render context, because a viewport that
+-- grew between two frames crops rows past anything a recorded height could
+-- have been widened around.
+--
+-- Reading the offset back is why the frame covers a set of offsets rather
+-- than one: this is the previous frame's, and the frame it prepares can be
+-- cropped a wheel press or a scroll-into-view away from it.
 settleColumnWindows :: EventM Name AppState ()
 settleColumnWindows = do
   geometry <- traverse columnGeometry allColumns
@@ -154,7 +159,7 @@ settleColumnWindows = do
     columnGeometry column = do
       measured <- lookupViewport (ColumnViewport column)
       pure (column, fmap dimensions measured)
-    dimensions measured = (fst (_vpSize measured), snd (_vpSize measured), _vpTop measured)
+    dimensions measured = (fst (_vpSize measured), _vpTop measured)
 
 dispatchEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 dispatchEvent event = do
@@ -926,6 +931,11 @@ applyIncidentActivation activation state =
           { appSelectedColumn = location.boardWorkColumn,
             appSelectedRows = Map.insert location.boardWorkColumn location.boardWorkRow current.appSelectedRows,
             appExpandedTrackers = maybe id Set.insert location.boardWorkExpands current.appExpandedTrackers,
+            -- With the set, for the reason 'Kanban.UI.Types.appExpansionEpoch'
+            -- states. Bumped whether or not this reveal expands anything: a
+            -- counter that moves without the set costs one column measurement,
+            -- while a set that moves without the counter draws a stale one.
+            appExpansionEpoch = current.appExpansionEpoch + 1,
             appEnsureSelectionVisible = True
           }
 

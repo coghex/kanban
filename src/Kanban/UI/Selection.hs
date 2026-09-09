@@ -157,6 +157,12 @@ toggleTrackerState column row trackerNumber state
         $ state
           { appSelectedColumn = column,
             appExpandedTrackers = expandedTrackers,
+            -- Moved with the set itself. Every column measurement's signature
+            -- stands on this counter rather than on the set, so a toggle that
+            -- moved one without the other would leave a frame drawing a
+            -- measurement of the other disclosure state
+            -- ('Kanban.UI.Types.appExpansionEpoch').
+            appExpansionEpoch = state.appExpansionEpoch + 1,
             appSelectedRows =
               normalizeSelectedRowsAfterToggle
                 expandedTrackers

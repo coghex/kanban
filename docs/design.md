@@ -571,16 +571,23 @@ appearing beside a card, or the earliest relative age on it changing wording —
 and that layout is what every frame in between is cut from. Repeated frames,
 selection movement, and wheel scrolling reuse it rather than rebuilding it,
 which is what makes the cost a property of the viewport rather than of the
-column. The layout is presentation state like every other: never cached, never
-part of a board snapshot, and never restored on restart.
+column. Whether a frame may reuse it is decided by comparing counters rather
+than the collections they stand for, so that check is the same size on a board
+of five items and a board of five thousand. The layout is presentation state
+like every other: never cached, never part of a board snapshot, and never
+restored on restart.
 
 Nothing about this is visible. The rows outside the viewport are held open at
 exactly the height their cards would have taken, so variable card heights, a
 partially clipped card at either edge, the search box, tracker expansion, the
 selection's scroll-into-view, three-row wheel scrolling, and the click targets
 on cards, epic headers, and column whitespace are all exactly what they were.
-A layout that no longer describes what the frame would draw is not used at all:
-that frame lays the column out itself, which is slower and identical.
+A frame covers every position its viewport can end up cropped at, not only the
+one the layout was prepared against: the offset the previous frame left, a
+wheel press either side of it, wherever a pending scroll-into-view can land,
+and the top a column shorter than its own viewport is put back to. A layout
+that no longer describes what the frame would draw is not used at all: that
+frame lays the column out itself, which is slower and identical.
 
 ### Column card search
 

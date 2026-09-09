@@ -7,19 +7,21 @@
 -- the height those cards would have taken.
 --
 -- Three things have to hold for that to be a fix rather than a trade, and each
--- is asserted here against the production frame rather than against a helper
+-- is asserted here against production code rather than against a helper
 -- written for the test:
 --
---   * every item is measured at the rows it actually draws at, since the
---     blank runs are built from those heights and a wrong one moves
---     everything below it;
---   * the frame a measured column draws is byte-identical, attributes
---     included, to the frame the whole column draws, wherever the viewport is
---     and whatever the selection is; and
+--   * every item is measured at the rows it actually draws at, and a
+--     measurement is dated at the instant its earliest relative age changes
+--     wording, since the blank runs are built from those heights;
+--   * a measured dashboard draws what an unmeasured one draws and resolves
+--     clicks to the same cards -- including through brick's own event loop,
+--     where a column's scroll offset persists from frame to frame and a wheel
+--     press is what moves it; and
 --   * what a frame costs stops growing with the column.
 module Spec.UI.ColumnWindow (spec) where
 
 import Brick (hLimit, txt, (<=>))
+import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Control.Monad (forM_)
 import Data.List (isSubsequenceOf)
@@ -27,9 +29,10 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (addUTCTime)
+import Data.Time (UTCTime, addUTCTime)
 import Data.Word (Word64)
 import GHC.Stats (RTSStats (..), getRTSStats, getRTSStatsEnabled)
+import qualified Graphics.Vty as Vty
 import Kanban.CLI (Options (..))
 import Kanban.Domain
 import Kanban.Layout (responsiveColumnWidths)
@@ -47,17 +50,19 @@ import Kanban.UI.Board
 import Kanban.UI.Events (BoardMouseAction (..), boardMousePress)
 import Kanban.UI.Filter (refreshVisibleBoard)
 import Kanban.UI.Search (columnCountText, columnItemsIn, entriesFor, expandedTrackersFor)
+import Kanban.UI.Selection (toggleTrackerState)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types
-import Kanban.UI.Util (allColumns, showText)
+import Kanban.UI.Util (allColumns, relativeAge, showText)
 import Spec.Support.App (testAppState, withSolveSession)
+import Spec.Support.Dashboard (DashboardRun (..), quitKey, runDashboardScript)
 import Spec.Support.Fixtures (baseIssue, epoch, fixtureBoard, fixtureTrackedEntry, testOptions)
 import Spec.Support.Render (FrameCell, renderFrameCells, renderWidgetLines)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "board frame cost" $ do
-  describe "measuring an item" $
+  describe "measuring an item" $ do
     forM_ [("box glyphs", testOptions), ("ascii glyphs", testOptions {optionAscii = True})] $ \(label, options) ->
       it ("measures every item at the rows it draws at, in " <> label) $ do
         state <- (\value -> value {appOptions = options}) <$> measuredState 40 0
@@ -65,10 +70,6 @@ spec = describe "board frame cost" $ do
         items `shouldSatisfy` ((> 10) . length)
         map (columnItemHeight state issuesWidth) items `shouldBe` map (renderedHeight state) items
 
-    -- A collapsed epic draws a header and no children, and a badge takes a
-    -- cell from the width the card beneath it wraps at. Both change what an
-    -- item measures to, so both are measured the way they are drawn.
-  describe "measuring an item beside live work" $ do
     it "measures a collapsed epic's header" $ do
       state <- (\value -> value {appExpandedTrackers = Set.empty}) <$> measuredState 40 0
       let items = allItems state
@@ -79,29 +80,52 @@ spec = describe "board frame cost" $ do
       let items = allItems state
       map (columnItemHeight state issuesWidth) items `shouldBe` map (renderedHeight state) items
 
+  describe "dating a measurement" $
+    -- A measurement is only good while every card still words its age the way
+    -- it did when measured, and an age is a fraction of a second wide. A
+    -- deadline computed by adding whole seconds to @now@ instead of counting
+    -- from the timestamp lands after the boundary, and the events in between
+    -- reuse heights the wording has already outgrown.
+    forM_ [0, 0.1, 0.5, 0.9, 0.999] $ \fraction ->
+      it ("ends at the instant a card's wording changes, " <> show (fraction :: Double) <> "s into a second") $ do
+        state <- agedState fraction
+        window <- windowOf state
+        deadline <- maybe (fail "the measurement was expected to carry a deadline") pure window.windowDeadline
+        let updatedAt = ageFixtureUpdatedAt
+        relativeAge state.appNow updatedAt
+          `shouldBe` relativeAge (addUTCTime (-0.001) deadline) updatedAt
+        relativeAge deadline updatedAt
+          `shouldNotBe` relativeAge state.appNow updatedAt
+
   describe "what a frame builds" $ do
     it "builds every card of a column nothing has measured" $ do
       state <- unmeasuredState 400
-      length (columnBodyItems state Issues issuesWidth) `shouldBe` length (allItems state)
+      length (drawnItems state) `shouldBe` length (allItems state)
 
     it "builds the viewport's worth of a measured column, whatever the column holds" $ do
       small <- measuredState 100 0
       large <- measuredState 5000 0
-      length (columnBodyItems small Issues issuesWidth)
-        `shouldBe` length (columnBodyItems large Issues issuesWidth)
-      length (columnBodyItems large Issues issuesWidth) `shouldSatisfy` (< frameHeight)
+      length (drawnItems small) `shouldBe` length (drawnItems large)
+      length (drawnItems large) `shouldSatisfy` (< frameHeight)
 
     it "builds the viewport's worth wherever in the column the viewport is" $
       forM_ [0, 500, 5000, 40000] $ \top -> do
         state <- measuredState 5000 top
-        length (columnBodyItems state Issues issuesWidth) `shouldSatisfy` (< frameHeight)
+        length (drawnItems state) `shouldSatisfy` (< frameHeight)
+
+    it "builds the viewport's worth for an offset the column has since shrunk past" $ do
+      -- Brick clamps a scroll request to the offsets the content can be shown
+      -- at, so a press here lands a long way from the recorded offset. Both
+      -- reaches are covered and both are bounded.
+      state <- measuredState 300 40000
+      length (drawnItems state) `shouldSatisfy` (< frameHeight)
 
     it "builds exactly the items the whole column would draw, in the order it would draw them" $ do
       -- Their rows and entries are what @CardTarget@ and @EpicTarget@ dispatch
       -- through, so a frame that drew a different item at a row would act on a
       -- different card than the one under the pointer.
       state <- measuredState 300 200
-      let built = columnBodyItems state Issues issuesWidth
+      let built = drawnItems state
       built `shouldSatisfy` (not . null)
       built `shouldSatisfy` (`isSubsequenceOf` allItems state)
 
@@ -109,13 +133,12 @@ spec = describe "board frame cost" $ do
       -- The selection sits at the top and the viewport two hundred rows down,
       -- so one range covering both would be the whole column between them.
       state <- measuredState 300 200
-      let runs = drawnRuns (columnBody state Issues issuesWidth)
-      length runs `shouldBe` 2
+      length (drawnRuns (body state)) `shouldBe` 2
 
     it "lays a body out at exactly the rows the whole column takes" $ do
       state <- measuredState 300 200
       window <- windowOf state
-      let pieces = columnBody state Issues issuesWidth
+      let pieces = body state
           blank = sum [rows | ColumnBlank rows <- pieces]
           built = sum [columnItemHeight state issuesWidth item | ColumnDrawn item <- pieces]
       blank + built `shouldBe` window.windowTotal
@@ -138,26 +161,75 @@ spec = describe "board frame cost" $ do
 
     it "draws what the whole column draws while a query narrows it" $ do
       state <- searchedState 800 "Card 12"
-      frameCells state `shouldBe` frameCells state {appColumnWindows = Map.empty}
+      frameCells frameHeight state `shouldBe` frameCells frameHeight (unmeasure state)
 
     it "draws what the whole column draws with every epic collapsed" $ do
       state <- (\value -> value {appExpandedTrackers = Set.empty}) <$> selectedState 800 400 0
-      frameCells state `shouldBe` frameCells state {appColumnWindows = Map.empty}
+      frameCells frameHeight state `shouldBe` frameCells frameHeight (unmeasure state)
 
-    it "draws what the whole column draws after the column shrank under the viewport" $ do
-      -- The viewport is most of the way down eight hundred cards when the
-      -- board comes back holding twenty. Nothing measured describes that
-      -- column any more, and the frame says so by laying it out itself.
-      tall <- selectedState 800 400 4000
-      short <- unmeasuredState 20
-      let shrunk =
-            tall
-              { appBoard = short.appBoard,
-                appVisibleBoard = short.appVisibleBoard,
-                appBoardEpoch = tall.appBoardEpoch + 1
-              }
-      columnWindowFor shrunk Issues issuesWidth `shouldSatisfy` (not . measurementHeld)
-      frameCells shrunk `shouldBe` frameCells shrunk {appColumnWindows = Map.empty}
+    it "draws what the whole column draws after the column shrank past the offset it was measured at" $ do
+      -- The settle measures the new, shorter column against the offset the
+      -- taller one left behind, so the recorded offset is past the end of what
+      -- there is to show. Brick answers that by putting the crop back at the
+      -- top, and nothing here is going to pull it anywhere else: the selection
+      -- is where the user left it, so no scroll-into-view is pending.
+      state <- unmeasuredState 3
+      let shrunk = settleAt 4000 state {appEnsureSelectionVisible = False}
+      frameCells frameHeight shrunk `shouldBe` frameCells frameHeight (unmeasure shrunk)
+
+    it "draws what the whole column draws into a viewport taller than the one it was measured for" $
+      -- The rows a viewport shows are read from the frame's own context rather
+      -- than from the measurement, so a viewport that grew -- a filter panel
+      -- closing, a wrapped footer shrinking, a taller terminal -- crops rows
+      -- the measurement never knew about and still finds them drawn.
+      forM_ [frameHeight, frameHeight + 20, frameHeight + 60] $ \height -> do
+        state <- selectedState 800 400 0
+        frameCells height state `shouldBe` frameCells height (unmeasure state)
+
+  describe "a dashboard driven through brick's own event loop" $ do
+    it "draws what an unmeasured one draws while the wheel scrolls a column" $
+      scriptAgrees (replicate 12 wheelDown)
+
+    it "draws what an unmeasured one draws when a query shrinks a column under a scrolled viewport" $
+      -- The offset is most of the way down eight hundred cards when the query
+      -- leaves a handful. The settle re-measures the shorter column against
+      -- the offset the taller one ended at, which is the offset brick is about
+      -- to clamp away from.
+      scriptAgrees (replicate 30 wheelDown <> map key "sCard 123")
+
+    it "draws what an unmeasured one draws when an epic collapses under a scrolled viewport" $
+      scriptAgrees (replicate 20 wheelDown <> [key 'g', key 'e'])
+
+    it "draws what an unmeasured one draws when the filter panel gives a scrolled column its rows back" $
+      -- The panel takes rows from every column while it is up, so hiding it
+      -- again leaves the columns taller than they were when brick last
+      -- reported their geometry. Those extra rows are cropped from a
+      -- measurement that never saw them.
+      scriptAgrees (replicate 12 wheelDown <> [key 'F', key 'F'])
+
+    it "resolves a click after scrolling to the same card an unmeasured one does" $ do
+      let script = replicate 12 wheelDown <> [press cardPoint]
+      measured <- runScript script id
+      whole <- runScript script unmeasure
+      measured.runState.appSelectedRows `shouldBe` whole.runState.appSelectedRows
+      measured.runState.appSelectedColumn `shouldBe` whole.runState.appSelectedColumn
+      -- And the click resolved to a card rather than to nothing, so the
+      -- agreement above is about a target and not about two no-ops.
+      Map.lookup Issues measured.runState.appSelectedRows `shouldNotBe` Just 0
+      measured.runFrames `shouldBe` whole.runFrames
+
+    it "resolves a click on an epic header after the viewport has been scrolled" $ do
+      -- Down and back up again, both through real scroll requests, so the
+      -- header is clicked in a viewport whose offset brick has moved rather
+      -- than one that never left the top.
+      let script = replicate 12 wheelDown <> replicate 12 wheelUp <> [press epicPoint]
+      measured <- runScript script id
+      whole <- runScript script unmeasure
+      measured.runState.appExpandedTrackers `shouldBe` whole.runState.appExpandedTrackers
+      measured.runState.appSelectedRows `shouldBe` whole.runState.appSelectedRows
+      -- The click reached the epic: its group is no longer open.
+      measured.runState.appExpandedTrackers `shouldBe` Set.empty
+      measured.runFrames `shouldBe` whole.runFrames
 
   describe "what invalidates a measurement" $ do
     it "keeps one taken from the state that is still current" $ do
@@ -178,22 +250,33 @@ spec = describe "board frame cost" $ do
       columnWindowFor state {appSearch = Just (ColumnSearch Issues "")} Issues issuesWidth
         `shouldSatisfy` (not . measurementHeld)
 
-    it "drops one taken before an epic was collapsed" $ do
+    it "drops one taken before an epic's disclosure changed" $ do
       state <- measuredState 200 0
-      columnWindowFor state {appExpandedTrackers = Set.empty} Issues issuesWidth
+      columnWindowFor (toggleTrackerState Issues 0 epicNumber state) Issues issuesWidth
         `shouldSatisfy` (not . measurementHeld)
 
-    it "drops one taken before a badge appeared beside a card" $ do
+    it "moves the expansion counter with the set every toggle writes" $ do
       state <- measuredState 200 0
-      columnWindowFor (withSolveSession (baseIssue 4 []) SolveRunning state) Issues issuesWidth
+      let toggled = toggleTrackerState Issues 0 epicNumber state
+      toggled.appExpandedTrackers `shouldNotBe` state.appExpandedTrackers
+      toggled.appExpansionEpoch `shouldNotBe` state.appExpansionEpoch
+
+    it "stops trusting one taken before a badge appeared beside a card" $ do
+      -- A badge takes cells from the width its card wraps at, so a
+      -- measurement taken without it no longer describes the column. The
+      -- settle is what notices, because noticing costs the sessions the
+      -- dashboard holds and a frame's own check has to stay constant-time.
+      state <- measuredState 200 0
+      let running = settle (withSolveSession (baseIssue 4 []) SolveRunning state)
+      running.appLayoutEpoch `shouldNotBe` state.appLayoutEpoch
+      columnWindowFor running {appColumnWindows = state.appColumnWindows} Issues issuesWidth
         `shouldSatisfy` (not . measurementHeld)
 
     it "drops one whose earliest relative age has since changed wording" $ do
       state <- measuredState 200 0
       window <- windowOf state
-      window.windowDeadline `shouldBe` Just (addUTCTime 60 epoch)
-      columnWindowFor state {appNow = addUTCTime 60 state.appNow} Issues issuesWidth
-        `shouldSatisfy` (not . measurementHeld)
+      deadline <- maybe (fail "the measurement was expected to carry a deadline") pure window.windowDeadline
+      columnWindowFor state {appNow = deadline} Issues issuesWidth `shouldSatisfy` (not . measurementHeld)
 
     it "bumps the board epoch every time the admitted board is rebuilt" $ do
       state <- unmeasuredState 10
@@ -217,21 +300,26 @@ spec = describe "board frame cost" $ do
       scrolled.appSelectedRows `shouldBe` state.appSelectedRows
 
   describe "what a frame costs" $
-    it "stops growing with the column a measurement covers, and grows with one it does not" $ do
-      enabled <- getRTSStatsEnabled
-      if not enabled
-        then expectationFailure "the suite must run with RTS statistics enabled for this bound to be measurable"
-        else do
-          measuredGrowth <- costGrowth measuredState
-          wholeGrowth <- costGrowth (\count _ -> unmeasuredState count)
-          -- The baseline is the same production frame with nothing measured,
-          -- which is what the board did before this: fifty times the cards
-          -- allocate about forty-six times as much (2.2 GiB against 48 MiB on
-          -- the machine this was written on). Measured, both frames allocate
-          -- about four megabytes.
-          wholeGrowth `shouldSatisfy` (> 10)
-          measuredGrowth `shouldSatisfy` (< 3)
-          wholeGrowth / measuredGrowth `shouldSatisfy` (> 10)
+    forM_ selectionCases $ \(label, row) ->
+      it ("stops growing with the column a measurement covers, with the selection " <> label) $ do
+        enabled <- getRTSStatsEnabled
+        if not enabled
+          then expectationFailure "the suite must run with RTS statistics enabled for this bound to be measurable"
+          else do
+            measuredGrowth <- costGrowth row id
+            wholeGrowth <- costGrowth row unmeasure
+            -- The baseline is the same production frame with nothing measured,
+            -- which is what the board did before this: fifty times the cards
+            -- allocate tens of times as much. Measured, both frames allocate
+            -- about the same few megabytes.
+            wholeGrowth `shouldSatisfy` (> 10)
+            measuredGrowth `shouldSatisfy` (< 3)
+            wholeGrowth / measuredGrowth `shouldSatisfy` (> 10)
+
+-- | The selections the cost of a frame is measured at: the row a column opens
+-- on, a child inside its epic, and the row at its far end.
+selectionCases :: [(String, Int -> Int)]
+selectionCases = [("at the first row", const 0), ("among an epic's children", const 2), ("at the last row", subtract 1)]
 
 -- | The frame width and height every assertion here is taken at.
 frameWidth, frameHeight :: Int
@@ -263,45 +351,75 @@ unmeasuredState count = do
   where
     board = fixtureBoard [(Issues, columnEntries count)]
 
--- | The same dashboard, with the geometry brick would have reported for it
--- after the frame before this one: the column's width, the rows its viewport
--- showed, and the offset it ended at.
---
--- The rows are the whole frame's height rather than the viewport's, which is
--- always fewer. A measurement can only widen what a frame draws for real, so
--- an over-generous height keeps every bound here honest and keeps this fixture
--- from restating the board's own vertical composition.
+-- | The same dashboard, measured against the geometry brick would have
+-- reported for it after the frame before this one.
 measuredState :: Int -> Int -> IO AppState
-measuredState count top = do
-  state <- unmeasuredState count
-  pure (refreshColumnWindows [(column, Just (issuesWidth, frameHeight, top)) | column <- allColumns] state)
+measuredState count top = settleAt top <$> unmeasuredState count
+
+-- | One settle, at the offset brick last reported.
+settleAt :: Int -> AppState -> AppState
+settleAt top = refreshColumnWindows [(column, Just (issuesWidth, top)) | column <- allColumns]
+
+settle :: AppState -> AppState
+settle = settleAt 0
+
+-- | The same dashboard with nothing measured, so every column draws in full.
+-- This is what the board did before issue #640, produced by the same
+-- production code with the preparation suppressed.
+unmeasure :: AppState -> AppState
+unmeasure state = state {appColumnWindows = Map.empty}
 
 -- | A measured dashboard with @row@ selected and waiting to be revealed.
 selectedState :: Int -> Int -> Int -> IO AppState
 selectedState count row top = do
-  state <- measuredState count top
-  pure state {appSelectedRows = Map.insert Issues row state.appSelectedRows}
+  state <- unmeasuredState count
+  pure (settleAt top state {appSelectedRows = Map.insert Issues row state.appSelectedRows})
 
 -- | A measured dashboard with a live query narrowing Issues.
 searchedState :: Int -> Text -> IO AppState
 searchedState count query = do
   state <- unmeasuredState count
-  let searching = state {appSearch = Just (ColumnSearch Issues query)}
-  pure (refreshColumnWindows [(column, Just (issuesWidth, frameHeight, 0)) | column <- allColumns] searching)
+  pure (settle state {appSearch = Just (ColumnSearch Issues query)})
+
+-- | A measured dashboard whose one card was updated @fraction@ of a second
+-- past a whole second ago, so its wording boundary falls between two ticks.
+agedState :: Double -> IO AppState
+agedState fraction = do
+  state <- testAppState board
+  pure
+    ( settle
+        state
+          { appVisibleBoard = board,
+            appSidebarVisible = False,
+            appNow = addUTCTime (realToFrac (59 + fraction)) ageFixtureUpdatedAt
+          }
+    )
+  where
+    board = fixtureBoard [(Issues, [Standalone (IssueItem (baseIssue 1 []) {issueUpdatedAt = ageFixtureUpdatedAt})])]
+
+ageFixtureUpdatedAt :: UTCTime
+ageFixtureUpdatedAt = epoch
 
 -- | The measured frame and the whole-column frame, cell for cell.
 framesAgree :: Int -> Int -> Int -> Expectation
 framesAgree count row top = do
   state <- selectedState count row top
-  columnBodyItems state Issues issuesWidth `shouldSatisfy` ((< length (allItems state)) . length)
-  frameCells state `shouldBe` frameCells state {appColumnWindows = Map.empty}
+  drawnItems state `shouldSatisfy` ((< length (allItems state)) . length)
+  frameCells frameHeight state `shouldBe` frameCells frameHeight (unmeasure state)
 
 -- | The whole frame as cells, characters and attributes together: §10's split
 -- border is a color contract on glyphs that are identical either way, so a
 -- comparison that dropped the attribute would not be a comparison of frames.
-frameCells :: AppState -> [[FrameCell]]
-frameCells state =
-  renderFrameCells (themeFor state.appOptions) (frameWidth, frameHeight) (drawApplication state)
+frameCells :: Int -> AppState -> [[FrameCell]]
+frameCells height state =
+  renderFrameCells (themeFor state.appOptions) (frameWidth, height) (drawApplication state)
+
+-- | The body one frame of Issues draws, and the items in it.
+body :: AppState -> [ColumnPiece]
+body state = columnBody state Issues issuesWidth frameHeight
+
+drawnItems :: AppState -> [ColumnItem]
+drawnItems state = columnBodyItems state Issues issuesWidth frameHeight
 
 -- | The rows one item takes once drawn, read off the drawing rather than
 -- predicted: a marker row is placed under it and its position is the height.
@@ -326,33 +444,85 @@ windowOf state = case columnWindowFor state Issues issuesWidth of
 measurementHeld :: Maybe ColumnWindow -> Bool
 measurementHeld = maybe False (const True)
 
+-- | The runs of items a body builds, split by the blank runs between them.
+drawnRuns :: [ColumnPiece] -> [[ColumnItem]]
+drawnRuns pieces = filter (not . null) (foldr collect [[]] pieces)
+  where
+    collect (ColumnBlank _) runs = [] : runs
+    collect (ColumnDrawn item) (run : rest) = (item : run) : rest
+    collect (ColumnDrawn item) [] = [[item]]
+
+-- | Run one script against the real dashboard, twice, and require the two to
+-- have painted the same terminal.
+--
+-- One run is the dashboard as it behaves; the other suppresses the
+-- measurement after every event, which is the same production draw and
+-- dispatch with the preparation taken away -- the board before issue #640.
+-- Anything the windowing gets wrong about where brick will crop shows up as a
+-- frame that differs.
+scriptAgrees :: [Vty.Event] -> Expectation
+scriptAgrees script = do
+  measured <- runScript script id
+  whole <- runScript script unmeasure
+  length measured.runFrames `shouldBe` length whole.runFrames
+  measured.runFrames `shouldBe` whole.runFrames
+
+runScript :: [Vty.Event] -> (AppState -> AppState) -> IO DashboardRun
+runScript script adjust = do
+  state <- unmeasuredState scriptedColumnLength
+  runDashboardScript (frameWidth, frameHeight) adjust state (script <> [quitKey])
+
+-- | Long enough that a scrolled viewport is nowhere near either end, short
+-- enough that the unmeasured half of each comparison stays quick.
+scriptedColumnLength :: Int
+scriptedColumnLength = 800
+
+-- | Where a press lands on the board: a point inside a card of the Issues
+-- column, and a point on the epic header that column opens with.
+--
+-- Both are read off the frame the same way a user would: the shell border
+-- takes the first column and row, the board's own heading row the second, and
+-- the column\'s top padding the third.
+cardPoint, epicPoint :: (Int, Int)
+cardPoint = (10, 10)
+
+epicPoint = (10, 4)
+
+-- | A wheel press over a card of the Issues column.
+wheelDown, wheelUp :: Vty.Event
+wheelDown = Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollDown []
+
+wheelUp = Vty.EvMouseDown (fst cardPoint) (snd cardPoint) Vty.BScrollUp []
+
+press :: (Int, Int) -> Vty.Event
+press (x, y) = Vty.EvMouseDown x y Vty.BLeft []
+
+key :: Char -> Vty.Event
+key character = Vty.EvKey (Vty.KChar character) []
+
 -- | How much more a frame of a five-thousand-card column costs than one of a
 -- hundred-card column, in bytes the production frame allocates with every cell
--- forced.
+-- forced to normal form.
 --
 -- Allocation rather than elapsed time, deliberately: this suite already
 -- carries one timing-sensitive example that flakes under load, and what is
 -- being told apart here is a factor of fifty against a factor of one.
-costGrowth :: (Int -> Int -> IO AppState) -> IO Double
-costGrowth build = do
-  small <- build 100 0 >>= frameAllocations
-  large <- build 5000 0 >>= frameAllocations
+costGrowth :: (Int -> Int) -> (AppState -> AppState) -> IO Double
+costGrowth row adjust = do
+  small <- selectedState 100 (row 100) 0 >>= frameAllocations . adjust
+  large <- selectedState 5000 (row 5000) 0 >>= frameAllocations . adjust
   pure (fromIntegral large / fromIntegral (max 1 small))
 
 frameAllocations :: AppState -> IO Word64
 frameAllocations state = do
   -- A first frame, discarded: it forces whatever in the board itself was still
   -- a thunk, so what the second one allocates is the frame's own work.
-  _ <- evaluate (frameCost state)
+  _ <- evaluate (force (frameCells frameHeight state))
   opening <- getRTSStats
-  measured <- evaluate (frameCost state)
+  measured <- evaluate (force (frameCells frameHeight state))
   closing <- getRTSStats
-  _ <- evaluate measured
+  _ <- evaluate (length measured)
   pure (closing.allocated_bytes - opening.allocated_bytes)
-
--- | The whole frame, every cell forced.
-frameCost :: AppState -> Int
-frameCost state = sum (map length (frameCells state))
 
 -- | The epic every one of these columns opens with.
 epicNumber :: Int
@@ -383,11 +553,3 @@ bodySentence = "Body text long enough to wrap across the interior of a card. "
 
 sampleLabels :: [Label]
 sampleLabels = [Label "ui" "5319e7", Label "bug" "d73a4a", Label "code-health" "1d76db"]
-
--- | The runs of items a body builds, split by the blank runs between them.
-drawnRuns :: [ColumnPiece] -> [[ColumnItem]]
-drawnRuns pieces = filter (not . null) (foldr collect [[]] pieces)
-  where
-    collect (ColumnBlank _) runs = [] : runs
-    collect (ColumnDrawn item) (run : rest) = (item : run) : rest
-    collect (ColumnDrawn item) [] = [[item]]

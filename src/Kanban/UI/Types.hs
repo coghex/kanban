@@ -14,6 +14,7 @@ module Kanban.UI.Types
     ColumnSearch (..),
     ColumnSignature (..),
     ColumnWindow (..),
+    LayoutInputs (..),
     columnItemRow,
     CompletedGeneration,
     CompletedHistoryStatus (..),
@@ -750,6 +751,22 @@ data AppState = AppState
     -- written, from 'Kanban.UI.Events.handleEvent'; a frame that finds it
     -- stale measures the column itself rather than trusting it.
     appColumnWindows :: Map BoardColumn ColumnWindow,
+    -- | How many times the epics open on the board have changed.
+    --
+    -- Stands for 'appExpandedTrackers' in a column measurement's signature so
+    -- that checking one costs a comparison rather than a walk over every open
+    -- epic. Every assignment to that set moves this with it; the two are
+    -- moved together by 'Kanban.UI.Selection.toggleSelectedEpic' and
+    -- 'Kanban.UI.Events''s board-work reveal, and by nothing else.
+    appExpansionEpoch :: Int,
+    -- | How many times the board-wide inputs to a column measurement have
+    -- changed, and what they were when that was last decided.
+    --
+    -- 'Kanban.UI.Board.refreshColumnWindows' is the one writer of both: it
+    -- compares 'appLayoutInputs' once per event and bumps the epoch when it
+    -- moved, which is what lets a frame's own check stay constant-time.
+    appLayoutEpoch :: Int,
+    appLayoutInputs :: LayoutInputs,
     -- | Which cards the board is showing, as four independent facets
     -- ("Kanban.Filter"). Process-lifetime state: it starts at
     -- 'Kanban.Filter.defaultFilterCriteria' every launch, survives every
@@ -1000,14 +1017,17 @@ columnItemRow = \case
 
 -- | What decides which entries a column shows, and in what shape.
 --
--- 'contentEpoch' stands for the admitted board itself:
+-- Two counters and a query, so comparing this costs the same whatever the
+-- board holds. 'contentEpoch' stands for the admitted board itself --
 -- 'Kanban.UI.Filter.refreshVisibleBoard' is the one writer of
--- 'appVisibleBoard' and bumps it there, so comparing one 'Int' answers the
--- question comparing two boards would.
+-- 'appVisibleBoard' and bumps it there -- and 'contentExpansion' stands for
+-- 'appExpandedTrackers' the same way. Carrying the expanded set itself would
+-- make every frame's own validity check proportional to how many epics the
+-- user has open, which on a board of epics is proportional to the board.
 data ColumnContentKey = ColumnContentKey
   { contentEpoch :: Int,
     contentQuery :: Maybe Text,
-    contentExpanded :: Set Int
+    contentExpansion :: Int
   }
   deriving stock (Eq, Show)
 
@@ -1029,17 +1049,35 @@ data ColumnBadges = ColumnBadges
   }
   deriving stock (Eq, Show)
 
--- | Everything a cached column measurement was taken from.
+-- | Everything a cached column measurement was taken from, as values a frame
+-- can compare in constant time.
 --
--- A frame recomputes this -- which costs a handful of comparisons, never a
--- pass over the column -- and measures the column itself when it differs, so
--- a stale cache can only cost a slow frame and never draw a wrong one.
+-- A frame recomputes this and measures the column itself when it differs, so
+-- a stale cache can only cost a slow frame and never draw a wrong one. That
+-- check runs on every column of every frame, so nothing in it may be
+-- proportional to the board, to the epics open on it, or to the sessions a
+-- long-lived dashboard has accumulated: 'signatureLayout' is the counter
+-- 'LayoutInputs' is collapsed into for exactly that reason.
 data ColumnSignature = ColumnSignature
   { signatureContent :: ColumnContentKey,
     signatureWidth :: Int,
-    signatureAscii :: Bool,
-    signatureExcerptLines :: Int,
-    signatureBadges :: ColumnBadges
+    signatureLayout :: Int
+  }
+  deriving stock (Eq, Show)
+
+-- | The board-wide inputs to a column measurement that are not a column's own
+-- entries: the badge geometry beside its cards, and the two presentation
+-- settings its cards are laid out under.
+--
+-- Compared once per event by 'Kanban.UI.Board.refreshColumnWindows', which
+-- collapses any difference into a bump of 'appLayoutEpoch'. That comparison
+-- is proportional to the live agent sessions a dashboard is holding -- a
+-- handful, and never a function of the repository -- and it buys every frame
+-- of every column a constant-time check in its place.
+data LayoutInputs = LayoutInputs
+  { layoutBadges :: ColumnBadges,
+    layoutAscii :: Bool,
+    layoutExcerptLines :: Int
   }
   deriving stock (Eq, Show)
 
@@ -1075,12 +1113,15 @@ data ColumnWindow = ColumnWindow
     -- Until then every measured height still describes what would be drawn;
     -- after it, the column is measured again.
     windowDeadline :: Maybe UTCTime,
-    -- | The viewport offset and height the last frame ended at, read back
-    -- from brick after the event that produced it. A frame widens the range
-    -- it draws for real around both, so the one frame either can be stale
-    -- for still draws real content.
-    windowTop :: Int,
-    windowViewportRows :: Int
+    -- | The viewport offset the last frame ended at, read back from brick
+    -- after the event that produced it.
+    --
+    -- Only the offset. How many rows the viewport shows is read from the
+    -- render context instead, because that is the one number a stale value
+    -- could not be widened around: a viewport that /grew/ between two frames
+    -- -- the filter panel closing, a wrapped footer shrinking -- crops rows
+    -- past anything a recorded height would have covered.
+    windowTop :: Int
   }
   deriving stock (Eq, Show)
 

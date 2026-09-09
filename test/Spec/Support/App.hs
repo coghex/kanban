@@ -54,6 +54,7 @@ import Kanban.UI.Types
     SolvePhase (..),
     SolveSession,
   )
+import Kanban.UI.Board (unmeasuredLayoutInputs)
 import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 
@@ -76,6 +77,9 @@ testAppState board = do
         -- Unmeasured, so every column draws in full: a test about the windowed
         -- body says so by applying 'Kanban.UI.Board.refreshColumnWindows'.
         appColumnWindows = Map.empty,
+        appExpansionEpoch = 0,
+        appLayoutEpoch = 0,
+        appLayoutInputs = unmeasuredLayoutInputs testOptions testResolvedConfig,
         appFilterCriteria = defaultFilterCriteria,
         appFilterPanel = Nothing,
         appUsage = Map.empty,
