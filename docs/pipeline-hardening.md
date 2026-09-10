@@ -37,7 +37,7 @@ Status legend: `[ ]` unprocessed · `[#N]` filed · `[no-issue]` closed without 
 - [x] PH-10. A malformed issue halts approval for every issue in the repository — [#201]
 - [x] PH-11. Autostash anchor refs leak and are never reaped — [#202]
 - [x] PH-12. The only executing pull-request guard was an untracked local edit — [no-issue]
-- [ ] PH-13. An approved issue cannot be corrected without discarding its approval
+- [x] PH-13. An approved issue cannot be corrected without discarding its approval — [#665]
 
 ---
 
@@ -915,7 +915,7 @@ now makes the daemon's compatibility path resolve to the canonical copy.
 
 ## Chapter 9 — Amending an approved issue
 
-### PH-13. An approved issue cannot be corrected without discarding its approval
+### [#665] PH-13. An approved issue cannot be corrected without discarding its approval
 
 > **Captured note:** a trusted comment on a GitHub issue silently dismisses that
 > issue's reviewed:approve label, and there is no way to make a small correction
