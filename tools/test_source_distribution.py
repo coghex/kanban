@@ -285,7 +285,7 @@ EXCLUDED_TRACKED_PATHS = (
 
 # The files each provider's `plugin marketplace add` reads. They are the only
 # tracked bundle files under dot-prefixed directories -- the one glob-semantics
-# detail whose silent change would strand all four bundles while every other bundle
+# detail whose silent change would strand all five bundles while every other bundle
 # file still shipped -- so they are asserted by exact name.
 PROVIDER_MANIFESTS = (
     "claude-plugin/.claude-plugin/marketplace.json",

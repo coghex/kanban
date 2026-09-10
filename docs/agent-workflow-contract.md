@@ -187,7 +187,7 @@ arithmetic, which §2.3 owns.
   Kimi, or Google is a spawned provider, so board revision and repair of a
   grok-origin, kimi-origin, or google-origin pull request are refused in
   every operating mode; the session that opened the pull request revises
-  it itself. All four bundled
+  it itself. All five bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
@@ -2236,10 +2236,10 @@ because that is where the record's own path is spelled whole:
 separate file name, so it carries neither literal, while the Haskell resolver
 spells each one for the same reason this manifest needs it spelled — a
 reconciliation matches a literal, not an expression. Both record rows also
-carry the same sixteen packaged assets, because since issue #445 each of them
+carry the same eighteen packaged assets, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
-naming the macOS one: the twelve Markdown workflow assets whose `bash` fence
-resolves the backend, and the four pull-request coordinators. An asset that spells
+naming the macOS one: the thirteen Markdown workflow assets whose `bash` fence
+resolves the backend, and the five pull-request coordinators. An asset that spells
 both literals is declared against both rows, so neither spelling can be
 reverted in one asset while the other row still passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
@@ -3031,9 +3031,9 @@ brand's asset speaking a tool its declaration does not carry.
   the environment, never through the option it was installed with, and that
   is unchanged by the per-platform defaults.
   Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
-  `src/Kanban/Preflight.hs`, the four packaged `review_pr.py` coordinators, and
-  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok and
-  Kimi `/solve`: a non-empty
+  `src/Kanban/Preflight.hs`, the five packaged `review_pr.py` coordinators, and
+  the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok,
+  Kimi, and Google `/solve`: a non-empty
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
   only when that field is absent, which is exactly how an installation
   predating the record reads — the directory holding the record. A selected
@@ -3048,12 +3048,12 @@ brand's asset speaking a tool its declaration does not carry.
   `tools/approve_issues_service.py` — and `src/Kanban/ManagedPaths.hs`, which
   is where the Haskell side's record location is now resolved and the only
   place either platform's spelling of it is written down on that side. The
-  sixteen vendored plugin assets listed above probe the same two record
+  eighteen vendored plugin assets listed above probe the same two record
   locations in the same order since issue #445, so an XDG-defaulted install is
   discovered on every host, but they reach that answer without importing
   either resolution point: neither a `bash` fence nor the Codex bundle's
   per-skill vendoring can, so each spells the two literals itself and §4's two
-  record rows declare all sixteen against both. One difference from the
+  record rows declare all eighteen against both. One difference from the
   resolvers is deliberate: with *neither* record occupied a packaged asset
   resolves the XDG candidate on every platform and reports both locations as
   consulted, rather than branching to this platform's write default, because

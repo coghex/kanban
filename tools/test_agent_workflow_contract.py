@@ -256,9 +256,9 @@ MANAGED_RECORD_TOKENS = {
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
-# issue-review backend out of the discovery record. All twelve carry the same
-# probe, so all twelve spell both record locations; `triage` and `retriage` reach
-# no other home-relative scan, which is why the pin below names the whole twelve
+# issue-review backend out of the discovery record. All thirteen carry the same
+# probe, so all thirteen spell both record locations; `triage` and `retriage` reach
+# no other home-relative scan, which is why the pin below names the whole thirteen
 # rather than the six that also sit in a scanned surface list.
 MARKDOWN_RECORD_RESOLVER_FILES = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -441,7 +441,7 @@ GOOGLE_PLUGIN_SURFACE_FILES = [
 
 # Every bundle's vendored trusted-comment issue-spec helper (issue #238). Each is
 # a member of its brand's surface list above, so its external commands are
-# already reconciled against the manifest; these four are named here so the
+# already reconciled against the manifest; these five are named here so the
 # non-vacuity pin below drives the real assets, and so dropping one from a
 # surface list fails a test rather than silently un-scanning a vendored asset.
 TRUSTED_SPEC_SURFACE_FILES = {
@@ -458,9 +458,9 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
 # same way and covered here with them; since issue #572 every coordinator
-# bundle carries a copy, because all four coordinators read the roster's
+# bundle carries a copy, because all five coordinators read the roster's
 # loaded provider set to route. What still differs is what each does with it --
-# the Claude, Grok, and Kimi copies resolve an assignment cell and pin it, the
+# the Claude, Grok, Kimi, and Google copies resolve an assignment cell and pin it, the
 # Codex copy resolves none (D-2) -- and that is a routing fact rather than an
 # external command, so the readers still spawn nothing at all. Their empty
 # sets are pins rather than omissions: a future edit that made any shell out
@@ -1684,7 +1684,7 @@ def tool_surface_findings(executable_tokens, tools_dir=TOOLS_DIR):
 # loudly, which is the safe direction. The captured segment keeps its leading
 # slash so it compares against a `personal-path` manifest token exactly the
 # way the Haskell segments do.
-# The four solve assets that owe issue #493's art policy: the paired Kanban-
+# The five solve assets that owe issue #493's art policy: the paired Kanban-
 # invoked /solve and $solve surfaces docs/agent-workflow-contract.md declares,
 # plus the Grok, Kimi, and Google /solve skills that stamp their external-origin pull
 # requests. PR #251
@@ -1702,7 +1702,7 @@ ART_POLICY_SOLVE_ASSETS = (
 )
 
 # Packaged assets that owe none of the rules below, so a rule broad enough to
-# match every Markdown file cannot pass vacuously. These eight qualify by
+# match every Markdown file cannot pass vacuously. These nine qualify by
 # orchestrating or judging rather than implementing: the issue-review pair
 # judges a filed issue and never drafts or implements, and the autoissue and
 # autosolve assets each delegate the work itself to another workflow.
@@ -3837,8 +3837,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
             ),
             (
                 # Issue #444 gave the record its XDG sibling, and issue #445
-                # gave both rows the sixteen packaged readers that probe them
-                # (twelve markdown resolvers plus four coordinators).
+                # gave both rows the eighteen packaged readers that probe them
+                # (thirteen markdown resolvers plus five coordinators).
                 # Neither spelling is tools/kanban_config.py's: that module
                 # composes the record path from the install directory above
                 # and a separate file name, so it carries neither literal

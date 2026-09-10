@@ -1716,7 +1716,7 @@ class ForkCheckoutRepositoryScopeTests(unittest.TestCase):
 
 class SolveRepositoryScopeTests(unittest.TestCase):
     """Issue #277 requirements 1, 2, 4, and 5: one established identity scopes
-    the whole solve run, in all four bundles. Kanban's resolved repository need not
+    the whole solve run, in all five bundles. Kanban's resolved repository need not
     be the checkout's own remote, so a lane that re-derives one for its
     selection, claim, spec fetch, or pull request works a different
     repository's issue #N than the one Kanban gated and displays."""

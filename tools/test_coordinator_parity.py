@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the four tracked review coordinators.
+"""Bounded-divergence gate for the five tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
