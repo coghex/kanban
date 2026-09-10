@@ -337,8 +337,8 @@ reviewers = {
 if origin is None:
     # No declared origin is the dual route the coordinator takes: with no
     # brand to be opposite of, only a review carrying BOTH spawned providers
-    # is known to be independent of whoever wrote the code. Grok and Kimi are
-    # not in that set: they are not reviewer brands.
+    # is known to be independent of whoever wrote the code. None of Grok,
+    # Kimi, or Google is in that set: they are not reviewer brands.
     if reviewers != UNKNOWN_ORIGIN_REVIEWERS:
         refuse(
             "this pull request declares no origin, so only a dual-brand review "

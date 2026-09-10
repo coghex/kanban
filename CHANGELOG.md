@@ -15,6 +15,16 @@ created above it.
 
 ### Unreleased
 
+- The tracked Google plugin (`google-plugin/`) packages `/solve` and
+  `/autosolve` for Copilot CLI sessions running a Google model such as
+  Gemini 3.8 Flash. A Google session stamps `<!-- pr-origin:google -->` and
+  `/autosolve` obtains a Codex review without `--self-review`. It never invokes
+  Claude. Google is still not a Kanban-spawned provider. Load it per session with
+  `copilot --model <google-model> --plugin-dir google-plugin/plugins/kanban`, or
+  register `google-plugin/` as the `kanban-google` marketplace and install
+  `kanban@kanban-google`; helper lookup uses `$GOOGLE_PLUGIN_ROOT`, then the
+  marketplace path recorded in `$COPILOT_HOME/settings.json`, then the hashed
+  `$COPILOT_HOME/installed-plugins/kanban-<hash>/` layout.
 - `<!-- pr-origin:google -->` is a known pull-request origin, on the same terms
   as grok and kimi: dual-mode review and rereview route it to Codex only — not
   Claude, and not both brands, which is what an unrecognized marker still does.

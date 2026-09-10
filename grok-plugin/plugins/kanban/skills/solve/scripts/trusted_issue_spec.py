@@ -2,7 +2,7 @@
 """Fetch one issue's effective spec while keeping untrusted comment bodies out
 of a solve agent's context.
 
-Vendored into the four tracked plugin bundles per docs/agent-workflow-contract.md
+Vendored into the five tracked plugin bundles per docs/agent-workflow-contract.md
 §3: standard library only, no import from tools/, so an installed bundle runs
 this from any repository without a Kanban checkout. The tracked solve
 workflows read the issue timeline exclusively through this script; §2.1 of that
