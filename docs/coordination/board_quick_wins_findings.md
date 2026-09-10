@@ -21,7 +21,7 @@ Effort estimates are relative and preliminary.
 - [x] BQ-3. Search misses canonically equivalent Unicode text — [#661]
 - [x] BQ-4. Focused search reserves ordinary letters as commands — [no-issue]
 - [x] BQ-5. Filtering unfinished children increases displayed epic completion — [#662]
-- [ ] BQ-6. Open the selected card in a browser
+- [x] BQ-6. Open the selected card in a browser — [#663]
 - [ ] BQ-7. Switch card density without restarting
 
 ## Small correctness bugs
@@ -109,7 +109,7 @@ Separate user-hidden children from unavailable references before choosing new se
 
 ## Small optional features
 
-### BQ-6. Open the selected card in a browser
+### [#663] BQ-6. Open the selected card in a browser
 
 **Priority: optional quick feature. Estimated effort: easy–medium.**
 
