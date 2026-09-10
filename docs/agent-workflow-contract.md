@@ -127,7 +127,7 @@ everything else.
   ([drafting-workflow-contract.md §3.6](drafting-workflow-contract.md#36-the-repair-loop-issue-rereview-and-issue-rereview))
   read the timeline through the Codex and Claude copies, resolved the same
   two ways and under the identical no-unfiltered-fallback rule; they do not
-  add a fifth copy.
+  add a sixth copy.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.

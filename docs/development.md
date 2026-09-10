@@ -100,7 +100,7 @@ extracted by, so nothing else delimits a release.
 
 The source distribution is meant to be a complete Kanban checkout, so that
 everything the packaged documentation advertises — the workflow setup command,
-the drainer installer, the Claude, Codex, Grok, and Kimi workflow bundles, and
+the drainer installer, the Claude, Codex, Grok, Kimi, and Google workflow bundles, and
 the test suites — is present after unpacking. Verify it with:
 
 ```console

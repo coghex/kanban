@@ -10,8 +10,8 @@ each packaged resolver against a redirected `$HOME` and assert which record it
 selects, which backend it returns, and what its diagnostic says when it finds
 none.
 
-Sixteen resolvers owe the same answers -- the twelve markdown workflow assets whose
-`bash` fence resolves the backend, and the four pull-request coordinators -- and
+Eighteen resolvers owe the same answers -- the thirteen markdown workflow assets whose
+`bash` fence resolves the backend, and the five pull-request coordinators -- and
 each is exercised through its real surface: the fence by running it in `bash`,
 the coordinator by calling its `approver_path()`. Nothing here reimplements the
 probe, so these tests cannot agree with a resolver that is wrong.
@@ -43,7 +43,7 @@ RECORD_NAME = "config.json"
 BACKEND_NAME = "approve_issues.py"
 
 # Every markdown workflow asset whose bash fence resolves the backend. All
-# twelve carry the same fence, which test_every_markdown_fence_is_the_same_probe
+# thirteen carry the same fence, which test_every_markdown_fence_is_the_same_probe
 # pins; that is what lets the full case matrix run against one of them.
 MARKDOWN_RESOLVER_ASSETS = (
     "claude-plugin/plugins/kanban/commands/issue-review.md",
@@ -92,7 +92,7 @@ def record_resolver_fence(relative_path):
 
 
 def load_coordinator(name, relative_path):
-    """Import a packaged coordinator by file path; none of the four live
+    """Import a packaged coordinator by file path; none of the five live
     under tools/, so none is importable by name."""
     module_name = f"kanban_{name}_plugin_review_pr_probe"
     spec = importlib.util.spec_from_file_location(module_name, REPO_ROOT / relative_path)
@@ -172,7 +172,7 @@ def coordinator_resolvers():
 
 
 def every_resolver():
-    """The full sixteen."""
+    """The full eighteen."""
     return [
         MarkdownFenceResolver(path) for path in MARKDOWN_RESOLVER_ASSETS
     ] + coordinator_resolvers()
@@ -373,7 +373,7 @@ class PackagedRecordProbeTests(unittest.TestCase):
 
 class EveryPackagedResolverProbesTests(unittest.TestCase):
     """The matrix above runs against one markdown fence. These hold the other
-    eleven to being the same program, and drive every one of the sixteen through
+    twelve to being the same program, and drive every one of the eighteen through
     the ordering case so none is covered by identity alone."""
 
     def test_every_markdown_fence_is_the_same_probe(self):

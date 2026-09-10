@@ -4,8 +4,8 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
 Issue #238 vendored `trusted_issue_spec.py` into the tracked plugin bundles and
 made it the solve workflows' only permitted view of an issue's comment timeline.
-The Grok bundle carries a third byte-identical copy, and the Kimi bundle a
-fourth. Every behavioural
+The Grok bundle carries a third byte-identical copy, the Kimi bundle a fourth,
+and the Google bundle a fifth. Every behavioural
 assertion here runs against every copy: a trust boundary enforced in one
 bundle and not the others is not enforced, and these files are the whole
 boundary — the tracked solve workflows have no fallback comment source to fail

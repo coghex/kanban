@@ -76,7 +76,7 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_3_0(self):
+    def test_the_plugin_manifest_declares_version_1_4_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
         self.assertEqual(document["version"], "1.4.0")
