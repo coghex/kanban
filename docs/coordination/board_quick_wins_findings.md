@@ -22,7 +22,7 @@ Effort estimates are relative and preliminary.
 - [x] BQ-4. Focused search reserves ordinary letters as commands — [no-issue]
 - [x] BQ-5. Filtering unfinished children increases displayed epic completion — [#662]
 - [x] BQ-6. Open the selected card in a browser — [#663]
-- [ ] BQ-7. Switch card density without restarting
+- [x] BQ-7. Switch card density without restarting — [#664]
 
 ## Small correctness bugs
 
@@ -125,7 +125,7 @@ The details overlay displays a GitHub URL, but there is no board action to open 
 
 Decide the key binding and local-versus-remote terminal behavior. Validate arguments through a fake executable. Clipboard transport remains covered by the existing text-selection design.
 
-### BQ-7. Switch card density without restarting
+### [#664] BQ-7. Switch card density without restarting
 
 **Priority: optional quick feature. Estimated effort: easy–medium.**
 
