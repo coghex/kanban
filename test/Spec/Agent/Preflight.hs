@@ -212,6 +212,7 @@ spec = do
         issueOriginFromBody "Body\n\n<!-- issue-origin:claude -->" `shouldBe` IssueOriginClaude
         issueOriginFromBody "Body\n\n<!-- issue-origin:codex -->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "Body\n\n<!-- issue-origin:kimi -->" `shouldBe` IssueOriginKimi
+        issueOriginFromBody "Body\n\n<!-- issue-origin:google -->" `shouldBe` IssueOriginGoogle
         issueOriginFromBody "Body with no marker" `shouldBe` IssueOriginUnmarked
       -- The backend routes on ORIGIN_RE, which is case-insensitive and
       -- allows whitespace on both sides of the value. Reading it more
@@ -223,25 +224,34 @@ spec = do
         issueOriginFromBody "<!--   issue-origin:codex   -->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "<!--\n  issue-origin:codex\n-->" `shouldBe` IssueOriginCodex
         issueOriginFromBody "<!--  issue-origin:Kimi  -->" `shouldBe` IssueOriginKimi
+        issueOriginFromBody "<!--  issue-origin:Google  -->" `shouldBe` IssueOriginGoogle
         issueOriginFromBody "a <!-- issue-origin:codex --> b <!-- issue-origin:CODEX -->"
           `shouldBe` IssueOriginCodex
         issueOriginFromBody "a <!-- issue-origin:kimi --> b <!-- ISSUE-ORIGIN:KIMI -->"
           `shouldBe` IssueOriginKimi
+        issueOriginFromBody "a <!-- issue-origin:google --> b <!-- ISSUE-ORIGIN:GOOGLE -->"
+          `shouldBe` IssueOriginGoogle
       it "rejects text that only looks like a marker" $ do
         issueOriginFromBody "issue-origin:claude" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claudex -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:kimii -->" `shouldBe` IssueOriginUnmarked
+        issueOriginFromBody "<!-- issue-origin:googlee -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin: claude -->" `shouldBe` IssueOriginUnmarked
         issueOriginFromBody "<!-- issue-origin:claude" `shouldBe` IssueOriginUnmarked
       -- The backend raises on a body declaring conflicting origins before reaching any
       -- reviewer, so preflight must not demand a provider for it either.
       it "mirrors the backend's conflicting-marker case" $ do
+        -- All 6 pairwise combinations of the 4 supported origins
+        -- (claude, codex, kimi, google):
         let conflicts =
               [ "<!-- issue-origin:claude -->\n<!-- issue-origin:codex -->",
                 "<!-- issue-origin:kimi -->\n<!-- issue-origin:codex -->",
-                "<!-- issue-origin:kimi -->\n<!-- issue-origin:claude -->"
+                "<!-- issue-origin:kimi -->\n<!-- issue-origin:claude -->",
+                "<!-- issue-origin:google -->\n<!-- issue-origin:codex -->",
+                "<!-- issue-origin:google -->\n<!-- issue-origin:claude -->",
+                "<!-- issue-origin:google -->\n<!-- issue-origin:kimi -->"
               ]
-        map issueOriginFromBody conflicts `shouldBe` replicate 3 IssueOriginConflicting
+        map issueOriginFromBody conflicts `shouldBe` replicate 6 IssueOriginConflicting
         canonicalReviewBrands IssueOriginConflicting `shouldBe` []
         blockedProblems readyPreflightEnvironment (ActionIssueReview IssueOriginConflicting)
           `shouldBe` []
@@ -253,6 +263,7 @@ spec = do
         revisionAuthorBrand IssueOriginClaude `shouldBe` ClaudeSolver
         revisionAuthorBrand IssueOriginCodex `shouldBe` CodexSolver
         revisionAuthorBrand IssueOriginKimi `shouldBe` CodexSolver
+        revisionAuthorBrand IssueOriginGoogle `shouldBe` CodexSolver
         revisionAuthorBrand IssueOriginUnmarked `shouldBe` CodexSolver
       -- approve_issues.py spawns the opposite brand itself, and both under
       -- the dual legacy policy Kanban always passes, so the canonical gate
@@ -260,20 +271,23 @@ spec = do
       it "routes the canonical reviewer to the opposite brand, or both when unmarked" $ do
         canonicalReviewBrands IssueOriginClaude `shouldBe` [CodexSolver]
         canonicalReviewBrands IssueOriginCodex `shouldBe` [ClaudeSolver]
-        -- Kimi is a known origin that is never a spawned reviewer: Codex
-        -- only, like a grok-origin pull request.
+        -- Kimi and Google are known origins that are never a spawned reviewer:
+        -- Codex only, like a grok-origin pull request.
         canonicalReviewBrands IssueOriginKimi `shouldBe` [CodexSolver]
+        canonicalReviewBrands IssueOriginGoogle `shouldBe` [CodexSolver]
         canonicalReviewBrands IssueOriginUnmarked `shouldBe` [CodexSolver, ClaudeSolver]
       it "requires the canonical reviewer's own CLI for a review" $ do
         let environment = withClaudeProbe (readyProviderProbe ClaudeSolver) {probeExecutable = Nothing}
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` [ExecutableUnavailable]
         blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` []
         blockedProblems environment (ActionIssueReview IssueOriginKimi) `shouldBe` []
+        blockedProblems environment (ActionIssueReview IssueOriginGoogle) `shouldBe` []
         blockedProblems environment (ActionIssueReview IssueOriginUnmarked) `shouldBe` [ExecutableUnavailable]
       it "requires a signed-in canonical reviewer for a review" $ do
         let environment = withCodexProbe (readyProviderProbe CodexSolver) {probeAuth = AuthNotAuthenticated "signed out"}
         blockedProblems environment (ActionIssueReview IssueOriginClaude) `shouldBe` [ProviderUnauthenticated]
         blockedProblems environment (ActionIssueReview IssueOriginKimi) `shouldBe` [ProviderUnauthenticated]
+        blockedProblems environment (ActionIssueReview IssueOriginGoogle) `shouldBe` [ProviderUnauthenticated]
         blockedProblems environment (ActionIssueReview IssueOriginCodex) `shouldBe` []
       -- pr-revise runs on the PR's own brand and then spawns the opposite
       -- one for its single nested canonical rereview, so a revision needs
@@ -533,6 +547,7 @@ spec = do
             [ ActionIssueReview IssueOriginCodex,
               ActionIssueReview IssueOriginClaude,
               ActionIssueReview IssueOriginKimi,
+              ActionIssueReview IssueOriginGoogle,
               ActionIssueReview IssueOriginUnmarked,
               ActionIssueRevision IssueOriginCodex,
               ActionIssueRevision IssueOriginClaude,
@@ -544,10 +559,12 @@ spec = do
               ActionPullRequestFlow PullRequestClaude PullRequestReview,
               ActionPullRequestFlow PullRequestGrok PullRequestReview,
               ActionPullRequestFlow PullRequestKimi PullRequestReview,
+              ActionPullRequestFlow PullRequestGoogle PullRequestReview,
               ActionPullRequestFlow PullRequestCodex PullRequestRereview,
               ActionPullRequestFlow PullRequestClaude PullRequestRereview,
               ActionPullRequestFlow PullRequestGrok PullRequestRereview,
               ActionPullRequestFlow PullRequestKimi PullRequestRereview,
+              ActionPullRequestFlow PullRequestGoogle PullRequestRereview,
               ActionPullRequestFlow PullRequestCodex PullRequestRevision,
               ActionPullRequestFlow PullRequestClaude PullRequestRevision,
               ActionPullRequestFlow PullRequestCodex PullRequestRepair,
@@ -565,6 +582,9 @@ spec = do
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR review (r) · kimi-origin"
           rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r) · kimi-origin"
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "PR repair (r) · kimi-origin")
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR review (r) · google-origin"
+          rendered `shouldSatisfy` Data.Text.isInfixOf "PR rereview (r) · google-origin"
+          rendered `shouldSatisfy` (not . Data.Text.isInfixOf "PR repair (r) · google-origin")
           -- The drainer keeps its own dedicated install and status flow.
           rendered `shouldSatisfy` (not . Data.Text.isInfixOf "drainer")
 

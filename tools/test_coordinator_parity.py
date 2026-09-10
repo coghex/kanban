@@ -339,8 +339,8 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
--        return origin if origin == "kimi" else None
-+        return origin if origin in {"grok", "kimi"} else None
+-        return origin if origin in {"kimi", "google"} else None
++        return origin if origin in {"grok", "kimi", "google"} else None
 @@
     in docs/agent-workflow-contract.md §4 declaring this file, and that
 -    reconciliation matches a literal, not an expression. This bundle vendors a
@@ -509,7 +509,7 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
      assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
 @@
-     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
+     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:google -->"}) == "google"
 +    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
      assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
 @@
@@ -518,7 +518,7 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        metavar="ORIGIN",
 +        help=(
 +            "Refuse before spawning if the live origin is not this value "
-+            "(unknown, claude, codex, grok, or kimi). Use with --expected-route to "
++            "(unknown, claude, codex, grok, kimi, or google). Use with --expected-route to "
 +            "fail closed when the pull request drifted after a dry run."
 +        ),
 +    )
@@ -555,7 +555,7 @@ GROK_ROUTE_VOCABULARY = (
     "live_route",
     "kanban_config.py",
     "isCrossRepository",
-    'origin in {"grok", "kimi"}',
+    'origin in {"grok", "kimi", "google"}',
 )
 
 # What a failing gate has to tell an author. Issue #624's false failures were

@@ -299,7 +299,7 @@ CURRENT_CHANGES_REASON = "latest current review verdict is CHANGES_REQUESTED"
 # The canonical approval lock's file name, inside the repository's shared Git
 # directory -- see approval_lock_path.
 APPROVAL_LOCK_NAME = "approve_issues.lock"
-ORIGIN_RE = re.compile(r"<!--\s*issue-origin:(claude|codex|kimi)\s*-->", re.IGNORECASE)
+ORIGIN_RE = re.compile(r"<!--\s*issue-origin:(claude|codex|kimi|google)\s*-->", re.IGNORECASE)
 REVIEW_MARKER_RE = re.compile(r"<!--\s*issue-review:v2\s+([^>]*?)\s*-->", re.IGNORECASE)
 AUTOMATED_REVIEW_COMMENT_RE = re.compile(r"<!--\s*issue-review:v2\b", re.IGNORECASE)
 LOG_DIR: Path | None = None
@@ -791,10 +791,11 @@ def reviewers_for_origin(
         route = [CODEX_REVIEWER]
     elif origin == "codex":
         route = [CLAUDE_REVIEWER]
-    elif origin == "kimi":
-        # Kimi is a known origin that is never a spawned reviewer: like a
-        # grok-origin pull request, a kimi-origin issue is Codex-reviewed
-        # only -- never Claude, and never the legacy dual route.
+    elif origin in ("kimi", "google"):
+        # Kimi and Google are known origins that are never a spawned reviewer:
+        # like a grok-origin pull request, a kimi-origin or google-origin
+        # issue is Codex-reviewed only -- never Claude, and never the legacy
+        # dual route.
         route = [CODEX_REVIEWER]
     elif legacy_policy == "dual":
         route = [CODEX_REVIEWER, CLAUDE_REVIEWER]
@@ -3977,20 +3978,30 @@ def _self_test_body() -> None:
     assert issue_origin(
         "<!-- issue-origin:kimi -->\n<!-- ISSUE-ORIGIN:KIMI -->"
     ) == "kimi"
+    assert issue_origin("Body\n\n<!-- issue-origin:google -->") == "google"
+    assert issue_origin("Body\n\n<!--  ISSUE-ORIGIN:GOOGLE  -->") == "google"
+    assert issue_origin(
+        "<!-- issue-origin:google -->\n<!-- ISSUE-ORIGIN:GOOGLE -->"
+    ) == "google"
     for conflicting in (
         "<!-- issue-origin:kimi -->\n<!-- issue-origin:codex -->",
         "<!-- issue-origin:kimi -->\n<!-- issue-origin:claude -->",
+        "<!-- issue-origin:google -->\n<!-- issue-origin:codex -->",
+        "<!-- issue-origin:google -->\n<!-- issue-origin:claude -->",
+        "<!-- issue-origin:google -->\n<!-- issue-origin:kimi -->",
     ):
         try:
             issue_origin(conflicting)
         except ApproveError as error:
             assert str(error) == "Issue body contains conflicting origin markers"
         else:
-            raise AssertionError("conflicting kimi origin markers were accepted")
+            raise AssertionError("conflicting origin markers were accepted")
     assert reviewers_for_origin("claude", "dual") == [CODEX_REVIEWER]
     assert reviewers_for_origin("codex", "dual") == [CLAUDE_REVIEWER]
     assert reviewers_for_origin("kimi", "dual") == [CODEX_REVIEWER]
     assert reviewers_for_origin("kimi", "hold") == [CODEX_REVIEWER]
+    assert reviewers_for_origin("google", "dual") == [CODEX_REVIEWER]
+    assert reviewers_for_origin("google", "hold") == [CODEX_REVIEWER]
     assert reviewers_for_origin(None, "dual") == [CODEX_REVIEWER, CLAUDE_REVIEWER]
     assert reviewers_for_origin(None, "hold") == []
     # Single-agent collapses every route to the loaded provider whatever the
@@ -4001,12 +4012,13 @@ def _self_test_body() -> None:
         assert reviewers_for_origin("claude", "dual", **single) == [reviewer]
         assert reviewers_for_origin("codex", "dual", **single) == [reviewer]
         assert reviewers_for_origin("kimi", "dual", **single) == [reviewer]
+        assert reviewers_for_origin("google", "dual", **single) == [reviewer]
         assert reviewers_for_origin(None, "dual", **single) == [reviewer]
         assert reviewers_for_origin(None, "hold", **single) == []
     # No-agent names no reviewer at all, and marker_matches reads that as
     # unapproved for anything that reaches it.
     none_loaded = {"mode": kanban_models.NO_AGENT_MODE, "loaded": ()}
-    for origin in ("claude", "codex", "kimi", None):
+    for origin in ("claude", "codex", "kimi", "google", None):
         assert reviewers_for_origin(origin, "dual", **none_loaded) == []
     assert spec_fingerprint(issue, [ordinary, marker_comment]) == spec_sha
     marker = latest_review_marker([ordinary, marker_comment])

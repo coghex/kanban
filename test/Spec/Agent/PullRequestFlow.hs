@@ -77,17 +77,25 @@ spec = do
       originFromBody "body\n<!-- pr-origin:grok -->" `shouldBe` Right PullRequestGrok
       originFromBody "body\n<!-- pr-origin:kimi -->" `shouldBe` Right PullRequestKimi
       originFromBody "body\n<!-- pr-origin:kimi -->\n \t\n" `shouldBe` Right PullRequestKimi
+      originFromBody "body\n<!-- pr-origin:google -->" `shouldBe` Right PullRequestGoogle
+      originFromBody "body\n<!-- pr-origin:google -->\n \t\n" `shouldBe` Right PullRequestGoogle
       originFromBody "body" `shouldBe` Left "PR body has no valid pr-origin marker"
       originFromBody "<!-- pr-origin:unknown -->" `shouldBe` Left "PR body has no valid pr-origin marker"
       originFromBody "body\n<!-- pr-origin:grok -->\n<!-- pr-origin:claude -->"
         `shouldBe` Left "PR body contains both pr-origin markers"
       originFromBody "body\n<!-- pr-origin:kimi -->\n<!-- pr-origin:codex -->"
         `shouldBe` Left "PR body contains both pr-origin markers"
+      originFromBody "body\n<!-- pr-origin:google -->\n<!-- pr-origin:codex -->"
+        `shouldBe` Left "PR body contains both pr-origin markers"
       originFromBody "<!-- pr-origin:grok -->\ntext"
         `shouldBe` Left "PR origin marker must be the final non-whitespace content"
       originFromBody "<!-- pr-origin:kimi -->\ntext"
         `shouldBe` Left "PR origin marker must be the final non-whitespace content"
       originFromBody "<!-- pr-origin:kimi -->\n<!-- pr-origin:kimi -->"
+        `shouldBe` Left "PR body contains a duplicate pr-origin marker"
+      originFromBody "<!-- pr-origin:google -->\ntext"
+        `shouldBe` Left "PR origin marker must be the final non-whitespace content"
+      originFromBody "<!-- pr-origin:google -->\n<!-- pr-origin:google -->"
         `shouldBe` Left "PR body contains a duplicate pr-origin marker"
 
     -- Issue #494. `originFromBody` counts each marker across the whole body
@@ -131,24 +139,31 @@ spec = do
       -- the PR's own origin brand rather than the reviewer's.
       agentForAction DualMode PullRequestCodex PullRequestRepair `shouldBe` CodexSolver
       agentForAction DualMode PullRequestClaude PullRequestRepair `shouldBe` ClaudeSolver
-      -- Grok and Kimi are known origins, not spawned providers. Codex is
-      -- their cross-brand reviewer; own-brand board actions are refused
-      -- separately.
+      -- Grok, Kimi, and Google are known origins, not spawned providers.
+      -- Codex is their cross-brand reviewer; own-brand board actions are
+      -- refused separately.
       agentForAction DualMode PullRequestGrok PullRequestReview `shouldBe` CodexSolver
       agentForAction DualMode PullRequestGrok PullRequestRereview `shouldBe` CodexSolver
       agentForAction DualMode PullRequestKimi PullRequestReview `shouldBe` CodexSolver
       agentForAction DualMode PullRequestKimi PullRequestRereview `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestGoogle PullRequestReview `shouldBe` CodexSolver
+      agentForAction DualMode PullRequestGoogle PullRequestRereview `shouldBe` CodexSolver
       externalOwnBrandUnsupported PullRequestGrok PullRequestRevision `shouldBe` True
       externalOwnBrandUnsupported PullRequestGrok PullRequestRepair `shouldBe` True
       externalOwnBrandUnsupported PullRequestGrok PullRequestReview `shouldBe` False
       externalOwnBrandUnsupported PullRequestKimi PullRequestRevision `shouldBe` True
       externalOwnBrandUnsupported PullRequestKimi PullRequestRepair `shouldBe` True
       externalOwnBrandUnsupported PullRequestKimi PullRequestReview `shouldBe` False
+      externalOwnBrandUnsupported PullRequestGoogle PullRequestRevision `shouldBe` True
+      externalOwnBrandUnsupported PullRequestGoogle PullRequestRepair `shouldBe` True
+      externalOwnBrandUnsupported PullRequestGoogle PullRequestReview `shouldBe` False
       externalOwnBrandUnsupported PullRequestClaude PullRequestRevision `shouldBe` False
       externalOwnBrandUnsupportedMessage PullRequestGrok
         `shouldBe` "grok-origin revision and repair are not a board action; Grok is not a spawned provider"
       externalOwnBrandUnsupportedMessage PullRequestKimi
         `shouldBe` "kimi-origin revision and repair are not a board action; Kimi is not a spawned provider"
+      externalOwnBrandUnsupportedMessage PullRequestGoogle
+        `shouldBe` "google-origin revision and repair are not a board action; Google is not a spawned provider"
 
     -- The fourth derived meaning of r: a Done card whose status is a problem
     -- needs its own code worked on, not another review round. Both halves of

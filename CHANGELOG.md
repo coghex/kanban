@@ -15,6 +15,18 @@ created above it.
 
 ### Unreleased
 
+- `<!-- pr-origin:google -->` is a known pull-request origin, on the same terms
+  as grok and kimi: dual-mode review and rereview route it to Codex only — not
+  Claude, and not both brands, which is what an unrecognized marker still does.
+  Google is not a spawned provider, so the board and the action registry refuse
+  revision and repair of that origin; the Google session that opened the pull
+  request revises it itself.
+- `<!-- issue-origin:google -->` is a known issue origin: the canonical issue
+  gate routes it to Codex only, instead of the legacy dual route an
+  unrecognized marker takes. Single-agent mode collapses that review onto its
+  loaded provider, no-agent mode launches none, and board issue revision is
+  refused because Google is not a spawned provider; the Google session authors
+  its own amendment.
 - The tracked Kimi plugin (`kimi-plugin/`) packages `/solve` and `/autosolve`
   for Copilot CLI sessions running a Kimi model. A Kimi session stamps
   `<!-- pr-origin:kimi -->` and `/autosolve` obtains a Codex review without

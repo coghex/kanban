@@ -142,6 +142,7 @@ ORIGIN_MARKERS = {
     "codex": "<!-- pr-origin:codex -->",
     "grok": "<!-- pr-origin:grok -->",
     "kimi": "<!-- pr-origin:kimi -->",
+    "google": "<!-- pr-origin:google -->",
 }
 
 # The paginated issue-comment endpoint, embedding the resolved repository the
@@ -1147,6 +1148,47 @@ class GateDecisionTests(unittest.TestCase):
     def test_a_kimi_origin_pull_request_refuses_a_dual_approval(self):
         marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex", "claude"])
         state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["kimi"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "reviewed by Codex only",
+                )
+
+    def test_a_google_origin_pull_request_accepts_a_codex_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["google"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertApproved(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    )
+                )
+
+    def test_a_google_origin_pull_request_refuses_a_claude_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["claude"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["google"] + "\n")
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertRefused(
+                    self.decide(
+                        relative_path,
+                        states=[state],
+                        pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                    ),
+                    "reviewed by Codex only",
+                )
+
+    def test_a_google_origin_pull_request_refuses_a_dual_approval(self):
+        marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex", "claude"])
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["google"] + "\n")
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 self.assertRefused(

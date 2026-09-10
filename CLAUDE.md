@@ -176,21 +176,21 @@ This repository is developed by agents, and the board reads their state off GitH
 - Workflow labels: `reviewed:approve` for approved work, `reviewed:changes` for changes
   requested, `reviewed:revised` for a revision handed back for rereview.
 - Origin markers route work to an opposite-brand reviewer. An agent-filed issue body
-  carries `<!-- issue-origin:codex -->`, `<!-- issue-origin:claude -->`, or
-  `<!-- issue-origin:kimi -->` — a kimi-origin issue's canonical reviewer is Codex,
-  since Kimi is not a spawned provider. Board issue revision is refused for
-  that origin; the Kimi session authors its own amendment. An issue
+  carries `<!-- issue-origin:codex -->`, `<!-- issue-origin:claude -->`,
+  `<!-- issue-origin:kimi -->`, or `<!-- issue-origin:google -->` — a kimi-origin or
+  google-origin issue's canonical reviewer is Codex, since neither is a spawned
+  provider. Board issue revision is refused for those origins; the authoring
+  session authors its own amendment. An issue
   filed through GitHub's web UI carries neither by design — the templates under
   `.github/ISSUE_TEMPLATE/` add no marker — and `tools/approve_issues.py` reads that
   absence as legacy provenance, routing it to both reviewers under the default
   `--legacy-policy dual` rather than to one. A pull request body
   carries exactly one of `<!-- pr-origin:codex -->`, `<!-- pr-origin:claude -->`,
-  `<!-- pr-origin:grok -->`, or `<!-- pr-origin:kimi -->` as its
+  `<!-- pr-origin:grok -->`, `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` as its
   final non-whitespace content — `Kanban.PullRequestFlow.originFromBody` rejects a
-  duplicated, mixed, or trailing-text marker. A grok-origin or kimi-origin pull
-  request is a
-  known origin Codex reviews; neither is a spawned Kanban provider, so board
-  revision and repair of those origins are refused.
+  duplicated, mixed, or trailing-text marker. A grok-origin, kimi-origin, or
+  google-origin pull request is a known origin Codex reviews; none of them is a
+  spawned Kanban provider, so board revision and repair of those origins are refused.
 - Never merge a pull request on your own initiative. Solve, review, and
   autonomous agents stop at the open PR; `tools/drain_prs.py` owns merging
   eligible PRs out of the Done column. The single exception is the packaged
