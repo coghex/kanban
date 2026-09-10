@@ -38,6 +38,7 @@ module Kanban.UI.Filter
 
     -- * What the panel reports
     FacetCount (..),
+    settleFacetCounts,
     completedHistoryStatusText,
     criteriaAreFiltering,
     facetCount,
@@ -54,7 +55,8 @@ module Kanban.UI.Filter
 where
 
 import Data.List (elemIndex)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -79,6 +81,12 @@ import Kanban.UI.Util (allColumns, noticeCleared, showText)
 import Kanban.Worker (WorkerDeadline (..))
 
 -- | Recompute what the criteria admit from the datasets currently held.
+--
+-- The epoch beside it moves with it. Every column measurement records the
+-- epoch it was taken at ('Kanban.UI.Types.ColumnContentKey'), so a rebuild
+-- here is what tells the next frame that a measurement of the previous board
+-- no longer describes what it would draw. Bumping it here rather than beside
+-- each caller is the same single-writer rule the field above already has.
 refreshVisibleBoard :: AppState -> AppState
 refreshVisibleBoard state =
   state
@@ -88,7 +96,8 @@ refreshVisibleBoard state =
           state.appFilterCriteria
           state.appBoard
           state.appOpenSnapshot
-          state.appCompletedHistory
+          state.appCompletedHistory,
+      appBoardEpoch = state.appBoardEpoch + 1
     }
 
 -- | One criteria edit, complete: the new criteria, the board they admit, and
@@ -376,30 +385,23 @@ toggleFilterBoxFromClick box state =
 criteriaAreFiltering :: AppState -> Bool
 criteriaAreFiltering state = state.appFilterCriteria /= defaultFilterCriteria
 
--- | What a count over the current datasets can honestly say.
---
--- Only 'FacetCountExact' is a number. The other two are the whole of §13's
--- rule that no count stands for more than it says: a figure that would depend
--- on an open generation that has not published, or on a completed generation
--- still being traversed, is reported as unknown or as progress rather than as
--- a total the data cannot support.
-data FacetCount
-  = FacetCountExact Int
-  | -- | A completed generation is in flight, with its loaded/total figures
-    -- when both connections have reported one.
-    FacetCountLoading (Maybe (Int, Int))
-  | FacetCountUnknown
-  deriving stock (Eq, Show)
-
 -- | The count beside one checkbox: how many cards its own value would admit
 -- under every other group's current selection.
 facetCount :: AppState -> FilterBox -> FacetCount
-facetCount state box = countUnder state (restrictedToBox box state.appFilterCriteria)
+facetCount state box = case preparedFacets state >>= Map.lookup box . (.facetBoxCounts) of
+  Just prepared -> prepared
+  Nothing -> countBox state box
+
+countBox :: AppState -> FilterBox -> FacetCount
+countBox state box = countUnder state (restrictedToBox box state.appFilterCriteria)
 
 -- | The panel's raw count: every card the complete datasets hold, whatever the
 -- criteria currently admit.
 rawEntryCount :: AppState -> FacetCount
-rawEntryCount state =
+rawEntryCount state = maybe (countEverything state) (.facetAdmittedCount) (preparedFacets state)
+
+countEverything :: AppState -> FacetCount
+countEverything state =
   countUnder
     state
     FilterCriteria
@@ -417,7 +419,51 @@ rawEntryCount state =
 -- whatever history was seeded while the blocker is showing none of it, and a
 -- figure taken from it would state a total the next publication will change.
 filteredCount :: AppState -> FacetCount
-filteredCount state = countUnder state state.appFilterCriteria
+filteredCount state = maybe (countUnder state state.appFilterCriteria) (.facetShownCount) (preparedFacets state)
+
+-- | Work out every figure the panel shows, keep the ones already worked out,
+-- or drop them when the panel is not up.
+--
+-- The one writer of 'appFacetCounts', applied after every event by
+-- 'Kanban.UI.Events.handleEvent'. Each figure is a count over the complete
+-- datasets and there are sixteen of them, so a frame that worked them out
+-- would put the whole board's cost back into every redraw the panel is open
+-- for -- including one that only moved the focus from one checkbox to the next
+-- (issue #640).
+--
+-- What they depend on is the datasets and the criteria, which 'appBoardEpoch'
+-- stands for -- 'refreshVisibleBoard' is applied after any change to either --
+-- together with the freshness that decides whether a count may be stated at
+-- all.
+settleFacetCounts :: AppState -> AppState
+settleFacetCounts state
+  | isNothing state.appFilterPanel = if isNothing state.appFacetCounts then state else state {appFacetCounts = Nothing}
+  | Just (key, _) <- state.appFacetCounts, key == facetKey state = state
+  | otherwise = state {appFacetCounts = Just (facetKey state, countedFacets state)}
+
+facetKey :: AppState -> FacetKey
+facetKey state =
+  FacetKey
+    { facetKeyEpoch = state.appBoardEpoch,
+      facetKeyOpenFetched = isJust state.appLastSuccessfulFetch,
+      facetKeyCompleted = state.appCompletedStatus,
+      facetKeyProgress = state.appCompletedProgress
+    }
+
+countedFacets :: AppState -> FacetCounts
+countedFacets state =
+  FacetCounts
+    { facetBoxCounts = Map.fromList [(box, countBox state box) | box <- everyFilterBox],
+      facetShownCount = countUnder state state.appFilterCriteria,
+      facetAdmittedCount = countEverything state
+    }
+
+-- | The figures already worked out, when they were worked out from what the
+-- dashboard holds now.
+preparedFacets :: AppState -> Maybe FacetCounts
+preparedFacets state = do
+  (key, counts) <- state.appFacetCounts
+  if key == facetKey state then Just counts else Nothing
 
 -- | How many cards one criteria set admits, or why that cannot be said yet.
 countUnder :: AppState -> FilterCriteria -> FacetCount

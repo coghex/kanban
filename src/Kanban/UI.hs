@@ -11,7 +11,8 @@
 -- 'Kanban.UI.Events' for dispatch, and the session, worker, refresh, and
 -- autosolve modules underneath them.
 module Kanban.UI
-  ( drawApplication,
+  ( dashboardApplication,
+    drawApplication,
     initialCompletedHistory,
     loadStartupCaches,
     restoreStartupNotice,
@@ -167,6 +168,20 @@ runHeldDashboard authority options config repository roster = do
             -- 'refreshVisibleBoard' below, which is what admits a seeded
             -- history under criteria that ask for one.
             appVisibleBoard = startupBoard config.resolvedWorkflow now,
+            -- The first admitted board is generation zero; every rebuild after
+            -- it goes through 'refreshVisibleBoard', which is what moves this.
+            appBoardEpoch = 0,
+            -- Nothing has been drawn yet, so nothing has been measured. The
+            -- first frame lays every column out in full and the settle after
+            -- the event that produced it records the measurement.
+            appColumnWindows = Map.empty,
+            appExpansionEpoch = 0,
+            -- Settled by the first 'refreshColumnWindows' rather than derived
+            -- here: an empty roster of sessions is what a launch actually has,
+            -- and the two presentation settings beside it never move, so the
+            -- first settle finds this already true and the epoch stays zero.
+            appLayoutEpoch = 0,
+            appLayoutInputs = unmeasuredLayoutInputs options config,
             -- Criteria are process-lifetime state: every launch starts at the
             -- defaults, and nothing restores a previous session's.
             appFilterCriteria = defaultFilterCriteria,
@@ -174,6 +189,7 @@ runHeldDashboard authority options config repository roster = do
             -- not part of them, so nothing about a previous session restores
             -- it either.
             appFilterPanel = Nothing,
+            appFacetCounts = Nothing,
             appUsage = initialUsage,
             appUsageFreshness = initialUsageFreshness,
             appSelectedColumn = Issues,
@@ -289,7 +305,7 @@ runHeldDashboard authority options config repository roster = do
             appConfig = config
           }
   (finalState, finalVty) <-
-    customMainWithDefaultVty (Just eventChannel) application (refreshVisibleBoard initialState)
+    customMainWithDefaultVty (Just eventChannel) dashboardApplication (refreshVisibleBoard initialState)
   -- Nothing review-shaped is stopped here any more. The embedded review
   -- client and every issue action's process belong to the repository review
   -- host, which is a detached worker like any other and outlives this
@@ -365,8 +381,15 @@ initialUsageState cacheLoad = case cacheLoad of
           (Claude, maybe NotLoaded (Fresh . (.usageFetchedAt)) (Map.lookup Claude snapshots))
         ]
 
-application :: App AppState AppEvent Name
-application =
+-- | The dashboard brick runs: the draw, the dispatch, the cursor policy, and
+-- the theme, composed once.
+--
+-- Exported so a regression can drive the real loop rather than a rebuilt one.
+-- What such a test replaces is 'appStartEvent', which enables the mouse and
+-- starts this launch's refreshes; every other field is the behavior under
+-- test.
+dashboardApplication :: App AppState AppEvent Name
+dashboardApplication =
   App
     { appDraw = drawApplication,
       appChooseCursor = neverShowCursor,
