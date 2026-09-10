@@ -19,7 +19,7 @@ Effort estimates are relative and preliminary.
 - [x] BQ-1. Card excerpts display template headings instead of descriptions — [#646]
 - [x] BQ-2. Filtering hides known PR relationships from issue details — [#647]
 - [x] BQ-3. Search misses canonically equivalent Unicode text — [#661]
-- [ ] BQ-4. Focused search reserves ordinary letters as commands
+- [x] BQ-4. Focused search reserves ordinary letters as commands — [no-issue]
 - [ ] BQ-5. Filtering unfinished children increases displayed epic completion
 - [ ] BQ-6. Open the selected card in a browser
 - [ ] BQ-7. Switch card density without restarting
@@ -73,7 +73,9 @@ Visually identical accented text can fail to match because the query and display
 
 ## Interaction design changes
 
-### BQ-4. Focused search reserves ordinary letters as commands
+### [no-issue] BQ-4. Focused search reserves ordinary letters as commands
+
+> **Disposition:** No issue — `s`, `q`, and uppercase `F` are reserved by an explicit signed-off decision (`docs/issue_search_design.md` D-5, 2026-08-11), which considered and rejected moving quit off `q`; #513 later revisited the reserved set on purpose and freed only lowercase `f`. Matching is case-insensitive, so every query remains typeable via the other case, and the footer, help overlay, and user guide state the three exceptions. Reopening D-5 is a product decision, not a defect.
 
 **Priority: after correctness fixes. Estimated effort: easy–medium.**
 
