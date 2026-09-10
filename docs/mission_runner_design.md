@@ -21,7 +21,7 @@ concrete precondition
 - [x] EPIC. Run missions without the dashboard through a per-repository service — [#597]
 - [x] RUN-1. Add the mission runner service and its supervisor/scheduler runtime — [#666]
 - [x] RUN-2. Install per-repository mission runner jobs with a dedicated installer and discovery record — [#667]
-- [ ] RUN-3. Discover, monitor, and control the mission runner from Kanban
+- [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
 - [ ] RUN-4. Own and reap the descendant tree across crash, timeout, and termination
 - [ ] RUN-5. Schedule missions fairly and survive capacity limits and upgrades
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
