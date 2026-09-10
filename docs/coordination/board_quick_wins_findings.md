@@ -18,7 +18,7 @@ Effort estimates are relative and preliminary.
 
 - [x] BQ-1. Card excerpts display template headings instead of descriptions — [#646]
 - [x] BQ-2. Filtering hides known PR relationships from issue details — [#647]
-- [ ] BQ-3. Search misses canonically equivalent Unicode text
+- [x] BQ-3. Search misses canonically equivalent Unicode text — [#661]
 - [ ] BQ-4. Focused search reserves ordinary letters as commands
 - [ ] BQ-5. Filtering unfinished children increases displayed epic completion
 - [ ] BQ-6. Open the selected card in a browser
@@ -57,7 +57,7 @@ An issue’s details can claim it has no linked PRs merely because PR cards are 
 
 **Handoff context:** Resolve known relationships from the retained dataset independently of card visibility. Preserve the visible board’s role in tracker presentation. Test relationship display with PR filters applied, and define how available completed history contributes. Existing data truncation limits still apply; this does not require fetching additional GitHub data.
 
-### BQ-3. Search misses canonically equivalent Unicode text
+### [#661] BQ-3. Search misses canonically equivalent Unicode text
 
 **Priority: third. Estimated effort: easy.**
 
