@@ -20,7 +20,7 @@ Effort estimates are relative and preliminary.
 - [x] BQ-2. Filtering hides known PR relationships from issue details — [#647]
 - [x] BQ-3. Search misses canonically equivalent Unicode text — [#661]
 - [x] BQ-4. Focused search reserves ordinary letters as commands — [no-issue]
-- [ ] BQ-5. Filtering unfinished children increases displayed epic completion
+- [x] BQ-5. Filtering unfinished children increases displayed epic completion — [#662]
 - [ ] BQ-6. Open the selected card in a browser
 - [ ] BQ-7. Switch card density without restarting
 
@@ -91,7 +91,7 @@ Typing lowercase `s` closes search, lowercase `q` reaches guarded dashboard quit
 
 Any accepted change must update the governing contract, help text, and input-routing tests together. The key policy requires a fresh design decision.
 
-### BQ-5. Filtering unfinished children increases displayed epic completion
+### [#662] BQ-5. Filtering unfinished children increases displayed epic completion
 
 **Priority: after correctness fixes. Estimated effort: medium.**
 
