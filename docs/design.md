@@ -1538,11 +1538,38 @@ ordinary chips rather than an invisible built-in set of names.
 
 ### Excerpts
 
-Use GitHub's plain-text body representation where available. Select the first
-meaningful non-empty paragraph, collapse whitespace, wrap to card width, show
-at most three display lines, and append `…` when truncated. This is more stable
-than trying to count natural-language sentences in issue templates, lists, and
-code-heavy bodies.
+An excerpt is selected from the Markdown body §13 fetches, after the
+external-text sanitization below. No plain-text rendition of a body is
+requested, so the selection is made over the author's own Markdown rather than
+over anything GitHub has flattened. Select the first meaningful non-empty
+paragraph, collapse whitespace, wrap to card width, show at most three display
+lines, and append `…` when truncated. This is more stable than trying to count
+natural-language sentences in issue templates, lists, and code-heavy bodies.
+
+"Meaningful" excludes the structure a body opens with, which is the template
+rather than the issue. Two things are skipped, repeatedly and in any order,
+with the selection resuming at whatever follows:
+
+- An ATX heading: one to six `#` characters closed by whitespace or by the end
+  of its line. Both halves matter, because `#123` is a cross-reference and
+  `#######` is seven hashes, and neither is a heading.
+- An HTML comment, through its closing `-->` however many lines and blank lines
+  it spans — the issue template's instructional comment spans one of each — and
+  content left after that marker on its own line begins the paragraph. A
+  comment that never closes consumes the rest of the body, so markup its author
+  wrote to be invisible cannot reach a card.
+
+Everything else is content and is excerpted exactly as a prose paragraph is: a
+list, a fenced code block, and a block quote all stand as they are, and so do
+the heading- and comment-shaped lines a fence may hold, because skipping stops
+at the first line that is neither of the two above. The two tests allow up to
+three spaces of indentation, which is CommonMark's limit; a fourth opens an
+indented code block, and that is content like any other. A body holding nothing
+but headings and comments excerpts to the empty text, and its card draws no
+excerpt line rather than a heading.
+
+None of this reaches the details overlay, which renders the whole sanitized
+body with its headings and comments intact.
 
 ### Card height and truncation
 
@@ -1595,7 +1622,9 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 
 `Enter` opens a scrollable overlay containing:
 
-- Full plain-text body.
+- The full body, sanitized but otherwise as written: the Markdown §13 fetched,
+  with the headings and comments §11's excerpt selection passes over left in
+  place.
 - All labels, assignees, and author information.
 - Tracker membership and implementation key.
 - All linked issues or pull requests.
@@ -2025,9 +2054,9 @@ and standalone cards:
 The GitHub provider uses the user's existing `gh` authentication and requests
 only the fields required by the board. Expected data includes:
 
-- Open issues: number, title, plain-text body, URL, labels, assignees, creation
+- Open issues: number, title, Markdown body, URL, labels, assignees, creation
   and update timestamps.
-- Open PRs: number, title, plain-text body, URL, labels, author, draft status,
+- Open PRs: number, title, Markdown body, URL, labels, author, draft status,
   base/head branches, creation/update timestamps, closing issue references,
   mergeability, merge-state status, review decision, and status-check rollup.
 - Open tracker issue bodies so ordered checklist membership can be parsed.
@@ -2051,6 +2080,13 @@ only the fields required by the board. Expected data includes:
   resolved without a request per tracker. Tracker recognition happens after
   decoding, so these are requested for every issue on the page and only the
   tracker ones are consumed.
+
+A body is requested as the Markdown its author wrote — GitHub's `body` field,
+not the flattened `bodyText` rendition — for both kinds. Nothing downstream
+needs a rendition GitHub has already stripped: §11's excerpt selection reads
+the Markdown's own structure to decide what is content, and the details overlay
+shows the body whole. Sanitization, not GitHub, is what makes either safe to
+draw.
 
 One explicit refresh follows both open connections to their end. Open issues
 and open pull requests paginate independently, each until GitHub reports no
@@ -4333,12 +4369,16 @@ The first solve/autosolve-compatible slice is implemented.
 - A provider event the parser does not recognize — an unknown top-level type,
   an unknown Codex item, or an unknown Claude content block — contributes at
   most one bounded single-line notice: a normalized, truncated type label and
-  a truncated compact payload prefix, whole-notice length included. Only a
-  literal JSON string names a recognized type, so a non-string type cannot be
-  coerced into a recognized branch and out of the bound. A payload with no
-  usable string type, and an `error` payload with no usable string `message`,
-  use the same bounded form; only a real textual error message is exempt and
-  kept in full. Repeats collapse per invocation: the first few
+  a truncated compact payload prefix, whole-notice length included.
+  Normalizing a type means sanitizing it and collapsing its whitespace onto one
+  line, and nothing more: none of it is read as Markdown the way §11 reads a
+  card body, so a type shaped like a heading or an HTML comment keeps an
+  identity of its own. Only a literal JSON string names a recognized type, so a
+  non-string type cannot be coerced into a recognized branch and out of the
+  bound. A payload with no usable string type — missing, non-string, or blank
+  once normalized — and an `error` payload with no usable string `message`, use
+  the same bounded form; only a real textual error message is exempt and kept
+  in full. Repeats collapse per invocation: the first few
   occurrences of each `(category, type)` are reported individually, later ones
   only accumulate a count, and one aggregate summary naming the total is
   appended before the terminal event on every path. The supervisor owns that

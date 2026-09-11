@@ -344,6 +344,24 @@ spec = do
           ]
       notices `shouldSatisfy` elem "still working"
 
+    -- #646 gave 'Kanban.Text.excerpt' the Markdown structure skipping a card
+    -- body wants. A provider's event type is not a card body: one shaped like
+    -- a heading or an HTML comment is still that type, and reading it as
+    -- structure would normalize it to nothing and fold every such type in with
+    -- the blank ones under the single placeholder key.
+    it "keeps heading- and comment-shaped event types apart, and apart from blank ones" $ do
+      let headingType = "{\"type\":\"## alpha\"}"
+          commentType = "{\"type\":\"<!-- beta -->\"}"
+          blankType = "{\"type\":\"   \"}"
+      notices <- aggregatedNotices (concat (replicate 5 [headingType, commentType, blankType]))
+      let summaries = filter (Data.Text.isInfixOf "×") notices
+      sort summaries
+        `shouldBe` sort
+          [ "[event] ## alpha ×5",
+            "[event] <!-- beta --> ×5",
+            "[event] unknown ×5"
+          ]
+
     it "keeps a textual error message in full while bounding an error payload that has no usable message" $ do
       -- The one exemption stays: a literal string 'message' is never
       -- truncated. Anything else about an 'error' payload — missing,
