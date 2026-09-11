@@ -1893,16 +1893,23 @@ ordinary `j`/`k` focus order only while their epic is expanded.
 
 Tracker progress under checklist membership is derived from the authoritative
 tracker body's checklist together with the retained data's own lifecycle
-facts. The total is every recognized child entry. A child counts complete
-when its checkbox is checked, or when the retained data — the open generation
-and the completed history together, whichever of them the criteria are
-currently drawing — does not report its issue open. That second half covers a
-child the data holds as closed, and a reference no retained dataset holds at
-all, never fetched or in another repository: neither can be rendered or
-interacted with, so both count as complete rather than pending forever. A
-checked child that has also closed is one child and is counted once. A linked
-pull request groups a child but establishes nothing about that child's own
-lifecycle.
+facts. The total is every recognized child entry. A child counts complete when
+its checkbox is checked, or when the retained data does not report its issue
+open. The retained data here is both generations at once — the open generation
+together with a loaded completed history — and completion consults both of
+them regardless of which the lifecycle criteria have selected for the board
+being drawn.
+
+That second condition covers two cases, and they differ in what the board can
+show. A child the retained data holds as closed is complete whether or not the
+criteria are drawing it: with `Closed` checked it is rendered as a completed
+card under its own header, with `Closed` unchecked it is off the board
+entirely, and the count is the same either way. A reference no retained
+dataset holds at all — never fetched, or in another repository — is complete
+because it can never be rendered or interacted with under any criteria, and
+the alternative is an entry that stays pending forever. A checked child that
+has also closed is one child and is counted once. A linked pull request groups
+a child but establishes nothing about that child's own lifecycle.
 
 Progress is therefore a fact about the retained data rather than about the
 view. It reads the same under every combination of filter criteria: hiding a
