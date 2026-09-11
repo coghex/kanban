@@ -1622,7 +1622,9 @@ but sanitized user-authored emoji may be displayed using Vty's measured width.
 
 `Enter` opens a scrollable overlay containing:
 
-- Full plain-text body.
+- The full body, sanitized but otherwise as written: the Markdown §13 fetched,
+  with the headings and comments §11's excerpt selection passes over left in
+  place.
 - All labels, assignees, and author information.
 - Tracker membership and implementation key.
 - All linked issues or pull requests.
@@ -2052,9 +2054,9 @@ and standalone cards:
 The GitHub provider uses the user's existing `gh` authentication and requests
 only the fields required by the board. Expected data includes:
 
-- Open issues: number, title, plain-text body, URL, labels, assignees, creation
+- Open issues: number, title, Markdown body, URL, labels, assignees, creation
   and update timestamps.
-- Open PRs: number, title, plain-text body, URL, labels, author, draft status,
+- Open PRs: number, title, Markdown body, URL, labels, author, draft status,
   base/head branches, creation/update timestamps, closing issue references,
   mergeability, merge-state status, review decision, and status-check rollup.
 - Open tracker issue bodies so ordered checklist membership can be parsed.
@@ -2078,6 +2080,13 @@ only the fields required by the board. Expected data includes:
   resolved without a request per tracker. Tracker recognition happens after
   decoding, so these are requested for every issue on the page and only the
   tracker ones are consumed.
+
+A body is requested as the Markdown its author wrote — GitHub's `body` field,
+not the flattened `bodyText` rendition — for both kinds. Nothing downstream
+needs a rendition GitHub has already stripped: §11's excerpt selection reads
+the Markdown's own structure to decide what is content, and the details overlay
+shows the body whole. Sanitization, not GitHub, is what makes either safe to
+draw.
 
 One explicit refresh follows both open connections to their end. Open issues
 and open pull requests paginate independently, each until GitHub reports no
