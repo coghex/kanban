@@ -832,6 +832,29 @@ attentionSpec = describe "the attention a waiting mission raises" $ do
             `shouldBe` Just (attentionRecord (MissionId "mission-a")).missionAttentionId
         other -> expectationFailure ("a pre-field snapshot was refused: " <> show (() <$ other))
 
+  -- Absent is migrated; present-and-malformed is not. `.:?` would have made
+  -- these the same question — it answers Nothing for a missing key and for an
+  -- explicit null alike — so a record that says its identity is nothing would
+  -- have been silently repaired and then observed and notified.
+  it "refuses an identity that is present and says nothing" $
+    forM_ ["null", "\"\""] $ \spelling ->
+      withWaitingMission $ \store -> do
+        blankAttentionIdentity store (MissionId "mission-a") spelling
+        readBack <- readMissionSnapshot store (MissionId "mission-a")
+        case readBack of
+          MissionUnreadable _ -> pure ()
+          other -> expectationFailure (spelling <> " was migrated: " <> show (() <$ other))
+
+  -- And the marker the migration uses is not something a document can claim:
+  -- "this record predates the field" stays a fact about the document's shape.
+  it "refuses a record that spells the unrecorded marker itself" $
+    withWaitingMission $ \store -> do
+      blankAttentionIdentity store (MissionId "mission-a") "\"\\u0000unrecorded\""
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionUnreadable _ -> pure ()
+        other -> expectationFailure ("the marker was accepted: " <> show (() <$ other))
+
   -- And it is a restoration rather than a blanket recomputation: an identity
   -- that is *present* and names somebody else is still refused, which is what
   -- the check is for.
@@ -1533,18 +1556,39 @@ unrecordAttentionIdentity store mission =
   where
     -- Removes the one key, leaving the rest of the document exactly as this
     -- release wrote it — which is what a record from before the field is.
-    dropIdentity contents = case breakOn "\"missionAttentionId\":" contents of
+    dropIdentity contents = case breakOnString "\"missionAttentionId\":" contents of
       Nothing -> error "the fixture snapshot carries no attention identity to remove"
       Just (leading, rest) ->
         let trailing = drop 1 (dropWhile (/= ',') rest)
          in leading <> trailing
 
-    breakOn needle haystack = go [] haystack
-      where
-        go _ [] = Nothing
-        go seen rest@(character : remaining)
-          | take (length needle) rest == needle = Just (reverse seen, rest)
-          | otherwise = go (character : seen) remaining
+
+-- | Replaces the recorded episode identity with whatever a test spells,
+-- leaving the key itself in place — which is what makes this a different
+-- record from one written before the key existed.
+blankAttentionIdentity :: MissionStore -> MissionId -> String -> IO ()
+blankAttentionIdentity store mission spelling =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> do
+      let path = directory </> "snapshot.json"
+      contents <- readFile path
+      length contents `seq` writeFile path (rewriteIdentity contents)
+  where
+    rewriteIdentity contents = case breakOnString "\"missionAttentionId\":" contents of
+      Nothing -> error "the fixture snapshot carries no attention identity to replace"
+      Just (leading, rest) ->
+        let key = "\"missionAttentionId\":"
+            trailing = dropWhile (/= ',') (drop (length key) rest)
+         in leading <> key <> spelling <> trailing
+
+breakOnString :: String -> String -> Maybe (String, String)
+breakOnString needle = go []
+  where
+    go _ [] = Nothing
+    go seen rest@(character : remaining)
+      | take (length needle) rest == needle = Just (reverse seen, rest)
+      | otherwise = go (character : seen) remaining
 
 -- | A record whose attention and lifecycle contradict each other, written
 -- past the writer that refuses to produce one.

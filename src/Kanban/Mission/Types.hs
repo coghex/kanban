@@ -106,9 +106,8 @@ module Kanban.Mission.Types
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:!), (.:?), (.=))
 import Data.Aeson.Types (Parser)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
@@ -387,18 +386,43 @@ data MissionAttention = MissionAttention
 -- the wrong identity\" survives to the place that can tell them apart. The
 -- second is still refused.
 instance FromJSON MissionAttention where
-  parseJSON = withObject "MissionAttention" $ \fields ->
-    MissionAttention
-      <$> (fromMaybe (MissionAttentionId "") <$> fields .:? "missionAttentionId")
-      <*> fields .: "missionAttentionSummary"
+  parseJSON = withObject "MissionAttention" $ \fields -> do
+    -- @.:!@ rather than @.:?@, and the difference is the whole point: @.:?@
+    -- answers 'Nothing' both for a key that is not there and for one whose
+    -- value is @null@, which would migrate an explicitly malformed record as
+    -- though it were an old one. @.:!@ answers 'Nothing' only for a key that
+    -- is absent and fails on a @null@ it cannot parse.
+    recorded <- fields .:! "missionAttentionId"
+    identity <- case recorded of
+      Nothing -> pure missionAttentionIdentityUnrecordedMarker
+      Just value
+        | Text.null value.unMissionAttentionId ->
+            fail "missionAttentionId is present and empty; an episode names itself or does not record a name at all"
+        -- Unreachable from a document: the marker carries a NUL, which no
+        -- identity this module mints contains. Refused rather than trusted,
+        -- so \"this record predates the field\" stays a fact about the
+        -- document's /shape/ and never something its contents can assert.
+        | value == missionAttentionIdentityUnrecordedMarker ->
+            fail "missionAttentionId names the reserved unrecorded marker"
+        | otherwise -> pure value
+    MissionAttention identity
+      <$> fields .: "missionAttentionSummary"
       <*> fields .:? "missionAttentionStep"
       <*> fields .: "missionAttentionRaisedAt"
 
+-- | What a record written before the identity field existed decodes to.
+--
+-- Carries a NUL so no document can spell it and no identity this module mints
+-- can collide with it: 'missionAttentionIdentity' joins an owner, a name, a
+-- mission and a timestamp, none of which contains one.
+missionAttentionIdentityUnrecordedMarker :: MissionAttentionId
+missionAttentionIdentityUnrecordedMarker = MissionAttentionId "\NULunrecorded"
+
 -- | Whether this episode's identity is the one a record predating the field
--- decodes to.
+-- decodes to — which is to say, whether the key was absent altogether.
 missionAttentionIdentityUnrecorded :: MissionAttention -> Bool
 missionAttentionIdentityUnrecorded attention =
-  Text.null attention.missionAttentionId.unMissionAttentionId
+  attention.missionAttentionId == missionAttentionIdentityUnrecordedMarker
 
 -- | The identity one episode takes, from what identifies it.
 --

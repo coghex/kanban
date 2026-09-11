@@ -1015,11 +1015,11 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
         raise PassFailure(
             f"The mission scheduler report names no repository: {repository!r}."
         )
-    termination = document["termination"]
-    if termination not in PASS_TERMINATIONS:
-        raise PassFailure(
-            f"The mission scheduler report has unknown termination {termination!r}."
-        )
+    termination = _require_vocabulary(
+        document["termination"],
+        PASS_TERMINATIONS,
+        "The mission scheduler report's termination",
+    )
     expected_exit = PASS_EXIT_CODES[termination]
     # `is_plain_integer` rather than `==`, because `True == 1` and `False == 0`:
     # a report carrying a Boolean where its exit status belongs would otherwise
@@ -1042,6 +1042,23 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
     for field in ("started_at", "finished_at"):
         _require_timestamp(document[field], f"The mission scheduler report's {field}")
     return document
+
+
+def _require_vocabulary(value: Any, allowed: frozenset[str], what: str) -> str:
+    """One value from a closed vocabulary, type-checked before it is looked up.
+
+    `value in frozenset` is not a safe question to ask of a document another
+    process wrote: a JSON array or object is unhashable, so the membership test
+    raises `TypeError` rather than answering. That escapes `PassFailure` and is
+    recorded as an unexpected controller failure — the service stops with a
+    traceback about a set lookup instead of the sentence saying the report was
+    malformed.
+    """
+    if not isinstance(value, str):
+        raise PassFailure(f"{what} is not text: {value!r}.")
+    if value not in allowed:
+        raise PassFailure(f"{what} is not one of {sorted(allowed)}: {value!r}.")
+    return value
 
 
 def _require_timestamp(value: Any, what: str) -> None:
@@ -1099,11 +1116,11 @@ def _require_admitted(admitted: Any, termination: str) -> None:
                 f"A mission scheduler report's admitted entry names no mission: "
                 f"{entry['mission']!r}."
             )
-        disposition = entry["disposition"]
-        if disposition not in PASS_DISPOSITIONS:
-            raise PassFailure(
-                f"A mission scheduler report names unknown disposition {disposition!r}."
-            )
+        disposition = _require_vocabulary(
+            entry["disposition"],
+            PASS_DISPOSITIONS,
+            "A mission scheduler report's disposition",
+        )
         if not isinstance(entry["detail"], str):
             raise PassFailure(
                 f"A mission scheduler report's admitted entry carries no detail: "
@@ -1166,11 +1183,11 @@ def _require_attention(attention: Any, termination: str, repository: str) -> Non
                     f"A mission scheduler report's attention entry names no {field}: "
                     f"{entry[field]!r}."
                 )
-        state = entry["notification"]
-        if state not in PASS_NOTIFICATION_STATES:
-            raise PassFailure(
-                f"A mission scheduler report names unknown notification state {state!r}."
-            )
+        state = _require_vocabulary(
+            entry["notification"],
+            PASS_NOTIFICATION_STATES,
+            "A mission scheduler report's notification state",
+        )
         _require_targets(entry["targets"])
         if entry["detail"] is not None and not isinstance(entry["detail"], str):
             raise PassFailure(
@@ -1258,10 +1275,11 @@ def _require_target(target: Any) -> None:
             f"A mission scheduler report's attention target has the wrong fields: "
             f"{sorted(keys)}."
         )
-    if target["kind"] not in PASS_TARGET_KINDS:
-        raise PassFailure(
-            f"A mission scheduler report names unknown target kind {target['kind']!r}."
-        )
+    _require_vocabulary(
+        target["kind"],
+        PASS_TARGET_KINDS,
+        "A mission scheduler report's attention target kind",
+    )
     if not is_plain_integer(target["number"]) or target["number"] <= 0:
         raise PassFailure(
             f"A mission scheduler report's attention target names no positive number: "

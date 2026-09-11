@@ -663,6 +663,36 @@ class PassReportTests(unittest.TestCase):
             # Python's `\d` matches every Unicode decimal digit, and `int()`
             # converts them, so a shape check written with it accepts an
             # instant no Haskell writer can emit.
+            # A JSON array or object is unhashable, so a membership test asked
+            # of one raises TypeError rather than answering — which escapes
+            # PassFailure and is recorded as an unexpected controller failure
+            # instead of a malformed report.
+            "a termination that is a list": (
+                json.dumps({**pass_document(), "termination": []}),
+                0,
+            ),
+            "a termination that is an object": (
+                json.dumps({**pass_document(), "termination": {}}),
+                0,
+            ),
+            "a disposition that is a list": (
+                json.dumps(pass_document(admitted=[{**admitted_entry(), "disposition": []}])),
+                0,
+            ),
+            "a notification state that is an object": (
+                json.dumps(pass_document(attention=[{**attention_entry(), "notification": {}}])),
+                0,
+            ),
+            "a target kind that is a list": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "targets": [{"kind": [], "number": 844}]}
+                        ]
+                    )
+                ),
+                0,
+            ),
             "a timestamp in non-ASCII digits": (
                 json.dumps({**pass_document(), "started_at": "\u0662\u0660\u0662\u0666-\u0660\u0669-\u0661\u0661T\u0660\u0660:\u0660\u0660:\u0660\u0660Z"}),
                 0,
@@ -747,6 +777,25 @@ class PassReportTests(unittest.TestCase):
                     attention=[{**attention_entry(), "targets": targets}]
                 )
                 self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_no_malformed_json_value_escapes_as_a_raw_exception(self):
+        # The property behind the cases above, over every field this decoder
+        # looks up in a closed vocabulary: whatever a document puts there, the
+        # answer is a PassFailure the controller classifies, never an exception
+        # it reports as its own failure.
+        for field, replacement in (
+            ("termination", [1]),
+            ("exit_code", {}),
+            ("admitted", {}),
+            ("attention", "not a list"),
+            ("repository", []),
+            ("detail", []),
+            ("started_at", {}),
+        ):
+            with self.subTest(field=field):
+                document = {**pass_document(), field: replacement}
+                with self.assertRaises(service.PassFailure):
+                    service.parse_pass_report(json.dumps(document), 0)
 
     def test_the_producers_timestamp_forms_are_accepted(self):
         # The control for the temporal cases above: `iso8601Show` emits a
