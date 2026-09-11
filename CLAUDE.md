@@ -114,8 +114,9 @@ Modules live in `src/Kanban/`; search the group that matches the change.
 - `Usage` with `Usage.Render`, `UsageCommand`, `Ping` — provider quota windows, the
   wording the sidebar and `--usage` share, the configured external usage commands,
   and the deliberate window-starting ping.
-- `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest` — terminal presentation, responsive
-  layout, and external-text sanitization. `UI` itself is only the composition root;
+- `UI` with `UI.*`, `Layout`, `Text`, `GlyphTest`, `Browser` — terminal presentation,
+  responsive layout, external-text sanitization, and the one place a URL is handed
+  to the platform's page opener. `UI` itself is only the composition root;
   the seams live beside it — `UI.Types` and `UI.State` (state), `UI.Theme`,
   `UI.Board`, `UI.Overlay`, and `UI.Details` (drawing), `UI.Events` (dispatch),
   `UI.Keys` (the one declaration site for a board key binding, held against

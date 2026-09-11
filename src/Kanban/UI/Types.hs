@@ -63,6 +63,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (TimeZone, UTCTime )
 import Data.Vector (Vector)
+import Kanban.Browser (OpenFailure)
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
 import Kanban.Domain
@@ -719,6 +720,13 @@ data AppEvent
     -- notice repeats — finds a different identity displayed and is dropped
     -- rather than allowed to clear it (issue #590 requirement 5).
     NoticeExpired Int
+  | -- | One @w@ launch has finished, carrying the URL it was launched for and
+    -- what became of the opener. The URL is the event's rather than read back
+    -- off the selection, because the selection is free to move — and the
+    -- details overlay free to close — while the opener is still starting, and
+    -- a failure has to name the page the user actually asked for. A launch
+    -- that completed cleanly carries 'Nothing' and shows nothing.
+    PageOpenFinished Text (Maybe OpenFailure)
 
 data AppState = AppState
   { appRepository :: Repository,

@@ -333,7 +333,3 @@ drawTrackingDetails context =
       concatMap
         (drawTrackerDiagnosticDetails . (.membershipTracker.trackerDiagnostics))
         (context.trackingPrimary : context.trackingAdditional)
-
-itemUrl :: BoardItem -> Text
-itemUrl (IssueItem issue) = issue.issueUrl
-itemUrl (PullRequestItem pullRequest) = pullRequest.pullRequestUrl

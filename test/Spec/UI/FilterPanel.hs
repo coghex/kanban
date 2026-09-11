@@ -666,8 +666,8 @@ blockerSpec = describe "the completed-history blocker" $ do
   it "makes every card action inert and leaves the rest alone" $ do
     map blockedByCompletedLoad [NextCard, PreviousCard, PreviousColumn, NextColumn, FirstItem, LastItem]
       `shouldBe` replicate 6 True
-    map blockedByCompletedLoad [OpenSearch, ToggleEpic, ShowDetails]
-      `shouldBe` replicate 3 True
+    map blockedByCompletedLoad [OpenSearch, ToggleEpic, ShowDetails, OpenCardPage]
+      `shouldBe` replicate 4 True
     map blockedByCompletedLoad [ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, KillWorking]
       `shouldBe` replicate 5 True
     map blockedByCompletedLoad [ShowFilter, DismissOrClose, ShowHelp, ShowSettings, RefreshAll, ToggleDrainer, ToggleSidebar, ShowProcesses, ShowIncidents, RepaintTerminal, QuitDashboard]

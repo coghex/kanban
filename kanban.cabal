@@ -116,6 +116,7 @@ library kanban-internal
   exposed-modules:
     Kanban.Action
     Kanban.ApprovalService
+    Kanban.Browser
     Kanban.CLI
     Kanban.Cache
     Kanban.Card
@@ -342,6 +343,7 @@ test-suite kanban-test
     Spec.Support.UsageWriters
     Spec.Suite.Assignment
     Spec.UI.AutoSolve
+    Spec.UI.Browser
     Spec.UI.Cards
     Spec.UI.ColumnWindow
     Spec.UI.CompletedHistory

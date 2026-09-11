@@ -42,7 +42,7 @@
 ║┃                                                                                                                                                                                                    ┃║
 ║┃                                                                                                                                                                                                    ┃║
 ║┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
-║ x kill  f fullscreen  esc close  r review/revise  S solve  A autosolve  m merge  q/Ctrl-C quit                                                                                                       ║
+║ x kill  w browser  f fullscreen  esc close  r review/revise  S solve  A autosolve  m merge  q/Ctrl-C quit                                                                                            ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

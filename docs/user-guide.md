@@ -97,6 +97,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `s` | Search a column, starting with Issues |
 | `F` | Show or hide the card filter |
 | `Enter` | Open details |
+| `w` | Open the selected card's GitHub page in your browser |
 | `f` | Make the open window fullscreen, or put it back — every window except the Codex/Claude solve chooser. It does nothing with no window open |
 | `Esc` | Close the current window |
 | `e` | Expand or collapse an epic |
@@ -113,6 +114,26 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `q` / `Ctrl-C` | Quit |
 
 The footer in the application shows the main controls.
+
+### Opening a card on GitHub
+
+Press `w` to open the selected card's own GitHub page in a browser. It works on
+the board and in an open details window, where it opens the card that window is
+showing; on a collapsed epic's row it opens the epic's own issue. Kanban already
+has the address, so nothing is fetched from GitHub, and nothing about the board
+moves — the page opens beside it.
+
+Which program opens it is `$BROWSER` when you have that set, and otherwise
+`open` on macOS or `xdg-open` on Linux. `$BROWSER` is read as **one program**:
+a command name to find on your `PATH`, or a path to one. It is not a command
+line — arguments, quoting, a `%s` placeholder, and a colon-separated list of
+fallbacks are all read as part of the program's name and will not be found. If
+you have set it to something else, unset it to get the platform's own opener
+back.
+
+Nothing is shown when the page opens. If it cannot — no opener is installed,
+`$BROWSER` names something that is not there or is empty, or the opener fails —
+the footer says so and includes the address, so you can still copy it out.
 
 ### Making a window fullscreen
 

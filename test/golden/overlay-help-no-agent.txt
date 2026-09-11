@@ -2,20 +2,20 @@
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
 ║┃ ┏━━━┓                    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
 ║┃ ┃ ↻ ┃                    ┃┃  STANDALONE                              ┃  STANDALONE                             ┃  STANDALONE                             ┃  STANDALONE                             ┃║
-║┃ ┗━━━┛                    ┃┃ ▌╭─────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  │ #812 Modal input l┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃                          ┃┃  │ overlay           ┃                                                                                             ┃       │ ┃  │ conflict                           │ ┃║
-║┃                          ┃┃  │  reviewed:approve ┃ j / Down         next card                                                                  ┃       │ ┃  │  reviewed:approve                  │ ┃║
-║┃                          ┃┃  │ unassigned · updat┃ k / Up           previous card                                                              ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃                          ┃┃  │ Empty modal areas ┃ x                kill selected working process tree                                         ┃       │ ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ pointer events to ┃ h / Left         previous column                                                            ┃to     │ ┃  │ Updates the branch after the       │ ┃║
-║┃                          ┃┃  │ pages. This is vis┃ l / Right        next column                                                                ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
-║┃                          ┃┃  ╰───────────────────┃ g                first visible item in the column                                           ┃       │ ┃  │ master.                            │ ┃║
-║┃                          ┃┃                      ┃ G                last visible item in the column                                            ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃                          ┃┃                      ┃ s                search a column; h/l type into the query, Left/Right move the search       ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  ▾ #700  Persistence ┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃         ┃                                         ┃║
-║┃                          ┃┃  1/2 complete        ┃ e                expand / collapse focused epic                                             ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  └─ ╭────────────────┃ Enter            details                                                                    ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃ ┗━━━┛                    ┃┃ ▌╭───────────────────┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  │ #812 Modal input l┃                                                                                             ┃atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃                          ┃┃  │ overlay           ┃ j / Down         next card                                                                  ┃       │ ┃  │ conflict                           │ ┃║
+║┃                          ┃┃  │  reviewed:approve ┃ k / Up           previous card                                                              ┃       │ ┃  │  reviewed:approve                  │ ┃║
+║┃                          ┃┃  │ unassigned · updat┃ x                kill selected working process tree                                         ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃                          ┃┃  │ Empty modal areas ┃ h / Left         previous column                                                            ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ pointer events to ┃ l / Right        next column                                                                ┃to     │ ┃  │ Updates the branch after the       │ ┃║
+║┃                          ┃┃  │ pages. This is vis┃ g                first visible item in the column                                           ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
+║┃                          ┃┃  ╰───────────────────┃ G                last visible item in the column                                            ┃       │ ┃  │ master.                            │ ┃║
+║┃                          ┃┃                      ┃ s                search a column; h/l type into the query, Left/Right move the search       ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃                          ┃┃                      ┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  ▾ #700  Persistence ┃ e                expand / collapse focused epic                                             ┃         ┃                                         ┃║
+║┃                          ┃┃  1/2 complete        ┃ Enter            details                                                                    ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃  └─ ╭────────────────┃ w                open the card's GitHub page in a browser                                   ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃     │ A1 · tracker #7┃ f                toggle the open overlay between windowed and fullscreen                    ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃     │ #711 Adopt the ┃ Esc              close overlay or dismiss a notice                                          ┃       │ ┃  │ #812 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃     │ envelope       ┃ p                processes and agent sessions                                               ┃       │ ┃  │ updated 3h ago                     │ ┃║

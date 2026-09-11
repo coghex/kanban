@@ -15,6 +15,14 @@ created above it.
 
 ### Unreleased
 
+- `w` opens the selected card's own GitHub page in a browser, from the board and
+  from a card's details overlay; a collapsed epic's row opens the epic's issue.
+  The URL is the one the board already retains, so no GitHub request is made,
+  and the launch never holds up the dashboard. `$BROWSER` chooses the program
+  when it is set — as one executable name or path, never a command line — and
+  otherwise it is `open` on macOS and `xdg-open` on Linux. A successful launch
+  says nothing; an opener that is missing, cannot be started, or exits non-zero
+  leaves a notice carrying the URL.
 - The tracked Google plugin (`google-plugin/`) packages `/solve` and
   `/autosolve` for Copilot CLI sessions running a Google model such as
   Gemini 3.8 Flash. A Google session stamps `<!-- pr-origin:google -->` and

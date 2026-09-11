@@ -42,6 +42,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (getCurrentTime )
 import qualified Graphics.Vty as Vty
+import Kanban.Browser (OpenFailure, openFailureNotice, openPage)
 import Kanban.Domain
 import Kanban.GitHub
   ( GhCleanupFailure (..),
@@ -200,6 +201,7 @@ dispatchEvent event = do
     -- instance's deadline has actually passed; everything else about the
     -- decision is 'Kanban.UI.Util.noticeExpiryApplied''s.
     (_, AppEvent (NoticeExpired instanceId)) -> modify (noticeExpiryApplied instanceId)
+    (_, AppEvent (PageOpenFinished url outcome)) -> reportPageOpen url outcome
     -- @f@ is the one binding live in every overlay that honors it, so it is
     -- resolved once here rather than in each overlay's own arms below. It has
     -- to come first: settings, the process inspector, and the incidents panel
@@ -489,6 +491,7 @@ blockedByCompletedLoad = \case
   OpenSearch -> True
   ToggleEpic -> True
   ShowDetails -> True
+  OpenCardPage -> True
   ReviewSelection -> True
   SolveSelection -> True
   AutoSolveSelection -> True
@@ -556,6 +559,7 @@ mutatesSelectedWork = \case
   ShowFilter -> False
   ToggleEpic -> False
   ShowDetails -> False
+  OpenCardPage -> False
   ToggleFullscreen -> False
   DismissOrClose -> False
   ShowProcesses -> False
@@ -580,6 +584,7 @@ dispatchBoardAction = \case
   LastItem -> selectBoundary True
   ToggleEpic -> toggleSelectedTracker
   ShowDetails -> openSelectedDetails
+  OpenCardPage -> onSelection openItemPage openSelectedPage
   ToggleFullscreen -> modify toggleOverlayFullscreen
   DismissOrClose -> closeOverlay
   ReviewSelection -> onSelection startItemReview startSelectedReview
@@ -965,6 +970,36 @@ handleIncidentsAction action = do
     Just (SolveOverlay _) -> presentTranscriptTail
     Just (PullRequestReviewOverlay _) -> presentTranscriptTail
     _ -> pure ()
+
+-- | Open the board selection's own GitHub page, promoted to the epic a
+-- collapsed group draws exactly as the keys that act on a card are
+-- ('Kanban.UI.Session.selectedReviewItem').
+--
+-- Nothing at all when there is no selection: an empty column has no page, and
+-- there is no launch to make for one.
+openSelectedPage :: EventM Name AppState ()
+openSelectedPage = do
+  state <- get
+  mapM_ openItemPage (selectedReviewItem state)
+
+-- | Hand one card's retained URL to the platform's opener.
+--
+-- 'Kanban.Browser.openPage' forks before it resolves anything, so this
+-- returns while the opener is still starting: the board, the selection, and a
+-- refresh in flight are all untouched, and the outcome arrives later as a
+-- 'PageOpenFinished' carrying the URL this launch was made for rather than
+-- whatever is selected by then.
+openItemPage :: BoardItem -> EventM Name AppState ()
+openItemPage item = do
+  state <- get
+  let url = itemUrl item
+  liftIO (openPage url (writeBChan state.appEventChannel . PageOpenFinished url))
+
+-- | What one finished launch says. A clean one says nothing: the page is up
+-- in another window, and announcing that would be noise over the board.
+reportPageOpen :: Text -> Maybe OpenFailure -> EventM Name AppState ()
+reportPageOpen _ Nothing = pure ()
+reportPageOpen url (Just failure) = setNotice (openFailureNotice url failure)
 
 openProcesses :: EventM Name AppState ()
 openProcesses = do

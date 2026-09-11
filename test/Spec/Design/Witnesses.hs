@@ -15,10 +15,15 @@
 -- work\" was witnessed by no reachable filter criteria retaining a settled
 -- card; issue #319's completed-history filter broke that fact, which is
 -- exactly the moment the entry became false and roughly five weeks before
--- anyone noticed. 'retiredDeclarations' keeps that witness and #424's, and the
--- suite runs them against today's code and requires them to come back broken —
--- the demonstration that a witness here has teeth rather than passing because
--- it asserts nothing.
+-- anyone noticed. 'retiredDeclarations' keeps that witness, #424's, and
+-- #663's, and the suite runs them against today's code and requires them to
+-- come back broken — the demonstration that a witness here has teeth rather
+-- than passing because it asserts nothing. #663's is there for the opposite
+-- reason to the other two: its entry was removed because the deferred feature
+-- was built, so the fact it asserted became false in the pull request that
+-- retired it rather than quietly some weeks earlier. Broken is broken either
+-- way, and a witness that stayed green through its own entry's implementation
+-- would have been asserting nothing all along.
 --
 -- Four rules hold the mechanism together:
 --
@@ -227,7 +232,7 @@ spec = describe "docs/design.md §3 and §20" $ do
                    ]
 
   describe "a broken witness" $ do
-    it "comes back broken for both entries #423 and #424 removed" $ do
+    it "comes back broken for every entry #423, #424, and #663 removed" $ do
       broken <- brokenWitnesses retiredDeclarations
       map fst broken `shouldBe` map declarationKey retiredDeclarations
 
@@ -476,19 +481,6 @@ declarations =
       ),
     Declaration
       20
-      "Optional `gh issue view --web`/`gh pr view --web` local-only action."
-      ( Witnessed
-          WitnessedFact
-            { factStatement =
-                "Every `gh` argument vector Kanban builds for the board begins `api graphql`, over both the open and the completed traversal and every cursor and sub-issue combination, and the action inventory is exactly the recorded `BoardAction` values.",
-              factRationale =
-                "`gh issue view --web` is a different subcommand, so it would be a vector that does not begin `api graphql`; and being optional and user-invoked, it would also be an action on the board. Neither exists.",
-              factReads = [],
-              factCheck = pure (everyFault [githubRequestsAreReads, boardActionInventory])
-            }
-      ),
-    Declaration
-      20
       "GitHub mutations such as assignment or label changes."
       ( Witnessed
           WitnessedFact
@@ -580,6 +572,19 @@ retiredDeclarations =
                 "A history view separate from the live board has to be built from a dataset other than the open generation. While every reachable criteria leaves that generation alone, there is no second view for one to be separate from.",
               factReads = [],
               factCheck = pure noSecondDataset
+            }
+      ),
+    Declaration
+      20
+      "Optional `gh issue view --web`/`gh pr view --web` local-only action."
+      ( Witnessed
+          WitnessedFact
+            { factStatement =
+                "Every `gh` argument vector Kanban builds for the board begins `api graphql`, over both the open and the completed traversal and every cursor and sub-issue combination, and the action inventory is exactly the values recorded before issue #663 — the ones with no page-opening action among them.",
+              factRationale =
+                "Being optional and user-invoked, a local action to open the page would be an action on the board, and while this entry stood there was none. `w` is that action, so the inventory half of the fact is false from the pull request that added it; the `gh` half is deliberately kept beside it, unchanged and still true, so what comes back broken is the clause the implementation actually falsified rather than the whole fact going dark.",
+              factReads = [],
+              factCheck = pure (everyFault [githubRequestsAreReads, boardActionInventoryBeforeCardPage])
             }
       )
   ]
@@ -753,6 +758,7 @@ boardActionInventory =
       "ShowFilter",
       "ToggleEpic",
       "ShowDetails",
+      "OpenCardPage",
       "ToggleFullscreen",
       "DismissOrClose",
       "ReviewSelection",
@@ -774,6 +780,46 @@ boardActionInventory =
 
 everyBoardAction :: [BoardAction]
 everyBoardAction = [minBound .. maxBound]
+
+-- | The inventory as it stood while the browser-opening deferral was still
+-- listed, which is the whole of what the retired witness above asserts.
+--
+-- Frozen rather than derived from 'boardActionInventory': a retired witness
+-- has to keep saying what it said, and one that followed the live list would
+-- come back green the moment the list moved on without it.
+boardActionInventoryBeforeCardPage :: Maybe Text
+boardActionInventoryBeforeCardPage =
+  sameAs
+    "the dashboard's board actions"
+    [ "NextCard",
+      "PreviousCard",
+      "KillWorking",
+      "PreviousColumn",
+      "NextColumn",
+      "FirstItem",
+      "LastItem",
+      "OpenSearch",
+      "ShowFilter",
+      "ToggleEpic",
+      "ShowDetails",
+      "ToggleFullscreen",
+      "DismissOrClose",
+      "ReviewSelection",
+      "SolveSelection",
+      "AutoSolveSelection",
+      "ShowProcesses",
+      "ShowIncidents",
+      "RefreshAll",
+      "ToggleApproval",
+      "ToggleDrainer",
+      "MergeDoneCard",
+      "ToggleSidebar",
+      "ShowSettings",
+      "ShowHelp",
+      "RepaintTerminal",
+      "QuitDashboard"
+    ]
+    (map showText everyBoardAction)
 
 -- | The actions that act on the work a card stands for.
 mutatingActions :: Maybe Text
