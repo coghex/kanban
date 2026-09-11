@@ -379,13 +379,21 @@ data BoardColumn = Issues | Active | Reviewing | Done
 -- | Which of §12's ordered membership sources a tracker's children came from.
 --
 -- This is not presentation detail: progress means different things under the
--- two sources. Checklist progress is counted from the marks in the body and
--- is completed by off-board children, while native progress is GitHub's own
--- completed/total pair and is never adjusted locally.
+-- two sources. Checklist progress is counted from the marks in the body
+-- together with the retained data's own lifecycle facts, while native progress
+-- is GitHub's own completed/total pair and is never adjusted locally. Neither
+-- is a statement about which children a view is drawing.
 data TrackerSource = ChecklistMembership | NativeMembership
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | One tracker as a board holds it.
+--
+-- 'trackerChildren' is the membership a view can reach and narrows as criteria
+-- hide children; 'trackerCompleted' and 'trackerTotal' are facts about the
+-- retained data and do not. 'Kanban.Tracker.trackerFromIssue' builds both from
+-- one issue alone, before any dataset or criteria have been consulted, and
+-- 'Kanban.Workflow.deriveBoardWithOpenIssues' finishes them.
 data Tracker = Tracker
   { trackerIssue :: Issue,
     trackerSource :: TrackerSource,

@@ -1805,22 +1805,24 @@ Parsing rules:
    admit it. Under the default criteria that is exactly the currently open
    issues and PRs; with `Closed` checked, completed children join their group
    too. A child the criteria leave off the board cannot be rendered or acted
-   on, so it is dropped from the tracker's children and folded into checklist
-   progress rather than staying a permanently unreachable pending entry.
+   on, so it is dropped from the tracker's children rather than staying a
+   permanently unreachable pending entry. The progress its header reports does
+   not move with it: progress is a fact about the retained data rather than
+   about the view, and reads the same under every combination of criteria.
 7. A child whose own tracker the criteria hide falls back to a standalone
    card, which is exactly what the board renders for a child whose epic is not
    on it, and takes its place behind every group in that column. A tracker the
    criteria keep with none of its children left collapses to a header, so the
    epic is still represented rather than vanishing behind its filtered-out
    group.
-8. Both of those, and the progress a header reports, are decided over the whole
-   board rather than one column at a time. A group's membership is not confined
-   to a single column — an epic can hold an unassigned child in Issues, an
-   assigned one in Active, and their pull requests in Reviewing and Done — so a
-   child still drawn in one column is never folded into another column's
-   progress, and a group that lost its rows in one column but kept them
-   elsewhere draws no header there. A group that lost every row board-wide
-   draws exactly one header, in the leftmost column its rows appeared in.
+8. Both of those are decided over the whole board rather than one column at a
+   time. A group's membership is not confined to a single column — an epic can
+   hold an unassigned child in Issues, an assigned one in Active, and their
+   pull requests in Reviewing and Done — so a group that lost its rows in one
+   column but kept them elsewhere draws no header there. A group that lost
+   every row board-wide draws exactly one header, in the leftmost column its
+   rows appeared in. The progress a header reports needs no such decision: it
+   is the same dataset fact in every column the group appears in.
 
 Membership resolution is structured as ordered sources feeding one internal
 model. The checklist parser above is the first source, and GitHub's native
@@ -1889,27 +1891,47 @@ keyboard focus target; `e` or a left click on its title expands or collapses
 that epic everywhere it appears across the board. Child cards rejoin the
 ordinary `j`/`k` focus order only while their epic is expanded.
 
-Tracker progress under checklist membership is derived from checklist marks in
-the authoritative tracker body: checked entries divided by total recognized
-child entries. It is labeled `complete`, not `closed` or `open`, because a
-checklist mark is tracker state and may briefly lag the linked issue's GitHub
-state. A checklist child that is not on the live board can never be rendered
-or interacted with, so it is dropped from the tracker's children and counted
-as complete rather than pending forever. The details overlay warns when a
-visible open child is checked complete; otherwise the board does not add
-network requests solely to reconcile progress text.
+Tracker progress under checklist membership is derived from the authoritative
+tracker body's checklist together with the retained data's own lifecycle
+facts. The total is every recognized child entry. A child counts complete when
+its checkbox is checked, or when the retained data does not report its issue
+open. The retained data here is both generations at once — the open generation
+together with a loaded completed history — and completion consults both of
+them regardless of which the lifecycle criteria have selected for the board
+being drawn.
+
+That second condition covers two cases, and they differ in what the board can
+show. A child the retained data holds as closed is complete whether or not the
+criteria are drawing it: with `Closed` checked it is rendered as a completed
+card under its own header, with `Closed` unchecked it is off the board
+entirely, and the count is the same either way. A reference no retained
+dataset holds at all — never fetched, or in another repository — is complete
+because it can never be rendered or interacted with under any criteria, and
+the alternative is an entry that stays pending forever. A checked child that
+has also closed is one child and is counted once. A linked pull request groups
+a child but establishes nothing about that child's own lifecycle.
+
+Progress is therefore a fact about the retained data rather than about the
+view. It reads the same under every combination of filter criteria: hiding a
+child does not complete it, and revealing a closed one does not uncomplete it.
+It is labeled `complete`, not `closed` or `open`, because a checklist mark is
+tracker state and may briefly lag the linked issue's GitHub state. The details
+overlay warns when a visible open child is checked complete; otherwise the
+board does not add network requests solely to reconcile progress text.
 
 Tracker progress under native membership is GitHub's own completed and total
 sub-issue counts, used as reported. GitHub already counts every sub-issue the
 tracker has, including the closed ones and any in another repository, so those
-are never counted again locally and the off-board completion adjustment above
-does not apply. Children that cannot be rendered are still dropped from the
+are never counted again locally and the checklist completion rule above does
+not apply. Children that cannot be rendered are still dropped from the
 tracker's children, so a closed or cross-repository child contributes to the
 counts without becoming a card. When GitHub delivered the relationships but
 not the summary, progress falls back to counting the relationships that did
 arrive, so the header never reads `0/0 complete` above visible children; that
 item is marked incomplete and named in the §17 banner, which is what keeps the
-derived pair from being mistaken for GitHub's own.
+derived pair from being mistaken for GitHub's own. Both the reported pair and
+that fallback are dataset facts in the same way the checklist rule is: like
+it, neither moves with the filter criteria.
 
 The same tracker header may appear in more than one column when its children
 are split across Issues, Active, Reviewing, and Done. This repetition provides

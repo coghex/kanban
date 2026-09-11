@@ -79,7 +79,7 @@ Issues and pull requests remain separate cards. An issue does not disappear just
 
 Issues labelled as epics can group related work. Press `e` to expand or collapse the selected epic.
 
-An epic's children come from one of two places. A `Children` or `Phase` checklist in the epic's body is authoritative: as long as it lists at least one issue, that list decides membership, order, implementation keys such as `A1`, and the `N/M complete` progress counted from its checked boxes. An epic with no such checklist falls back to GitHub's own sub-issues, so a repository that uses GitHub's Add sub-issue button needs no Markdown conventions at all. Native children have no implementation key, so they appear in the order GitHub lists them and are labelled `step 1`, `step 2`, and so on, and the progress counts are the ones GitHub reports rather than anything Kanban counts itself. Because GitHub counts every sub-issue, an epic can show progress like `2/5 complete` while fewer than five cards appear beneath it: closed sub-issues and sub-issues living in another repository count towards it but are not cards on this board.
+An epic's children come from one of two places. A `Children` or `Phase` checklist in the epic's body is authoritative: as long as it lists at least one issue, that list decides membership, order, implementation keys such as `A1`, and the `N/M complete` progress. A child counts complete when its box is ticked or when the data Kanban holds says its issue is closed, so both ticking the box and closing the issue move the count, and a checklist entry Kanban holds no issue for at all — never fetched, or living in another repository — counts complete too. That count comes from the data rather than from the board, so it stays where it is when the filter hides a child or reveals a closed one. An epic with no such checklist falls back to GitHub's own sub-issues, so a repository that uses GitHub's Add sub-issue button needs no Markdown conventions at all. Native children have no implementation key, so they appear in the order GitHub lists them and are labelled `step 1`, `step 2`, and so on, and the progress counts are the ones GitHub reports rather than anything Kanban counts itself. Because GitHub counts every sub-issue, an epic can show progress like `2/5 complete` while fewer than five cards appear beneath it: closed sub-issues and sub-issues living in another repository count towards it but are not cards on this board.
 
 An epic that has neither a checklist nor sub-issues still shows as an empty header with an amber warning explaining what is missing. An epic using sub-issues is never warned for having no checklist, but a checklist that is present and malformed is still reported.
 
@@ -195,7 +195,9 @@ epics and their children, leave **Epic groups** checked and uncheck
 
 Everything starts checked except Closed, which is why Kanban opens on the live
 open board. Checking or unchecking a box changes the cards straight away; there
-is nothing to apply, and nothing is sent to GitHub. Inside a group the checked
+is nothing to apply, and nothing is sent to GitHub. It changes the cards and
+nothing else: an epic's `N/M complete` count describes its work rather than
+your view of it, so it reads the same whatever you tick. Inside a group the checked
 values are alternatives, and the groups are combined — so unchecking every value
 in one group is a real choice that shows nothing, not a reset.
 
