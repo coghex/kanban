@@ -171,7 +171,7 @@ spec = do
 
     it "keeps every tracker diagnostic on the card, not just the first" $ do
       let rendered = renderCard testOptions False cardFixtureDiagnosticEntry 46
-      drop 6 (map Data.Text.strip (cardInterior rendered))
+      drop 5 (map Data.Text.strip (cardInterior rendered))
         `shouldBe` [ "TRACKER · line 3: checklist item has no",
                      "issue reference",
                      "TRACKER · line 4: malformed checklist",
@@ -179,6 +179,20 @@ spec = do
                      "TRACKER · line 5: duplicate child #2"
                    ]
       map displayWidth rendered `shouldBe` replicate (length rendered) 46
+
+    -- #646, on a real card: this fixture's body opens with '## Children',
+    -- which is the template rather than the issue, so §11 excerpts the
+    -- checklist under it instead. Together with the rows the case above
+    -- takes from the end, this pins the whole interior.
+    it "excerpts a heading-led body from the content under the heading" $ do
+      let rendered = renderCard testOptions False cardFixtureDiagnosticEntry 46
+      take 5 (map Data.Text.strip (cardInterior rendered))
+        `shouldBe` [ "#900 Issue 900",
+                     "epic",
+                     "unassigned · updated now",
+                     "- [ ] #2 — A1: Valid - [ ] missing",
+                     "reference - [?] #3 - [x] #2 — duplicate"
+                   ]
 
     it "keeps a pull request's CI and merge status row visible" $ do
       let rendered = renderCard testOptions False cardFixturePullRequestEntry 46

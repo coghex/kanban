@@ -1538,11 +1538,38 @@ ordinary chips rather than an invisible built-in set of names.
 
 ### Excerpts
 
-Use GitHub's plain-text body representation where available. Select the first
-meaningful non-empty paragraph, collapse whitespace, wrap to card width, show
-at most three display lines, and append `…` when truncated. This is more stable
-than trying to count natural-language sentences in issue templates, lists, and
-code-heavy bodies.
+An excerpt is selected from the Markdown body §13 fetches, after the
+external-text sanitization below. No plain-text rendition of a body is
+requested, so the selection is made over the author's own Markdown rather than
+over anything GitHub has flattened. Select the first meaningful non-empty
+paragraph, collapse whitespace, wrap to card width, show at most three display
+lines, and append `…` when truncated. This is more stable than trying to count
+natural-language sentences in issue templates, lists, and code-heavy bodies.
+
+"Meaningful" excludes the structure a body opens with, which is the template
+rather than the issue. Two things are skipped, repeatedly and in any order,
+with the selection resuming at whatever follows:
+
+- An ATX heading: one to six `#` characters closed by whitespace or by the end
+  of its line. Both halves matter, because `#123` is a cross-reference and
+  `#######` is seven hashes, and neither is a heading.
+- An HTML comment, through its closing `-->` however many lines and blank lines
+  it spans — the issue template's instructional comment spans one of each — and
+  content left after that marker on its own line begins the paragraph. A
+  comment that never closes consumes the rest of the body, so markup its author
+  wrote to be invisible cannot reach a card.
+
+Everything else is content and is excerpted exactly as a prose paragraph is: a
+list, a fenced code block, and a block quote all stand as they are, and so do
+the heading- and comment-shaped lines a fence may hold, because skipping stops
+at the first line that is neither of the two above. The two tests allow up to
+three spaces of indentation, which is CommonMark's limit; a fourth opens an
+indented code block, and that is content like any other. A body holding nothing
+but headings and comments excerpts to the empty text, and its card draws no
+excerpt line rather than a heading.
+
+None of this reaches the details overlay, which renders the whole sanitized
+body with its headings and comments intact.
 
 ### Card height and truncation
 
