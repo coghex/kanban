@@ -302,6 +302,15 @@ APPROVAL_LOCK_NAME = "approve_issues.lock"
 ORIGIN_RE = re.compile(r"<!--\s*issue-origin:(claude|codex|kimi|google)\s*-->", re.IGNORECASE)
 REVIEW_MARKER_RE = re.compile(r"<!--\s*issue-review:v2\s+([^>]*?)\s*-->", re.IGNORECASE)
 AUTOMATED_REVIEW_COMMENT_RE = re.compile(r"<!--\s*issue-review:v2\b", re.IGNORECASE)
+# An eligible commenter's own assertion that their comment amends no
+# requirement and so must not invalidate a published approval. Recognized as
+# the complete fixed literal anywhere in a comment body, differing only in
+# letter case -- deliberately NOT the `\s*`-tolerant shape of the marker
+# regexes above, so a whitespace variant, an incomplete marker, or an
+# extended spelling carrying fields is not recognized and that comment keeps
+# its ordinary fingerprint weight. The gate does not verify the assertion;
+# see docs/agent-workflow-contract.md §2.1.
+NO_AMEND_MARKER = "<!-- issue-spec:no-amend -->"
 LOG_DIR: Path | None = None
 LOG_TO_STDERR = False
 # Incremented by note_model_invocation at the single reviewer-model funnel.
@@ -819,6 +828,13 @@ def canonical_comment(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def has_no_amend_marker(body: str) -> bool:
+    # NO_AMEND_MARKER is lowercase ASCII, so casefolding the body is the
+    # whole of the case-insensitivity rule; nothing else about the literal
+    # may vary.
+    return NO_AMEND_MARKER in (body or "").casefold()
+
+
 def is_spec_relevant_comment(issue: dict[str, Any], comment: dict[str, Any]) -> bool:
     # Reviewer-gate arithmetic, and deliberately no longer the solve agent's
     # own trust rule. This decides which comments a *published approval* is
@@ -865,6 +881,13 @@ def spec_fingerprint(issue: dict[str, Any], comments: list[dict[str, Any]]) -> s
             canonical_comment(item)
             for item in comments
             if not AUTOMATED_REVIEW_COMMENT_RE.search(item.get("body") or "")
+            # An eligible author may waive their own comment's weight with
+            # NO_AMEND_MARKER, leaving a published approval current. This is
+            # the only thing the marker does: it is ANDed with the eligibility
+            # rule below rather than replacing it, so it grants an unprivileged
+            # non-reporter nothing, and it is applied to whatever body was
+            # fetched, so it holds regardless of a comment's age.
+            and not has_no_amend_marker(item.get("body") or "")
             and is_spec_relevant_comment(issue, item)
         ],
     }
@@ -4085,6 +4108,67 @@ def _self_test_body() -> None:
     reporter_spec = spec_fingerprint(reporter_issue, [])
     assert spec_fingerprint(reporter_issue, [reporter_comment]) != reporter_spec
     assert spec_fingerprint(reporter_issue, [drive_by]) == reporter_spec
+    # An eligible author may waive their own comment's fingerprint weight with
+    # NO_AMEND_MARKER, across the whole eligible population: association-based
+    # and reporter-based alike.
+    for index, (login, association) in enumerate(
+        (
+            ("owner", "OWNER"),
+            ("member", "MEMBER"),
+            ("collaborator", "COLLABORATOR"),
+            ("reporter", "NONE"),
+        )
+    ):
+        amending = {
+            **ordinary,
+            "id": 100 + index,
+            "user": {"login": login},
+            "author_association": association,
+            "body": "Clarifying the requirements.",
+        }
+        waived = {**amending, "body": f"Typo in my last comment.\n{NO_AMEND_MARKER}"}
+        assert spec_fingerprint(reporter_issue, [amending]) != reporter_spec, login
+        assert spec_fingerprint(reporter_issue, [waived]) == reporter_spec, login
+    # The marker confers nothing on an unprivileged non-reporter: marked or
+    # not, that comment was already outside the fingerprint.
+    marked_drive_by = {**drive_by, "body": f"Happy to take this one! {NO_AMEND_MARKER}"}
+    assert spec_fingerprint(reporter_issue, [marked_drive_by]) == reporter_spec
+    # Recognized: the complete literal, in any letter case, anywhere in a body.
+    for index, recognized in enumerate(
+        (
+            NO_AMEND_MARKER,
+            NO_AMEND_MARKER.upper(),
+            "<!-- Issue-Spec:No-Amend -->",
+            f"Fixed a typo above. {NO_AMEND_MARKER} Nothing else changed.",
+        )
+    ):
+        waived = {**ordinary, "id": 200 + index, "body": recognized}
+        assert spec_fingerprint(reporter_issue, [waived]) == reporter_spec, recognized
+    # Unrecognized: incomplete markers, extended spellings, and -- unlike
+    # AUTOMATED_REVIEW_COMMENT_RE, whose `\s*` tolerance deliberately does not
+    # reach here -- every whitespace variant. Each keeps its ordinary weight.
+    for index, unrecognized in enumerate(
+        (
+            "<!-- issue-spec:no-amend",
+            "<!-- issue-spec:no -->",
+            "issue-spec:no-amend",
+            "<!-- issue-spec:no-amend reason=typo -->",
+            "<!-- issue-spec:no-amendment -->",
+            "<!--issue-spec:no-amend-->",
+            "<!--  issue-spec:no-amend  -->",
+            "<!-- issue-spec:no-amend\t-->",
+            "<!-- issue-spec: no-amend -->",
+        )
+    ):
+        counted = {**ordinary, "id": 300 + index, "body": unrecognized}
+        assert spec_fingerprint(reporter_issue, [counted]) != reporter_spec, unrecognized
+    # The literal waives a comment and nothing else: in the issue's own body it
+    # is ordinary hashed text, so it cannot be mistaken for an opt-out.
+    marked_body_issue = {
+        **reporter_issue,
+        "body": f"{reporter_issue['body']}\n{NO_AMEND_MARKER}",
+    }
+    assert spec_fingerprint(marked_body_issue, []) != reporter_spec
     untrusted_marker = {
         **marker_comment,
         "author_association": "NONE",

@@ -169,6 +169,45 @@ amendments alone. Nothing in the solve path may widen its own view to match the
 gate's, and nothing in this boundary changes the gate's association-based
 arithmetic, which §2.3 owns.
 
+One qualification sits on top of that population rather than inside it. An
+eligible author may waive their own comment's weight in the fingerprint:
+`tools/approve_issues.py` recognizes the complete fixed literal
+`<!-- issue-spec:no-amend -->` anywhere in a comment body, differing only in
+letter case, and leaves that comment out of the hashed comment list — so
+appending one to an approved issue leaves the specification fingerprint
+byte-identical and the published approval current. Recognition is exact: an
+incomplete marker, an extended spelling carrying fields such as
+`<!-- issue-spec:no-amend reason=typo -->`, and every whitespace variant
+(`<!--issue-spec:no-amend-->`, extra or tab spacing inside the delimiters) are
+**not** recognized, deliberately unlike the `\s*`-tolerant `issue-origin` and
+`issue-review:v2` marker regexes beside it. The waiver only ever subtracts,
+because it is applied on top of `is_spec_relevant_comment` rather than in place
+of it: a marked comment from an unprivileged non-reporter stays outside the
+fingerprint exactly as an unmarked one does, automated `issue-review:v2`
+comments remain excluded on their own terms, and the literal appearing in an
+issue's own title or body is ordinary hashed text rather than an opt-out. An
+unmarked eligible comment is unchanged and remains the default: it still moves
+the hash and re-opens the gate.
+
+Recognition is stateless and carries no activation date or migration state. The
+gate reads each comment body as fetched, so a historical comment that already
+contains the literal is waived exactly as a new one is, and a comment edited to
+add or remove the marker leaves or re-enters the hash with no memory of its
+earlier state. Where a historical marked comment was counted by the fingerprint
+an existing approval is bound to, excluding it changes that fingerprint: that
+approval goes stale and takes the ordinary reconciliation path in §2.3.1 — the
+label is removed, and a fresh review binds the new hash. Nothing rewrites such
+a marker or special-cases the mismatch to keep the old approval alive.
+
+The marker is the comment author's own assertion that their comment amends no
+requirement, and the gate does not verify that assertion. Nothing inspects a
+marked comment's text for a real requirement change, so a marked comment that
+does amend the contract leaves a published approval in place. That is the
+accepted tradeoff: the alternative is either no waiver at all or a semantic
+judgment the gate has no way to make, and the eligible authors who can
+invalidate an approval simply by commenting are the same ones trusted to say
+that a particular comment should not.
+
 ### 2.2 PR review, rereview, revise, and repair
 
 - **Owning source:** `src/Kanban/PullRequestFlow.hs`, with the process itself
