@@ -78,6 +78,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Text.Normalize (NormalizationMode (NFC), normalize)
 import qualified Graphics.Vty as Vty
 import Kanban.Domain
 import Kanban.Workflow (entryItem)
@@ -105,10 +106,31 @@ activeQueryFor state column = do
   query <- searchQueryFor state column
   if Text.null (normalizeForMatch query) then Nothing else Just query
 
--- | The form both sides of a match are compared in: case-folded, with runs of
--- whitespace collapsed to one space.
+-- | The form both sides of a match are compared in: canonically composed,
+-- case-folded, with runs of whitespace collapsed to one space.
+--
+-- The composition is what lets a query spelled with combining marks find the
+-- title it renders identically to. An identity always arrives composed —
+-- 'Kanban.UI.Util.itemHeading' ends every title in NFC through
+-- 'Kanban.Text.sanitizeText' (@docs\/design.md@ §11) — but a query is appended
+-- one code point at a time exactly as the terminal delivered it, so a paste or
+-- an input method that emits @e@ followed by U+0301 reaches this decomposed.
+--
+-- Both normalizations earn their pass. The first makes two canonically
+-- equivalent spellings one identical text /before/ the fold, which is the only
+-- thing that holds in general: case folding is defined over code points and
+-- Unicode guarantees neither that it preserves a normalization form nor that
+-- it maps equivalent spellings to equivalent results (Unicode 16.0 section
+-- 3.13, canonical caseless matching). The second puts the folded text back in
+-- NFC, so a fold that decomposed a character still meets a needle whose own
+-- fold composed one.
+--
+-- NFC rather than NFD is the whole of what keeps this equivalence-sensitive
+-- instead of accent-insensitive. Under NFD @cafe@ would be a literal prefix of
+-- a decomposed @caf@ + @e@ + U+0301 and would match it as a substring; under
+-- NFC that identity is @caf@ + U+00E9, which @cafe@ does not occur in.
 normalizeForMatch :: Text -> Text
-normalizeForMatch = Text.toCaseFold . Text.unwords . Text.words
+normalizeForMatch = normalize NFC . Text.toCaseFold . normalize NFC . Text.unwords . Text.words
 
 -- | A card's visible identity: the @#number@ and title the renderer draws,
 -- sanitized exactly as it sanitizes them. Nothing else about an item — body,
