@@ -2,6 +2,7 @@ module Kanban.Workflow
   ( CardStatus (..),
     classifyPullRequest,
     deriveBoard,
+    deriveBoardWithOpenIssues,
     entryItem,
     hasChangesRequestedLabel,
     isApproved,
@@ -9,6 +10,7 @@ module Kanban.Workflow
     isStatusLabel,
     itemCompleted,
     itemLifecycleBadge,
+    openIssueNumbers,
     orderCardLabels,
     pruneOffBoardChildren,
     pullRequestStatus,
@@ -36,13 +38,39 @@ data CardStatus
   | StatusProblem Text
   deriving stock (Eq, Show)
 
+-- | The board one dataset yields, with checklist progress read from that same
+-- dataset's own open issues.
+--
+-- That is the right reading wherever the dataset holds every issue the
+-- retained data reports open, and an open generation on its own is such a
+-- dataset: a completed generation is settled work, so nothing it adds is open.
+-- Only 'Kanban.Filter.visibleBoardFor' can be looking at a narrower one -- its
+-- lifecycle facet can drop the open generation entirely -- and it says so by
+-- passing the wider set below.
 deriveBoard :: WorkflowConfig -> RepoSnapshot -> Board
 deriveBoard config snapshot =
+  deriveBoardWithOpenIssues config (openIssueNumbers snapshot.snapshotIssues) snapshot
+
+-- | 'deriveBoard' told separately which issues the retained data reports open.
+--
+-- The two differ only for a caller drawing a dataset narrower than the data it
+-- holds. 'Kanban.Filter.visibleBoardFor' is that caller: its lifecycle facet
+-- selects which generations are derived from, while a checklist child's
+-- completion is a fact about the work rather than about the view, so it is
+-- read from every retained generation whichever of them the criteria are
+-- drawing (§12). A board derived from the completed generation alone would
+-- otherwise find no record of the open children a checklist names and count
+-- every one of them complete.
+deriveBoardWithOpenIssues :: WorkflowConfig -> Set.Set Int -> RepoSnapshot -> Board
+deriveBoardWithOpenIssues config retainedOpenIssues snapshot =
   Board
     . Map.fromList
     $ [(column, sortedEntries column) | column <- [minBound .. maxBound]]
   where
-    trackers = map (pruneOffBoardChildren visibleChildNumbers) (mapMaybe (trackerFromIssue config) snapshot.snapshotIssues)
+    trackers =
+      map
+        (pruneOffBoardChildren visibleChildNumbers . withChecklistProgress retainedOpenIssues)
+        (mapMaybe (trackerFromIssue config) snapshot.snapshotIssues)
     -- Every recognized tracker gets exactly one card: either the header
     -- entry below, or (when at least one child is visible) the group
     -- header 'sortColumnEntries' builds from its tracked children. A
@@ -161,42 +189,71 @@ issueColumn issue
       Issues
   | otherwise = Active
 
--- | A tracker's checklist can reference a child issue that no longer
--- appears on the live board (closed, merged, or otherwise outside the
--- current snapshot). Such a child can never be rendered or interacted
--- with, so it is dropped from 'trackerChildren' and folded into
--- 'trackerCompleted' instead of staying a permanently unreachable, always-
--- pending entry -- an off-board reference counts as done, not as blocking
--- progress forever.
+-- | The issue numbers a list of issues reports open.
 --
--- That completion adjustment belongs to checklist membership alone. A
--- natively-sourced tracker's counts are GitHub's own summary over every
--- sub-issue it has, so a closed or cross-repository child is already counted
--- there; adding it again here would drift the displayed progress above the
--- number GitHub reported. Both sources still lose their non-visible children
--- from 'trackerChildren', so neither renders a card it cannot reach.
+-- Its complement is what completes a checklist child below, so the two cases
+-- that complement covers are deliberately alike: an issue the retained data
+-- holds as closed and a reference no retained dataset holds at all have the
+-- same amount of work left to do here, which is none.
+openIssueNumbers :: [Issue] -> Set.Set Int
+openIssueNumbers issues =
+  Set.fromList [issue.issueNumber | issue <- issues, issue.issueState == IssueOpen]
+
+-- | A checklist tracker's completed count, over the retained data's own
+-- lifecycle facts rather than over the children a board or a criteria set
+-- happens to be drawing (§12).
+--
+-- A child is incomplete exactly when its box is unchecked and the retained
+-- data reports its issue open. Everything else is complete: a checked box, an
+-- issue the data holds as closed, and a reference no retained dataset holds --
+-- never fetched, or in another repository -- which can never be rendered or
+-- interacted with and so counts as done rather than blocking progress
+-- forever. A child that is both checked and closed is one member of one set
+-- and is therefore counted once.
+--
+-- Applied before 'pruneOffBoardChildren', over the whole checklist the body
+-- parsed to. Pruning narrows 'trackerChildren' to what a view can reach, and a
+-- count taken after it would be a count of that view.
+--
+-- The rule belongs to checklist membership alone. A natively-sourced tracker's
+-- counts are GitHub's own summary over every sub-issue it has -- or, when that
+-- summary never arrived, the relationships that did -- so a closed or
+-- cross-repository child is already counted there; counting it again here
+-- would drift the displayed progress away from the number GitHub reported.
+withChecklistProgress :: Set.Set Int -> Tracker -> Tracker
+withChecklistProgress retainedOpenIssues tracker = case tracker.trackerSource of
+  NativeMembership -> tracker
+  ChecklistMembership ->
+    tracker
+      { trackerCompleted =
+          length (filter isComplete (Map.elems tracker.trackerChildren))
+      }
+  where
+    isComplete child =
+      child.trackerChildComplete
+        || child.trackerChildIssueNumber `Set.notMember` retainedOpenIssues
+
+-- | A tracker's children narrowed to the ones a view can reach: those whose
+-- issue number is in the given set.
+--
+-- A tracker's checklist can reference a child issue that no longer appears on
+-- the live board (closed, merged, or otherwise outside the current dataset),
+-- and such a child can never be rendered or interacted with, so keeping it in
+-- 'trackerChildren' would put a row on the board that nothing draws.
 --
 -- Exported because the filter criteria reach the same situation by a second
--- door: a child the criteria hide is as unreachable as one that never made
--- the dataset, and its group's header must say so the same way rather than
--- keeping a count of rows nothing is drawing (§12).
+-- door: a child the criteria hide is as unreachable as one that never made the
+-- dataset, and its group must stop holding it the same way.
+--
+-- What this does /not/ do is move 'trackerCompleted'. Membership is a fact
+-- about the view and progress is a fact about the retained data, so the header
+-- above a group the criteria narrowed reports the same pair as the header
+-- above the whole of it (§12).
 pruneOffBoardChildren :: Set.Set Int -> Tracker -> Tracker
 pruneOffBoardChildren visibleChildNumbers tracker =
-  tracker
-    { trackerCompleted = case tracker.trackerSource of
-        ChecklistMembership -> tracker.trackerCompleted + newlyCompleted
-        NativeMembership -> tracker.trackerCompleted,
-      trackerChildren = Map.filter isVisible tracker.trackerChildren
-    }
+  tracker {trackerChildren = Map.filter isVisible tracker.trackerChildren}
   where
     isVisible child = child.trackerChildIssueNumber `Set.member` visibleChildNumbers
-    newlyCompleted =
-      length
-        [ child
-          | child <- Map.elems tracker.trackerChildren,
-            not (isVisible child),
-            not child.trackerChildComplete
-        ]
 
 trackedEntry :: [TrackerMembership] -> BoardItem -> ColumnEntry
 trackedEntry rawMemberships item = case uniqueMemberships rawMemberships of

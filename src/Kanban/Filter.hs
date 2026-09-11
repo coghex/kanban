@@ -61,12 +61,13 @@ import Data.Time (UTCTime (..))
 import Data.Time.Calendar (Day (..))
 import Kanban.Domain
 import Kanban.Workflow
-  ( deriveBoard,
+  ( deriveBoardWithOpenIssues,
     entryItem,
     hasChangesRequestedLabel,
     isApproved,
     isProblem,
     itemCompleted,
+    openIssueNumbers,
     pruneOffBoardChildren,
     sortBoardEntries,
   )
@@ -294,6 +295,13 @@ criteriaDataset criteria openSnapshot history
 -- the snapshot only once something has to be derived from it. An absent
 -- snapshot therefore means an absent open generation, which is the state a
 -- process is in before its first one publishes and the empty board it draws.
+--
+-- Checklist progress is read from both retained generations whichever of them
+-- the lifecycle facet selects, so a header reports the same pair under every
+-- combination of criteria (§12). The @openBoard@ branch needs no such reading:
+-- a completed generation holds no open issue, so the open generation's own
+-- open issues are already the retained ones the board it derived was counted
+-- against.
 visibleBoardFor ::
   WorkflowConfig ->
   FilterCriteria ->
@@ -305,7 +313,14 @@ visibleBoardFor ::
 visibleBoardFor config criteria openBoard openSnapshot history =
   filterBoardEntries config criteria derived
   where
-    derived = maybe openBoard (deriveBoard config) (criteriaDataset criteria openSnapshot history)
+    retainedOpenIssues =
+      openIssueNumbers
+        (maybe [] (.snapshotIssues) openSnapshot <> maybe [] (.historyIssues) history)
+    derived =
+      maybe
+        openBoard
+        (deriveBoardWithOpenIssues config retainedOpenIssues)
+        (criteriaDataset criteria openSnapshot history)
 
 -- | The kind, workflow and structure facets applied to a derived board, with
 -- the structural repair the composition calls for.
@@ -317,19 +332,19 @@ visibleBoardFor config criteria openBoard openSnapshot history =
 -- collapses to a 'TrackerHeader', so the epic is still represented rather than
 -- vanishing behind its own filtered-out group.
 --
--- A surviving tracker is repaired as well as retained. Its header draws a
--- progress count over the children it holds, and a child the criteria hid is
--- exactly as unreachable as one that never made the dataset — so it leaves
--- 'trackerChildren' and folds into checklist progress through the same
--- 'pruneOffBoardChildren' 'deriveBoard' already applies, rather than leaving
--- the header counting rows nothing is drawing.
+-- A surviving tracker is repaired as well as retained. A child the criteria
+-- hid is exactly as unreachable as one that never made the dataset, so it
+-- leaves 'trackerChildren' through the same 'pruneOffBoardChildren'
+-- 'deriveBoardWithOpenIssues' already applies, rather than leaving the group
+-- holding a row nothing is drawing. The progress its header reports does not
+-- move with it: that pair was read off the retained data before either pruning
+-- ran, and a view setting is not a fact about the tracker's work (§12).
 --
--- All of that is decided over the whole board rather than column by column,
--- because a group's membership is not confined to one: an epic can hold an
--- unassigned child in Issues, an assigned one in Active, and their pull
--- requests in Reviewing and Done. Repairing per column would report every
--- other column's surviving children as completed and would draw one collapsed
--- header per column the group had lost its rows in.
+-- The membership repair is decided over the whole board rather than column by
+-- column, because a group's membership is not confined to one: an epic can
+-- hold an unassigned child in Issues, an assigned one in Active, and their
+-- pull requests in Reviewing and Done. Repairing per column would draw one
+-- collapsed header per column the group had lost its rows in.
 --
 -- Criteria admitting every card return the board untouched. That is the
 -- default, and returning the same value rather than an equal one keeps every

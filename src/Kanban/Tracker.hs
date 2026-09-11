@@ -38,6 +38,14 @@ data ParseState = ParseState
 -- lets the existing empty-child-list diagnostics stand: an answer that never
 -- arrived is an unverified absence, and one that did arrive is the second
 -- source rather than a missing checklist to warn about.
+--
+-- This reads one issue and no dataset, so a checklist tracker leaves here
+-- carrying its body's own marks as 'trackerCompleted' and its whole parsed
+-- checklist as 'trackerChildren'. Both are what the board narrows next:
+-- 'Kanban.Workflow.deriveBoardWithOpenIssues' recounts the completed pair
+-- against the retained data's lifecycle facts and prunes the children a view
+-- cannot reach. A caller wanting the progress a header draws asks the board
+-- for it rather than this.
 trackerFromIssue :: WorkflowConfig -> Issue -> Maybe Tracker
 trackerFromIssue config issue
   | not (isTrackerIssue config issue) = Nothing

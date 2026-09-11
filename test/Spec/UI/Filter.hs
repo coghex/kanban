@@ -62,7 +62,10 @@ import Spec.Support.Fixtures
     detailsFixtureSnapshot,
     detailsFixtureUpdatedAt,
     epoch,
-    itemNumber
+    itemNumber,
+    localSubIssue,
+    nativeTrackerIssue,
+    withSubIssuesLackingSummary
   )
 import Spec.Support.Render (detailsText, renderDetailsForState)
 import Test.Hspec
@@ -71,6 +74,7 @@ spec :: Spec
 spec = do
   defaultsSpec
   admittedSpec
+  progressSpec
   orderingSpec
   attentionSpec
   refusalSpec
@@ -200,10 +204,12 @@ admittedSpec = describe "criteria admitting completed history" $ do
     map summarize (entriesForBoard hidden Issues) `shouldBe` [("header", 810)]
     map summarize (entriesForBoard shown Issues) `shouldBe` [("tracked", 811)]
 
-  -- A header counts the children it holds, so a child the criteria hid must
-  -- leave the tracker rather than stay a permanently unreachable pending
-  -- entry the header keeps counting (§12).
-  it "folds a child the criteria hid into its tracker's checklist progress" $ do
+  -- A child the criteria hid must leave the tracker rather than stay a
+  -- permanently unreachable entry a group holds a row for. What must not
+  -- follow it out is the progress its header reports: that pair is a fact
+  -- about the retained data, and both children are open in it either way
+  -- (§12).
+  it "drops a child the criteria hid without moving its tracker's progress" $ do
     let snapshot = RepoSnapshot [approvedEpic 870 [871, 872], baseIssue 871 [], baseIssue 872 []] [] epoch
         -- Only #871 is approved, so an Approved-only workflow facet keeps the
         -- epic and that child while hiding #872.
@@ -214,28 +220,28 @@ admittedSpec = describe "criteria admitting completed history" $ do
           visibleFrom everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved} narrowed Nothing
     numbersIn unfiltered Issues `shouldBe` [871, 872]
     map trackerProgress (entriesForBoard unfiltered Issues) `shouldBe` [Just (0, 2), Just (0, 2)]
-    -- #872 is gone, and the header no longer counts a row nothing draws.
+    -- #872 is gone from the group, and the header reports what it did before.
     numbersIn filtered Issues `shouldBe` [871]
-    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (1, 2)]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (0, 2)]
 
-  it "folds every child into progress when the criteria leave a tracker alone" $ do
+  it "keeps a collapsed tracker's progress when the criteria leave it alone" $ do
     let snapshot = RepoSnapshot [approvedEpic 870 [871], baseIssue 871 []] [] epoch
         filtered =
           visibleFrom everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved} snapshot Nothing
     map summarize (entriesForBoard filtered Issues) `shouldBe` [("header", 870)]
-    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (1, 1)]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (0, 1)]
 
   -- A group's membership is not confined to one column: an epic holds an
   -- unassigned child in Issues and an assigned one in Active. Repairing per
-  -- column would report each column's own child as the only survivor and
-  -- fold the other — still on screen — into completed progress.
+  -- column would report each column's own child as the only survivor and drop
+  -- the other — still on screen — from the group it is drawn under.
   it "repairs a tracker spanning columns from every column at once" $ do
     let filtered =
           visibleFrom everyLifecycle {filterKind = Set.singleton KindIssues} crossColumnSnapshot Nothing
     numbersIn filtered Issues `shouldBe` [871]
     numbersIn filtered Active `shouldBe` [872]
-    -- Both children are still drawn, so neither is folded into progress in
-    -- either column, and both headers report the same tracker.
+    -- Both children are still drawn, and both columns' headers report the one
+    -- pair the retained data yields for the tracker they share.
     map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (0, 2)]
     map trackerProgress (entriesForBoard filtered Active) `shouldBe` [Just (0, 2)]
 
@@ -250,7 +256,9 @@ admittedSpec = describe "criteria admitting completed history" $ do
     -- Only #872, in Active, is approved. Issues lost its only child of the
     -- group and must show nothing rather than a second header for it.
     numbersIn filtered Active `shouldBe` [872]
-    map trackerProgress (entriesForBoard filtered Active) `shouldBe` [Just (1, 2)]
+    -- #871 left the group and stayed open, so it is still one of the two the
+    -- header counts.
+    map trackerProgress (entriesForBoard filtered Active) `shouldBe` [Just (0, 2)]
     entriesForBoard filtered Issues `shouldBe` []
 
   it "draws exactly one header, in the leftmost column, when a spanning group loses every row" $ do
@@ -263,7 +271,7 @@ admittedSpec = describe "criteria admitting completed history" $ do
     -- the tracker survives with nothing under it in either column and is
     -- represented once rather than once per column it lost rows in.
     map summarize (entriesForBoard filtered Issues) `shouldBe` [("header", 870)]
-    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (2, 2)]
+    map trackerProgress (entriesForBoard filtered Issues) `shouldBe` [Just (0, 2)]
     concat [entriesForBoard filtered column | column <- [Active, Reviewing, Done]] `shouldBe` []
 
   -- A child whose epic the criteria hide is sorted by its own number.
@@ -303,6 +311,129 @@ admittedSpec = describe "criteria admitting completed history" $ do
     itemWorkflowFacet workflow (IssueItem (labelled 2 ["blocked"])) `shouldBe` WorkflowProblems
     itemWorkflowFacet workflow (IssueItem (labelled 3 ["reviewed:approve"])) `shouldBe` WorkflowApproved
     itemWorkflowFacet workflow (IssueItem (labelled 4 [])) `shouldBe` WorkflowOther
+
+-- ---------------------------------------------------------------------------
+
+-- | #662. A tracker's completed/total pair is a fact about the retained data,
+-- so it reads the same under every combination of criteria — while the
+-- membership beside it goes on narrowing to what a view can reach (§12).
+--
+-- Every case asserts both halves: the pair that must not move, and the rows
+-- and headers that must go on behaving as they did.
+progressSpec :: Spec
+progressSpec = describe "tracker progress across the criteria" $ do
+  -- #662's own reproduction table, with the correction its review carried:
+  -- the two rows whose #872 is open both read 0/2, and the two whose #872 has
+  -- closed both read 1/2. Only #872's lifecycle moves the pair; unchecking
+  -- Problems to hide it and checking Closed to draw it move nothing.
+  it "reads one pair for a checklist group whatever the criteria admit" $ do
+    let blockedChild = (baseIssue 872 []) {issueLabels = [Label "blocked" "b60205"]}
+        openSide = RepoSnapshot [epicIssue 870 [871, 872], baseIssue 871 [], blockedChild] [] epoch
+        closedSide = RepoSnapshot [epicIssue 870 [871, 872], baseIssue 871 []] [] epoch
+        closedChildHistory = Just (CompletedHistory [closed (baseIssue 872 [])] [] epoch)
+        hidden = visibleFrom withoutProblems openSide Nothing
+        settled = visibleFrom everyLifecycle closedSide closedChildHistory
+    -- #872 open, labelled blocked, and drawn.
+    progressAcross (visibleFrom defaultFilterCriteria openSide Nothing) `shouldBe` [(0, 2)]
+    -- #872 open, labelled blocked, and hidden by the workflow facet.
+    progressAcross hidden `shouldBe` [(0, 2)]
+    numbersIn hidden Issues `shouldBe` [871]
+    -- #872 closed, retained as completed history, and not drawn.
+    progressAcross (visibleFrom defaultFilterCriteria closedSide closedChildHistory) `shouldBe` [(1, 2)]
+    -- #872 closed and drawn as a completed card.
+    progressAcross settled `shouldBe` [(1, 2)]
+    numbersIn settled Issues `shouldBe` [871, 872]
+
+  -- The kind facet reaches a group's rows through its pull requests, and a
+  -- checklist child the board knows only through one is where it used to move
+  -- progress: 'deriveBoard' counts a pull request's linked issues as
+  -- reachable, so the child stayed in the tracker until hiding pull requests
+  -- took its only row away. No retained dataset holds #872's own issue, so it
+  -- counts complete throughout — a linked pull request groups a child without
+  -- establishing that child's lifecycle.
+  it "keeps progress when the kind facet takes away a child's only row" $ do
+    let snapshot =
+          RepoSnapshot
+            [epicIssue 870 [871, 872], baseIssue 871 []]
+            [basePullRequest 880 [872] False []]
+            epoch
+        issuesOnly = defaultFilterCriteria {filterKind = Set.singleton KindIssues}
+        drawn = visibleFrom defaultFilterCriteria snapshot Nothing
+        withoutPullRequests = visibleFrom issuesOnly snapshot Nothing
+    numbersIn drawn Reviewing `shouldBe` [880]
+    trackerNumbers (entriesForBoard drawn Reviewing) `shouldBe` [Just 870]
+    progressAcross drawn `shouldBe` [(1, 2)]
+    entriesForBoard withoutPullRequests Reviewing `shouldBe` []
+    numbersIn withoutPullRequests Issues `shouldBe` [871]
+    progressAcross withoutPullRequests `shouldBe` [(1, 2)]
+
+  -- Requirement 3's off-board reference, which goes on counting as complete:
+  -- #999 was never fetched, so no retained dataset can report it open.
+  it "counts a reference no retained dataset holds as complete" $ do
+    let snapshot = RepoSnapshot [epicIssue 870 [871, 999], baseIssue 871 []] [] epoch
+    progressAcross (visibleFrom defaultFilterCriteria snapshot Nothing) `shouldBe` [(1, 2)]
+    progressAcross (visibleFrom everyLifecycle snapshot mixedHistory) `shouldBe` [(1, 2)]
+
+  -- A checked box and a closed issue are two reasons for one child to be
+  -- complete, not two completions.
+  it "counts a child that is both checked and closed exactly once" $ do
+    let snapshot = RepoSnapshot [markedEpic 870 [(871, True), (872, False)], baseIssue 872 []] [] epoch
+        history = Just (CompletedHistory [closed (baseIssue 871 [])] [] epoch)
+    progressAcross (visibleFrom defaultFilterCriteria snapshot history) `shouldBe` [(1, 2)]
+    progressAcross (visibleFrom everyLifecycle snapshot history) `shouldBe` [(1, 2)]
+
+  -- The lifecycle facet selects which generations a board is derived from, so
+  -- a board drawn from the completed one alone holds no record of a
+  -- checklist's open children. They are open in the retained data all the
+  -- same, and the criteria that hid them say nothing about that.
+  it "keeps an open child incomplete under a completed-history-only view" $ do
+    let closedOnly = defaultFilterCriteria {filterLifecycle = Set.singleton LifecycleClosed}
+        headerOnly = visibleFrom closedOnly childOnlySnapshot closedEpicHistory
+    map summarize (entriesForBoard headerOnly Issues) `shouldBe` [("header", 810)]
+    progressAcross headerOnly `shouldBe` [(0, 1)]
+    -- The same tracker with its child drawn beside it reports the same pair.
+    progressAcross (visibleFrom everyLifecycle childOnlySnapshot closedEpicHistory) `shouldBe` [(0, 1)]
+
+  -- Requirement 4. GitHub already counts every sub-issue the tracker has, so
+  -- nothing about a view may reach those numbers either.
+  it "leaves a native tracker's reported counts alone under every facet" $ do
+    let tracker = nativeTrackerIssue 870 [localSubIssue 871 False, localSubIssue 872 False] 1 3
+        blockedChild = (baseIssue 872 []) {issueLabels = [Label "blocked" "b60205"]}
+        snapshot = RepoSnapshot [tracker, baseIssue 871 [], blockedChild] [] epoch
+        hidden = visibleFrom withoutProblems snapshot Nothing
+    progressAcross (visibleFrom defaultFilterCriteria snapshot Nothing) `shouldBe` [(1, 3)]
+    progressAcross hidden `shouldBe` [(1, 3)]
+    numbersIn hidden Issues `shouldBe` [871]
+    progressAcross (visibleFrom everyLifecycle snapshot mixedHistory) `shouldBe` [(1, 3)]
+
+  -- The other native pair: the one derived from the relationships that did
+  -- arrive when GitHub's summary did not. It is as much a dataset fact as the
+  -- reported one, so the criteria may not move it either.
+  it "leaves a native tracker's missing-summary fallback alone under every facet" $ do
+    let tracker =
+          withSubIssuesLackingSummary
+            [localSubIssue 871 False, localSubIssue 872 False, localSubIssue 873 True]
+            (baseIssue 870 [])
+              { issueLabels = [Label "epic" "5319e7"],
+                issueBody = "Background only, with no child list."
+              }
+        blockedChild = (baseIssue 872 []) {issueLabels = [Label "blocked" "b60205"]}
+        snapshot = RepoSnapshot [tracker, baseIssue 871 [], blockedChild] [] epoch
+        history = Just (CompletedHistory [closed (baseIssue 873 [])] [] epoch)
+        hidden = visibleFrom withoutProblems snapshot history
+    progressAcross (visibleFrom defaultFilterCriteria snapshot history) `shouldBe` [(1, 3)]
+    progressAcross hidden `shouldBe` [(1, 3)]
+    numbersIn hidden Issues `shouldBe` [871]
+    progressAcross (visibleFrom everyLifecycle snapshot history) `shouldBe` [(1, 3)]
+
+  -- Requirement 1's spanning case read as one board rather than one column:
+  -- every header the group draws, wherever it draws it, reports one pair.
+  it "reads one pair in every column a spanning group appears in" $ do
+    let across criteria = progressAcross (visibleFrom criteria crossColumnSnapshot Nothing)
+    across defaultFilterCriteria `shouldBe` [(0, 2)]
+    across everyLifecycle {filterKind = Set.singleton KindIssues} `shouldBe` [(0, 2)]
+    across everyLifecycle {filterWorkflow = Set.singleton WorkflowApproved} `shouldBe` [(0, 2)]
+    across withoutProblems `shouldBe` [(0, 2)]
 
 -- ---------------------------------------------------------------------------
 
@@ -713,18 +844,25 @@ approvedClosedEpic :: Issue
 approvedClosedEpic =
   (closed (epicIssue 810 [811])) {issueLabels = [Label "epic" "5319e7", Label "reviewed:approve" "0e8a16"]}
 
--- | An epic whose checklist names the given children in implementation order.
+-- | An epic whose checklist names the given children in implementation order,
+-- every box unchecked.
 epicIssue :: Int -> [Int] -> Issue
-epicIssue number children =
+epicIssue number children = markedEpic number [(child, False) | child <- children]
+
+-- | The same, with each child's checkbox as its pair supplies it.
+markedEpic :: Int -> [(Int, Bool)] -> Issue
+markedEpic number children =
   (baseIssue number [])
     { issueLabels = [Label "epic" "5319e7"],
       issueBody =
         "## Children\n"
           <> Text.concat
-            [ "- [ ] #" <> showNumber child <> " — A" <> showNumber (order + 1) <> ": step\n"
-              | (order, child) <- zip [0 :: Int ..] children
+            [ "- [" <> mark done <> "] #" <> showNumber child <> " — A" <> showNumber (order + 1) <> ": step\n"
+              | (order, (child, done)) <- zip [0 :: Int ..] children
             ]
     }
+  where
+    mark done = if done then "x" else " "
 
 -- | Three children in implementation order, the outer two of which a case
 -- then closes.
@@ -771,6 +909,17 @@ trackerFor issue = case trackerFromIssue workflow issue of
   Just tracker -> tracker
   Nothing -> error ("fixture issue #" <> show issue.issueNumber <> " is not a tracker")
 
+-- | Every distinct completed/total pair the board's trackers report, over
+-- every column and every row of a group.
+--
+-- Distinct rather than per row, because the question these cases ask is
+-- whether one tracker reports one pair: a board whose columns disagree, or
+-- whose group's rows disagree with its header, yields two.
+progressAcross :: Board -> [(Int, Int)]
+progressAcross board =
+  Set.toList
+    (Set.fromList [pair | column <- allBoardColumns, Just pair <- map trackerProgress (entriesForBoard board column)])
+
 -- | The completed/total an entry's own tracker reports, if it has one.
 trackerProgress :: ColumnEntry -> Maybe (Int, Int)
 trackerProgress (Tracked tracking _) = Just (progress tracking.trackingPrimary.membershipTracker)
@@ -815,6 +964,11 @@ busyDrainer = DrainerStatus DrainerOn "running" DrainerServiceRunning Nothing
 
 everyLifecycle :: FilterCriteria
 everyLifecycle = defaultFilterCriteria {filterLifecycle = everyFacetValue}
+
+-- | The defaults with the Problems box unchecked, which is how a case hides
+-- one @blocked@ child while leaving its epic and its siblings drawn.
+withoutProblems :: FilterCriteria
+withoutProblems = defaultFilterCriteria {filterWorkflow = Set.delete WorkflowProblems everyFacetValue}
 
 visible :: Board -> Maybe CompletedHistory -> Board
 visible board = visibleWith defaultFilterCriteria board openSnapshot
