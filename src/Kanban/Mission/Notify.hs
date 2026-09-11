@@ -37,7 +37,7 @@
 -- This module is internal — "Kanban.Mission" re-exports the parts of it that
 -- module's public contract promises.
 module Kanban.Mission.Notify
-  ( missionNotificationTarget,
+  ( missionNotificationTargets,
     missionNotificationArguments,
     missionNotificationDigest,
     missionNotificationTimeoutMicros,
@@ -105,21 +105,26 @@ import System.Process
     proc,
   )
 
--- | Which tracker item this waiting episode is about, if the mission names
--- one.
+-- | Which tracker items this waiting episode is about.
 --
 -- Resolved from typed records and never from text. The step the attention
 -- names comes first, because a mission waiting inside one step is waiting
--- about that step's own target; failing that, the selector's target list is
--- what the mission was created for, and its first entry is the one a
--- notification can name. A mission whose selector resolved to nothing — a
--- query that matched no item, or a mission created from a bare request —
--- notifies with no target at all rather than inventing one.
-missionNotificationTarget :: MissionSpecification -> MissionAttention -> Maybe MissionTarget
-missionNotificationTarget specification attention =
+-- about that step's own target and nothing else; failing that, the selector's
+-- targets are what the mission was created for, and /all/ of them are the
+-- answer. Keeping only the first would silently drop the rest of a mission
+-- created for several items, which is the ordinary case for a selector.
+--
+-- Empty when the mission names none — a step with no target and a selector
+-- that resolved to nothing, which is what a mission created from a bare
+-- request looks like. That is a real answer rather than a failure, and the
+-- notification still fires; what it may never be is the answer given for a
+-- specification nobody could read, which is why the caller resolves the
+-- specification before calling this rather than defaulting on its behalf.
+missionNotificationTargets :: MissionSpecification -> MissionAttention -> [MissionTarget]
+missionNotificationTargets specification attention =
   case stepTarget of
-    Just target -> Just target
-    Nothing -> listToMaybe specification.missionSpecificationSelector.missionSelectorTargets
+    Just target -> [target]
+    Nothing -> specification.missionSpecificationSelector.missionSelectorTargets
   where
     stepTarget = do
       step <- attention.missionAttentionStep
@@ -133,18 +138,24 @@ missionNotificationTarget specification attention =
           planStep.missionPlanStepId == step
         ]
 
--- | The three arguments appended to the configured command, in order.
+-- | The arguments appended to the configured command, in order.
 --
--- Positional and fixed, so a one-line shell wrapper can read them as @$1@,
--- @$2@ and @$3@ without parsing anything. The target is @none@ rather than an
--- empty string when there is none, because an empty argument is easy to lose
--- through a shell and a word is not.
-missionNotificationArguments :: Text -> Maybe MissionTarget -> [Text]
-missionNotificationArguments repository target =
-  [ repository,
-    maybe "none" rendered target,
-    "attention-required"
-  ]
+-- Two fixed positions and then the targets: @$1@ is the repository and @$2@ is
+-- the word @attention-required@, so a one-line shell wrapper can read both
+-- without counting anything, and @$3@ onward are however many typed items the
+-- mission named — none, one, or several.
+--
+-- Variadic at the /end/ for that reason. A target in the middle would move the
+-- indication's position with the number of targets, which is exactly the shape
+-- that makes a positional contract unreadable.
+--
+-- A mission that names no target appends nothing at all rather than a sentinel
+-- word. An absent target is absent: spelling it @none@ would put an untyped
+-- value where typed ones go, and a command that split on the target's own
+-- @kind#number@ shape would have to special-case it.
+missionNotificationArguments :: Text -> [MissionTarget] -> [Text]
+missionNotificationArguments repository targets =
+  [repository, "attention-required"] <> map rendered targets
   where
     rendered value = kindTag value.missionTargetKind <> "#" <> Text.pack (show value.missionTargetNumber)
     kindTag kind = case kind of

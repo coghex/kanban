@@ -52,7 +52,7 @@ where
 
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (filterM, forM)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -73,7 +73,7 @@ import Kanban.Mission.Notify
   ( MissionNotificationAttempt (..),
     attemptMissionNotification,
     missionNotificationArguments,
-    missionNotificationTarget,
+    missionNotificationTargets,
     missionNotificationTimeoutMicros,
     runMissionNotificationCommand,
   )
@@ -187,7 +187,7 @@ runMissionSchedulerPass seams missions store repository = do
     -- and said nothing about the third that is waiting for them.
     Just message -> refuse startedAt message
     Nothing -> do
-      inventory <- readInventory store
+      (inventory, unreadable) <- readInventory store
       candidates <- admissible seams inventory
       let admitted = take missionAdmissionCeiling candidates
       advanced <- if null admitted then pure [] else seams.missionSchedulerAdvance admitted
@@ -200,19 +200,26 @@ runMissionSchedulerPass seams missions store repository = do
       -- Every mission, not only the admitted ones (requirement 13): a mission
       -- that is waiting is precisely the one nobody is advancing, and it is
       -- the one somebody needs to hear about.
-      outstanding <- readInventory store
-      attention <- catMaybes <$> mapM (observeAttention seams notifications store repository) outstanding
+      (outstanding, unreadableAfter) <- readInventory store
+      observed <- mapM (observeAttention seams notifications store repository) outstanding
       finishedAt <- seams.missionSchedulerNow
-      let failures = filter (missionDispositionIsFailure . (.missionDispositionValue)) dispositions
+      let attention = catMaybes (map fst observed)
+          indeterminate = nub (unreadable <> unreadableAfter <> catMaybes (map snd observed))
+          failures = filter (missionDispositionIsFailure . (.missionDispositionValue)) dispositions
+          -- Either kind of trouble fails the pass. A record nobody can read is
+          -- not a quieter problem than a child that broke: both leave a
+          -- mission whose state this pass cannot account for, and a supervisor
+          -- has to hear about it rather than see a healthy idle repository.
+          failed = not (null failures) || not (null indeterminate)
       pure
         MissionPassReport
           { missionPassRepository = identity,
             missionPassStartedAt = startedAt,
             missionPassFinishedAt = finishedAt,
-            missionPassTermination = if null failures then MissionPassCompleted else MissionPassFailed,
+            missionPassTermination = if failed then MissionPassFailed else MissionPassCompleted,
             missionPassAdmitted = dispositions,
             missionPassAttention = attention,
-            missionPassDetail = summary (length inventory) dispositions attention failures
+            missionPassDetail = summary (length inventory) dispositions attention failures indeterminate
           }
   where
     notifications = missions.missionsNotifications
@@ -231,32 +238,42 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassDetail = "this pass advanced nothing: " <> message
           }
 
-    summary total dispositions attention failures =
-      Text.intercalate
-        "; "
+    summary total dispositions attention failures indeterminate =
+      Text.intercalate "; " $
         [ Text.pack (show (length dispositions)) <> " of " <> Text.pack (show total) <> " missions admitted",
           Text.pack (show (length attention)) <> " waiting on a person",
           Text.pack (show (length failures)) <> " failed"
         ]
+          <> indeterminate
 
--- | Every mission whose snapshot this store will hand over, newest decision
--- last.
+-- | Every mission whose snapshot this store will hand over, and every mission
+-- whose snapshot it would not.
 --
--- A mission whose snapshot is absent or will not decode contributes nothing
--- and is not reported as a failure: it is not a mission this pass declined to
--- advance, it is a record this release cannot read, and §16's silence rule
--- already says what a reader does with one. Sorted by identifier so two passes
--- over one unchanged store admit the same two missions — fair rotation is
--- RUN-5's, and until it exists a stable order is better than an arbitrary one.
-readInventory :: MissionStore -> IO [(MissionId, MissionSnapshot)]
+-- The split is the whole point. §16's silence rule is about a record that is
+-- /absent/ — missing, or written under a schema version this release does not
+-- know — and a reader is right to carry on past one of those. It says nothing
+-- about a record that is there and does not decode, or one that decodes and
+-- names another repository: those are mission state nobody can account for,
+-- and a pass that dropped them would report a completed idle repository over a
+-- mission that may well be mid-flight. So they are collected and reported, and
+-- the pass they appear in is a failed one.
+--
+-- Sorted by identifier so two passes over one unchanged store admit the same
+-- two missions — fair rotation is RUN-5's, and until it exists a stable order
+-- is better than an arbitrary one.
+readInventory :: MissionStore -> IO ([(MissionId, MissionSnapshot)], [Text])
 readInventory store = do
   missions <- listMissions store
   loaded <- forM (sortOn (.unMissionId) missions) $ \mission -> do
     snapshot <- readMissionSnapshot store mission
     pure $ case snapshot of
-      MissionPresent present -> Just (mission, present)
-      _ -> Nothing
-  pure (catMaybes loaded)
+      MissionPresent present -> (Just (mission, present), Nothing)
+      MissionAbsent -> (Nothing, Nothing)
+      MissionUnreadable detail ->
+        (Nothing, Just ("mission " <> mission.unMissionId <> " has an unreadable snapshot: " <> detail))
+      MissionRefused detail ->
+        (Nothing, Just ("mission " <> mission.unMissionId <> " has a snapshot this store refused: " <> detail))
+  pure (catMaybes (map fst loaded), catMaybes (map snd loaded))
 
 -- | The runnable missions nothing else is already advancing, in order.
 --
@@ -323,30 +340,52 @@ observeAttention ::
   MissionStore ->
   Repository ->
   (MissionId, MissionSnapshot) ->
-  IO (Maybe MissionAttentionRecord)
+  IO (Maybe MissionAttentionRecord, Maybe Text)
 observeAttention seams notifications store repository (mission, snapshot) =
   case snapshot.missionSnapshotAttention of
-    Nothing -> pure Nothing
+    Nothing -> pure (Nothing, Nothing)
     Just attention -> do
       specification <- readMissionSpecification store mission
-      let target = case specification of
-            MissionPresent present -> missionNotificationTarget present attention
-            _ -> Nothing
-      (state, detail) <- notify attention target
-      pure
-        ( Just
-            MissionAttentionRecord
-              { missionAttentionRecordMission = mission,
-                missionAttentionRecordId = attention.missionAttentionId,
-                missionAttentionRecordTarget = target,
-                missionAttentionRecordNotification = state,
-                missionAttentionRecordDetail = detail
-              }
-        )
+      case specification of
+        MissionPresent present -> do
+          let targets = missionNotificationTargets present attention
+          (state, detail) <- notify attention targets
+          pure (Just (record attention targets state detail), Nothing)
+        -- No specification, no targets — and therefore no notification. An
+        -- empty target list is what a mission that genuinely names nothing
+        -- produces, so sending one on this reading would spend the episode's
+        -- single, permanent attempt on a payload asserting the mission is
+        -- about no item at all. The episode is still reported, so nothing is
+        -- hidden; what is withheld is the claim.
+        other -> do
+          let reason = unresolvedReason other
+          pure
+            ( Just (record attention [] MissionNotificationUnresolved (Just reason)),
+              Just ("mission " <> mission.unMissionId <> " needs attention and " <> reason)
+            )
   where
     identity = repositoryIdentity repository.repositoryOwner repository.repositoryName
 
-    notify attention target = case (notifications.missionNotificationEnabled, notifications.missionNotificationCommand) of
+    record attention targets state detail =
+      MissionAttentionRecord
+        { missionAttentionRecordMission = mission,
+          missionAttentionRecordId = attention.missionAttentionId,
+          missionAttentionRecordTargets = targets,
+          missionAttentionRecordNotification = state,
+          missionAttentionRecordDetail = detail
+        }
+
+    -- Absent is reported beside the other two rather than passed over. §16's
+    -- silence rule lets a reader carry on past a record it cannot recognise;
+    -- it does not make a mission that is waiting on somebody, and whose
+    -- specification this release cannot read, a mission nobody need hear
+    -- about.
+    unresolvedReason other = case other of
+      MissionUnreadable detail -> "its specification will not decode (" <> detail <> "), so no target could be resolved"
+      MissionRefused detail -> "its specification was refused (" <> detail <> "), so no target could be resolved"
+      _ -> "its specification is missing or was written by another release, so no target could be resolved"
+
+    notify attention targets = case (notifications.missionNotificationEnabled, notifications.missionNotificationCommand) of
       (True, Just command) -> do
         attempt <-
           attemptMissionNotification
@@ -354,7 +393,7 @@ observeAttention seams notifications store repository (mission, snapshot) =
             store
             mission
             attention.missionAttentionId
-            (command.missionNotificationArgv <> missionNotificationArguments identity target)
+            (command.missionNotificationArgv <> missionNotificationArguments identity targets)
         pure (attempt.missionNotificationAttemptState, attempt.missionNotificationAttemptDetail)
       -- Unreachable: 'missionNotificationRefusal' has already refused the pass
       -- for an enabled configuration with no command. Written out rather than
@@ -472,7 +511,7 @@ advanceMissions executable options repository scratch admitted = do
       exitCode <- waitForProcess processHandle
       releaseCapture outputCapture
       releaseCapture errorCapture
-      readChildResult mission resultPath exitCode
+      readChildResult identity mission resultPath exitCode
 
 -- | Removes whatever occupies a child's result path, and proves it is gone.
 --
@@ -509,8 +548,8 @@ data LaunchedChild
 -- exit status said; and a document that disagrees with the exit status is two
 -- records contradicting each other, which is reported rather than resolved by
 -- preferring one.
-readChildResult :: MissionId -> FilePath -> ExitCode -> IO (MissionId, Either Text MissionChildResult)
-readChildResult mission resultPath exitCode = do
+readChildResult :: Text -> MissionId -> FilePath -> ExitCode -> IO (MissionId, Either Text MissionChildResult)
+readChildResult identity mission resultPath exitCode = do
   loaded <- try @IOException (ByteString.readFile resultPath)
   pure . (,) mission $ case loaded of
     Left exception ->
@@ -530,6 +569,19 @@ readChildResult mission resultPath exitCode = do
                   <> result.missionChildResultMission.unMissionId
                   <> " while advancing "
                   <> mission.unMissionId
+              )
+        -- The mission identifier alone does not identify a mission: two
+        -- repositories may spell one the same way, and every durable record in
+        -- the store is repository-qualified for exactly that reason. A result
+        -- naming another repository is somebody else's account of somebody
+        -- else's work, and accepting it would let it decide this mission's
+        -- disposition.
+        | result.missionChildResultRepository /= identity ->
+            Left
+              ( "the mission child wrote a result for "
+                  <> result.missionChildResultRepository
+                  <> " while this pass is advancing "
+                  <> identity
               )
         | not (agreesWithExit result) ->
             Left

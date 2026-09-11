@@ -295,6 +295,14 @@ gains an internal `--mission-result FILE`, which writes a typed account of what
 one run did and is written only when a caller asks for one, so an operator's own
 `--mission` run is unchanged.
 
+A record that is *absent* — missing, or written under a schema version this
+release does not know — is passed over silently, exactly as section 16 says. A
+record that is there and will not decode, or that decodes and names another
+repository, is not: that is mission state nobody can account for, and the pass
+it appears in is a failed one rather than a quiet repository. A child's result
+is held to the same standard, and is refused unless it names both the mission
+it was launched for and the repository this pass is advancing.
+
 A pass reaches no network. The runnable set, the lease decision, and every
 disposition come from durable records on this machine, so a pass with nothing to
 advance launches no child and makes no GitHub request at all. What it still does
@@ -313,11 +321,18 @@ records attention too; only a scheduler pass observes and notifies.
 
 Notifications are off by default (section 16). When they are on, the operator's
 configured command is run through the same bounded capture seam a usage command
-uses, with the repository, the typed target and the word `attention-required`
-appended and nothing else — no title, no summary, no path. It runs in its own
-process group, and that group is swept on every path out, so a command that
-outlived its bound is ended rather than left running and a descendant it
-backgrounded goes with it. Delivery is at most
+uses, with the repository and the word `attention-required` appended, followed
+by one argument per item the episode is about — the waiting step's own when it
+names one, otherwise every target the mission's selector resolved to, and none
+at all when it names none. Nothing else is passed: no title, no summary, no
+path. The items come last so the two fixed positions do not move with their
+number. It runs in its own process group, and that group is swept on every path
+out, so a command that outlived its bound is ended rather than left running and
+a descendant it backgrounded goes with it. A mission whose own specification
+cannot be read launches nothing, because that is indistinguishable from a
+mission that names no item and notifying on the second reading would spend the
+episode's one attempt on a false claim; the episode is reported and stays
+eligible. Delivery is at most
 once per waiting episode: a durable suppression record is written before the
 command is launched and the identity is never retried afterwards, whatever the
 outcome, so a crash in that window loses the notification rather than risking a

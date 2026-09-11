@@ -200,7 +200,7 @@ def attention_entry(mission="mission-a", state="disabled"):
     return {
         "mission": mission,
         "attention_id": f"acme/widgets#{mission}@2026-09-11T00:00:00Z",
-        "target": {"kind": "issue", "number": 844},
+        "targets": [{"kind": "issue", "number": 844}],
         "notification": state,
         "detail": None,
     }
@@ -423,10 +423,6 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(pass_document(admitted=[admitted_entry(disposition="failed")])),
                 0,
             ),
-            "failed pass naming no failed mission": (
-                json.dumps(pass_document(termination="failed", admitted=[admitted_entry()])),
-                1,
-            ),
             "refused pass naming admitted missions": (
                 json.dumps(pass_document(termination="refused", admitted=[admitted_entry()])),
                 2,
@@ -479,13 +475,13 @@ class PassReportTests(unittest.TestCase):
             # renders, so every way it can be malformed is refused here rather
             # than passed through.
             "target that is not an object": (
-                json.dumps(pass_document(attention=[{**attention_entry(), "target": "issue#844"}])),
+                json.dumps(pass_document(attention=[{**attention_entry(), "targets": "issue#844"}])),
                 0,
             ),
             "target with the wrong fields": (
                 json.dumps(
                     pass_document(
-                        attention=[{**attention_entry(), "target": {"kind": "issue"}}]
+                        attention=[{**attention_entry(), "targets": [{"kind": "issue"}]}]
                     )
                 ),
                 0,
@@ -496,7 +492,7 @@ class PassReportTests(unittest.TestCase):
                         attention=[
                             {
                                 **attention_entry(),
-                                "target": {"kind": "issue", "number": 844, "title": "no"},
+                                "targets": [{"kind": "issue", "number": 844, "title": "no"}],
                             }
                         ]
                     )
@@ -507,7 +503,7 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(
                     pass_document(
                         attention=[
-                            {**attention_entry(), "target": {"kind": "discussion", "number": 844}}
+                            {**attention_entry(), "targets": [{"kind": "discussion", "number": 844}]}
                         ]
                     )
                 ),
@@ -517,7 +513,7 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(
                     pass_document(
                         attention=[
-                            {**attention_entry(), "target": {"kind": "issue", "number": "844"}}
+                            {**attention_entry(), "targets": [{"kind": "issue", "number": "844"}]}
                         ]
                     )
                 ),
@@ -527,7 +523,7 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(
                     pass_document(
                         attention=[
-                            {**attention_entry(), "target": {"kind": "issue", "number": True}}
+                            {**attention_entry(), "targets": [{"kind": "issue", "number": True}]}
                         ]
                     )
                 ),
@@ -537,7 +533,7 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(
                     pass_document(
                         attention=[
-                            {**attention_entry(), "target": {"kind": "issue", "number": 0}}
+                            {**attention_entry(), "targets": [{"kind": "issue", "number": 0}]}
                         ]
                     )
                 ),
@@ -559,19 +555,34 @@ class PassReportTests(unittest.TestCase):
         )
         self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
 
-    def test_an_absent_target_and_both_kinds_are_accepted(self):
+    def test_no_targets_one_target_and_several_are_all_accepted(self):
         # The negative control for the target cases above: refusing everything
-        # would pass that table while accepting no real report at all.
-        for target in (
-            None,
-            {"kind": "issue", "number": 844},
-            {"kind": "pull_request", "number": 12},
+        # would pass that table while accepting no real report at all. The
+        # several-target case is the ordinary one for a mission whose selector
+        # matched more than one item.
+        for targets in (
+            [],
+            [{"kind": "issue", "number": 844}],
+            [{"kind": "pull_request", "number": 12}],
+            [{"kind": "issue", "number": 844}, {"kind": "issue", "number": 845}],
         ):
-            with self.subTest(target=target):
+            with self.subTest(targets=targets):
                 document = pass_document(
-                    attention=[{**attention_entry(), "target": target}]
+                    attention=[{**attention_entry(), "targets": targets}]
                 )
                 self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_a_pass_level_failure_with_nothing_admitted_is_accepted(self):
+        # The exact shape `runMissionSchedulerMode` writes when it cannot even
+        # prepare its scratch directory: the pass failed, and no mission is to
+        # blame. A controller that required a failed mission beside a failed
+        # pass would call its own writer malformed and drop the one report that
+        # said what went wrong.
+        document = pass_document(
+            termination="failed",
+            detail="this pass could not prepare its scratch directory: ...",
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
 
     def test_a_refused_pass_is_accepted_with_nothing_admitted(self):
         document = pass_document(termination="refused", detail="nothing to run")
@@ -978,6 +989,31 @@ class FailureTests(MissionRunnerFixture):
         self.assertEqual(status, 1)
         incident = self.assert_incident(service.PASS_INCIDENT_KIND)
         self.assertIn("nothing to run", incident["summary"])
+
+    def test_a_pass_level_failure_is_retained_and_opens_an_incident(self):
+        # The end of the same thread as the decoder's unit case: the scheduler
+        # can fail before it admits anything, and the wrapper has to keep that
+        # report rather than reject it as malformed. `last_pass` is what proves
+        # it was kept, since an incident is opened for a rejected report too.
+        self.write_plan(
+            {
+                "report": {
+                    "document": pass_document(
+                        termination="failed",
+                        detail="this pass could not prepare its scratch directory: denied",
+                    ),
+                    "status": 1,
+                }
+            }
+        )
+        status, _stdout, _stderr = self.run_controller()
+        self.assertEqual(status, 1)
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        self.assertIn("scratch directory", incident["summary"])
+        snapshot = self.status()
+        self.assertIsNotNone(snapshot["last_pass"])
+        self.assertEqual(snapshot["last_pass"]["termination"], "failed")
+        self.assertEqual(snapshot["last_pass"]["admitted"], [])
 
     def test_an_unreadable_report_is_a_failure_rather_than_an_idle_pass(self):
         for label, report in (

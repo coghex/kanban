@@ -273,6 +273,43 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
   it "names exactly one failing disposition" $
     filter missionDispositionIsFailure missionDispositions `shouldBe` [MissionDispositionFailed]
 
+  -- §16's silence rule covers a record that is *absent* — missing, or written
+  -- under a version this release does not know. A record that is there and
+  -- will not decode is mission state nobody can account for, and a pass that
+  -- dropped it would report a healthy idle repository over a mission that may
+  -- be mid-flight.
+  it "fails the pass on a snapshot that will not decode" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      corruptSnapshot store (MissionId "mission-a")
+      (report, advanced) <- passWith store defaultMissionsConfig id
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      ("unreadable snapshot" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
+
+  -- Written by editing the file rather than through 'writeMissionSnapshot',
+  -- because that writer refuses to produce this record at all -- which is the
+  -- point. A snapshot naming another repository arrives by restore, by a
+  -- directory somebody copied, or by a repository that was renamed, and the
+  -- reader's refusal exists for exactly those. Staging it through the writer
+  -- would be staging a state this release cannot reach.
+  it "fails the pass on a snapshot recorded against another repository" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      disownSnapshot store (MissionId "mission-a")
+      (report, _) <- passWith store defaultMissionsConfig id
+      report.missionPassTermination `shouldBe` MissionPassFailed
+
+  -- The negative control: an absent snapshot really is silent, so the two
+  -- examples above are about decoding rather than about enumeration.
+  it "stays completed when a listed mission has no snapshot at all" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      removeSnapshot store (MissionId "mission-a")
+      (report, _) <- passWith store defaultMissionsConfig id
+      report.missionPassTermination `shouldBe` MissionPassCompleted
+      report.missionPassAdmitted `shouldBe` []
+
 -- ---------------------------------------------------------------------------
 -- The pass contract
 -- ---------------------------------------------------------------------------
@@ -299,7 +336,8 @@ passContractSpec = describe "the pass report" $ do
                    "timed_out",
                    "launch_failed",
                    "uncertain",
-                   "recording_failed"
+                   "recording_failed",
+                   "unresolved"
                  ]
 
   it "carries the repository, the admitted missions, and the attention it saw" $
@@ -491,6 +529,20 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
 
   -- Requirement 9's contradiction case at the child boundary: a document
   -- saying the mission advanced beside a non-zero exit, and the reverse.
+  -- A mission identifier does not identify a mission: two repositories may
+  -- spell one the same way, which is why every durable record in the store is
+  -- repository-qualified. A result from somebody else's repository must not
+  -- decide this mission's disposition.
+  it "fails a child whose document names another repository" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        fake <- writeFakeKanban scratch (resultScript "mission-a" "someone/else" "advanced" 0)
+        putMission store "mission-a" MissionRunning
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        case map snd results of
+          [Left message] -> ("someone/else" `Text.isInfixOf` message) `shouldBe` True
+          other -> expectationFailure ("a foreign result was accepted: " <> show other)
+
   it "fails a child whose document contradicts its exit status" $
     withStore $ \store ->
       withScratch $ \scratch ->
@@ -597,27 +649,77 @@ attentionSpec = describe "the attention a waiting mission raises" $ do
   -- Requirement 12's target resolution, as the review corrected it: the step's
   -- own target first, the selector's list next, and nothing at all when a
   -- mission names neither.
-  it "resolves the step's target first" $
-    missionNotificationTarget theSpecification (attentionOn (Just theStep))
-      `shouldBe` Just theTarget
+  it "resolves the step's target first, and only that one" $
+    -- The step's own target is what the mission is waiting about, so the
+    -- selector's other items are not also the subject of this episode.
+    missionNotificationTargets
+      theSpecification {missionSpecificationSelector = selectorOver [theTarget, theSecondTarget]}
+      (attentionOn (Just theStep))
+      `shouldBe` [theTarget]
 
   it "falls back to the selector's targets when the step names none" $
-    missionNotificationTarget
+    missionNotificationTargets
       theSpecification {missionSpecificationPlan = [stepWithoutTarget]}
       (attentionOn (Just theStep))
-      `shouldBe` Just theTarget
+      `shouldBe` [theTarget]
 
-  it "resolves the selector's targets when the attention names no step" $
-    missionNotificationTarget theSpecification (attentionOn Nothing) `shouldBe` Just theTarget
-
-  it "resolves no target at all when the mission names none" $
-    missionNotificationTarget
+  -- Every one of them, not the first. A selector that matched three items is
+  -- a mission about three items, and dropping two would quietly narrow what an
+  -- operator is told to look at.
+  it "keeps every selector target rather than the first" $
+    missionNotificationTargets
       theSpecification
         { missionSpecificationPlan = [stepWithoutTarget],
-          missionSpecificationSelector = (theSpecification.missionSpecificationSelector) {missionSelectorTargets = []}
+          missionSpecificationSelector = selectorOver [theTarget, theSecondTarget]
         }
       (attentionOn (Just theStep))
-      `shouldBe` Nothing
+      `shouldBe` [theTarget, theSecondTarget]
+
+  it "resolves the selector's targets when the attention names no step" $
+    missionNotificationTargets theSpecification (attentionOn Nothing) `shouldBe` [theTarget]
+
+  it "resolves no target at all when the mission names none" $
+    missionNotificationTargets
+      theSpecification
+        { missionSpecificationPlan = [stepWithoutTarget],
+          missionSpecificationSelector = selectorOver []
+        }
+      (attentionOn (Just theStep))
+      `shouldBe` []
+
+  -- An unreadable specification is not a mission that names no item: those two
+  -- look identical downstream, and notifying on the second reading would spend
+  -- this episode's single permanent attempt asserting the mission is about
+  -- nothing. Nothing is launched, the episode is still reported, and the pass
+  -- fails because mission state could not be accounted for.
+  it "launches nothing for an episode whose specification will not read" $
+    forM_ ["unreadable", "refused", "absent"] $ \shape ->
+      withWaitingMission $ \store -> do
+        breakSpecification store (MissionId "mission-a") shape
+        invocations <- newIORef []
+        (report, _) <- passWith store (enabledWith (Just ["notify"])) $ \seams ->
+          seams {missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing)}
+        (shape, ) <$> readIORef invocations `shouldReturn` (shape, [])
+        (shape, map (.missionAttentionRecordNotification) report.missionPassAttention)
+          `shouldBe` (shape, [MissionNotificationUnresolved])
+        (shape, map (.missionAttentionRecordTargets) report.missionPassAttention)
+          `shouldBe` (shape, [[]])
+        (shape, report.missionPassTermination) `shouldBe` (shape, MissionPassFailed)
+
+  -- And the episode is still eligible afterwards: nothing was suppressed, so a
+  -- repaired specification gets the attempt this pass withheld.
+  it "leaves an unresolved episode eligible for its attempt" $
+    withWaitingMission $ \store -> do
+      breakSpecification store (MissionId "mission-a") "unreadable"
+      invocations <- newIORef []
+      _ <- passWith store (enabledWith (Just ["notify"])) $ \seams ->
+        seams {missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing)}
+      restoreSpecification store (MissionId "mission-a")
+      (report, _) <- passWith store (enabledWith (Just ["notify"])) $ \seams ->
+        seams {missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing)}
+      length <$> readIORef invocations `shouldReturn` 1
+      map (.missionAttentionRecordNotification) report.missionPassAttention
+        `shouldBe` [MissionNotificationCompleted]
 
   -- Requirement 13: a waiting mission is not admitted and is still observed,
   -- which is the pairing the review asked for explicitly.
@@ -660,15 +762,21 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
     withWaitingMission $ \store -> do
       (_, invocations) <- passRecordingNotifications store (enabledWith (Just ["notify", "--now"]))
       readIORef invocations
-        `shouldReturn` [["notify", "--now", "coghex/kanban", "issue#844", "attention-required"]]
+        `shouldReturn` [["notify", "--now", "coghex/kanban", "attention-required", "issue#844"]]
 
-  it "spells an absent target as a word rather than an empty argument" $
-    missionNotificationArguments "coghex/kanban" Nothing
-      `shouldBe` ["coghex/kanban", "none", "attention-required"]
+  -- A mission that names nothing appends nothing. The two fixed positions stay
+  -- where they are, so a wrapper reading `$1` and `$2` is unaffected by how
+  -- many items there turn out to be — which is the whole reason the variadic
+  -- part is last.
+  it "appends no target argument at all when the mission names none" $
+    missionNotificationArguments "coghex/kanban" []
+      `shouldBe` ["coghex/kanban", "attention-required"]
 
-  it "spells a pull-request target by kind" $
-    missionNotificationArguments "coghex/kanban" (Just theTarget {missionTargetKind = MissionTargetPullRequest, missionTargetNumber = 7})
-      `shouldBe` ["coghex/kanban", "pull_request#7", "attention-required"]
+  it "appends one argument per target, in order" $
+    missionNotificationArguments
+      "coghex/kanban"
+      [theTarget, theTarget {missionTargetKind = MissionTargetPullRequest, missionTargetNumber = 7}]
+      `shouldBe` ["coghex/kanban", "attention-required", "issue#844", "pull_request#7"]
 
   -- Requirement 15's whole point. Two passes over one unchanged episode, and
   -- the second reaches nothing.
@@ -926,6 +1034,23 @@ checkoutIn root = boardRepository {repositoryRoot = root}
 theStep :: MissionStepId
 theStep = MissionStepId "solve-844"
 
+-- | The selector a specification carries, over whatever targets a test names.
+selectorOver :: [MissionTarget] -> MissionSelector
+selectorOver targets =
+  MissionSelector
+    { missionSelectorKind = "issues",
+      missionSelectorQuery = Nothing,
+      missionSelectorTargets = targets
+    }
+
+theSecondTarget :: MissionTarget
+theSecondTarget =
+  MissionTarget
+    { missionTargetKind = MissionTargetIssue,
+      missionTargetNumber = 845,
+      missionTargetTitle = Just "the other issue"
+    }
+
 theTarget :: MissionTarget
 theTarget = MissionTarget {missionTargetKind = MissionTargetIssue, missionTargetNumber = 844, missionTargetTitle = Just "the issue"}
 
@@ -1112,6 +1237,60 @@ currentSnapshot store mission = do
   case readBack of
     MissionPresent snapshot -> pure snapshot
     other -> fail ("the snapshot did not read back: " <> show (() <$ other))
+
+-- | A snapshot that decodes and names another repository, which this store
+-- refuses rather than adopts.
+disownSnapshot :: MissionStore -> MissionId -> IO ()
+disownSnapshot store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> rewriteOwner (directory </> "snapshot.json")
+
+-- | A snapshot that is there and will not decode, which is a different thing
+-- from one that is missing.
+corruptSnapshot :: MissionStore -> MissionId -> IO ()
+corruptSnapshot store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> writeFile (directory </> "snapshot.json") "{\"schemaVersion\":1,\"payload\":\"not a snapshot\"}"
+
+-- | The three ways a specification can fail to hand itself over.
+breakSpecification :: MissionStore -> MissionId -> String -> IO ()
+breakSpecification store mission shape =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> case shape of
+      "absent" -> removeFile (directory </> "specification.json")
+      "unreadable" -> writeFile (directory </> "specification.json") "{\"schemaVersion\":1,\"payload\":\"not a specification\"}"
+      -- Decodes perfectly and belongs to another repository, which this store
+      -- refuses rather than adopts.
+      _ -> rewriteOwner (directory </> "specification.json")
+
+-- | Reassigns one durable record to another owner, in place.
+--
+-- The record goes on decoding; what changes is who it says it belongs to,
+-- which is the one thing the reader's identity check is for.
+rewriteOwner :: FilePath -> IO ()
+rewriteOwner path = do
+  contents <- readFile path
+  length contents `seq` writeFile path (replace "\"missionRepositoryOwner\":\"coghex\"" "\"missionRepositoryOwner\":\"someone\"" contents)
+  where
+    replace needle replacement haystack = go haystack
+      where
+        go [] = []
+        go rest@(character : remaining)
+          | take (length needle) rest == needle = replacement <> go (drop (length needle) rest)
+          | otherwise = character : go remaining
+
+-- | Puts a readable specification back, so a later pass can resolve it.
+restoreSpecification :: MissionStore -> MissionId -> IO ()
+restoreSpecification store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> do
+      removeFile (directory </> "specification.json")
+      created <- createMissionSpecification store (specificationFor mission)
+      created `shouldBe` Right MissionCreated
 
 removeSnapshot :: MissionStore -> MissionId -> IO ()
 removeSnapshot store mission =

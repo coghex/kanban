@@ -313,6 +313,15 @@ data MissionNotificationState
     MissionNotificationUncertain
   | -- | Suppression could not be persisted, so nothing was launched.
     MissionNotificationRecordingFailed
+  | -- | The mission's own specification could not be read, so which items this
+    -- episode is about could not be resolved and nothing was launched.
+    --
+    -- Distinct from every other state because the alternative is worse than
+    -- not notifying: an unreadable specification looks exactly like a mission
+    -- that names no target, and notifying on that reading would spend the
+    -- episode's one and only attempt on a payload that says the mission is
+    -- about nothing.
+    MissionNotificationUnresolved
   deriving stock (Bounded, Enum, Eq, Ord, Show)
 
 missionNotificationStates :: [MissionNotificationState]
@@ -328,14 +337,19 @@ missionNotificationStateTag state = case state of
   MissionNotificationLaunchFailed -> "launch_failed"
   MissionNotificationUncertain -> "uncertain"
   MissionNotificationRecordingFailed -> "recording_failed"
+  MissionNotificationUnresolved -> "unresolved"
 
 -- | One outstanding waiting episode this pass observed.
 data MissionAttentionRecord = MissionAttentionRecord
   { missionAttentionRecordMission :: MissionId,
     missionAttentionRecordId :: MissionAttentionId,
-    -- | The typed target the notification was resolved against, if the mission
-    -- names one. Never a title, a path, or a summary.
-    missionAttentionRecordTarget :: Maybe MissionTarget,
+    -- | The typed targets the notification was resolved against — the step's
+    -- own when the attention names a step that has one, and otherwise every
+    -- target the mission's selector resolved to. Empty when the mission names
+    -- none, and empty too when its specification could not be read, which is
+    -- why the state beside it has to be consulted rather than the length of
+    -- this list. Never a title, a path, or a summary.
+    missionAttentionRecordTargets :: [MissionTarget],
     missionAttentionRecordNotification :: MissionNotificationState,
     missionAttentionRecordDetail :: Maybe Text
   }
@@ -418,7 +432,7 @@ encodeMissionPassReport report =
       object
         [ "mission" .= record.missionAttentionRecordMission.unMissionId,
           "attention_id" .= record.missionAttentionRecordId.unMissionAttentionId,
-          "target" .= maybe Null target record.missionAttentionRecordTarget,
+          "targets" .= map target record.missionAttentionRecordTargets,
           "notification" .= missionNotificationStateTag record.missionAttentionRecordNotification,
           "detail" .= maybe Null Aeson.toJSON record.missionAttentionRecordDetail
         ]

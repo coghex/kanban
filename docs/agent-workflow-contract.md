@@ -2076,8 +2076,13 @@ report did not name.
 - **The pass contract:** one JSON document on stdout and narration on stderr,
   carrying `kanban-mission-scheduler-pass` version 1, the repository identity,
   each admitted mission and its disposition, each outstanding attention
-  identity and what became of its notification, and a termination reason of
-  `completed`, `refused`, or `failed` — exiting 0, 2, and 1 respectively. The
+  identity with the typed items it is about and what became of its
+  notification, and a termination reason of `completed`, `refused`, or `failed`
+  — exiting 0, 2, and 1 respectively. A pass fails for reasons of its own as
+  well as for a mission's: a snapshot that will not decode, one recorded
+  against another repository, a specification that cannot be read behind a
+  waiting mission, and a scratch directory it could not prepare each produce a
+  `failed` pass, the last three with nothing admitted at all. The
   schema, the version, the three vocabularies and that exit mapping are
   declared once in `Kanban.Mission.Pass` and mirrored as constants in the
   controller, which cannot import them;
@@ -2103,12 +2108,14 @@ report did not name.
   launch loses that notification by design.
 - **Notifications:** off by default, and when enabled the operator's own
   configured command is run through the bounded command-capture seam with three
-  appended arguments — the repository identity, the typed target or the word
-  `none`, and `attention-required`. No title, summary, recommendation, or
-  filesystem path is ever passed. The command runs in its own process group and
-  that group is swept on every path out, so neither a command that outlived its
-  bound nor a descendant it backgrounded survives the pass. A zero exit
-  establishes that the command completed and nothing more.
+  appended arguments — the repository identity and `attention-required`,
+  followed by one argument per typed item the episode is about, which may be
+  none. No title, summary, recommendation, or filesystem path is ever passed,
+  and nothing at all is launched for an episode whose mission specification
+  cannot be read. The command runs in its own process group and that group is
+  swept on every path out, so neither a command that outlived its bound nor a
+  descendant it backgrounded survives the pass. A zero exit establishes that
+  the command completed and nothing more.
 - **Mandatory/optional:** optional. A Kanban that never runs a mission runner
   never resolves `kanban` as an external command and writes none of this state.
 

@@ -131,15 +131,18 @@ PASS_NOTIFICATION_STATES = frozenset(
         "launch_failed",
         "uncertain",
         "recording_failed",
+        "unresolved",
     }
 )
 PASS_ADMITTED_FIELDS = frozenset({"mission", "disposition", "detail"})
 PASS_ATTENTION_FIELDS = frozenset(
-    {"mission", "attention_id", "target", "notification", "detail"}
+    {"mission", "attention_id", "targets", "notification", "detail"}
 )
-# The typed item an attention entry may name, mirrored from the `target` object
+# The typed items an attention entry names, mirrored from the `targets` array
 # `Kanban.Mission.Pass.encodeMissionPassReport` writes and the two kinds its
-# `targetKindTag` spells.
+# `targetKindTag` spells. A list rather than one value because a mission's
+# selector resolves to however many items it matched, and an empty list is the
+# ordinary answer for a mission created from a bare request.
 PASS_TARGET_FIELDS = frozenset({"kind", "number"})
 PASS_TARGET_KINDS = frozenset({"issue", "pull_request"})
 
@@ -1058,15 +1061,17 @@ def _require_admitted(admitted: Any, termination: str) -> None:
     # reported a failed mission and called itself completed is telling a
     # supervisor two different things, and believing the cheerful half is how a
     # broken mission goes unnoticed.
+    #
+    # The converse is NOT a contradiction, and asserting it was a bug: a pass
+    # fails for reasons that belong to the pass rather than to any one mission
+    # — a scratch directory it could not prepare, a snapshot it could not read
+    # — and the scheduler emits exactly that shape, `failed` with nothing
+    # admitted. A controller that refused it would call its own writer
+    # malformed and drop the one report that said what went wrong.
     if failing and termination != PASS_FAILED:
         raise PassFailure(
             f"The mission scheduler report terminated {termination!r} while naming a "
             "failed mission."
-        )
-    if termination == PASS_FAILED and not failing:
-        raise PassFailure(
-            "The mission scheduler report terminated 'failed' while naming no failed "
-            "mission."
         )
     if termination == PASS_REFUSED and admitted:
         raise PassFailure(
@@ -1104,7 +1109,7 @@ def _require_attention(attention: Any) -> None:
             raise PassFailure(
                 f"A mission scheduler report names unknown notification state {state!r}."
             )
-        _require_target(entry["target"])
+        _require_targets(entry["targets"])
         if entry["detail"] is not None and not isinstance(entry["detail"], str):
             raise PassFailure(
                 f"A mission scheduler report's attention detail is neither absent nor "
@@ -1112,18 +1117,26 @@ def _require_attention(attention: Any) -> None:
             )
 
 
-def _require_target(target: Any) -> None:
-    """The typed item an attention entry is about, or nothing.
+def _require_targets(targets: Any) -> None:
+    """The typed items an attention entry is about, however many.
 
     Checked to the same depth as everything else this controller reads, because
-    it is the part a reader is most tempted to pass straight through: it is
+    this is the part a reader is most tempted to pass straight through: it is
     reproduced in the status document a dashboard will render, so a `kind` that
     is not one of the two, or a `number` that is a string, a Boolean, or
     negative, would travel from a malformed report into a durable document
     describing a repository's state.
     """
-    if target is None:
-        return
+    if not isinstance(targets, list):
+        raise PassFailure(
+            f"A mission scheduler report's attention targets are not a list: "
+            f"{type(targets).__name__}."
+        )
+    for target in targets:
+        _require_target(target)
+
+
+def _require_target(target: Any) -> None:
     if not isinstance(target, dict):
         raise PassFailure(
             f"A mission scheduler report's attention target is not an object: "

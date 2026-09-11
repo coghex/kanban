@@ -311,7 +311,7 @@ module Kanban.Mission
     attemptMissionNotification,
     missionNotificationArguments,
     missionNotificationDigest,
-    missionNotificationTarget,
+    missionNotificationTargets,
     missionNotificationTimeoutMicros,
     runMissionNotificationCommand,
 
@@ -353,7 +353,7 @@ import Kanban.Mission.Notify
     attemptMissionNotification,
     missionNotificationArguments,
     missionNotificationDigest,
-    missionNotificationTarget,
+    missionNotificationTargets,
     missionNotificationTimeoutMicros,
     runMissionNotificationCommand,
   )

@@ -136,17 +136,30 @@ worker_deadline_seconds = 14400
 # out rather than holding the pass open, and its process group is then ended —
 # along with anything it backgrounded — rather than left running.
 #
-# Three arguments are appended to whatever you write here, in this order:
+# Two fixed arguments are appended to whatever you write here, and then one
+# argument per item the mission is waiting about:
 #
-#   1. the repository, as `owner/name`;
-#   2. the item the mission is waiting about, as `issue#844` or
-#      `pull_request#12`, or the word `none` when the mission names neither;
-#   3. the literal word `attention-required`.
+#   $1  the repository, as `owner/name`;
+#   $2  the literal word `attention-required`;
+#   $3… each item, as `issue#844` or `pull_request#12` — the waiting step's own
+#       item when it names one, otherwise every item the mission's selector
+#       resolved to, and *nothing at all* when the mission names none.
+#
+# The items come last so the two fixed positions never move: a mission about
+# three issues and a mission about none are read the same way by a wrapper that
+# looks at `$1` and `$2`. An absent item appends no argument rather than a
+# placeholder word, so everything from `$3` on is a real typed item.
 #
 # Nothing else is passed. No title, no summary, no recommendation, and no
 # filesystem path — a notification command is frequently a one-liner piped into
 # something that logs, and the mission's own text is the part most likely to
 # carry a tracker title or a checkout path.
+#
+# Nothing is launched at all for a mission whose own specification cannot be
+# read: that is indistinguishable from a mission that names no item, and
+# sending on the second reading would spend the episode's one permanent attempt
+# asserting the mission is about nothing. The episode is still reported, and it
+# stays eligible for its attempt once the record is readable again.
 #
 # Delivery is at most once per waiting episode, and it is not guaranteed. A
 # durable suppression record is written before the command is launched, so two
