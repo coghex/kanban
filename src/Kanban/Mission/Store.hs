@@ -138,6 +138,7 @@ import Kanban.Mission.Types
     missionSealSchemaVersion,
     missionSessionDisposition,
     missionAttentionIdentity,
+    missionAttentionIdentityUnrecorded,
     missionSnapshotSchemaVersion,
     missionSpecificationSchemaVersion,
   )
@@ -293,6 +294,36 @@ belongsHere store mission recorded
             <> ", which is not the one this store holds"
         )
 
+-- | Fills in an episode identity a record written before the field existed
+-- does not carry.
+--
+-- Lossless, because the identity is derived: the repository, the mission and
+-- the raised-at time the record already holds are exactly what
+-- 'missionAttentionIdentity' computes from. So a snapshot written by a release
+-- that had no such field reads back with the identity it would have been given
+-- had the field existed, and the checks below then hold for it like any other.
+--
+-- Only an /absent/ identity is restored. One that is present and names another
+-- repository, mission or moment is refused, which is the whole point of
+-- checking it: a record that arrived by restore or by hand is exactly the one
+-- that can carry somebody else's episode.
+restoredAttention :: MissionSnapshot -> MissionSnapshot
+restoredAttention snapshot = case snapshot.missionSnapshotAttention of
+  Just attention
+    | missionAttentionIdentityUnrecorded attention ->
+        snapshot
+          { missionSnapshotAttention =
+              Just
+                attention
+                  { missionAttentionId =
+                      missionAttentionIdentity
+                        snapshot.missionSnapshotRepository
+                        snapshot.missionSnapshotId
+                        attention.missionAttentionRaisedAt
+                  }
+          }
+  _ -> snapshot
+
 -- | Refuses a snapshot whose attention does not belong to it.
 --
 -- 'missionAttentionIdentity' derives an episode's name from three things — the
@@ -338,6 +369,12 @@ attentionIdentityFailure snapshot =
     -- refusing that would make every such mission unreadable on upgrade. The
     -- controller already repairs it — the next transition opens an episode —
     -- and a reader that finds none simply has nothing outstanding to report.
+    -- A record predating the identity field carries an empty one. It is
+    -- restored rather than refused ('restoredAttention'), and only a reader
+    -- that skipped that restoration would ever see one here.
+    (MissionWaitingInput, Just attention)
+      | missionAttentionIdentityUnrecorded attention ->
+          Just "its attention records no identity, and was not restored before it was checked"
     (lifecycle, Just attention)
       | lifecycle /= MissionWaitingInput ->
           Just
@@ -443,7 +480,7 @@ readMissionSnapshot store mission =
     case missionSnapshotPath root mission of
       Left message -> pure (MissionUnreadable message)
       Right path -> do
-        result <-
+        decoded <-
           readMissionRecordFor
             mission
             [missionSnapshotSchemaVersion]
@@ -451,6 +488,12 @@ readMissionSnapshot store mission =
             missionSnapshotId
             missionSnapshotRepository
             path
+        -- Restored before it is checked, so a record written before the
+        -- identity field existed is migrated rather than reported as
+        -- corruption, and no consumer ever sees an episode without a name.
+        let result = case decoded of
+              MissionPresent snapshot -> MissionPresent (restoredAttention snapshot)
+              other -> other
         pure $ case result of
           MissionPresent snapshot
             | Just reason <- sessionTreeFailure snapshot ->

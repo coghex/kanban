@@ -293,7 +293,14 @@ derived from the child's own machine-readable result, its exit status, and the
 mission's durable snapshot, never from terminal text; to that end `--mission`
 gains an internal `--mission-result FILE`, which writes a typed account of what
 one run did and is written only when a caller asks for one, so an operator's own
-`--mission` run is unchanged.
+`--mission` run is unchanged. A launch identity minted before the child is
+created travels with it as an internal `--mission-invocation`, is written into
+that account, and is the first thing checked when it is read — before the
+mission and the repository, because it is the only one of the three that
+separates this launch from another launch of the same mission in the same
+repository. A result is therefore bound to its launch rather than to the path
+it was left at, and a document an earlier pass — or this pass's own earlier
+attempt — left in that place is refused rather than adopted.
 
 A record that is *absent* — missing, or written under a schema version this
 release does not know — is passed over silently, exactly as section 16 says. A

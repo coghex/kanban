@@ -18,6 +18,7 @@ thing standing between the two halves of a pass contract that cannot import
 each other.
 """
 
+import argparse
 import json
 import os
 import re
@@ -326,6 +327,34 @@ class MirroredPassContractTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class PollIntervalTests(unittest.TestCase):
+    """The wait between passes, as a real positive number of seconds."""
+
+    def test_a_positive_interval_is_taken(self):
+        self.assertEqual(service.poll_interval("0.5"), 0.5)
+
+    def test_a_non_finite_interval_is_refused(self):
+        # `float()` accepts these and no range check is true of a NaN, so
+        # `nan <= 0` is False and it passes. What it produces is not a long
+        # wait but none at all: `Controller.sleep` computes `max(0.0, nan)`,
+        # which is `0.0`, so an idle service would run passes back to back.
+        for value in ("nan", "NaN", "inf", "-inf", "Infinity"):
+            with self.subTest(interval=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    service.poll_interval(value)
+
+    def test_a_nan_interval_would_not_have_waited(self):
+        # The consequence, stated rather than assumed: this is why NaN is
+        # refused at the boundary instead of being clamped later.
+        self.assertEqual(max(0.0, float("nan")), 0.0)
+
+    def test_zero_and_negative_and_unparseable_are_refused(self):
+        for value in ("0", "-1", "soon"):
+            with self.subTest(interval=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    service.poll_interval(value)
+
+
 class LocationTests(unittest.TestCase):
     """Where this service's runtime lives, on each platform's terms."""
 
@@ -629,6 +658,26 @@ class PassReportTests(unittest.TestCase):
             ),
             "a timestamp with no zone": (
                 json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00"}),
+                0,
+            ),
+            # Python's `\d` matches every Unicode decimal digit, and `int()`
+            # converts them, so a shape check written with it accepts an
+            # instant no Haskell writer can emit.
+            "a timestamp in non-ASCII digits": (
+                json.dumps({**pass_document(), "started_at": "\u0662\u0660\u0662\u0666-\u0660\u0669-\u0661\u0661T\u0660\u0660:\u0660\u0660:\u0660\u0660Z"}),
+                0,
+            ),
+            "an attention raised-at in non-ASCII digits": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {
+                                **attention_entry(),
+                                "attention_id": "acme/widgets#mission-a@\u0662\u0660\u0662\u0666-\u0660\u0669-\u0661\u0661T\u0660\u0660:\u0660\u0660:\u0660\u0660Z",
+                            }
+                        ]
+                    )
+                ),
                 0,
             ),
             "a timestamp that names no real instant": (

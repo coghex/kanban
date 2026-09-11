@@ -48,6 +48,7 @@ import contextlib
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -238,8 +239,11 @@ INCIDENT_ID_RE = re.compile(r"\Aincident-[A-Za-z0-9TZ-]+\Z")
 # and these fields are identity-bearing: an attention episode's name is
 # `<owner>/<name>#<mission>@<raised-at>`, so a raised-at nobody validated is a
 # name nobody validated.
+# `[0-9]` rather than `\d`, which in Python matches every Unicode decimal
+# digit: `٢٠٢٦-٠٩-١١T٠٠:٠٠:٠٠Z` would otherwise pass the shape check, survive
+# `int()`, and be persisted as an instant no Haskell writer can emit.
 PASS_TIMESTAMP_RE = re.compile(
-    r"\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z\Z"
+    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?Z\Z"
 )
 
 
@@ -1701,10 +1705,24 @@ def print_value(value: Any, *, as_json: bool) -> None:
 
 
 def poll_interval(value: str) -> float:
+    """One wait between passes, as a real positive number of seconds.
+
+    `float()` accepts `nan` and `inf`, and neither comparison a range check
+    makes is true of a NaN — so `nan <= 0` is `False` and it passes. What it
+    then does is not a long wait but no wait at all: `Controller.sleep`
+    computes `max(0.0, nan)`, which is `0.0`, so an otherwise idle service
+    would run scheduler passes back to back for ever. An infinity passes the
+    same check and waits for ever instead. Both are refused here, where the
+    value is still a string the operator typed.
+    """
     try:
         seconds = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"{value!r} is not a number of seconds.") from exc
+    if not math.isfinite(seconds):
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a finite number of seconds."
+        )
     if seconds <= 0:
         raise argparse.ArgumentTypeError("The interval must be a positive number of seconds.")
     return seconds

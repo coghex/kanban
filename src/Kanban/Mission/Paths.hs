@@ -110,7 +110,6 @@ import Kanban.Paths (createPrivateDirectory)
 import Data.Time (getCurrentTime)
 import System.Directory
   ( XdgDirectory (XdgState),
-    doesDirectoryExist,
     getXdgDirectory,
     listDirectory,
     removeFile,
@@ -894,10 +893,21 @@ listMissionEntries store = either (const []) id <$> listMissionEntriesStrictly s
 -- creates the root before any caller reaches here.
 listMissionEntriesStrictly :: FilePath -> IO (Either Text [FilePath])
 listMissionEntriesStrictly store = do
-  exists <- doesDirectoryExist store
-  if not exists
-    then pure (Right [])
-    else do
+  -- The root is classified with the non-following stat every other decision
+  -- here uses, not with 'doesDirectoryExist'. That predicate answers False for
+  -- three quite different things — nothing is there, something is there and is
+  -- not a directory, and the question could not be asked because a parent is
+  -- not searchable — and only the first of them means an empty store. Reading
+  -- the other two as empty is how an unreachable repository reports as a quiet
+  -- one.
+  presence <- missionEntryAt store
+  case presence of
+    MissionEntryAbsent -> pure (Right [])
+    MissionEntryUndecidable reason ->
+      pure (Left (Text.pack store <> " could not be inspected: " <> reason))
+    MissionEntryOther ->
+      pure (Left (Text.pack store <> " is not a directory"))
+    MissionEntryDirectory -> do
       listed <- try @IOException (listDirectory store)
       pure $ case listed of
         Left exception ->

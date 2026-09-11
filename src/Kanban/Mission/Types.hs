@@ -64,6 +64,7 @@ module Kanban.Mission.Types
     MissionAttention (..),
     MissionAttentionId (..),
     missionAttentionIdentity,
+    missionAttentionIdentityUnrecorded,
     MissionNotificationRecord (..),
     MissionRetryCounter (..),
     MissionReconciliation (..),
@@ -105,8 +106,9 @@ module Kanban.Mission.Types
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:?), (.=))
 import Data.Aeson.Types (Parser)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
@@ -364,7 +366,39 @@ data MissionAttention = MissionAttention
     missionAttentionRaisedAt :: UTCTime
   }
   deriving stock (Eq, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Decoded with the identity optional, and only the identity.
+--
+-- The field arrived after this record did, and 'missionSnapshotSchemaVersion'
+-- did not move with it — deliberately. A version bump would make every
+-- snapshot written before it read as /absent/ under §16's rule, which for a
+-- mission store means silently forgetting every mission that is currently in
+-- flight; that is a far worse answer than the one this gives.
+--
+-- It is only available because the identity is /derived/. A record written
+-- before the field existed is not missing information: the repository, the
+-- mission and the raised-at time it already carries are exactly what
+-- 'missionAttentionIdentity' is computed from, so the value can be restored
+-- rather than guessed. The restoration needs the snapshot around it, so it
+-- happens in "Kanban.Mission.Store" where that is in hand; what this does is
+-- decode such a record into an identity that is recognisably empty, so the
+-- difference between \"written before the field existed\" and \"written with
+-- the wrong identity\" survives to the place that can tell them apart. The
+-- second is still refused.
+instance FromJSON MissionAttention where
+  parseJSON = withObject "MissionAttention" $ \fields ->
+    MissionAttention
+      <$> (fromMaybe (MissionAttentionId "") <$> fields .:? "missionAttentionId")
+      <*> fields .: "missionAttentionSummary"
+      <*> fields .:? "missionAttentionStep"
+      <*> fields .: "missionAttentionRaisedAt"
+
+-- | Whether this episode's identity is the one a record predating the field
+-- decodes to.
+missionAttentionIdentityUnrecorded :: MissionAttention -> Bool
+missionAttentionIdentityUnrecorded attention =
+  Text.null attention.missionAttentionId.unMissionAttentionId
 
 -- | The identity one episode takes, from what identifies it.
 --

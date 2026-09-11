@@ -339,6 +339,29 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
       report.missionPassTermination `shouldBe` MissionPassFailed
       ("attributable to nobody" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
 
+  -- `doesDirectoryExist` answers False for three different things, and only
+  -- one of them is an empty store. A root that is not a directory, and one
+  -- whose parent cannot be searched, both used to read as "no missions here".
+  it "fails the pass on a root that is not a directory" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        let occupied = scratch </> "occupied-root"
+        writeFile occupied "not a directory\n"
+        (report, _) <- passWith store {missionStoreDirectory = occupied} defaultMissionsConfig id
+        report.missionPassTermination `shouldBe` MissionPassFailed
+        ("is not a directory" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
+
+  it "fails the pass on a root it cannot even inspect" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        let sealed = scratch </> "sealed"
+        createDirectoryIfMissing True (sealed </> "missions")
+        setFileMode sealed 0o000
+        (report, _) <- passWith store {missionStoreDirectory = sealed </> "missions"} defaultMissionsConfig id
+        setFileMode sealed 0o700
+        report.missionPassTermination `shouldBe` MissionPassFailed
+        ("could not be inspected" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
+
   it "fails the pass on a legacy directory it cannot enumerate" $
     withStore $ \store -> do
       putMission store "mission-a" MissionRunning
@@ -793,6 +816,43 @@ attentionSpec = describe "the attention a waiting mission raises" $ do
   -- `waiting_input` before episodes existed carries no attention, and refusing
   -- that would make every such mission unreadable on upgrade; the controller
   -- opens an episode on its next transition instead.
+  -- The field arrived after the record did, and the schema version did not
+  -- move with it: bumping it would make every snapshot written before the
+  -- change read as *absent*, which for a mission store means silently
+  -- forgetting every mission in flight. Instead a record without the field is
+  -- restored, which is lossless because the identity is derived from three
+  -- things the record already carries.
+  it "restores the episode identity of a snapshot written before the field existed" $
+    withWaitingMission $ \store -> do
+      unrecordAttentionIdentity store (MissionId "mission-a")
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionPresent snapshot ->
+          ((.missionAttentionId) <$> snapshot.missionSnapshotAttention)
+            `shouldBe` Just (attentionRecord (MissionId "mission-a")).missionAttentionId
+        other -> expectationFailure ("a pre-field snapshot was refused: " <> show (() <$ other))
+
+  -- And it is a restoration rather than a blanket recomputation: an identity
+  -- that is *present* and names somebody else is still refused, which is what
+  -- the check is for.
+  it "restores an absent identity without excusing a wrong one" $
+    withWaitingMission $ \store -> do
+      disownAttention store (MissionId "mission-a")
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionUnreadable _ -> pure ()
+        other -> expectationFailure ("a foreign identity was restored away: " <> show (() <$ other))
+
+  -- The restored record is a mission a pass reports on like any other, so the
+  -- migration reaches the behaviour rather than only the decoder.
+  it "observes a restored episode and notifies it once" $
+    withWaitingMission $ \store -> do
+      unrecordAttentionIdentity store (MissionId "mission-a")
+      (report, invocations) <- passRecordingNotifications store (enabledWith (Just ["notify"]))
+      map (.missionAttentionRecordId) report.missionPassAttention
+        `shouldBe` [(attentionRecord (MissionId "mission-a")).missionAttentionId]
+      length <$> readIORef invocations `shouldReturn` 1
+
   it "reads a waiting mission that records no attention at all" $
     withStore $ \store -> do
       putMission store "mission-a" MissionWaitingInput
@@ -1459,6 +1519,32 @@ stageForeignLegacyMission store mission = do
         (specificationFor mission) {missionSpecificationRepository = MissionRepository "someone" "else"}
   created <- createMissionSpecification legacy specification
   created `shouldBe` Right MissionCreated
+
+-- | A snapshot as a release before the identity field wrote one: the attention
+-- record is there and carries no @missionAttentionId@ at all.
+unrecordAttentionIdentity :: MissionStore -> MissionId -> IO ()
+unrecordAttentionIdentity store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> do
+      let path = directory </> "snapshot.json"
+      contents <- readFile path
+      length contents `seq` writeFile path (dropIdentity contents)
+  where
+    -- Removes the one key, leaving the rest of the document exactly as this
+    -- release wrote it — which is what a record from before the field is.
+    dropIdentity contents = case breakOn "\"missionAttentionId\":" contents of
+      Nothing -> error "the fixture snapshot carries no attention identity to remove"
+      Just (leading, rest) ->
+        let trailing = drop 1 (dropWhile (/= ',') rest)
+         in leading <> trailing
+
+    breakOn needle haystack = go [] haystack
+      where
+        go _ [] = Nothing
+        go seen rest@(character : remaining)
+          | take (length needle) rest == needle = Just (reverse seen, rest)
+          | otherwise = go (character : seen) remaining
 
 -- | A record whose attention and lifecycle contradict each other, written
 -- past the writer that refuses to produce one.
