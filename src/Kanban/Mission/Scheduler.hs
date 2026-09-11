@@ -443,6 +443,12 @@ advanceMissions executable options repository scratch admitted = do
 
     launch (index, mission) = do
       let resultPath = scratch </> ("child-" <> show index <> ".json")
+      -- Minted before anything is created, and handed to the child, so this
+      -- launch and its account are bound by something the filesystem cannot
+      -- reproduce. The result path alone binds nothing: a document an earlier
+      -- pass left, or one this pass's own earlier launch left, sits exactly
+      -- where this launch's would.
+      invocation <- newLaunchIdentity index
       -- The result document is read back by path, and a document that was
       -- already there is indistinguishable from one this child wrote. That is
       -- not hypothetical: a pass that was killed leaves its children's
@@ -456,20 +462,20 @@ advanceMissions executable options repository scratch admitted = do
       cleared <- clearResultPath resultPath
       case cleared of
         Left detail -> pure (LaunchRefused mission detail)
-        Right () -> start mission resultPath
+        Right () -> start mission resultPath invocation
 
-    start mission resultPath = do
+    start mission resultPath invocation = do
       started <-
         try @IOException
           ( bracket (openFile "/dev/null" ReadMode) hClose $ \devNull ->
-              createProcess (childProcess devNull mission resultPath)
+              createProcess (childProcess devNull mission resultPath invocation)
           )
       case started of
         Left exception -> pure (LaunchRefused mission (Text.pack (show exception)))
         Right (_, Just outputHandle, Just errorHandle, processHandle) -> do
           outputCapture <- startCapture outputHandle
           errorCapture <- startCapture errorHandle
-          pure (LaunchedChild mission resultPath processHandle outputCapture errorCapture)
+          pure (LaunchedChild mission resultPath invocation processHandle outputCapture errorCapture)
         -- Unreachable while both streams are piped above, and still waited for
         -- rather than abandoned: a child this process started is a child it
         -- must not return in front of, whatever it failed to give back.
@@ -477,8 +483,8 @@ advanceMissions executable options repository scratch admitted = do
           _ <- waitForProcess processHandle
           pure (LaunchRefused mission "the mission child did not provide stdout and stderr pipes")
 
-    childProcess devNull mission resultPath =
-      (proc executable (childArguments mission resultPath))
+    childProcess devNull mission resultPath invocation =
+      (proc executable (childArguments mission resultPath invocation))
         { -- The checkout travels as the working directory rather than as
           -- @--path@, because a directory name that is not representable in
           -- the process's own argument encoding survives the first and not the
@@ -501,11 +507,13 @@ advanceMissions executable options repository scratch admitted = do
           create_group = False
         }
 
-    childArguments mission resultPath =
+    childArguments mission resultPath invocation =
       [ "--mission",
         Text.unpack mission.unMissionId,
         "--mission-result",
         resultPath,
+        "--mission-invocation",
+        Text.unpack invocation,
         "--repo",
         Text.unpack identity
       ]
@@ -513,11 +521,11 @@ advanceMissions executable options repository scratch admitted = do
 
     await (LaunchRefused mission detail) =
       pure (mission, Left ("the mission child could not be started: " <> detail))
-    await (LaunchedChild mission resultPath processHandle outputCapture errorCapture) = do
+    await (LaunchedChild mission resultPath invocation processHandle outputCapture errorCapture) = do
       exitCode <- waitForProcess processHandle
       releaseCapture outputCapture
       releaseCapture errorCapture
-      readChildResult identity mission resultPath exitCode
+      readChildResult identity invocation mission resultPath exitCode
 
 -- | Removes whatever occupies a child's result path, and proves it is gone.
 --
@@ -543,8 +551,27 @@ clearResultPath path = do
 -- A type rather than a tuple with an 'Either' in it, so the waiting arm cannot
 -- be written to reach for a capture that a refused launch never produced.
 data LaunchedChild
-  = LaunchedChild MissionId FilePath ProcessHandle StreamCapture StreamCapture
+  = LaunchedChild MissionId FilePath Text ProcessHandle StreamCapture StreamCapture
   | LaunchRefused MissionId Text
+
+-- | A name for one launch that no other launch can hold.
+--
+-- The moment, this process, and the launch's place in the pass, which is the
+-- spelling "Kanban.Mission.Lease" uses for a token that has only to differ.
+-- Two launches of one pass differ by index, and two passes by time and
+-- process identifier — including a pass whose identifier the kernel later
+-- recycles, because the moment is in there too.
+newLaunchIdentity :: Int -> IO Text
+newLaunchIdentity index = do
+  now <- getCurrentTime
+  processId <- getProcessID
+  pure
+    ( Text.filter (`notElem` ("-:. TZ" :: String)) (Text.pack (show now))
+        <> "-"
+        <> Text.pack (show processId)
+        <> "-"
+        <> Text.pack (show index)
+    )
 
 -- | The child's own account of itself, checked against the status it exited
 -- with.
@@ -554,8 +581,8 @@ data LaunchedChild
 -- exit status said; and a document that disagrees with the exit status is two
 -- records contradicting each other, which is reported rather than resolved by
 -- preferring one.
-readChildResult :: Text -> MissionId -> FilePath -> ExitCode -> IO (MissionId, Either Text MissionChildResult)
-readChildResult identity mission resultPath exitCode = do
+readChildResult :: Text -> Text -> MissionId -> FilePath -> ExitCode -> IO (MissionId, Either Text MissionChildResult)
+readChildResult identity invocation mission resultPath exitCode = do
   loaded <- try @IOException (ByteString.readFile resultPath)
   pure . (,) mission $ case loaded of
     Left exception ->
@@ -569,6 +596,18 @@ readChildResult identity mission resultPath exitCode = do
     Right bytes -> case decodeMissionChildResult bytes of
       Left message -> Left (message <> "; the child " <> exited)
       Right result
+        -- Checked before the mission and the repository, because it is the
+        -- only one of the three that distinguishes this launch from another
+        -- launch of the very same mission in the very same repository — a
+        -- stale document from a previous pass, or from this pass's own earlier
+        -- attempt, matches both of those perfectly.
+        | result.missionChildResultInvocation /= invocation ->
+            Left
+              ( "the mission child wrote a result for launch "
+                  <> result.missionChildResultInvocation
+                  <> " while this launch is "
+                  <> invocation
+              )
         | result.missionChildResultMission /= mission ->
             Left
               ( "the mission child wrote a result for "

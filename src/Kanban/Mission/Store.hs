@@ -122,6 +122,7 @@ import Kanban.Mission.Types
     MissionSessionNode (..),
     MissionAttention (..),
     MissionAttentionId (..),
+    MissionLifecycle (..),
     MissionSnapshot (..),
     MissionSpecification (..),
     MissionStepId (..),
@@ -292,7 +293,7 @@ belongsHere store mission recorded
             <> ", which is not the one this store holds"
         )
 
--- | Refuses a snapshot whose attention is named for somebody else.
+-- | Refuses a snapshot whose attention does not belong to it.
 --
 -- 'missionAttentionIdentity' derives an episode's name from three things — the
 -- repository, the mission, and the moment the episode began — so the identity
@@ -317,25 +318,53 @@ wellFormedAttention snapshot = case attentionIdentityFailure snapshot of
   Nothing -> Right ()
   Just reason -> Left ("mission " <> snapshot.missionSnapshotId.unMissionId <> ": " <> reason)
 
--- | Why this snapshot's attention identity is not its own, if it is not.
+-- | Why this snapshot's attention is not its own, if it is not.
+--
+-- Two things, and the second is the one a reader would otherwise never
+-- question. An episode is /exactly/ a visit to 'MissionWaitingInput': the
+-- controller opens one on entry and clears it on the way out, so attention on
+-- a running, paused or terminal snapshot is a record that contradicts the
+-- lifecycle beside it. A reader that took any @Just@ as an outstanding episode
+-- would report a mission that is running — or finished — as waiting on a
+-- person, and, with notifications on, would spend that episode's one permanent
+-- attempt saying so.
 attentionIdentityFailure :: MissionSnapshot -> Maybe Text
-attentionIdentityFailure snapshot = do
-  attention <- snapshot.missionSnapshotAttention
-  let expected =
-        missionAttentionIdentity
-          snapshot.missionSnapshotRepository
-          snapshot.missionSnapshotId
-          attention.missionAttentionRaisedAt
-  if attention.missionAttentionId == expected
-    then Nothing
-    else
-      Just
-        ( "its attention is recorded under "
-            <> attention.missionAttentionId.unMissionAttentionId
-            <> ", which is not the identity this repository, mission and raised-at time name ("
-            <> expected.unMissionAttentionId
-            <> ")"
-        )
+attentionIdentityFailure snapshot =
+  case (snapshot.missionSnapshotLifecycle, snapshot.missionSnapshotAttention) of
+    -- Deliberately one-directional. Attention present outside
+    -- 'MissionWaitingInput' is a record contradicting itself, and this release
+    -- cannot have written one. Attention *absent* inside it is not: a mission
+    -- that entered @waiting_input@ before episodes existed carries none, and
+    -- refusing that would make every such mission unreadable on upgrade. The
+    -- controller already repairs it — the next transition opens an episode —
+    -- and a reader that finds none simply has nothing outstanding to report.
+    (lifecycle, Just attention)
+      | lifecycle /= MissionWaitingInput ->
+          Just
+            ( "it records attention while its lifecycle is "
+                <> missionLifecycleTag lifecycle
+                <> "; an episode is exactly a visit to "
+                <> missionLifecycleTag MissionWaitingInput
+            )
+      | otherwise -> mismatchedIdentity attention
+    _ -> Nothing
+  where
+    mismatchedIdentity attention
+      | attention.missionAttentionId == expected attention = Nothing
+      | otherwise =
+          Just
+            ( "its attention is recorded under "
+                <> attention.missionAttentionId.unMissionAttentionId
+                <> ", which is not the identity this repository, mission and raised-at time name ("
+                <> (expected attention).unMissionAttentionId
+                <> ")"
+            )
+
+    expected attention =
+      missionAttentionIdentity
+        snapshot.missionSnapshotRepository
+        snapshot.missionSnapshotId
+        attention.missionAttentionRaisedAt
 
 -- | Refuses to write a snapshot whose session tree is not one.
 --

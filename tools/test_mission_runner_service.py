@@ -298,6 +298,20 @@ class MirroredPassContractTests(unittest.TestCase):
         self.assertIsNotNone(match, "missionAdmissionCeiling is not declared")
         self.assertEqual(service.PASS_ADMISSION_CEILING, int(match.group(1)))
 
+    def test_the_timestamp_form_matches_the_writer(self):
+        # The writer renders both instants with `iso8601Show`, so the shape the
+        # controller parses has to be the shape that function emits. Pinned
+        # against the encoder rather than assumed, because a change to how the
+        # report spells a time would otherwise make every pass unreadable.
+        self.assertIn("iso8601Show", self.source)
+        encoder = re.search(
+            r"^encodeMissionPassReport report =\n((?:.*\n)+?)^  where", self.source, re.MULTILINE
+        )
+        self.assertIsNotNone(encoder)
+        for field in ("started_at", "finished_at"):
+            self.assertRegex(encoder.group(1), rf'"{field}" \.= stamp ')
+        self.assertRegex(self.source, r"stamp = Text\.pack \. iso8601Show")
+
     def test_the_report_fields_match(self):
         encoder = re.search(
             r"^encodeMissionPassReport report =\n((?:.*\n)+?)^  where", self.source, re.MULTILINE
@@ -605,6 +619,43 @@ class PassReportTests(unittest.TestCase):
                 ),
                 0,
             ),
+            "a started_at that is not a time": (
+                json.dumps({**pass_document(), "started_at": "not-a-time"}),
+                0,
+            ),
+            "a finished_at that is not a time": (
+                json.dumps({**pass_document(), "finished_at": ""}),
+                0,
+            ),
+            "a timestamp with no zone": (
+                json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00"}),
+                0,
+            ),
+            "a timestamp that names no real instant": (
+                json.dumps({**pass_document(), "started_at": "2026-13-45T99:99:99Z"}),
+                0,
+            ),
+            # The tail of an attention identity is the moment the episode
+            # began, and it is what makes two visits to `waiting_input` two
+            # episodes rather than one.
+            "attention with an empty raised-at": (
+                json.dumps(
+                    pass_document(
+                        attention=[{**attention_entry(), "attention_id": "acme/widgets#mission-a@"}]
+                    )
+                ),
+                0,
+            ),
+            "attention with a malformed raised-at": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "attention_id": "acme/widgets#mission-a@whenever"}
+                        ]
+                    )
+                ),
+                0,
+            ),
             "target number that is not positive": (
                 json.dumps(
                     pass_document(
@@ -646,6 +697,24 @@ class PassReportTests(unittest.TestCase):
                 document = pass_document(
                     attention=[{**attention_entry(), "targets": targets}]
                 )
+                self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_the_producers_timestamp_forms_are_accepted(self):
+        # The control for the temporal cases above: `iso8601Show` emits a
+        # fractional part only when there is one, so both shapes have to
+        # decode or the controller would refuse its own scheduler's reports.
+        for stamp in ("2026-09-11T00:00:00Z", "2026-09-11T08:24:02.123456Z"):
+            with self.subTest(stamp=stamp):
+                document = pass_document(
+                    attention=[
+                        {
+                            **attention_entry(),
+                            "attention_id": f"acme/widgets#mission-a@{stamp}",
+                        }
+                    ]
+                )
+                document["started_at"] = stamp
+                document["finished_at"] = stamp
                 self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
 
     def test_two_distinct_missions_and_episodes_are_accepted(self):

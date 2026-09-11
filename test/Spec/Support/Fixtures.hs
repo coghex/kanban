@@ -336,6 +336,7 @@ testOptions =
       optionMission = Nothing,
       optionMissionScheduler = False,
       optionMissionResult = Nothing,
+      optionMissionInvocation = Nothing,
       optionWorkerSpec = Nothing,
       optionReviewTools = Nothing
     }

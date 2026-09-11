@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import hashlib
 import json
 import os
@@ -230,6 +231,16 @@ CAPTURED_STDERR_LINES = 60
 SLUG_LIMIT = 160
 
 INCIDENT_ID_RE = re.compile(r"\Aincident-[A-Za-z0-9TZ-]+\Z")
+# The one timestamp form the scheduler emits: `Data.Time.Format.ISO8601`'s
+# `iso8601Show` over a `UTCTime`, which is `YYYY-MM-DDTHH:MM:SSZ` with an
+# optional fractional part and always the `Z` zone. Matched structurally and
+# then range-checked, because a string that is merely non-blank says nothing —
+# and these fields are identity-bearing: an attention episode's name is
+# `<owner>/<name>#<mission>@<raised-at>`, so a raised-at nobody validated is a
+# name nobody validated.
+PASS_TIMESTAMP_RE = re.compile(
+    r"\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z\Z"
+)
 
 
 class ServiceError(RuntimeError):
@@ -1025,11 +1036,29 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
     if not isinstance(detail, str):
         raise PassFailure(f"The mission scheduler report carries no detail: {detail!r}.")
     for field in ("started_at", "finished_at"):
-        if not isinstance(document[field], str) or not document[field].strip():
-            raise PassFailure(
-                f"The mission scheduler report names no {field}: {document[field]!r}."
-            )
+        _require_timestamp(document[field], f"The mission scheduler report's {field}")
     return document
+
+
+def _require_timestamp(value: Any, what: str) -> None:
+    """One instant, in the only form the scheduler can write it.
+
+    Structure and then range: `2026-13-45T99:99:99Z` matches the shape and is
+    not a time, and a reader that accepted it would persist it into the status
+    document a dashboard renders.
+    """
+    if not isinstance(value, str):
+        raise PassFailure(f"{what} is not text: {value!r}.")
+    match = PASS_TIMESTAMP_RE.fullmatch(value)
+    if match is None:
+        raise PassFailure(
+            f"{what} is not an ISO-8601 UTC instant: {value!r}."
+        )
+    year, month, day, hour, minute, second = (int(part) for part in match.groups())
+    try:
+        datetime.datetime(year, month, day, hour, minute, second)
+    except ValueError as exc:
+        raise PassFailure(f"{what} names no real instant: {value!r} ({exc}).") from exc
 
 
 def _require_admitted(admitted: Any, termination: str) -> None:
@@ -1169,6 +1198,14 @@ def _require_attention(attention: Any, termination: str, repository: str) -> Non
                 f"{entry['attention_id']!r}, which is not qualified for "
                 f"{expected_prefix!r}."
             )
+        # The tail is the moment the episode began, and it is what makes two
+        # visits to `waiting_input` two episodes rather than one. An empty or
+        # malformed tail is an identity that cannot distinguish them, and
+        # delivery is suppressed per identity for ever.
+        _require_timestamp(
+            entry["attention_id"][len(expected_prefix) :],
+            f"The mission scheduler report's attention {entry['attention_id']!r} raised-at",
+        )
     # One outstanding episode per mission: a mission is waiting for one thing
     # at a time, and two entries naming one identity would be counted twice by
     # anything that reads the status document.

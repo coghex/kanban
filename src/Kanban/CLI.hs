@@ -63,6 +63,11 @@ data Options = Options
     -- rather than from the terminal report, and an invocation that names no
     -- file writes none and behaves exactly as it always has.
     optionMissionResult :: Maybe FilePath,
+    -- | @--mission-invocation ID@: the launch a mission result is the account
+    -- of. Internal, and written into the result document so the scheduler can
+    -- tell this launch's account from one an earlier launch left in the same
+    -- place.
+    optionMissionInvocation :: Maybe String,
     optionWorkerSpec :: Maybe FilePath,
     optionReviewTools :: Maybe FilePath
   }
@@ -326,6 +331,13 @@ optionsParser =
       ( strOption
           ( long "mission-result"
               <> metavar "FILE"
+              <> internal
+          )
+      )
+    <*> optional
+      ( strOption
+          ( long "mission-invocation"
+              <> metavar "ID"
               <> internal
           )
       )

@@ -283,11 +283,12 @@ runMissionMode options config repository identifier
 -- nobody can establish — which 'missionRunSucceeded' already refuses to call a
 -- success and which this refuses to call an advance, for the same reason
 -- (requirement 18).
-missionChildResultOf :: Text -> MissionId -> Either MissionStartRefusal MissionRunReport -> MissionChildResult
-missionChildResultOf repository mission outcome = case outcome of
+missionChildResultOf :: Text -> Text -> MissionId -> Either MissionStartRefusal MissionRunReport -> MissionChildResult
+missionChildResultOf invocation repository mission outcome = case outcome of
   Left refusal ->
     MissionChildResult
-      { missionChildResultRepository = repository,
+      { missionChildResultInvocation = invocation,
+        missionChildResultRepository = repository,
         missionChildResultMission = mission,
         missionChildResultOutcome = MissionChildRefused,
         missionChildResultRefusal = Just (childRefusal refusal),
@@ -295,7 +296,8 @@ missionChildResultOf repository mission outcome = case outcome of
       }
   Right report ->
     MissionChildResult
-      { missionChildResultRepository = repository,
+      { missionChildResultInvocation = invocation,
+        missionChildResultRepository = repository,
         missionChildResultMission = mission,
         missionChildResultOutcome = if missionRunSucceeded report then MissionChildAdvanced else MissionChildFailed,
         missionChildResultRefusal = Nothing,

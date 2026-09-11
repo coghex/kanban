@@ -98,7 +98,16 @@ import Kanban.Mission.Types
 -- Written only when @--mission-result@ names a file, so an operator's own
 -- @--mission@ run is byte-for-byte the run it always was.
 data MissionChildResult = MissionChildResult
-  { missionChildResultRepository :: Text,
+  { -- | The launch this result is the account of.
+    --
+    -- Minted by the scheduler before the child is created and handed to it, so
+    -- a result and a launch are bound to each other by something neither the
+    -- filesystem nor a repeated identifier can counterfeit. Without it the
+    -- binding is the result /path/, and a path says only where a document is:
+    -- a document left by an earlier pass, or by an earlier launch of this one,
+    -- sits exactly where this launch's would.
+    missionChildResultInvocation :: Text,
+    missionChildResultRepository :: Text,
     missionChildResultMission :: MissionId,
     missionChildResultOutcome :: MissionChildOutcome,
     -- | Present exactly when the outcome is 'MissionChildRefused': a refusal
@@ -172,6 +181,7 @@ encodeMissionChildResult result =
     ( object
         [ "schema" .= missionChildResultSchema,
           "version" .= missionChildResultVersion,
+          "invocation" .= result.missionChildResultInvocation,
           "repository" .= result.missionChildResultRepository,
           "mission" .= result.missionChildResultMission.unMissionId,
           "outcome" .= missionChildOutcomeTag result.missionChildResultOutcome,
@@ -204,6 +214,10 @@ decodeMissionChildResult bytes = case eitherDecodeStrict' bytes of
       if version /= missionChildResultVersion
         then fail ("unknown schema version " <> show (version :: Int) <> "; this release reads " <> show missionChildResultVersion)
         else pure ()
+      invocation <- document Aeson..: "invocation"
+      if Text.null (Text.strip invocation)
+        then fail "invocation must name the launch this result is for"
+        else pure ()
       repository <- document Aeson..: "repository"
       mission <- document Aeson..: "mission"
       outcomeTag <- document Aeson..: "outcome"
@@ -224,7 +238,8 @@ decodeMissionChildResult bytes = case eitherDecodeStrict' bytes of
       detail <- document Aeson..: "detail"
       pure
         MissionChildResult
-          { missionChildResultRepository = repository,
+          { missionChildResultInvocation = invocation,
+            missionChildResultRepository = repository,
             missionChildResultMission = MissionId mission,
             missionChildResultOutcome = outcome,
             missionChildResultRefusal = refusal,

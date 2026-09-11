@@ -314,7 +314,14 @@ Attention itself is created by the transition, not by the pass. Entering
 `waiting_input` opens a waiting episode and gives it a stable,
 repository-qualified identity that repeated observations and a restart both
 preserve; leaving that state ends the episode, and a later re-entry is a new one
-with a new identity. The other waits raise none: a barrier and a capacity wait
+with a new identity. That identity is derived from the repository, the mission
+and the moment, so it is checked against the record carrying it, and attention
+recorded outside `waiting_input` is refused on the way in and on the way out —
+an episode is exactly a visit to that state, and a record saying otherwise
+would be read as a mission waiting on somebody it is not. A waiting mission
+that records no attention is not refused: that is what a mission which entered
+the state before episodes existed looks like, and the next transition opens
+one. The other waits raise none: a barrier and a capacity wait
 are this machine's own arithmetic, and a pause is something an operator already
 did. Because the transition creates it, an interactive `kanban --mission` run
 records attention too; only a scheduler pass observes and notifies.

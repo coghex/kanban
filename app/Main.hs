@@ -214,7 +214,12 @@ main = do
                     written <-
                       writeMissionChildResult
                         resultPath
-                        (missionChildResultOf ownerName (MissionId (Text.strip (Text.pack mission))) outcome)
+                        ( missionChildResultOf
+                            (maybe "" Text.pack options.optionMissionInvocation)
+                            ownerName
+                            (MissionId (Text.strip (Text.pack mission)))
+                            outcome
+                        )
                     case written of
                       Left detail -> hPutStrLn stderr ("kanban: could not write the mission result document: " <> Text.unpack detail)
                       Right () -> pure ()

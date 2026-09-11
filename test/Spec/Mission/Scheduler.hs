@@ -30,7 +30,7 @@ import Control.Monad (forM_, void)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
-import Data.List (isInfixOf, nub, sort)
+import Data.List (isInfixOf, isPrefixOf, nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
@@ -592,6 +592,40 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
   -- spell one the same way, which is why every durable record in the store is
   -- repository-qualified. A result from somebody else's repository must not
   -- decide this mission's disposition.
+  -- The launch identity is the only one of the three checks that separates
+  -- this launch from another launch of the very same mission in the very same
+  -- repository — which is exactly what a document left by an earlier pass, or
+  -- by this pass's own earlier attempt, looks like.
+  it "fails a child whose document names another launch" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        fake <- writeFakeKanban scratch (unlines ["#!/bin/sh", resultLineFor "\"$2\"" "coghex/kanban" "advanced" "some-other-launch", "exit 0"])
+        putMission store "mission-a" MissionRunning
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        case map snd results of
+          [Left message] -> ("some-other-launch" `Text.isInfixOf` message) `shouldBe` True
+          other -> expectationFailure ("a foreign launch's result was accepted: " <> show other)
+
+  -- And the identity really is handed over, rather than merely checked: a
+  -- child that echoes what it was given is accepted, so the example above is
+  -- about the binding and not about the fake writing the wrong thing.
+  it "hands each launch an identity the child echoes back" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        let transcript = scratch </> "transcript"
+        fake <- writeFakeKanban scratch (recordingScript transcript "advanced" 0)
+        forM_ ["mission-a", "mission-b"] $ \mission -> putMission store mission MissionRunning
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"]
+        map (fmap (.missionChildResultOutcome) . snd) results
+          `shouldBe` [Right MissionChildAdvanced, Right MissionChildAdvanced]
+        recorded <- lines <$> readFile transcript
+        let identities = [drop (length ("invocation=" :: String)) line | line <- recorded, "invocation=" `isPrefixOf` line]
+        length identities `shouldBe` 2
+        -- Two launches of one pass are two identities, or the check above
+        -- would pass one child's account off as the other's.
+        length (nub identities) `shouldBe` 2
+        all (not . null) identities `shouldBe` True
+
   it "fails a child whose document names another repository" $
     withStore $ \store ->
       withScratch $ \scratch -> do
@@ -717,6 +751,55 @@ attentionSpec = describe "the attention a waiting mission raises" $ do
       case readBack of
         MissionUnreadable message -> ("attention is recorded under" `Text.isInfixOf` message) `shouldBe` True
         other -> expectationFailure ("a disowned attention identity was handed over: " <> show (() <$ other))
+
+  -- An episode is exactly a visit to `waiting_input`, so attention on a
+  -- running, paused or terminal snapshot is a record contradicting itself. A
+  -- reader that took any `Just` as outstanding would report a running — or
+  -- finished — mission as waiting on a person, and spend its one permanent
+  -- notification attempt saying so.
+  it "refuses a snapshot that records attention outside waiting_input" $
+    withStore $ \store ->
+      forM_ [MissionRunning, MissionPaused, MissionCompleted, MissionWaitingBarrier] $ \lifecycle -> do
+        putMission store "mission-a" MissionRunning
+        let incoherent =
+              (snapshotFor (MissionId "mission-a") lifecycle)
+                {missionSnapshotAttention = Just (attentionRecord (MissionId "mission-a"))}
+        written <- writeMissionSnapshot store incoherent
+        case written of
+          Right () -> expectationFailure ("attention was written under " <> show lifecycle)
+          Left message -> (lifecycle, "an episode is exactly a visit to" `Text.isInfixOf` message) `shouldBe` (lifecycle, True)
+
+  it "reads a snapshot that records attention outside waiting_input as unreadable" $
+    withWaitingMission $ \store -> do
+      derailAttentionLifecycle store (MissionId "mission-a")
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionUnreadable message -> ("an episode is exactly a visit to" `Text.isInfixOf` message) `shouldBe` True
+        other -> expectationFailure ("an incoherent record was handed over: " <> show (() <$ other))
+
+  -- And a pass never reports one: the record does not read, so the mission is
+  -- indeterminate rather than waiting, and nothing is notified about it.
+  it "notifies nothing for a snapshot whose attention contradicts its lifecycle" $
+    withWaitingMission $ \store -> do
+      derailAttentionLifecycle store (MissionId "mission-a")
+      invocations <- newIORef []
+      (report, _) <- passWith store (enabledWith (Just ["notify"])) $ \seams ->
+        seams {missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing)}
+      readIORef invocations `shouldReturn` []
+      report.missionPassAttention `shouldBe` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+
+  -- The compatibility direction stays open. A mission that entered
+  -- `waiting_input` before episodes existed carries no attention, and refusing
+  -- that would make every such mission unreadable on upgrade; the controller
+  -- opens an episode on its next transition instead.
+  it "reads a waiting mission that records no attention at all" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionWaitingInput
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionPresent snapshot -> snapshot.missionSnapshotAttention `shouldBe` Nothing
+        other -> expectationFailure ("a pre-episode waiting mission was refused: " <> show (() <$ other))
 
   it "is cleared when the mission stops waiting" $
     withController $ \store controller -> do
@@ -1053,9 +1136,14 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
                 "sleep 120"
               ]
           )
-      attempt <- runMissionNotificationCommand (300 * 1000) [Text.pack command]
+      -- A bound long enough that the command reliably reaches its own `echo`
+      -- before the deadline, even on a loaded machine: this example is about
+      -- what happens to a process that outlived the bound, and a child that
+      -- never got as far as recording its identity would leave it asserting
+      -- nothing. Still short enough to cost a second rather than a minute.
+      attempt <- runMissionNotificationCommand (2 * 1000 * 1000) [Text.pack command]
       attempt.missionNotificationAttemptState `shouldBe` MissionNotificationTimedOut
-      recorded <- read . takeWhile (/= '\n') <$> readFile marker
+      recorded <- awaitRecordedPid marker
       awaitGone recorded
 
   -- And a command that exits cleanly having backgrounded something: the group
@@ -1076,7 +1164,7 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
           )
       attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros [Text.pack command]
       attempt.missionNotificationAttemptState `shouldBe` MissionNotificationCompleted
-      recorded <- read . takeWhile (/= '\n') <$> readFile marker
+      recorded <- awaitRecordedPid marker
       awaitGone recorded
 
 -- ---------------------------------------------------------------------------
@@ -1251,7 +1339,8 @@ snapshotFor mission lifecycle =
 childAdvanced :: MissionId -> MissionChildResult
 childAdvanced mission =
   MissionChildResult
-    { missionChildResultRepository = "coghex/kanban",
+    { missionChildResultInvocation = "launch-0",
+      missionChildResultRepository = "coghex/kanban",
       missionChildResultMission = mission,
       missionChildResultOutcome = MissionChildAdvanced,
       missionChildResultRefusal = Nothing,
@@ -1261,7 +1350,8 @@ childAdvanced mission =
 childRefusal :: MissionId -> MissionChildRefusal -> MissionChildResult
 childRefusal mission refusal =
   MissionChildResult
-    { missionChildResultRepository = "coghex/kanban",
+    { missionChildResultInvocation = "launch-0",
+      missionChildResultRepository = "coghex/kanban",
       missionChildResultMission = mission,
       missionChildResultOutcome = MissionChildRefused,
       missionChildResultRefusal = Just refusal,
@@ -1369,6 +1459,17 @@ stageForeignLegacyMission store mission = do
         (specificationFor mission) {missionSpecificationRepository = MissionRepository "someone" "else"}
   created <- createMissionSpecification legacy specification
   created `shouldBe` Right MissionCreated
+
+-- | A record whose attention and lifecycle contradict each other, written
+-- past the writer that refuses to produce one.
+derailAttentionLifecycle :: MissionStore -> MissionId -> IO ()
+derailAttentionLifecycle store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> do
+      let path = directory </> "snapshot.json"
+      contents <- readFile path
+      length contents `seq` writeFile path (replaceAll "\"waiting_input\"" "\"running\"" contents)
 
 -- | An attention record reassigned to another repository's episode, written
 -- past the writer that refuses to produce one.
@@ -1554,6 +1655,7 @@ recordingNotifier invocations attempt argv = do
 staleRefusalDocument :: String
 staleRefusalDocument =
   "{\"schema\":\"kanban-mission-child-result\",\"version\":1,"
+    <> "\"invocation\":\"a-launch-that-is-long-gone\","
     <> "\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\","
     <> "\"outcome\":\"refused\",\"refusal\":\"already_advancing\","
     <> "\"detail\":\"from a pass that is long gone\"}"
@@ -1593,8 +1695,9 @@ recordingScript transcript outcome status =
       "{",
       "  echo \"cwd=$(pwd)\"",
       "  echo \"mission=$2\"",
-      "  echo \"repo=$6\"",
-      "  echo \"config=$8\"",
+      "  echo \"invocation=$6\"",
+      "  echo \"repo=$8\"",
+      "  echo \"config=${10}\"",
       "  if [ -t 0 ]; then echo 'stdin-is-a-terminal=yes'; else echo 'stdin-is-a-terminal=no'; fi",
       "} >> " <> show transcript,
       "touch './ran here'",
@@ -1630,10 +1733,17 @@ slowScript marker =
       "exit 0"
     ]
 
+-- | The result document the fake writes, echoing the launch identity it was
+-- handed so the scheduler's binding is exercised rather than bypassed.
 resultLine :: String -> String -> String -> String
-resultLine mission repository outcome =
+resultLine mission repository outcome = resultLineFor mission repository outcome "\"$6\""
+
+resultLineFor :: String -> String -> String -> String -> String
+resultLineFor mission repository outcome invocation =
   "printf '%s' '"
-    <> "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\""
+    <> "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"invocation\":\"'"
+    <> invocation
+    <> "'\",\"repository\":\""
     <> repository
     <> "\",\"mission\":\"'"
     <> mission
@@ -1647,6 +1757,25 @@ resultLine mission repository outcome =
 
 withScratch :: (FilePath -> IO result) -> IO result
 withScratch = withTemporaryCacheRoot
+
+-- | The identifier a fake command recorded, once it has finished recording it.
+--
+-- Read under a bound rather than at once: the command writes its identity and
+-- then blocks, and on a loaded machine the write can land after the caller has
+-- already given up on the process. A half-written or absent file is this
+-- fixture not being ready yet, not an answer.
+awaitRecordedPid :: FilePath -> IO Int
+awaitRecordedPid marker = go (600 :: Int)
+  where
+    go 0 = do
+      expectationFailure ("no process identifier was recorded at " <> marker)
+      pure 0
+    go remaining = do
+      contents <- try @IOException (readFile marker)
+      case contents of
+        Right recorded
+          | (digits@(_ : _), _) <- span (`elem` ("0123456789" :: String)) recorded -> pure (read digits)
+        _ -> threadDelay 20000 >> go (remaining - 1)
 
 -- | Waits for one process identifier to stop resolving.
 --

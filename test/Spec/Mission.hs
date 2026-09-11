@@ -270,14 +270,21 @@ snapshotWith lifecycle steps sessions worktrees =
       missionSnapshotNextSteps = [MissionStepId "review-592"],
       missionSnapshotSteps = steps,
       missionSnapshotPause = MissionPause {missionPauseRequested = False, missionPauseReason = Nothing, missionPauseAt = Nothing},
+      -- Attached only while the mission is waiting for an answer, because an
+      -- episode is exactly a visit to that lifecycle and the store refuses a
+      -- record that says otherwise. A fixture that carried attention on every
+      -- snapshot would be staging a shape this release cannot write.
       missionSnapshotAttention =
-        Just
-          MissionAttention
-            { missionAttentionId = missionAttentionIdentity (MissionRepository "coghex" "kanban") theMission fixedTime,
-              missionAttentionSummary = "the reviewer asked a product question",
-              missionAttentionStep = Just (MissionStepId "solve-592"),
-              missionAttentionRaisedAt = fixedTime
-            },
+        if lifecycle == MissionWaitingInput
+          then
+            Just
+              MissionAttention
+                { missionAttentionId = missionAttentionIdentity (MissionRepository "coghex" "kanban") theMission fixedTime,
+                  missionAttentionSummary = "the reviewer asked a product question",
+                  missionAttentionStep = Just (MissionStepId "solve-592"),
+                  missionAttentionRaisedAt = fixedTime
+                }
+          else Nothing,
       missionSnapshotPlannerSummary = Just "one issue, one review loop",
       missionSnapshotRetries = [MissionRetryCounter {missionRetryCounterStep = MissionStepId "solve-592", missionRetryCounterAttempts = 1, missionRetryCounterLastAttemptAt = Just fixedTime}],
       missionSnapshotLastReconciliation =
