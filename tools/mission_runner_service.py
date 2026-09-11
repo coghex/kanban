@@ -239,11 +239,21 @@ INCIDENT_ID_RE = re.compile(r"\Aincident-[A-Za-z0-9TZ-]+\Z")
 # and these fields are identity-bearing: an attention episode's name is
 # `<owner>/<name>#<mission>@<raised-at>`, so a raised-at nobody validated is a
 # name nobody validated.
+# Exactly what `iso8601Show` emits for a `UTCTime`, and nothing else.
+#
 # `[0-9]` rather than `\d`, which in Python matches every Unicode decimal
 # digit: `٢٠٢٦-٠٩-١١T٠٠:٠٠:٠٠Z` would otherwise pass the shape check, survive
 # `int()`, and be persisted as an instant no Haskell writer can emit.
+#
+# The fraction is `1` to `12` digits ending in a nonzero one, or absent
+# altogether. That is not a guess: the producer renders picosecond precision
+# and strips trailing zeros, so `00Z`, `00.1Z` and `00.000000000001Z` are its
+# forms while `00.10Z` and a thirteenth digit are not. Admitting those would
+# let one instant be spelled several ways — and an attention identity ends in
+# one of these, so two spellings of one moment would be two episodes.
 PASS_TIMESTAMP_RE = re.compile(
-    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?Z\Z"
+    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.[0-9]{0,11}[1-9])?Z\Z"
 )
 
 
@@ -887,7 +897,12 @@ def _classify_status(
             f"{recorded!r}, not {job.identity!r}"
         )
     state = stored.get("state")
-    if state not in STATUS_STATES:
+    # Type before membership, for the reason `_require_vocabulary` gives: a
+    # JSON array or object is unhashable, so `state in STATUS_STATES` would
+    # raise rather than answer — and this is the read-only diagnostic somebody
+    # reaches for when the runtime is already in a bad state. It has to report
+    # `unknown` with a reason, not crash.
+    if not isinstance(state, str) or state not in STATUS_STATES:
         return STATE_UNKNOWN, (
             f"the status document at {job.status_path} records unknown state {state!r}"
         )
@@ -1036,6 +1051,8 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
         )
     _require_admitted(document["admitted"], termination)
     _require_attention(document["attention"], termination, repository)
+    if termination == PASS_REFUSED:
+        _require_refused_observed_nothing(document["attention"])
     detail = document["detail"]
     if not isinstance(detail, str):
         raise PassFailure(f"The mission scheduler report carries no detail: {detail!r}.")
@@ -1156,6 +1173,22 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         raise PassFailure(
             "The mission scheduler report terminated 'refused' while naming admitted "
             "missions."
+        )
+
+
+def _require_refused_observed_nothing(attention: Any) -> None:
+    """A refused pass looked at nothing, so it can have seen nothing.
+
+    The refusal happens before the inventory is read and before any attention
+    is observed, and returns with both lists empty. A refused report naming
+    attention is therefore describing a pass that cannot have happened — and it
+    would be retained as `last_pass` and rendered as this repository's waiting
+    state before the incident that follows ever says otherwise.
+    """
+    if attention:
+        raise PassFailure(
+            "The mission scheduler report terminated 'refused' while naming attention; "
+            "a refused pass observes nothing."
         )
 
 

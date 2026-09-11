@@ -693,6 +693,32 @@ class PassReportTests(unittest.TestCase):
                 ),
                 0,
             ),
+            # `iso8601Show` strips trailing zeros and renders at most
+            # picosecond precision, so neither of these is a spelling it can
+            # produce — and an attention identity ends in one, so two
+            # spellings of one moment would be two episodes.
+            "a fraction with a trailing zero": (
+                json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00.10Z"}),
+                0,
+            ),
+            "a fraction of only zeros": (
+                json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00.0Z"}),
+                0,
+            ),
+            "a fraction beyond picosecond precision": (
+                json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00.1234567890123Z"}),
+                0,
+            ),
+            "an empty fraction": (
+                json.dumps({**pass_document(), "started_at": "2026-09-11T00:00:00.Z"}),
+                0,
+            ),
+            # The refusal returns before the inventory is read, so a refused
+            # pass cannot have observed anything.
+            "a refused pass naming attention": (
+                json.dumps(pass_document(termination="refused", attention=[attention_entry()])),
+                2,
+            ),
             "a timestamp in non-ASCII digits": (
                 json.dumps({**pass_document(), "started_at": "\u0662\u0660\u0662\u0666-\u0660\u0669-\u0661\u0661T\u0660\u0660:\u0660\u0660:\u0660\u0660Z"}),
                 0,
@@ -801,7 +827,13 @@ class PassReportTests(unittest.TestCase):
         # The control for the temporal cases above: `iso8601Show` emits a
         # fractional part only when there is one, so both shapes have to
         # decode or the controller would refuse its own scheduler's reports.
-        for stamp in ("2026-09-11T00:00:00Z", "2026-09-11T08:24:02.123456Z"):
+        for stamp in (
+            "2026-09-11T00:00:00Z",
+            "2026-09-11T00:00:00.1Z",
+            "2026-09-11T08:24:02.123456Z",
+            "2026-09-11T00:00:00.000000000001Z",
+            "2026-09-11T00:00:00.123456789012Z",
+        ):
             with self.subTest(stamp=stamp):
                 document = pass_document(
                     attention=[
@@ -1334,6 +1366,24 @@ class StatusTests(MissionRunnerFixture):
         snapshot = self.status()
         self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
         self.assertIn("no status document", snapshot["reason"])
+
+    def test_an_unhashable_state_reads_as_unknown_rather_than_crashing(self):
+        # `state in STATUS_STATES` raises on a list or an object rather than
+        # answering, and this is the read-only diagnostic somebody reaches for
+        # when the runtime is already in a bad state: it has to report rather
+        # than crash.
+        job = self.job()
+        for spelling in ("[]", "{}", "7", "null"):
+            with self.subTest(state=spelling):
+                job.status_path.parent.mkdir(parents=True, exist_ok=True)
+                job.status_path.write_text(
+                    '{"schema": "%s", "version": %d, "repository": "%s", "state": %s, "runner_pid": %d}'
+                    % (service.STATUS_SCHEMA, service.STATUS_VERSION, self.identity, spelling, os.getpid()),
+                    encoding="utf-8",
+                )
+                snapshot = service.status_snapshot(job)
+                self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+                self.assertIn("unknown state", snapshot["reason"])
 
     def test_every_unbelievable_document_reads_as_unknown_with_a_reason(self):
         job = self.job()

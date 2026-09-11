@@ -2080,9 +2080,15 @@ report did not name.
   notification, and a termination reason of `completed`, `refused`, or `failed`
   — exiting 0, 2, and 1 respectively. A pass fails for reasons of its own as
   well as for a mission's: a snapshot that will not decode, one recorded
-  against another repository, a specification that cannot be read behind a
-  waiting mission, and a scratch directory it could not prepare each produce a
-  `failed` pass, the last three with nothing admitted at all. The
+  against another repository, a store or legacy root it cannot enumerate, a
+  specification that cannot be read behind a waiting mission, and a scratch
+  directory it could not prepare each produce a `failed` pass. Only the last
+  admits nothing by construction — it happens before the pass begins. The
+  others are found while the pass is under way, so a failed pass may well carry
+  dispositions for the missions it did advance, and a supervisor must read the
+  termination rather than infer it from an empty `admitted` list. A `refused`
+  pass is the one that observed nothing at all: it returns before the inventory
+  is read, so both its admitted and its attention lists are empty. The
   schema, the version, the three vocabularies and that exit mapping are
   declared once in `Kanban.Mission.Pass` and mirrored as constants in the
   controller, which cannot import them;

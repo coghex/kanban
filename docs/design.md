@@ -306,7 +306,10 @@ A record that is *absent* — missing, or written under a schema version this
 release does not know — is passed over silently, exactly as section 16 says. A
 record that is there and will not decode, or that decodes and names another
 repository, is not: that is mission state nobody can account for, and the pass
-it appears in is a failed one rather than a quiet repository. A child's result
+it appears in is a failed one rather than a quiet repository. It is still a
+pass: the missions it could read are advanced, so a failed pass routinely
+carries dispositions beside the reasons it failed, and a reader takes the
+termination for the verdict rather than inferring one from an empty list. A child's result
 is held to the same standard, and is refused unless it names both the mission
 it was launched for and the repository this pass is advancing.
 
