@@ -17,6 +17,7 @@ module Kanban.UI.Util
     itemHeading,
     itemMetadata,
     itemStatusText,
+    itemUrl,
     launchAssignment,
     liveAssignmentDisplay,
     mergeText,
@@ -286,6 +287,13 @@ itemHeading (PullRequestItem pullRequest) =
 itemBody :: BoardItem -> Text
 itemBody (IssueItem issue) = issue.issueBody
 itemBody (PullRequestItem pullRequest) = pullRequest.pullRequestBody
+
+-- | The card's own page on GitHub, as the refresh that drew it retained it.
+-- Reading it costs no request, which is what lets the details overlay print
+-- it and @w@ open it without either one going back to GitHub.
+itemUrl :: BoardItem -> Text
+itemUrl (IssueItem issue) = issue.issueUrl
+itemUrl (PullRequestItem pullRequest) = pullRequest.pullRequestUrl
 
 -- | A card's metadata row, led by its lifecycle badge when it has one (§11).
 --

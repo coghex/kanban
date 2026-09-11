@@ -425,6 +425,7 @@ Initial bindings:
 | `F` | Show or hide the card filter panel; j/k or Up/Down move between boxes, Left/Right between groups, Space toggles the focused box, d restores the defaults, s focuses the card search, and F or Esc hides the panel leaving the criteria unchanged |
 | `e` | Expand or collapse the focused epic |
 | `Enter` | Open the selected card's details overlay |
+| `w` | Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL |
 | `f` | Toggle the open overlay between its windowed box and fullscreen, in every overlay except the Codex/Claude solve chooser; a live-agent overlay answers it in normal mode, where insert mode types the letter into the draft instead, and with no overlay open the key does nothing |
 | `Esc` | Close an overlay or dismiss any notice early, ahead of its ten-second lifetime; in a live-agent overlay it is modal, returning an insert-mode session to normal and only then hiding the overlay, and it never reaches the dashboard's own quit |
 | `r` | Start or reopen the selected issue's review session, or the selected PR's review, rereview, revise, or repair session; a no-op on a collapsed or childless epic header |
@@ -1358,7 +1359,8 @@ drainer-state, structural, reusable-session, and process-presence errors those
 actions would otherwise report, and is re-checked at each action's own launch
 or termination boundary, so a chooser, details overlay, or session opened
 before a refresh cannot act after the item completes. Details and the item URL
-remain readable.
+remain readable, and `w` still opens that URL: it reaches the card without
+acting on the work behind it.
 
 Every route reaching those actions is covered, not only the board's own keys:
 a session overlay's Enter, numbered choice and Ctrl-C, and every row of the
@@ -1654,8 +1656,8 @@ included — keeps resolving against the board the overlay was opened from, so a
 completed card's presentation still matches the view it was drawn in.
 
 The overlay presents this content without editing any of it. The board actions
-that act on the selected card — `r`, `S`, `A`, `x`, and `m` — dispatch from it
-as well, against the item it is showing.
+that reach the selected card — `r`, `S`, `A`, `x`, `m`, and `w` — dispatch from
+it as well, against the item it is showing.
 
 ### Incidents panel
 
@@ -4649,7 +4651,6 @@ and every network call is attributable to startup or an explicit refresh key.
 
 - Configurable keybindings.
 - OSC 52 URL copy support for remote terminals.
-- Optional `gh issue view --web`/`gh pr view --web` local-only action.
 - GitHub mutations such as assignment or label changes.
 - Automatic refresh intervals, disabled by default if ever added.
 - Multi-repository aggregation.

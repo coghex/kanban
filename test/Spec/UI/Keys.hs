@@ -118,7 +118,7 @@ spec = describe "keybinding table" $ do
     -- binding added by accident.
     it "keeps the overlay scopes to the board's bindings, plus the one that is overlay-only" $ do
       map (.bindingAction) (scopeBindings DetailsScope)
-        `shouldBe` [KillWorking, ToggleFullscreen, DismissOrClose, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, QuitDashboard]
+        `shouldBe` [KillWorking, OpenCardPage, ToggleFullscreen, DismissOrClose, ReviewSelection, SolveSelection, AutoSolveSelection, MergeDoneCard, QuitDashboard]
       map (.bindingAction) (scopeBindings HelpScope) `shouldBe` [ToggleFullscreen, DismissOrClose, QuitDashboard]
       map (.bindingAction) (scopeBindings OverlayScope) `shouldBe` [ToggleFullscreen]
       map (.bindingAction) (scopeBindings BoardScope)
@@ -426,7 +426,7 @@ spec = describe "keybinding table" $ do
     -- the half of requirement 1 this scope owns.
     it "hides the three a card's details overlay also carries, and keeps x" $ do
       map (.bindingAction) (modeScopeBindings NoAgentMode DetailsScope)
-        `shouldBe` [KillWorking, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
+        `shouldBe` [KillWorking, OpenCardPage, ToggleFullscreen, DismissOrClose, MergeDoneCard, QuitDashboard]
       sequence_
         [ (name, map (.bindingAction) (modeScopeBindings mode DetailsScope))
             `shouldBe` (name, map (.bindingAction) (scopeBindings DetailsScope))

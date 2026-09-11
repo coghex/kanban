@@ -1,19 +1,19 @@
 ╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
 ║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
-║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
-║┃ 5 hour  [██████░░░░] 63% ┃┃  STANDALONE          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓         ┃  STANDALONE                             ┃║
-║┃ in 1h 5m · Thu 16:05     ┃┃ ▌╭───────────────────┃                                                                                             ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃ week    [████░░░░░░] 41% ┃┃  │ #812 Modal input l┃ j / Down         next card                                                                  ┃atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
-║┃ in 4d 18h · Tue 09:00    ┃┃  │ overlay           ┃ k / Up           previous card                                                              ┃       │ ┃  │ conflict                           │ ┃║
-║┃ Claude         3h 0m old ┃┃  │  reviewed:approve ┃ x                kill selected working process tree                                         ┃       │ ┃  │  reviewed:approve                  │ ┃║
-║┃ 5 hour  [████████░░] 78% ┃┃  │ unassigned · updat┃ h / Left         previous column                                                            ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
-║┃ in 2h 30m · Thu 17:30    ┃┃  │ Empty modal areas ┃ l / Right        next column                                                                ┃       │ ┃  │ updated 3h ago                     │ ┃║
-║┃ week    [██░░░░░░░░] 22% ┃┃  │ pointer events to ┃ g                first visible item in the column                                           ┃to     │ ┃  │ Updates the branch after the       │ ┃║
-║┃ in 1d 18h · Sat 09:10    ┃┃  │ pages. This is vis┃ G                last visible item in the column                                            ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
-║┃ ┏━━━┓                    ┃┃  ╰───────────────────┃ s                search a column; h/l type into the query, Left/Right move the search       ┃       │ ┃  │ master.                            │ ┃║
-║┃ ┃ ↻ ┃                    ┃┃                      ┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃                      ┃ e                expand / collapse focused epic                                             ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  ▾ #700  Persistence ┃ Enter            details                                                                    ┃         ┃                                         ┃║
+║┃ Codex          3h 0m old ┃┃                      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃  STANDALONE          ┃                                                                                             ┃         ┃  STANDALONE                             ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃ ▌╭───────────────────┃ j / Down         next card                                                                  ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  │ #812 Modal input l┃ k / Up           previous card                                                              ┃atch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  │ overlay           ┃ x                kill selected working process tree                                         ┃       │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃  │  reviewed:approve ┃ h / Left         previous column                                                            ┃       │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃  │ unassigned · updat┃ l / Right        next column                                                                ┃       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃  │ Empty modal areas ┃ g                first visible item in the column                                           ┃       │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃  │ pointer events to ┃ G                last visible item in the column                                            ┃to     │ ┃  │ Updates the branch after the       │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃  │ pages. This is vis┃ s                search a column; h/l type into the query, Left/Right move the search       ┃ng the │ ┃  │ persistence registry changed on    │ ┃║
+║┃ ┏━━━┓                    ┃┃  ╰───────────────────┃ F                filter cards; j/k move, Left/Right change group, space toggles, d defaults ┃       │ ┃  │ master.                            │ ┃║
+║┃ ┃ ↻ ┃                    ┃┃                      ┃ e                expand / collapse focused epic                                             ┃       │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ ┗━━━┛                    ┃┃                      ┃ Enter            details                                                                    ┃───────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  ▾ #700  Persistence ┃ w                open the card's GitHub page in a browser                                   ┃         ┃                                         ┃║
 ║┃                          ┃┃  1/2 complete        ┃ f                toggle the open overlay between windowed and fullscreen                    ┃───────╮ ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃  └─ ╭────────────────┃ Esc              close overlay or dismiss a notice                                          ┃       │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃     │ A1 · tracker #7┃ r                review/revise/repair selected issue or PR                                  ┃       │ ┃  │  reviewed:approve   input   ui     │ ┃║

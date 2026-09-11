@@ -127,6 +127,7 @@ data BoardAction
   | ShowFilter
   | ToggleEpic
   | ShowDetails
+  | OpenCardPage
   | ToggleFullscreen
   | DismissOrClose
   | ReviewSelection
@@ -212,6 +213,11 @@ binding action = case action of
   ShowDetails ->
     KeyBinding action [plain Vty.KEnter] [BoardScope] Nothing "details" "details"
       "Open the selected card's details overlay"
+  -- The URL is the one the board already retains, so this reaches GitHub the
+  -- website and never GitHub the API.
+  OpenCardPage ->
+    KeyBinding action [key 'w'] [BoardScope, DetailsScope] Nothing "browser" "open the card's GitHub page in a browser"
+      "Open the selected card's GitHub page in a browser, through `$BROWSER` when it is set and the platform's own opener otherwise, making no GitHub request; a collapsed epic's row opens the epic's own issue, and an opener that is missing, cannot be started, or exits non-zero leaves a notice carrying the URL"
   -- Deliberately not a 'BoardScope' binding: with nothing open there is no box
   -- to grow, and the founding request was for a key that exists only inside an
   -- overlay. 'OverlayScope' is what makes it live in the three overlays that
@@ -322,6 +328,7 @@ requiresLoadedAgent = \case
   ShowFilter -> False
   ToggleEpic -> False
   ShowDetails -> False
+  OpenCardPage -> False
   ToggleFullscreen -> False
   DismissOrClose -> False
   ShowIncidents -> False

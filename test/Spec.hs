@@ -72,6 +72,7 @@ import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
 import qualified Spec.UI.AutoSolve as AutoSolve
+import qualified Spec.UI.Browser as Browser
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.ColumnWindow as ColumnWindow
 import qualified Spec.UI.CompletedHistory as CompletedHistory
@@ -244,6 +245,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Incidents" PingLane Incidents.spec,
     SuiteGroup "Spec.UI.Usage" PingLane UIUsage.spec,
     SuiteGroup "Spec.UI.Keys" PingLane Keys.spec,
+    SuiteGroup "Spec.UI.Browser" PingLane Browser.spec,
     SuiteGroup "Spec.UI.Settings" PingLane UISettings.spec,
     SuiteGroup "Spec.Design.Witnesses" UsageLane DesignWitnesses.spec,
     SuiteGroup "Spec.UI.Search" PingLane Search.spec,
