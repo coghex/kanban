@@ -34,7 +34,7 @@ import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp (..))
 import Kanban.CLI (Options (..))
 import Kanban.Domain
-import Kanban.UI.Board (CardEnv (..), drawCardFrame)
+import Kanban.UI.Board (CardEnv (..), defaultExcerptsVisible, drawCardFrame)
 import Kanban.UI.Details (DetailsEnv (..), detailsEnv, drawDetails)
 import Kanban.UI.Theme (themeFor)
 import Kanban.UI.Types (AppState, Name (..))
@@ -131,6 +131,7 @@ renderCard options selected entry width =
       CardEnv
         { cardOptions = options,
           cardConfig = testResolvedConfig,
+          cardExcerptsVisible = defaultExcerptsVisible,
           cardNow = epoch,
           cardSolveSessions = Map.empty
         }

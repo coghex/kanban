@@ -52,6 +52,7 @@ module Kanban.UI.Keys
     gestureHelpEntry,
     helpRows,
     footerHint,
+    excerptFooterHint,
     footerHintRow,
     footerKeyText,
     helpKeyText,
@@ -140,6 +141,7 @@ data BoardAction
   | ToggleDrainer
   | MergeDoneCard
   | ToggleSidebar
+  | ToggleExcerpts
   | ShowSettings
   | ShowHelp
   | RepaintTerminal
@@ -264,6 +266,12 @@ binding action = case action of
   ToggleSidebar ->
     KeyBinding action [key 'c'] [BoardScope] Nothing "sidebar" "collapse / expand sidebar"
       "Collapse or expand the usage sidebar"
+  -- The chip beside this key is the one footer label that is not constant:
+  -- 'excerptFooterHint' spells the other state, and the label here is the
+  -- one a board drawing its excerpts shows.
+  ToggleExcerpts ->
+    KeyBinding action [key 'v'] [BoardScope] Nothing "excerpts" "show / hide card body excerpts"
+      "Show or hide the body excerpt on every card, reflowing the columns and keeping the selection in view; titles, label chips, metadata, tracker context, diagnostics and pull-request status are unchanged, a card's details overlay still shows the whole body, and every launch starts at the configured `excerpt_lines` height"
   ShowSettings ->
     KeyBinding action [key 'o'] [BoardScope] Nothing "options" "settings"
       "Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes"
@@ -336,6 +344,7 @@ requiresLoadedAgent = \case
   ToggleDrainer -> False
   MergeDoneCard -> False
   ToggleSidebar -> False
+  ToggleExcerpts -> False
   ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
@@ -443,6 +452,22 @@ helpEntryKeyText entry =
 -- | A binding's chip on the footer hint line.
 footerHint :: KeyBinding -> Text
 footerHint candidate = footerKeyText candidate.bindingKeys <> " " <> candidate.bindingLabel
+
+-- | The excerpt toggle's chip, which names the state the board is /in/ rather
+-- than the one the key would move it to.
+--
+-- The only binding whose chip is not 'footerHint' of its own label. Both
+-- spellings are written here, beside the binding, for the reason the whole
+-- module exists: a second label kept in the footer's own module would be a
+-- second definition site for user-visible key text. A board drawing its
+-- excerpts shows exactly the label the table declares, so the default line is
+-- still the plain projection every other chip's is.
+excerptFooterHint :: Bool -> Text
+excerptFooterHint excerptsVisible
+  | excerptsVisible = footerHint declared
+  | otherwise = footerKeyText declared.bindingKeys <> " brief"
+  where
+    declared = binding ToggleExcerpts
 
 -- | The footer's hint row, built from the chips whichever surface currently
 -- has the keyboard declares.

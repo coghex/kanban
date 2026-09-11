@@ -200,6 +200,12 @@ runHeldDashboard authority options config repository roster = do
             -- no query and the complete board.
             appSearch = Nothing,
             appSidebarVisible = True,
+            -- Excerpts are presentation state too: every launch starts at the
+            -- configured height, and nothing restores a previous session's
+            -- toggle. Seated from the same constant 'unmeasuredLayoutInputs'
+            -- above reads, so the first settle finds the budget already
+            -- current and the layout epoch stays zero.
+            appExcerptsVisible = defaultExcerptsVisible,
             appSettings = initialSettings,
             appModelRoster = modelRoster,
             -- Derived here, from the same load, and afterwards moved only

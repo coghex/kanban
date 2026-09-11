@@ -77,6 +77,7 @@ import Kanban.UI.Board
   ( approvalControlLabel,
     completedLoadingHeading,
     completedUnavailableHeading,
+    defaultExcerptsVisible,
     drainerLabel,
     openDataLoadingHeading,
     openDataUnavailableHeading,
@@ -121,7 +122,7 @@ import Kanban.UI.SessionCore
 import Kanban.UI.Session (reviewSessionInputLive)
 import Kanban.UI.SessionEvents (SessionOps (..), reviewSessionOps)
 import Kanban.UI.Solve (freshSolveTranscript)
-import Kanban.UI.State (plainTranscript)
+import Kanban.UI.State (plainTranscript, toggleCardExcerpts)
 import Kanban.UI.Notice (NoticeLife (..), emptyNoticeState, showNotice)
 import Kanban.UI.Util (noticeSet)
 import Kanban.UI.Types
@@ -738,6 +739,7 @@ data FrameCase = FrameCase
 frameCases :: [FrameCase]
 frameCases =
   [ wideCase,
+    briefCase,
     FrameCase
       { frameCaseName = "board-minimum",
         frameCaseWidth = 164,
@@ -1460,6 +1462,30 @@ wideCase =
       frameCaseState = id
     }
 
+-- | The same board with @v@ having taken the excerpts off every card
+-- (issue #664).
+--
+-- Drawn at the reference frame's own size and from the same fixture board, so
+-- the diff against 'wideCase' is the excerpt rows and nothing else: the cards
+-- keep their titles, chips, metadata, tracker context, diagnostics and
+-- pull-request status, and more of every column fits. The chip is not in that
+-- diff, and cannot be in any frame's: the hint row is a single line clipped at
+-- the terminal width, and @v@ sits well past where 200 cells end. The help
+-- overlay is where the binding shows, exactly as §7 says it is for the rest of
+-- the tail.
+--
+-- Produced by the transition rather than by seating the flag, so no frame here
+-- can show a density the key cannot reach.
+briefCase :: FrameCase
+briefCase =
+  FrameCase
+    { frameCaseName = "board-brief",
+      frameCaseWidth = 200,
+      frameCaseHeight = 64,
+      frameCaseSummary = "the wide board after v: every card without its excerpt rows",
+      frameCaseState = toggleCardExcerpts
+    }
+
 frameCaseSpec :: FrameCase -> Spec
 frameCaseSpec frameCase =
   it ("renders " <> frameCase.frameCaseName <> " — " <> frameCase.frameCaseSummary) $ do
@@ -1509,6 +1535,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appExpandedTrackers = Set.singleton 700,
       appSearch = Nothing,
       appSidebarVisible = True,
+      appExcerptsVisible = defaultExcerptsVisible,
       appSettings = defaultSettings,
       -- The pure compiled value, not a load: a golden frame must not read
       -- the developer's real XDG configuration. A frame drawn over another

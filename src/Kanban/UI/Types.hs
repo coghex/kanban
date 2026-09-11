@@ -807,6 +807,16 @@ data AppState = AppState
     -- underlying card.
     appSearch :: Maybe ColumnSearch,
     appSidebarVisible :: Bool,
+    -- | Whether cards draw their body excerpt. Process-lifetime state, like
+    -- 'appFilterCriteria' beside it: @v@ moves it, every launch starts at
+    -- 'Kanban.UI.Board.defaultExcerptsVisible' and so at the configured
+    -- @excerpt_lines@ height, and nothing writes it to the settings file, the
+    -- configuration, or the snapshot cache.
+    --
+    -- Read only through 'Kanban.UI.Board.cardExcerptLimit', which is what
+    -- keeps the budget a card is measured at, drawn at, and has its
+    -- measurement invalidated by one number rather than three.
+    appExcerptsVisible :: Bool,
     appSettings :: Settings,
     -- | The model roster in force, as the typed success-or-error value
     -- 'Kanban.Models.loadModelRoster' produced at startup — and afterwards

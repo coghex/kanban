@@ -76,6 +76,7 @@ import qualified Spec.UI.Browser as Browser
 import qualified Spec.UI.Cards as Cards
 import qualified Spec.UI.ColumnWindow as ColumnWindow
 import qualified Spec.UI.CompletedHistory as CompletedHistory
+import qualified Spec.UI.Excerpts as Excerpts
 import qualified Spec.UI.Filter as Filter
 import qualified Spec.UI.FilterPanel as FilterPanel
 import qualified Spec.UI.Notice as Notice
@@ -237,6 +238,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Layout" PingLane Layout.spec,
     SuiteGroup "Spec.UI.OpenData" PingLane OpenData.spec,
     SuiteGroup "Spec.UI.CompletedHistory" PingLane CompletedHistory.spec,
+    SuiteGroup "Spec.UI.Excerpts" PingLane Excerpts.spec,
     SuiteGroup "Spec.UI.Filter" PingLane Filter.spec,
     SuiteGroup "Spec.UI.FilterPanel" PingLane FilterPanel.spec,
     SuiteGroup "Spec.UI.Fullscreen" PingLane Fullscreen.spec,

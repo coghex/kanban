@@ -1,5 +1,6 @@
 module Kanban.UI.Board
-  ( CardEnv (..),
+  ( BoardMarks (..),
+    CardEnv (..),
     approvalControlLabel,
     baseFooterRows,
     boardFooterHintLine,
@@ -12,6 +13,8 @@ module Kanban.UI.Board
     columnItemHeight,
     columnScrollStep,
     columnWindowFor,
+    defaultBoardMarks,
+    defaultExcerptsVisible,
     unmeasuredLayoutInputs,
     drawColumnItem,
     refreshColumnWindows,
@@ -110,7 +113,7 @@ import Kanban.Workflow (entryItem, isApproved, isProblem, itemLifecycleBadge, or
 import Kanban.UI.Types
 import Kanban.Models (OperatingMode (..))
 import Kanban.Usage (usageProviders)
-import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, footerHint, footerHintRow, modeScopeBindings)
+import Kanban.UI.Keys (BindingScope (..), BoardAction (..), KeyBinding (..), actionKeyText, excerptFooterHint, footerHint, footerHintRow, modeScopeBindings)
 import Kanban.UI.SessionCore
 import Kanban.UI.Session (incidentsFooterHints, processesFooterHints)
 import Kanban.UI.SessionEvents (pullRequestSessionOps, reviewSessionOps, sessionOverlayHints, solveSessionOps)
@@ -1118,7 +1121,7 @@ layoutInputs state =
   LayoutInputs
     { layoutBadges = columnBadgeCounts state,
       layoutAscii = state.appOptions.optionAscii,
-      layoutExcerptLines = cardExcerptLimit state.appConfig
+      layoutExcerptLines = cardExcerptLimit state.appExcerptsVisible state.appConfig
     }
 
 -- | The layout inputs a dashboard has before anything has been measured or
@@ -1126,14 +1129,25 @@ layoutInputs state =
 -- budget it launched under.
 --
 -- The one place a fresh 'appLayoutInputs' is spelled, so a launch and a test
--- seat it identically and the first settle finds nothing to move.
+-- seat it identically and the first settle finds nothing to move. That
+-- includes the excerpt budget, which is why it reads
+-- 'defaultExcerptsVisible' rather than 'True': a launch seating
+-- 'appExcerptsVisible' from the same constant cannot disagree with it.
 unmeasuredLayoutInputs :: Options -> ResolvedConfig -> LayoutInputs
 unmeasuredLayoutInputs options config =
   LayoutInputs
     { layoutBadges = ColumnBadges 0 0 0,
       layoutAscii = options.optionAscii,
-      layoutExcerptLines = cardExcerptLimit config
+      layoutExcerptLines = cardExcerptLimit defaultExcerptsVisible config
     }
+
+-- | Whether a dashboard draws card excerpts before anything has toggled them.
+--
+-- The one place the launch default is spelled (issue #664 requirement 4): a
+-- fresh state starts at the configured @excerpt_lines@ height, and nothing
+-- restores a previous session's choice.
+defaultExcerptsVisible :: Bool
+defaultExcerptsVisible = True
 
 columnBadgeCounts :: AppState -> ColumnBadges
 columnBadgeCounts state =
@@ -1347,6 +1361,10 @@ drawCard state column row entry lastInTracker =
 data CardEnv = CardEnv
   { cardOptions :: Options,
     cardConfig :: ResolvedConfig,
+    -- | Whether @v@ is leaving the excerpt rows on. Carried beside the
+    -- configuration rather than read off it, because the height in force is
+    -- the two together ('cardExcerptLimit').
+    cardExcerptsVisible :: Bool,
     cardNow :: UTCTime,
     cardSolveSessions :: Map Int SolveSession
   }
@@ -1356,6 +1374,7 @@ cardEnv state =
   CardEnv
     { cardOptions = state.appOptions,
       cardConfig = state.appConfig,
+      cardExcerptsVisible = state.appExcerptsVisible,
       cardNow = state.appNow,
       cardSolveSessions = state.appSolveSessions
     }
@@ -1419,9 +1438,21 @@ drawCardFrame env selected entry =
     leftAttribute = if selected then selectedAttr else statusAttribute
     interiorAttribute = cardInteriorAttribute statusAttribute
 
--- | The configured card excerpt height, in rows.
-cardExcerptLimit :: ResolvedConfig -> Int
-cardExcerptLimit config = config.resolvedLimits.limitsExcerptLines
+-- | The card excerpt height in force, in rows: the configured
+-- @excerpt_lines@ while excerpts are drawn, and none at all while @v@ is
+-- hiding them.
+--
+-- The one effective budget (issue #664). Measurement ('columnItemHeight',
+-- through 'cardLines'), rendering ('drawCardFrame', through the same), and
+-- invalidation ('layoutInputs') all read this rather than the configuration,
+-- so a toggle cannot move one of the three without the other two. Zero is a
+-- runtime budget only: 'Kanban.Config.parsePositiveBoundedInt' still refuses
+-- @excerpt_lines = 0@, and 'Kanban.Card.boundedLines' answers a zero budget
+-- with no rows at all rather than with an elided one.
+cardExcerptLimit :: Bool -> ResolvedConfig -> Int
+cardExcerptLimit excerptsVisible config
+  | excerptsVisible = config.resolvedLimits.limitsExcerptLines
+  | otherwise = 0
 
 -- | The card interior as one widget per rendered row, laid out for
 -- @innerWidth@ cells. Titles and excerpts get their own line budgets so
@@ -1433,7 +1464,7 @@ cardLines env selected entry innerWidth =
     <> map (withAttr titleAttribute . txt) (boundedLines innerWidth cardTitleLimit (itemHeading item))
     <> cardLabelRows env item innerWidth
     <> map (withAttr dimAttr . txt) (wrappedLines innerWidth (itemMetadata env.cardNow item))
-    <> map txt (boundedLines innerWidth (cardExcerptLimit env.cardConfig) (excerpt (itemBody item)))
+    <> map txt (boundedLines innerWidth (cardExcerptLimit env.cardExcerptsVisible env.cardConfig) (excerpt (itemBody item)))
     <> statusLines
   where
     item = entryItem entry
@@ -1682,7 +1713,7 @@ boardHintLine state = case state.appOverlay of
   Nothing
     | isJust (filterPanelFocusedBox state) -> filterFooterHintLine
     | isJust (focusedSearch state) -> searchFooterHintLine
-    | otherwise -> boardFooterHintLine state.appOperatingMode (criteriaAreFiltering state)
+    | otherwise -> boardFooterHintLine state.appOperatingMode (boardMarks state)
 
 -- | The hint line an open overlay shows in place of the board's.
 overlayHintLine :: AppState -> Overlay -> Text
@@ -1749,7 +1780,7 @@ filterFooterHintLine =
 -- is a parameter of 'boardFooterHintLine' rather than of this alias because a
 -- board that loads no provider draws a shorter one.
 footerHintLine :: Text
-footerHintLine = boardFooterHintLine DualMode False
+footerHintLine = boardFooterHintLine DualMode defaultBoardMarks
 
 -- | The same line with the filter chip marked while the criteria are hiding
 -- cards.
@@ -1765,12 +1796,49 @@ footerHintLine = boardFooterHintLine DualMode False
 -- would advertise four keys that answer with a refusal. They are still
 -- dispatched -- 'Kanban.UI.Events.boardActionGate' is where a press on one
 -- lands -- so this hides a chip and never a key.
-boardFooterHintLine :: OperatingMode -> Bool -> Text
-boardFooterHintLine mode filtering = footerHintRow (map chip (modeScopeBindings mode BoardScope))
+boardFooterHintLine :: OperatingMode -> BoardMarks -> Text
+boardFooterHintLine mode marks = footerHintRow (map chip (modeScopeBindings mode BoardScope))
   where
-    chip candidate
-      | filtering, candidate.bindingAction == ShowFilter = footerHint candidate <> "*"
-      | otherwise = footerHint candidate
+    chip candidate = case candidate.bindingAction of
+      ShowFilter | marks.marksFiltering -> footerHint candidate <> "*"
+      -- The one label that is not constant. Both spellings are
+      -- "Kanban.UI.Keys"'s, for the same reason the marker above is only a
+      -- marker: the footer must not become a second place a key's own text
+      -- is written.
+      ToggleExcerpts -> excerptFooterHint marks.marksExcerptsVisible
+      _ -> footerHint candidate
+
+-- | The board state the footer's own chips reflect, beside the operating mode
+-- that decides which chips there are at all.
+--
+-- One value rather than two positional flags: both are Booleans read off the
+-- same board, so a call site that swapped them would still typecheck and
+-- would silently mark the wrong chip.
+data BoardMarks = BoardMarks
+  { -- | Whether the criteria are hiding cards, which marks the filter chip.
+    marksFiltering :: Bool,
+    -- | Whether cards are drawing their excerpts, which decides which of the
+    -- excerpt chip's two labels the row carries.
+    marksExcerptsVisible :: Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | What one board's chips are marked from.
+boardMarks :: AppState -> BoardMarks
+boardMarks state =
+  BoardMarks
+    { marksFiltering = criteriaAreFiltering state,
+      marksExcerptsVisible = state.appExcerptsVisible
+    }
+
+-- | The marks a board carries with the default criteria admitting everything
+-- and excerpts drawn, which is where every launch starts.
+defaultBoardMarks :: BoardMarks
+defaultBoardMarks =
+  BoardMarks
+    { marksFiltering = False,
+      marksExcerptsVisible = defaultExcerptsVisible
+    }
 
 -- | The hint line a live search shows in place of the board's.
 --

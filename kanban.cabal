@@ -347,6 +347,7 @@ test-suite kanban-test
     Spec.UI.Cards
     Spec.UI.ColumnWindow
     Spec.UI.CompletedHistory
+    Spec.UI.Excerpts
     Spec.UI.Filter
     Spec.UI.FilterPanel
     Spec.UI.Fullscreen

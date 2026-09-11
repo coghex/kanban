@@ -27,5 +27,5 @@ spec = do
     it "converts the configured Claude timeout from seconds to microseconds" $
       claudeRefreshTimeoutMicros (testResolvedConfig {resolvedTimeouts = TimeoutsConfig 5 7 9 11 13 14400}) `shouldBe` 9000000
     it "passes the configured excerpt line count through to the card-rendering limit" $ do
-      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 3}) `shouldBe` 3
-      cardExcerptLimit (testResolvedConfig {resolvedLimits = LimitsConfig 9}) `shouldBe` 9
+      cardExcerptLimit True (testResolvedConfig {resolvedLimits = LimitsConfig 3}) `shouldBe` 3
+      cardExcerptLimit True (testResolvedConfig {resolvedLimits = LimitsConfig 9}) `shouldBe` 9
