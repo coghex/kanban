@@ -13,6 +13,12 @@ triage, and since issue #427 the retriage refresh that re-renders triage's
 output. Retriage is the harder consumer because it must recompute even the busy
 fallback instead of carrying markers from the prior roadmap.
 
+Issue #665 later qualified the specification fingerprint every one of those
+decisions rests on, letting an eligible author waive their own comment with
+`<!-- issue-spec:no-amend -->`; its reconciliation coverage lives here too,
+because this harness is what proves an approval survives a waived comment and
+still goes stale without one.
+
 No GitHub account and no model invocation: `get_issue`, `get_comments`, the
 label mutation, and the lock are patched, while the decision itself -- the real
 `approval_reconciliation_decision`, `review_record_matches`, `marker_matches`,
@@ -22,6 +28,7 @@ the predicate would leave the one thing this issue is about untested.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -118,6 +125,57 @@ def current_marker_for(issue: dict, *, verdict: str = "APPROVE") -> dict:
     the hash the gate will recompute.
     """
     return marker_comment(approve_issues.spec_fingerprint(issue, []), verdict=verdict)
+
+
+def eligible_comment(body: str, *, identifier: int = 2,
+                     created_at: str = "2026-02-02T00:00:00Z") -> dict:
+    """An ordinary comment from an author `is_spec_relevant_comment` counts."""
+    return {
+        "id": identifier,
+        "author_association": "OWNER",
+        "user": {"login": "coghex"},
+        "created_at": created_at,
+        "updated_at": created_at,
+        "html_url": f"https://github.com/acme/example/issues/7#issuecomment-{identifier}",
+        "body": body,
+    }
+
+
+def legacy_spec_fingerprint(issue: dict, comments: list[dict]) -> str:
+    """`spec_fingerprint` as it hashed before #665 added the no-amend waiver.
+
+    Transcribed rather than digested to a literal so the historical fixture
+    cannot silently rot when an unrelated fingerprint input changes, and every
+    test that uses it first asserts it still reproduces the tracked function
+    over a comment list with nothing marked -- so a transcription that falls
+    behind fails loudly instead of proving nothing.
+    """
+    labels = sorted(
+        approve_issues.issue_labels(issue)
+        - {
+            approve_issues.APPROVE_LABEL,
+            approve_issues.CHANGES_LABEL,
+            approve_issues.REVISED_LABEL,
+        }
+    )
+    content = {
+        "number": issue["number"],
+        "title": issue.get("title") or "",
+        "body": issue.get("body") or "",
+        "labels": labels,
+        "comments": [
+            approve_issues.canonical_comment(item)
+            for item in comments
+            if not approve_issues.AUTOMATED_REVIEW_COMMENT_RE.search(
+                item.get("body") or ""
+            )
+            and approve_issues.is_spec_relevant_comment(issue, item)
+        ],
+    }
+    encoded = json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class ReconcileHarness(unittest.TestCase):
@@ -349,6 +407,187 @@ class CurrentApprovalTests(ReconcileHarness):
 
         self.assertEqual(self.entry(result, 7)["outcome"], "current")
         self.assertEqual(self.edits(), [])
+
+
+class NoAmendMarkerTests(ReconcileHarness):
+    """#665: an eligible author's no-amend marker waives their comment's
+    fingerprint weight, so a published approval survives a comment that amends
+    nothing -- and nothing else about reconciliation changes."""
+
+    REMOVE_LABEL_EDIT = (
+        "gh", "issue", "edit", "7", "--repo", "acme/example",
+        "--remove-label", "reviewed:approve",
+    )
+    WAIVED = f"Fixed a typo in my last comment.\n{approve_issues.NO_AMEND_MARKER}"
+    UNMARKED = "Fixed a typo in my last comment."
+
+    def test_a_marked_eligible_comment_leaves_the_approval_current(self):
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        marker = current_marker_for(issue)
+        waived = eligible_comment(self.WAIVED)
+        # Byte-identical, which is the whole claim: appending the comment moved
+        # no fingerprint input at all.
+        self.assertEqual(
+            approve_issues.spec_fingerprint(issue, [marker]),
+            approve_issues.spec_fingerprint(issue, [marker, waived]),
+        )
+        self.assertEqual(
+            approve_issues.approval_reconciliation_decision(
+                issue, [marker, waived], legacy_policy="dual"
+            )["kind"],
+            "current",
+        )
+        self.assertTrue(
+            approve_issues.current_gate_status(
+                issue, [marker, waived], legacy_policy="dual"
+            )["approved"]
+        )
+        self.state(7, issue, [marker, waived])
+
+        with mock.patch.object(approve_issues, "remove_approval_label") as removal:
+            result = self.run_reconcile([7])
+
+        removal.assert_not_called()
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "current")
+        self.assertFalse(entry["label_removed"])
+        self.assertTrue(entry["approved"])
+        self.assertEqual(self.edits(), [])
+
+    def test_the_unmarked_counterpart_goes_stale_and_loses_the_label(self):
+        # The default this issue preserves: the same comment without the
+        # marker still re-opens the gate.
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        marker = current_marker_for(issue)
+        ordinary = eligible_comment(self.UNMARKED)
+        self.assertNotEqual(
+            approve_issues.spec_fingerprint(issue, [marker]),
+            approve_issues.spec_fingerprint(issue, [marker, ordinary]),
+        )
+        comments = [marker, ordinary]
+        self.state(7, issue, comments)
+        self.state(7, make_issue(7, labels=["bug"]), comments)
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertTrue(entry["label_removed"])
+        self.assertFalse(entry["approved"])
+        self.assertEqual(self.edits(), [self.REMOVE_LABEL_EDIT])
+        self.assertEqual(self.model_calls, 0)
+        self.post_comment.assert_not_called()
+
+    def test_an_unprivileged_author_gains_nothing_from_the_marker(self):
+        # Requirement 5: the waiver only ever subtracts, so it cannot promote a
+        # comment that was never in the fingerprint.
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        marker = current_marker_for(issue)
+        stranger = {
+            **eligible_comment(self.WAIVED),
+            "user": {"login": "some-random-user"},
+            "author_association": "NONE",
+        }
+        unmarked_stranger = {**stranger, "body": self.UNMARKED}
+        for comment in (stranger, unmarked_stranger):
+            self.assertEqual(
+                approve_issues.spec_fingerprint(issue, [marker]),
+                approve_issues.spec_fingerprint(issue, [marker, comment]),
+            )
+
+    def test_a_historical_marked_comment_invalidates_its_old_approval(self):
+        # Requirement 4: recognition is stateless and unconditional, so an
+        # approval whose fingerprint once counted a marked comment goes stale
+        # through ordinary reconciliation rather than being preserved.
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        historical = eligible_comment(
+            self.WAIVED, created_at="2025-03-04T05:06:07Z"
+        )
+        plain = eligible_comment(self.UNMARKED, created_at="2025-03-04T05:06:07Z")
+        self.assertEqual(
+            legacy_spec_fingerprint(issue, [plain]),
+            approve_issues.spec_fingerprint(issue, [plain]),
+        )
+        old_rules = legacy_spec_fingerprint(issue, [historical])
+        self.assertNotEqual(
+            old_rules, approve_issues.spec_fingerprint(issue, [historical])
+        )
+        comments = [marker_comment(old_rules), historical]
+        self.state(7, issue, comments)
+        self.state(7, make_issue(7, labels=["bug"]), comments)
+
+        result = self.run_reconcile([7])
+
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "removed")
+        self.assertTrue(entry["label_removed"])
+        self.assertEqual(self.edits(), [self.REMOVE_LABEL_EDIT])
+        self.assertEqual(self.model_calls, 0)
+        self.post_comment.assert_not_called()
+
+    def test_a_fresh_approval_over_the_new_fingerprint_is_current(self):
+        # The other half of requirement 4: once re-reviewed under the new
+        # rules, the same historical comment keeps the approval current.
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        historical = eligible_comment(
+            self.WAIVED, created_at="2025-03-04T05:06:07Z"
+        )
+        fresh = marker_comment(approve_issues.spec_fingerprint(issue, [historical]))
+        self.state(7, issue, [fresh, historical])
+
+        with mock.patch.object(approve_issues, "remove_approval_label") as removal:
+            result = self.run_reconcile([7])
+
+        removal.assert_not_called()
+        entry = self.entry(result, 7)
+        self.assertEqual(entry["outcome"], "current")
+        self.assertTrue(entry["approved"])
+        self.assertEqual(self.edits(), [])
+
+    def test_a_historical_unmarked_comment_keeps_its_previous_weight(self):
+        issue = make_issue(7, labels=["reviewed:approve", "bug"])
+        historical = eligible_comment(
+            self.UNMARKED, created_at="2025-03-04T05:06:07Z"
+        )
+        self.assertEqual(
+            legacy_spec_fingerprint(issue, [historical]),
+            approve_issues.spec_fingerprint(issue, [historical]),
+        )
+        bound = marker_comment(approve_issues.spec_fingerprint(issue, [historical]))
+        self.state(7, issue, [bound, historical])
+
+        result = self.run_reconcile([7])
+
+        self.assertEqual(self.entry(result, 7)["outcome"], "current")
+        self.assertEqual(self.edits(), [])
+
+
+class NoAmendMarkerContractTests(unittest.TestCase):
+    """The §2.1 prose #665 requires, pinned against the code it describes so
+    the documented literal and the recognized one cannot drift apart."""
+
+    def setUp(self):
+        raw = (REPO_ROOT / "docs" / "agent-workflow-contract.md").read_text(
+            encoding="utf-8"
+        )
+        # Squashed, so these pin what the contract says rather than how a
+        # paragraph happens to be wrapped.
+        self.contract = " ".join(raw.split())
+
+    def test_it_documents_the_exact_recognized_literal(self):
+        self.assertIn(approve_issues.NO_AMEND_MARKER, self.contract)
+
+    def test_it_documents_the_eligible_population_and_the_unmarked_default(self):
+        self.assertIn("is_spec_relevant_comment", self.contract)
+        self.assertIn("An unmarked eligible comment is unchanged", self.contract)
+
+    def test_it_documents_the_historical_comment_policy(self):
+        self.assertIn("no activation date or migration state", self.contract)
+        self.assertIn("that approval goes stale", self.contract)
+
+    def test_it_documents_the_unverified_assertion_tradeoff(self):
+        self.assertIn("the gate does not verify that assertion", self.contract)
+        self.assertIn("accepted tradeoff", self.contract)
 
 
 class NotStaleRefusalTests(ReconcileHarness):
