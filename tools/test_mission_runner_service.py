@@ -567,6 +567,44 @@ class PassReportTests(unittest.TestCase):
                 json.dumps(pass_document(termination="refused", attention=[attention_entry(state="unresolved")])),
                 2,
             ),
+            "a mission admitted twice": (
+                json.dumps(
+                    pass_document(
+                        admitted=[admitted_entry(mission="mission-a"), admitted_entry(mission="mission-a")]
+                    )
+                ),
+                0,
+            ),
+            "an episode named twice": (
+                json.dumps(pass_document(attention=[attention_entry(), attention_entry()])),
+                0,
+            ),
+            "attention qualified for another repository": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {
+                                **attention_entry(),
+                                "attention_id": "someone/else#mission-a@2026-09-11T00:00:00Z",
+                            }
+                        ]
+                    )
+                ),
+                0,
+            ),
+            "attention qualified for another mission": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {
+                                **attention_entry(),
+                                "attention_id": "acme/widgets#mission-elsewhere@2026-09-11T00:00:00Z",
+                            }
+                        ]
+                    )
+                ),
+                0,
+            ),
             "target number that is not positive": (
                 json.dumps(
                     pass_document(
@@ -609,6 +647,16 @@ class PassReportTests(unittest.TestCase):
                     attention=[{**attention_entry(), "targets": targets}]
                 )
                 self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_two_distinct_missions_and_episodes_are_accepted(self):
+        # The negative control for the duplicate cases above: rejecting every
+        # report with two entries would pass them while accepting no real
+        # two-mission pass.
+        document = pass_document(
+            admitted=[admitted_entry(mission="mission-a"), admitted_entry(mission="mission-b")],
+            attention=[attention_entry(mission="mission-a"), attention_entry(mission="mission-b")],
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
 
     def test_the_admission_ceiling_is_accepted_up_to_its_limit(self):
         # The negative control for the over-capacity case: rejecting every

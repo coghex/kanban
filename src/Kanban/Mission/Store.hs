@@ -89,6 +89,8 @@ import Kanban.Mission.Paths
     MissionStore (..),
     ignoreFileOperation,
     isPlainDirectory,
+    LegacyClaim (..),
+    legacyMissionClaim,
     listMissionEntries,
     listMissionEntriesStrictly,
     MissionEntry (..),
@@ -118,6 +120,8 @@ import Kanban.Mission.Types
     MissionSessionDisposition (..),
     MissionSessionId (..),
     MissionSessionNode (..),
+    MissionAttention (..),
+    MissionAttentionId (..),
     MissionSnapshot (..),
     MissionSpecification (..),
     MissionStepId (..),
@@ -132,6 +136,7 @@ import Kanban.Mission.Types
     missionSealDigestAlgorithm,
     missionSealSchemaVersion,
     missionSessionDisposition,
+    missionAttentionIdentity,
     missionSnapshotSchemaVersion,
     missionSpecificationSchemaVersion,
   )
@@ -204,22 +209,39 @@ listMissionsStrictly store = do
   case (listed, legacyListed) of
     (Left reason, _) -> pure ([], [reason])
     (_, Left reason) -> pure ([], [reason])
-    (Right entries, Right _) -> do
+    (Right entries, Right legacyEntries) -> do
       -- Each entry's own stat, kept rather than filtered: an entry this store
       -- cannot classify is an entry it cannot say is not a mission.
-      classified <- mapM (\entry -> (,) entry <$> missionEntryAt (store.missionStoreDirectory </> entry)) entries
+      classified <- mapM (classify store.missionStoreDirectory) entries
+      legacyClassified <- mapM (classify store.missionStoreLegacyDirectory) legacyEntries
+      -- The legacy entries are classified here rather than handed back to
+      -- 'adoptedLegacyMissions', which is the fail-open half of this pair: it
+      -- drops an entry whose stat did not answer and one whose ownership claim
+      -- could not be established, both of which are exactly what this function
+      -- exists to report. Only a record /proven/ to belong to another
+      -- repository is excluded, because that one really is invisible here
+      -- (issue #615, requirement 3).
+      claims <-
+        mapM
+          (\entry -> (,) entry <$> legacyMissionClaim store.missionStoreRepository (MissionId (Text.pack entry)) store.missionStoreLegacyDirectory)
+          [entry | (entry, MissionEntryDirectory) <- legacyClassified]
       let directories = [entry | (entry, MissionEntryDirectory) <- classified]
+          ours = [entry | (entry, LegacyOurs) <- claims]
           undecidable =
             [ Text.pack entry <> " could not be classified: " <> reason
-            | (entry, MissionEntryUndecidable reason) <- classified
+            | (entry, MissionEntryUndecidable reason) <- classified <> legacyClassified
             ]
-      legacy <- adoptedLegacyMissions store
-      let candidates = sort (nub (map (MissionId . Text.pack) directories <> legacy))
+              <> [ "legacy mission " <> Text.pack entry <> " is attributable to nobody: " <> reason
+                 | (entry, LegacyUnattributable reason) <- claims
+                 ]
+          candidates = sort (nub (map (MissionId . Text.pack) (directories <> ours)))
       resolutions <- mapM (\mission -> (,) mission <$> missionRoot store mission) candidates
       pure
         ( [mission | (mission, Right _) <- resolutions],
           undecidable <> [reason | (_, Left reason) <- resolutions]
         )
+  where
+    classify root entry = (,) entry <$> missionEntryAt (root </> entry)
 
 -- | Whether a specification was written, or one was already there.
 data MissionCreation
@@ -270,6 +292,51 @@ belongsHere store mission recorded
             <> ", which is not the one this store holds"
         )
 
+-- | Refuses a snapshot whose attention is named for somebody else.
+--
+-- 'missionAttentionIdentity' derives an episode's name from three things — the
+-- repository, the mission, and the moment the episode began — so the identity
+-- is not free-form text: it is a statement about which episode of which
+-- mission of which repository this is, and it can be checked against the
+-- record carrying it.
+--
+-- Checking it matters because of what reads it. The scheduler keys a
+-- notification's durable suppression on this identity and attempts delivery
+-- once per identity, for ever; a record whose identity was minted for another
+-- repository, another mission, or another moment therefore consumes an attempt
+-- that belongs to a different episode, and does it permanently. A restored
+-- backup, a copied directory, and a hand-repaired record are each enough to
+-- produce one, which is exactly the class of record the identity checks
+-- elsewhere in this module already refuse.
+--
+-- Held on the way in and on the way out, for the reason 'readMissionSnapshot'
+-- gives about the session tree: the writer's guarantee covers only records
+-- this release wrote.
+wellFormedAttention :: MissionSnapshot -> Either Text ()
+wellFormedAttention snapshot = case attentionIdentityFailure snapshot of
+  Nothing -> Right ()
+  Just reason -> Left ("mission " <> snapshot.missionSnapshotId.unMissionId <> ": " <> reason)
+
+-- | Why this snapshot's attention identity is not its own, if it is not.
+attentionIdentityFailure :: MissionSnapshot -> Maybe Text
+attentionIdentityFailure snapshot = do
+  attention <- snapshot.missionSnapshotAttention
+  let expected =
+        missionAttentionIdentity
+          snapshot.missionSnapshotRepository
+          snapshot.missionSnapshotId
+          attention.missionAttentionRaisedAt
+  if attention.missionAttentionId == expected
+    then Nothing
+    else
+      Just
+        ( "its attention is recorded under "
+            <> attention.missionAttentionId.unMissionAttentionId
+            <> ", which is not the identity this repository, mission and raised-at time name ("
+            <> expected.unMissionAttentionId
+            <> ")"
+        )
+
 -- | Refuses to write a snapshot whose session tree is not one.
 --
 -- This is where D-14 is /enforced/ rather than merely modelled: a duplicate
@@ -317,7 +384,8 @@ writeMissionSnapshot store snapshot =
   withMissionRoot store mission Left $ \root ->
     case (,) <$> missionDirectory root mission <*> missionSnapshotPath root mission
       <* belongsHere store mission snapshot.missionSnapshotRepository
-      <* wellFormedSessions snapshot of
+      <* wellFormedSessions snapshot
+      <* wellFormedAttention snapshot of
       Left message -> pure (Left message)
       Right (directory, path) -> do
         prepared <- ensureMissionDirectory directory
@@ -365,6 +433,14 @@ readMissionSnapshot store mission =
                       <> " records sessions that are not a tree: "
                       <> reason
                   )
+            -- Reported rather than read as absent, exactly as an invalid
+            -- lineage is: the file is there and does not cohere, which is a
+            -- repair somebody has to make, and handing it over would let a
+            -- foreign episode identity spend this mission's notification
+            -- attempt.
+            | Just reason <- attentionIdentityFailure snapshot ->
+                MissionUnreadable
+                  ("mission " <> mission.unMissionId <> ": " <> Text.pack path <> " " <> reason)
           other -> other
 
 -- | Appends one event to a mission's journal.

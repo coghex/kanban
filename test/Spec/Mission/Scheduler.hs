@@ -326,6 +326,39 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
       report.missionPassTermination `shouldBe` MissionPassFailed
       report.missionPassAdmitted `shouldBe` []
 
+  -- The legacy root is enumerated on the same terms as the current one. Its
+  -- helpers are the fail-open half of the pair — they drop an entry whose stat
+  -- did not answer and one whose ownership cannot be established — so a
+  -- mission that lives only under the pre-#615 root could otherwise vanish
+  -- from a pass entirely.
+  it "fails the pass on a legacy mission attributable to nobody" $
+    withStore $ \store -> do
+      stageUnattributableLegacyMission store (MissionId "mission-legacy")
+      (report, advanced) <- passWith store defaultMissionsConfig id
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      ("attributable to nobody" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
+
+  it "fails the pass on a legacy directory it cannot enumerate" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      createDirectoryIfMissing True store.missionStoreLegacyDirectory
+      setFileMode store.missionStoreLegacyDirectory 0o000
+      (report, _) <- passWith store defaultMissionsConfig id
+      setFileMode store.missionStoreLegacyDirectory 0o700
+      report.missionPassTermination `shouldBe` MissionPassFailed
+
+  -- And the control that keeps the legacy rule itself intact: another
+  -- repository's mission under the shared ambiguous root is invisible here
+  -- rather than a failure, which is what issue #615 requirement 3 asks for.
+  it "stays completed when the legacy root holds another repository's mission" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      stageForeignLegacyMission store (MissionId "mission-elsewhere")
+      (report, advanced) <- passWith store defaultMissionsConfig id
+      readIORef advanced `shouldReturn` [[MissionId "mission-a"]]
+      report.missionPassTermination `shouldBe` MissionPassCompleted
+
   -- The negative control: an absent snapshot really is silent, so the examples
   -- above are about decoding and enumeration rather than about a quiet store.
   it "stays completed when a listed mission has no snapshot at all" $
@@ -637,6 +670,53 @@ attentionSpec = describe "the attention a waiting mission raises" $ do
       -- restated.
       ((.missionAttentionSummary) <$> second.missionSnapshotAttention)
         `shouldBe` Just "the reviewer is still waiting"
+
+  -- The identity is derived from the repository, the mission and the moment,
+  -- so it can be checked against the record carrying it — and it has to be,
+  -- because the scheduler suppresses delivery per identity for ever. A record
+  -- naming somebody else's episode would spend an attempt that is not its own.
+  it "refuses a snapshot whose attention is named for another episode" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      let foreign' =
+            (snapshotFor (MissionId "mission-a") MissionWaitingInput)
+              { missionSnapshotAttention =
+                  Just
+                    (attentionRecord (MissionId "mission-a"))
+                      { missionAttentionId = missionAttentionIdentity (MissionRepository "someone" "else") (MissionId "mission-a") fixedTime
+                      }
+              }
+      written <- writeMissionSnapshot store foreign'
+      case written of
+        Right () -> expectationFailure "a foreign attention identity was written"
+        Left message -> ("attention is recorded under" `Text.isInfixOf` message) `shouldBe` True
+
+  it "refuses a snapshot whose attention names another mission or moment" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      forM_
+        [ ("another mission", missionAttentionIdentity (MissionRepository "coghex" "kanban") (MissionId "mission-elsewhere") fixedTime),
+          ("another moment", missionAttentionIdentity (MissionRepository "coghex" "kanban") (MissionId "mission-a") (UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)))
+        ]
+        $ \(label, identity) -> do
+          let wrong =
+                (snapshotFor (MissionId "mission-a") MissionWaitingInput)
+                  { missionSnapshotAttention =
+                      Just (attentionRecord (MissionId "mission-a")) {missionAttentionId = identity}
+                  }
+          written <- writeMissionSnapshot store wrong
+          (label :: String, either (const True) (const False) written) `shouldBe` (label, True)
+
+  -- And it is refused on the way out too: the writer's guarantee covers only
+  -- records this release wrote, and a restored or hand-repaired one arrives
+  -- with no such history.
+  it "reads a snapshot whose attention was disowned as unreadable" $
+    withWaitingMission $ \store -> do
+      disownAttention store (MissionId "mission-a")
+      readBack <- readMissionSnapshot store (MissionId "mission-a")
+      case readBack of
+        MissionUnreadable message -> ("attention is recorded under" `Text.isInfixOf` message) `shouldBe` True
+        other -> expectationFailure ("a disowned attention identity was handed over: " <> show (() <$ other))
 
   it "is cleared when the mission stops waiting" $
     withController $ \store controller -> do
@@ -1263,6 +1343,51 @@ currentSnapshot store mission = do
   case readBack of
     MissionPresent snapshot -> pure snapshot
     other -> fail ("the snapshot did not read back: " <> show (() <$ other))
+
+-- | A legacy mission whose records say nothing about who owns it, which
+-- 'legacyMissionClaim' refuses to attribute.
+stageUnattributableLegacyMission :: MissionStore -> MissionId -> IO ()
+stageUnattributableLegacyMission store mission = do
+  let directory = store.missionStoreLegacyDirectory </> Text.unpack mission.unMissionId
+  createDirectoryIfMissing True directory
+  -- A directory with records nothing can read: present, so it is a candidate,
+  -- and attributable to nobody, so this store may neither adopt it nor ignore
+  -- it.
+  writeFile (directory </> "specification.json") "{\"schemaVersion\":1,\"payload\":\"not a specification\"}"
+
+-- | A legacy mission that plainly belongs to another repository, which this
+-- store is right to pass over in silence.
+stageForeignLegacyMission :: MissionStore -> MissionId -> IO ()
+stageForeignLegacyMission store mission = do
+  let legacy =
+        store
+          { missionStoreDirectory = store.missionStoreLegacyDirectory,
+            missionStoreLegacyDirectory = store.missionStoreLegacyDirectory </> "no-legacy-root-here",
+            missionStoreRepository = MissionRepository "someone" "else"
+          }
+      specification =
+        (specificationFor mission) {missionSpecificationRepository = MissionRepository "someone" "else"}
+  created <- createMissionSpecification legacy specification
+  created `shouldBe` Right MissionCreated
+
+-- | An attention record reassigned to another repository's episode, written
+-- past the writer that refuses to produce one.
+disownAttention :: MissionStore -> MissionId -> IO ()
+disownAttention store mission =
+  case missionDirectory store.missionStoreDirectory mission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> do
+      let path = directory </> "snapshot.json"
+      contents <- readFile path
+      length contents `seq` writeFile path (replaceAll "coghex/kanban#" "someone/else#" contents)
+
+replaceAll :: String -> String -> String -> String
+replaceAll needle replacement = go
+  where
+    go [] = []
+    go rest@(character : remaining)
+      | take (length needle) rest == needle = replacement <> go (drop (length needle) rest)
+      | otherwise = character : go remaining
 
 -- | One identifier recorded under both the current root and the ambiguous one
 -- a release before #615 wrote to, which 'missionRoot' refuses to resolve.

@@ -1020,7 +1020,7 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
             f"exits {expected_exit}, but the pass exited with status {returncode}."
         )
     _require_admitted(document["admitted"], termination)
-    _require_attention(document["attention"], termination)
+    _require_attention(document["attention"], termination, repository)
     detail = document["detail"]
     if not isinstance(detail, str):
         raise PassFailure(f"The mission scheduler report carries no detail: {detail!r}.")
@@ -1077,6 +1077,15 @@ def _require_admitted(admitted: Any, termination: str) -> None:
                 f"{entry['detail']!r}."
             )
         failing = failing or disposition in PASS_FAILING_DISPOSITIONS
+    # One child per admitted mission, so one disposition per admitted mission.
+    # A report naming a mission twice carries two answers to one question, and
+    # nothing downstream could say which of them describes the mission's state.
+    missions = [entry["mission"] for entry in admitted]
+    if len(set(missions)) != len(missions):
+        raise PassFailure(
+            f"The mission scheduler report admits a mission more than once: "
+            f"{sorted(missions)}."
+        )
     # The two halves of one report held against each other. A pass that
     # reported a failed mission and called itself completed is telling a
     # supervisor two different things, and believing the cheerful half is how a
@@ -1100,7 +1109,7 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         )
 
 
-def _require_attention(attention: Any, termination: str) -> None:
+def _require_attention(attention: Any, termination: str, repository: str) -> None:
     if not isinstance(attention, list):
         raise PassFailure(
             f"The mission scheduler report's attention is not a list: "
@@ -1146,6 +1155,35 @@ def _require_attention(attention: Any, termination: str) -> None:
                 f"The mission scheduler report terminated {termination!r} while naming "
                 "attention whose targets it could not resolve."
             )
+        # The identity is repository-qualified by construction:
+        # `Kanban.Mission.Types.missionAttentionIdentity` spells it
+        # `<owner>/<name>#<mission>@<raised-at>`. An entry whose identity is
+        # qualified for another repository or another mission is an episode
+        # belonging to something else, and delivery is suppressed per identity
+        # for ever — so accepting one would let a foreign episode consume an
+        # attempt and be published as this repository's waiting state.
+        expected_prefix = f"{repository}#{entry['mission']}@"
+        if not entry["attention_id"].startswith(expected_prefix):
+            raise PassFailure(
+                f"The mission scheduler report names attention "
+                f"{entry['attention_id']!r}, which is not qualified for "
+                f"{expected_prefix!r}."
+            )
+    # One outstanding episode per mission: a mission is waiting for one thing
+    # at a time, and two entries naming one identity would be counted twice by
+    # anything that reads the status document.
+    identities = [entry["attention_id"] for entry in attention]
+    if len(set(identities)) != len(identities):
+        raise PassFailure(
+            f"The mission scheduler report names an attention episode more than "
+            f"once: {sorted(identities)}."
+        )
+    missions = [entry["mission"] for entry in attention]
+    if len(set(missions)) != len(missions):
+        raise PassFailure(
+            f"The mission scheduler report names attention for a mission more than "
+            f"once: {sorted(missions)}."
+        )
 
 
 def _require_targets(targets: Any) -> None:

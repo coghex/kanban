@@ -41,6 +41,8 @@ module Kanban.Mission.Paths
     missionRoot,
     withMissionRoot,
     adoptedLegacyMissions,
+    LegacyClaim (..),
+    legacyMissionClaim,
     missionDirectory,
     missionSpecificationPath,
     missionSnapshotPath,

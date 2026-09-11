@@ -322,16 +322,35 @@ sessionNode identity parent observation =
 settled :: Maybe MissionTerminalObservation
 settled = Just MissionTerminalObservation {missionObservationAt = fixedTime, missionObservationOutcome = MissionObservedExit 0, missionObservationDetail = Nothing}
 
+-- | Re-points a fixture snapshot at another repository, another mission, or
+-- both, taking its attention identity with it.
+--
+-- A record update alone will not do. An episode's identity is derived from the
+-- repository, the mission and the moment it was raised, so a snapshot
+-- re-pointed by hand carries an identity minted for the snapshot it was copied
+-- from — which the store refuses in its own right, and that refusal would
+-- arrive instead of the one each example below is about.
+attributedTo :: MissionRepository -> MissionId -> MissionSnapshot -> MissionSnapshot
+attributedTo repository mission snapshot =
+  snapshot
+    { missionSnapshotId = mission,
+      missionSnapshotRepository = repository,
+      missionSnapshotAttention = reattributed <$> snapshot.missionSnapshotAttention
+    }
+  where
+    reattributed attention =
+      attention
+        { missionAttentionId = missionAttentionIdentity repository mission attention.missionAttentionRaisedAt
+        }
+
 -- | 'runningSnapshot' for another repository and another mission.
 snapshotIn :: MissionRepository -> MissionId -> MissionSnapshot
-snapshotIn repository mission =
-  runningSnapshot {missionSnapshotId = mission, missionSnapshotRepository = repository}
+snapshotIn repository mission = attributedTo repository mission runningSnapshot
 
 -- | A terminal snapshot for another repository and another mission, so a
 -- delete has something to decide from.
 completedIn :: MissionRepository -> MissionId -> MissionSnapshot
-completedIn repository mission =
-  (snapshotWith MissionCompleted [] [] []) {missionSnapshotId = mission, missionSnapshotRepository = repository}
+completedIn repository mission = attributedTo repository mission (snapshotWith MissionCompleted [] [] [])
 
 -- | 'eventNamed' for another repository and another mission.
 eventIn :: MissionRepository -> MissionId -> Text -> MissionEvent
@@ -937,7 +956,7 @@ foreignRecords root store owner named = do
     ( expectRight
         =<< writeMissionSnapshot
           elsewhere
-          runningSnapshot {missionSnapshotId = named, missionSnapshotRepository = owner}
+          (attributedTo owner named runningSnapshot)
     )
   void
     ( expectRight
@@ -1565,7 +1584,12 @@ schemaSpec = describe "a record this release did not write" $ do
       -- terminal snapshot authorise archiving or deleting mission-0001.
       let other = MissionId "mission-0002"
       void (expectRight =<< createMissionSpecification store (specificationFor (MissionRepository "coghex" "kanban") other "another mission"))
-      void (expectRight =<< writeMissionSnapshot store (runningSnapshot {missionSnapshotId = other, missionSnapshotLifecycle = MissionCompleted}))
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (attributedTo (MissionRepository "coghex" "kanban") other runningSnapshot) {missionSnapshotLifecycle = MissionCompleted}
+        )
       createDirectoryIfMissing True (missionRoot store)
       forM_ ["specification.json", "snapshot.json"] $ \name ->
         renameFile (store.missionStoreDirectory </> "mission-0002" </> name) (missionRoot store </> name)
@@ -1588,7 +1612,7 @@ schemaSpec = describe "a record this release did not write" $ do
       case created of
         Left message -> Text.unpack message `shouldSatisfy` isInfixOf "not the one this store holds"
         Right outcome -> expectationFailure ("expected a refusal, got " <> show outcome)
-      written <- writeMissionSnapshot store (runningSnapshot {missionSnapshotRepository = MissionRepository "coghex" "elsewhere"})
+      written <- writeMissionSnapshot store (attributedTo (MissionRepository "coghex" "elsewhere") theMission runningSnapshot)
       case written of
         Left message -> Text.unpack message `shouldSatisfy` isInfixOf "not the one this store holds"
         Right () -> expectationFailure "expected the snapshot write to be refused"
