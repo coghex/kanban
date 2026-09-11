@@ -286,6 +286,24 @@ that a particular comment should not.
   `reviewed:*` label and review comment, and an approval marks a draft PR ready
   for review so it enters Done without waiting for CI — Kanban never sets a
   verdict label or changes draft state directly.
+- **Large nested-review inputs:** all five packaged coordinators keep initial
+  prompts up to 64 KiB inline. Above that threshold they place the complete
+  metadata and unmodified patch in a unique read-only directory inside the
+  reviewer's private source extraction, with a per-file patch index containing
+  line ranges, byte offsets, sizes, and whole-file SHA-256 hashes. The short
+  initial prompt directs the reviewer to read those materials in bounded
+  sections, including authored changes after large vendor sections. No patch,
+  issue specification, comment, CI result, or override reason is omitted.
+  Only the extraction's root is briefly made writable during preparation,
+  before any reviewer starts; its original mode is restored even on failure.
+  Materials are cleaned up with that extraction on every exit. Dual reviewers
+  remain serial and never share a live extraction or materials directory.
+  Routing, model policy, the issue gate, result validation, and publication's
+  head/gate freshness checks are unchanged. The direct `--self-review` response
+  remains inline. `tools/test_pr_review_large_input.py` exercises all five
+  copies against multi-megabyte patches, large metadata, overrides, cleanup,
+  and serial isolation; the existing review contract and parity tests hold
+  the unchanged authority boundaries.
 - **Failure semantics:** the same missing-executable and
   `KANBAN_NEEDS_INPUT` handoff pattern as solve.
 - **Issue-gate override:** the coordinator refuses to review a pull request
