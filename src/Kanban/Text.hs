@@ -1,5 +1,6 @@
 module Kanban.Text
   ( excerpt,
+    oneLineText,
     sanitizeText,
     withoutJsonPath,
   )
@@ -13,8 +14,24 @@ import Data.Text.Normalize (NormalizationMode (NFC), normalize)
 sanitizeText :: Text -> Text
 sanitizeText = normalize NFC . Text.filter safeCharacter . stripEscapeSequences . normalizeLineControls
 
+-- | A card's body excerpt: the first paragraph that is content rather than
+-- structure (see 'firstParagraph'), collapsed onto one line.
+--
+-- This reads its input as the Markdown a body is, so it belongs to bodies
+-- alone. A caller that has some other external string to put on one line --
+-- a provider's event type, a rendered JSON payload -- wants 'oneLineText',
+-- which normalizes without deciding that any of it is structure.
 excerpt :: Text -> Text
 excerpt = collapseWhitespace . firstParagraph . sanitizeText
+
+-- | External text made safe to draw on one line: sanitized, with every run of
+-- whitespace collapsed to a single space and the edges trimmed.
+--
+-- Nothing here is Markdown-aware. A string this returns empty for held no
+-- printable character to begin with, which is what lets a caller use it as a
+-- blankness test over text it did not write.
+oneLineText :: Text -> Text
+oneLineText = collapseWhitespace . sanitizeText
 
 -- | Drops the JSONPath Aeson prefixes a parse failure with (@Error in $: @),
 -- which is noise inside a sentence already naming the one document it is

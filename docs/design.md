@@ -4369,12 +4369,16 @@ The first solve/autosolve-compatible slice is implemented.
 - A provider event the parser does not recognize — an unknown top-level type,
   an unknown Codex item, or an unknown Claude content block — contributes at
   most one bounded single-line notice: a normalized, truncated type label and
-  a truncated compact payload prefix, whole-notice length included. Only a
-  literal JSON string names a recognized type, so a non-string type cannot be
-  coerced into a recognized branch and out of the bound. A payload with no
-  usable string type, and an `error` payload with no usable string `message`,
-  use the same bounded form; only a real textual error message is exempt and
-  kept in full. Repeats collapse per invocation: the first few
+  a truncated compact payload prefix, whole-notice length included.
+  Normalizing a type means sanitizing it and collapsing its whitespace onto one
+  line, and nothing more: none of it is read as Markdown the way §11 reads a
+  card body, so a type shaped like a heading or an HTML comment keeps an
+  identity of its own. Only a literal JSON string names a recognized type, so a
+  non-string type cannot be coerced into a recognized branch and out of the
+  bound. A payload with no usable string type — missing, non-string, or blank
+  once normalized — and an `error` payload with no usable string `message`, use
+  the same bounded form; only a real textual error message is exempt and kept
+  in full. Repeats collapse per invocation: the first few
   occurrences of each `(category, type)` are reported individually, later ones
   only accumulate a count, and one aggregate summary naming the total is
   appended before the terminal event on every path. The supervisor owns that

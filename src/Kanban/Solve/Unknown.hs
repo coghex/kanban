@@ -27,7 +27,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Solve.Event (AgentEvent (..), StreamEvent (..), UnknownStreamCategory (..), UnknownStreamKey (..))
-import Kanban.Text (excerpt)
+import Kanban.Text (oneLineText)
 
 -- | The deterministic ceiling on an entire unknown-payload notice — category
 -- tag, type label, separator, and bounded detail together, not just the
@@ -144,7 +144,7 @@ unknownAggregateNotice key total = elide maxUnknownNoticeLength (unknownNoticePr
 unknownNoticePrefix :: UnknownStreamKey -> Text
 unknownNoticePrefix (UnknownStreamKey category usableType) = categoryTag category <> label
   where
-    label = maybe unknownTypePlaceholder (elide maxUnknownTypeLength . excerpt) usableType
+    label = maybe unknownTypePlaceholder (elide maxUnknownTypeLength . oneLineText) usableType
 
 categoryTag :: UnknownStreamCategory -> Text
 categoryTag UnknownTopLevel = "[event] "

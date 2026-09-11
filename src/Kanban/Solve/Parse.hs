@@ -23,7 +23,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Kanban.Solve.Event (AgentEvent (..), StreamEvent (..), UnknownStreamCategory (..), UnknownStreamKey (..))
 import Kanban.Solve.Unknown (elide, maxUnknownNoticeLength, unknownNoticePrefix)
-import Kanban.Text (excerpt)
+import Kanban.Text (oneLineText)
 
 data ParsedSolveOutput = ParsedSolveOutput
   { parsedSessionId :: Maybe Text,
@@ -112,11 +112,16 @@ unknownStreamEvent category value =
 -- | The aggregation identity of an unrecognized payload. Only a literal JSON
 -- string is a usable type; everything else — missing, non-string, or blank
 -- once normalized — shares the one stable placeholder key.
+--
+-- Normalized by 'oneLineText' rather than by 'Kanban.Text.excerpt', because a
+-- provider's type is not a card body: one shaped like a Markdown heading or an
+-- HTML comment is a type like any other, and reading it as structure would
+-- leave it blank and fold it in with the payloads that genuinely name none.
 unknownStreamKey :: UnknownStreamCategory -> Value -> UnknownStreamKey
 unknownStreamKey category value = UnknownStreamKey category usableType
   where
     usableType = case fieldString "type" value of
-      Just typeText | not (Text.null (excerpt typeText)) -> Just typeText
+      Just typeText | not (Text.null (oneLineText typeText)) -> Just typeText
       _ -> Nothing
 
 -- | The whole notice for one occurrence: category tag, bounded type label,
@@ -128,7 +133,7 @@ unknownNotice :: UnknownStreamKey -> Value -> Text
 unknownNotice key value =
   let prefix = unknownNoticePrefix key
       budget = maxUnknownNoticeLength - Text.length prefix - 1
-      detail = if budget <= 0 then "" else elide budget (excerpt (boundedCompactValue budget value))
+      detail = if budget <= 0 then "" else elide budget (oneLineText (boundedCompactValue budget value))
    in elide maxUnknownNoticeLength (if Text.null detail then prefix else prefix <> " " <> detail)
 
 -- | A compact JSON rendering truncated to at least @limit@ characters

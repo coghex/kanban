@@ -1,13 +1,14 @@
 -- | Sanitizing text that arrives from outside the process.
 module Spec.UI.Text (spec) where
 
-import Kanban.Text (excerpt, sanitizeText)
+import Kanban.Text (excerpt, oneLineText, sanitizeText)
 import Test.Hspec
 
 spec :: Spec
 spec = do
   sanitizationSpec
   excerptSelectionSpec
+  oneLineSpec
 
 sanitizationSpec :: Spec
 sanitizationSpec = do
@@ -36,6 +37,30 @@ sanitizationSpec = do
     -- to fold it into.
     it "preserves an ordinary combining mark that has no precomposed form" $
       sanitizeText "5\817" `shouldBe` "5\817"
+
+-- | The boundary beside 'excerpt': text normalized for one line without any
+-- of it being read as Markdown.
+--
+-- Provider event types travel through this rather than through 'excerpt'
+-- ("Kanban.Solve.Parse"), and a type shaped like a heading or a comment is a
+-- type like any other. Reading one as structure would leave it blank and fold
+-- every such type in with the payloads that genuinely name none.
+oneLineSpec :: Spec
+oneLineSpec = describe "one-line normalization" $ do
+  it "collapses whitespace and trims, as an excerpt does" $ do
+    oneLineText "  spread\tacross\nlines  " `shouldBe` "spread across lines"
+    oneLineText "   " `shouldBe` ""
+
+  it "reads none of its input as Markdown structure" $ do
+    oneLineText "## alpha" `shouldBe` "## alpha"
+    oneLineText "<!-- beta -->" `shouldBe` "<!-- beta -->"
+    -- The same two inputs an excerpt does skip, which is the whole
+    -- difference between the two.
+    excerpt "## alpha" `shouldBe` ""
+    excerpt "<!-- beta -->" `shouldBe` ""
+
+  it "sanitizes like everything else that arrives from outside" $
+    oneLineText "safe\ESC[31m red\ESC[0m\NULtext" `shouldBe` "safe redtext"
 
 -- | #646. Which paragraph an excerpt comes from, once the structure a body
 -- opens with is no longer eligible to be it (§11).
