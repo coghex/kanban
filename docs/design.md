@@ -631,7 +631,14 @@ search declines:
 
 A card matches when the case-folded query occurs as a substring of the
 case-folded `#number` and title shown on the card, with runs of whitespace
-normalized. Bodies, labels, assignees, branches, and status text never
+normalized and both sides compared under Unicode canonical equivalence. A query
+is matched as it renders rather than as it was encoded: one spelling an accented
+character as a base letter followed by a combining mark finds the precomposed
+title it is indistinguishable from, and a precomposed query finds a decomposed
+identity. That is canonical equivalence, not accent insensitivity — `cafe` still
+does not match `café`. Normalization reaches the comparison alone: the box shows
+the query exactly as it was typed, and the 256-code-point bound counts the code
+points entered. Bodies, labels, assignees, branches, and status text never
 contribute. An epic's header is kept when its own identity matches or any of its
 children match, and only matching children are shown beneath it — a matching
 child renders even under a collapsed epic, and an epic that matches alone shows

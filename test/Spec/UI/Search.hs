@@ -109,6 +109,28 @@ laterGroupBoard = issuesBoard laterGroupEntries
 laterGroupBoardWithout :: Int -> Board
 laterGroupBoardWithout number = issuesBoard (filter ((/= Just number) . entryNumber) laterGroupEntries)
 
+-- | A column holding one accented word in both of its canonical spellings:
+-- #880 precomposed as U+00E9, #881 decomposed as @e@ followed by U+0301. The
+-- two titles render identically, so which of them a query finds is a question
+-- about canonical equivalence rather than about the code points stored. The
+-- rest of each title differs, which is what lets a result name the card it
+-- came from.
+accentEntries :: [ColumnEntry]
+accentEntries =
+  [ standaloneCard 880 "Restore caf\233 export",
+    standaloneCard 881 "Restore cafe\769 import"
+  ]
+
+accentBoard :: Board
+accentBoard = issuesBoard accentEntries
+
+-- | The accent column with a query typed into it, reached the way a user
+-- reaches one: open search, then insert each code point in turn.
+accentSearchFor :: Text -> IO AppState
+accentSearchFor query = do
+  state <- testAppState accentBoard
+  pure (withQuery query (openSearch state))
+
 issuesBoard :: [ColumnEntry] -> Board
 issuesBoard entries = Board (Map.fromList ([(column, []) | column <- [minBound .. maxBound]] <> [(Issues, entries)]))
 
@@ -173,6 +195,47 @@ matchingSpec = describe "matching" $ do
   it "normalizes runs of whitespace on both sides of the match" $ do
     spaced <- searchingFor "save   envelope"
     visibleIdentities spaced `shouldBe` ["#711  Adopt the versioned save envelope"]
+
+  it "matches a query and an identity that are canonically equivalent, whichever spelling each uses" $ do
+    -- U+00E9, and 'e' followed by U+0301: one character, two encodings that
+    -- draw the same glyph. All four pairings are the same match.
+    matchesQuery "caf\233" "#123  caf\233" `shouldBe` True
+    matchesQuery "cafe\769" "#123  caf\233" `shouldBe` True
+    matchesQuery "caf\233" "#123  cafe\769" `shouldBe` True
+    matchesQuery "cafe\769" "#123  cafe\769" `shouldBe` True
+    -- Case folding reaches across the spellings too, in both directions.
+    matchesQuery "CAF\201" "#123  cafe\769" `shouldBe` True
+    matchesQuery "CAFE\769" "#123  caf\233" `shouldBe` True
+
+  it "stays canonical-equivalence-sensitive rather than accent-insensitive" $ do
+    -- The base letter alone is a different character, not a looser spelling of
+    -- the accented one — which is what a decomposing comparison would have made
+    -- it, since 'cafe' is a literal prefix of 'cafe' + U+0301.
+    matchesQuery "cafe" "#123  caf\233" `shouldBe` False
+    matchesQuery "cafe" "#123  cafe\769" `shouldBe` False
+    matchesQuery "caf\233" "#123  cafe" `shouldBe` False
+
+  it "finds both spellings of a title from either spelling of the query, through the column view" $ do
+    -- The same equivalence through 'entriesFor': #881's title is stored
+    -- decomposed and #880's precomposed, and neither query can tell them
+    -- apart.
+    precomposed <- accentSearchFor "caf\233"
+    decomposed <- accentSearchFor "cafe\769"
+    let exported = "#880  Restore caf\233 export"
+        imported = "#881  Restore caf\233 import"
+    visibleIdentities precomposed `shouldBe` [exported, imported]
+    visibleIdentities decomposed `shouldBe` [exported, imported]
+    -- And each card is still reachable on its own, from either spelling: the
+    -- one stored precomposed is found by a decomposed query and the one stored
+    -- decomposed by a precomposed one.
+    onlyExport <- accentSearchFor "cafe\769 export"
+    onlyImport <- accentSearchFor "caf\233 import"
+    visibleIdentities onlyExport `shouldBe` [exported]
+    visibleIdentities onlyImport `shouldBe` [imported]
+    -- The unaccented query finds neither, in the column view as in the match.
+    unaccented <- accentSearchFor "cafe"
+    visibleIdentities unaccented `shouldBe` []
+    columnCountText unaccented Issues `shouldBe` "0/2"
 
   it "reads only the identity, never the body, labels, assignees, or status" $ do
     -- The fixture issue bodies are all "Body"; a card would match on it if
@@ -317,6 +380,25 @@ transitionSpec = describe "transitions" $ do
     backspaceQuery "\128devil" `shouldBe` "\128devi"
     backspaceQuery "é" `shouldBe` ""
     backspaceQuery "" `shouldBe` ""
+
+  it "holds a decomposed query as the code points that were entered, and counts each toward the bound" $ do
+    state <- testAppState accentBoard
+    let typed = withQuery "cafe\769" (openSearch state)
+    -- Normalization reaches the comparison alone: the box still holds the five
+    -- code points that were typed, not the four they compose to.
+    (.searchQuery) <$> typed.appSearch `shouldBe` Just "cafe\769"
+    (Text.length <$> ((.searchQuery) <$> typed.appSearch)) `shouldBe` Just 5
+    -- Backspace takes the combining mark alone and leaves the base letter, so
+    -- the query the box shows loses its accent before it loses its 'e'.
+    let unmarked = applySearchInput SearchBackspace typed
+    (.searchQuery) <$> unmarked.appSearch `shouldBe` Just "cafe"
+    (.searchQuery) <$> (applySearchInput SearchBackspace unmarked).appSearch `shouldBe` Just "caf"
+    backspaceQuery "cafe\769" `shouldBe` "cafe"
+    -- And a combining mark spends one of the 256, rather than riding along on
+    -- the letter it marks.
+    let marked = insertQueryChar '\769' (Text.replicate (searchQueryLimit - 1) "e")
+    Text.length marked `shouldBe` 256
+    insertQueryChar 'b' marked `shouldBe` marked
 
   it "stops accepting printable input at 256 code points and accepts it again after a deletion" $ do
     let full = Text.replicate searchQueryLimit "a"
