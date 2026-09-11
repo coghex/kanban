@@ -173,14 +173,17 @@ One qualification sits on top of that population rather than inside it. An
 eligible author may waive their own comment's weight in the fingerprint:
 `tools/approve_issues.py` recognizes the complete fixed literal
 `<!-- issue-spec:no-amend -->` anywhere in a comment body, differing only in
-letter case, and leaves that comment out of the hashed comment list — so
+ASCII letter case, and leaves that comment out of the hashed comment list — so
 appending one to an approved issue leaves the specification fingerprint
 byte-identical and the published approval current. Recognition is exact: an
 incomplete marker, an extended spelling carrying fields such as
 `<!-- issue-spec:no-amend reason=typo -->`, and every whitespace variant
 (`<!--issue-spec:no-amend-->`, extra or tab spacing inside the delimiters) are
 **not** recognized, deliberately unlike the `\s*`-tolerant `issue-origin` and
-`issue-review:v2` marker regexes beside it. The waiver only ever subtracts,
+`issue-review:v2` marker regexes beside it. The case rule is ASCII-only for the
+same reason: `str.casefold` maps `ß` to `ss` and `ſ` to `s`, so a Unicode fold
+would recognize lookalike spellings differing from the literal by more than
+letter case, and those are not recognized either. The waiver only ever subtracts,
 because it is applied on top of `is_spec_relevant_comment` rather than in place
 of it: a marked comment from an unprivileged non-reporter stays outside the
 fingerprint exactly as an unmarked one does, automated `issue-review:v2`

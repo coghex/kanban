@@ -305,12 +305,22 @@ AUTOMATED_REVIEW_COMMENT_RE = re.compile(r"<!--\s*issue-review:v2\b", re.IGNOREC
 # An eligible commenter's own assertion that their comment amends no
 # requirement and so must not invalidate a published approval. Recognized as
 # the complete fixed literal anywhere in a comment body, differing only in
-# letter case -- deliberately NOT the `\s*`-tolerant shape of the marker
+# ASCII letter case -- deliberately NOT the `\s*`-tolerant shape of the marker
 # regexes above, so a whitespace variant, an incomplete marker, or an
 # extended spelling carrying fields is not recognized and that comment keeps
 # its ordinary fingerprint weight. The gate does not verify the assertion;
 # see docs/agent-workflow-contract.md §2.1.
 NO_AMEND_MARKER = "<!-- issue-spec:no-amend -->"
+# A-Z to a-z and nothing else. `str.casefold`, and `str.lower` for some
+# codepoints, map non-ASCII characters INTO ASCII -- "\u00df" folds to "ss",
+# "\u017f" to "s" -- so folding with either would recognize lookalike
+# spellings that differ from the literal by more than letter case, and
+# "\u0130" folds to two characters, changing the body's length. This table
+# maps only the ASCII uppercase letters, leaving every other codepoint and
+# the string's length exactly as fetched.
+ASCII_CASE_FOLD = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
 LOG_DIR: Path | None = None
 LOG_TO_STDERR = False
 # Incremented by note_model_invocation at the single reviewer-model funnel.
@@ -829,10 +839,10 @@ def canonical_comment(comment: dict[str, Any]) -> dict[str, Any]:
 
 
 def has_no_amend_marker(body: str) -> bool:
-    # NO_AMEND_MARKER is lowercase ASCII, so casefolding the body is the
-    # whole of the case-insensitivity rule; nothing else about the literal
-    # may vary.
-    return NO_AMEND_MARKER in (body or "").casefold()
+    # NO_AMEND_MARKER is lowercase ASCII, so an ASCII-only fold of the body is
+    # the whole of the case-insensitivity rule; nothing else about the literal
+    # may vary, a non-ASCII lookalike least of all.
+    return NO_AMEND_MARKER in (body or "").translate(ASCII_CASE_FOLD)
 
 
 def is_spec_relevant_comment(issue: dict[str, Any], comment: dict[str, Any]) -> bool:
@@ -4158,6 +4168,13 @@ def _self_test_body() -> None:
             "<!--  issue-spec:no-amend  -->",
             "<!-- issue-spec:no-amend\t-->",
             "<!-- issue-spec: no-amend -->",
+            # Non-ASCII lookalikes. Each differs from the literal by more than
+            # letter case, yet `str.casefold` maps every one of them onto it.
+            "<!-- i\u00dfue-spec:no-amend -->",
+            "<!-- i\u017fsue-spec:no-amend -->",
+            "<!-- issue-\u017fpec:no-amend -->",
+            "<!-- \u0130ssue-spec:no-amend -->",
+            "<!-- \u0131ssue-spec:no-amend -->",
         )
     ):
         counted = {**ordinary, "id": 300 + index, "body": unrecognized}
