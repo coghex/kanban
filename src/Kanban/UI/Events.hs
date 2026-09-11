@@ -509,6 +509,10 @@ blockedByCompletedLoad = \case
   ToggleApproval -> False
   ToggleDrainer -> False
   ToggleSidebar -> False
+  -- Reaches no card either: it changes how every card is laid out, and a
+  -- blocker that is drawing none of them still has a footer, a filter panel,
+  -- and a board to come back to.
+  ToggleExcerpts -> False
   ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
@@ -568,6 +572,7 @@ mutatesSelectedWork = \case
   ToggleApproval -> False
   ToggleDrainer -> False
   ToggleSidebar -> False
+  ToggleExcerpts -> False
   ShowSettings -> False
   ShowHelp -> False
   RepaintTerminal -> False
@@ -597,6 +602,7 @@ dispatchBoardAction = \case
   ToggleDrainer -> toggleDrainer
   MergeDoneCard -> onSelection mergeItemDoneCard mergeSelectedDoneCard
   ToggleSidebar -> modify (\current -> current {appSidebarVisible = not current.appSidebarVisible})
+  ToggleExcerpts -> modify toggleCardExcerpts
   ShowSettings -> modify openSettings
   OpenSearch -> modify openSearch
   ShowFilter -> modify toggleFilterPanel

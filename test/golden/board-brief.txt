@@ -1,0 +1,64 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════ coghex/kanban ═══════════════════════════════════════════════════════════════════════════════════════════╗
+║┏━━━━━━━━━━ USAGE ━━━━━━━━━┓┏━━━━━━━━━━━━━━━━ ISSUES  5 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━ ACTIVE  3 ━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━ REVIEWING  2 ━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━ DONE  3 ━━━━━━━━━━━━━━━━┓║
+║┃ Codex          3h 0m old ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ 5 hour  [██████░░░░] 63% ┃┃  STANDALONE                              ┃  STANDALONE                             ┃  STANDALONE                             ┃  STANDALONE                             ┃║
+║┃ in 1h 5m · Thu 16:05     ┃┃ ▌╭─────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ week    [████░░░░░░] 41% ┃┃  │ #812 Modal input leaks through      │ ┃  │ #799 Repair stale world cache      │ ┃  │ PR #841 Split the input dispatch   │ ┃  │ PR #851 Resolve save envelope      │ ┃║
+║┃ in 4d 18h · Tue 09:00    ┃┃  │ overlay                             │ ┃  │ invalidation                       │ ┃  │ facade                             │ ┃  │ conflict                           │ ┃║
+║┃ Claude         3h 0m old ┃┃  │  reviewed:approve   bug   ui        │ ┃  │  blocked   bug                     │ ┃  │  refactor                          │ ┃  │  reviewed:approve                  │ ┃║
+║┃ 5 hour  [████████░░] 78% ┃┃  │ unassigned · updated 4h ago         │ ┃  │ @codex-agent · updated 4h ago      │ ┃  │ #833 · agent-name → master ·       │ ┃  │ UNLINKED · agent-name → master ·   │ ┃║
+║┃ in 2h 30m · Thu 17:30    ┃┃  ╰─────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃  │ updated 3h ago                     │ ┃  │ updated 3h ago                     │ ┃║
+║┃ week    [██░░░░░░░░] 22% ┃┃                                          ┃                                         ┃  │ ◐ CI 12/14 · behind                │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
+║┃ in 1d 18h · Sat 09:10    ┃┃                                          ┃                                         ┃  ╰────────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┏━━━┓                    ┃┃  ▾ #700  Persistence contract rollout    ┃  ▾ #700  Persistence contract rollout   ┃                                         ┃                                         ┃║
+║┃ ┃ ↻ ┃                    ┃┃  1/2 complete                            ┃  1/2 complete                           ┃  ╭────────────────────────────────────╮ ┃  ╭────────────────────────────────────╮ ┃║
+║┃ ┗━━━┛                    ┃┃  └─ ╭──────────────────────────────────╮ ┃  └─ ╭─────────────────────────────────╮ ┃  │ DRAFT #847 Prototype native        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃     │ A1 · tracker #700                │ ┃     │ A2 · tracker #700               │ ┃  │ sub-issue import                   │ ┃  │  reviewed:approve   input   ui     │ ┃║
+║┃                          ┃┃     │ #711 Adopt the versioned save    │ ┃     │ #712 Migrate the terrain cache  │ ┃  │  experimental                      │ ┃  │ #812 · agent-name → master ·       │ ┃║
+║┃                          ┃┃     │ envelope                         │ ┃     │ reader                          │ ┃  │ #756 · agent-name → master ·       │ ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃     │  feature                         │ ┃     │  code-health                    │ ┃  │ updated 3h ago                     │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
+║┃                          ┃┃     │ unassigned · updated 4h ago      │ ┃     │ @codex-agent · updated 4h ago   │ ┃  │ ? CI unknown · calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃     ╰──────────────────────────────────╯ ┃     ╰─────────────────────────────────╯ ┃  ╰────────────────────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                          ┃  STANDALONE                             ┃                                         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardening  0/1    ┃  ╭────────────────────────────────────╮ ┃                                         ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  complete                                ┃  │ #833 Improve notification category │ ┃                                         ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  STANDALONE                              ┃  │ defaults                           │ ┃                                         ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃  │  code-health                       │ ┃                                         ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ #756 Define the persistence         │ ┃  │ @claude-agent · updated 4h ago     │ ┃                                         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ contract                            │ ┃  ╰────────────────────────────────────╯ ┃                                         ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │  architecture                       │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╭─────────────────────────────────────╮ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ #901 Add repository snapshot cache  │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │  feature                            │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  │ unassigned · updated 4h ago         │ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃  ╰─────────────────────────────────────╯ ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃                          ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━━━━━━┓    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ approve_issues.py ┃    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━━━━━━┛    ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┃ off                      ┃┃                                          ┃                                         ┃                                         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║ j/↓ next  k/↑ previous  x kill  h/← prev column  l/→ next column  g first  G last  s search  F filter  e epic  enter details  w browser  esc close  r review/revise  S solve  A autosolve  p process ║
+║ board: updated 3h ago · history: current                                                                                                                                                             ║
+║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

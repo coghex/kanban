@@ -10,6 +10,7 @@ module Kanban.UI.State
     setNoticeFor,
     settleNoticeExpiry,
     settleOverlayFullscreen,
+    toggleCardExcerpts,
     toggleOverlayFullscreen,
     transcriptFor,
   )
@@ -104,6 +105,31 @@ toggleOverlayFullscreen state
   | maybe False overlayHonorsFullscreen state.appOverlay =
       state {appOverlayFullscreen = not state.appOverlayFullscreen}
   | otherwise = state
+
+-- | The whole of what @v@ does: one flag, and the request to keep the
+-- selection on screen through the reflow it causes (issue #664).
+--
+-- Local and immediate by construction. Nothing here reaches GitHub, the
+-- snapshot cache, the configuration, the settings file, or the board's
+-- freshness: the flag is process-lifetime presentation state, exactly as the
+-- filter criteria beside it are. Every column measurement taken under the old
+-- budget is dropped by the settle after this event, because
+-- 'Kanban.UI.Board.layoutInputs' reads the same flag
+-- ('Kanban.UI.Board.cardExcerptLimit') and 'appLayoutEpoch' moves with it.
+--
+-- The reveal is the half that needs saying. The selection is a row index and
+-- this moves none of them, so identity survives on its own; what does not is
+-- /visibility/, because every card above the selected one changes height. The
+-- flag is what makes the next frame ask brick to scroll it back into the
+-- viewport, and it is set in both directions -- growing the cards above can
+-- push the selection past the bottom, and shrinking them can leave a viewport
+-- offset that is now past the end of the column.
+toggleCardExcerpts :: AppState -> AppState
+toggleCardExcerpts state =
+  state
+    { appExcerptsVisible = not state.appExcerptsVisible,
+      appEnsureSelectionVisible = True
+    }
 
 -- | What one event leaves the fullscreen flag holding, given the overlay that
 -- was open before it.

@@ -438,6 +438,7 @@ Initial bindings:
 | `d` or click | Start or stop the service-managed PR drainer |
 | `m` | Merge the selected approved pull request in Done through the PR drainer's own single-pull-request path |
 | `c` | Collapse or expand the usage sidebar |
+| `v` | Show or hide the body excerpt on every card, reflowing the columns and keeping the selection in view; titles, label chips, metadata, tracker context, diagnostics and pull-request status are unchanged, a card's details overlay still shows the whole body, and every launch starts at the configured `excerpt_lines` height |
 | `o` | Open settings: `1`/`2`/`3` select chat-output verbosity; `j`/`k` or Up/Down select a roster assignment; `h`/`l` or Left/Right cycle its model; `[`/`]` cycle its effort; `d` resets the selected assignment, or repairs an unusable roster with defaults; click selects, the wheel scrolls, and Esc closes |
 | `?` | Open a help overlay listing all bindings |
 | `Ctrl-L` | Force a terminal repaint without a network request |
@@ -1579,6 +1580,18 @@ excerpt line rather than a heading.
 
 None of this reaches the details overlay, which renders the whole sanitized
 body with its headings and comments intact.
+
+§7's `v` takes the excerpt rows off every card and puts them back, leaving
+everything else a card draws exactly as it was. It is process-lifetime
+presentation state, like the filter criteria: every launch starts with excerpts
+shown at the configured `excerpt_lines` height, the toggle survives refreshes,
+overlays and resizes, and nothing writes it to the configuration, the settings
+file, or the snapshot cache. Hiding them is a runtime budget of zero rows
+rather than a configuration value — §16 still refuses `excerpt_lines = 0` — and
+it is one budget rather than three: a card is measured, drawn, and has its
+cached column layout invalidated against the same number, so a toggle reflows
+the columns in one step. The details overlay shows the whole body in either
+state.
 
 ### Card height and truncation
 

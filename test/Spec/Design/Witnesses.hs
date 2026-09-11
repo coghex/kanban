@@ -771,6 +771,7 @@ boardActionInventory =
       "ToggleDrainer",
       "MergeDoneCard",
       "ToggleSidebar",
+      "ToggleExcerpts",
       "ShowSettings",
       "ShowHelp",
       "RepaintTerminal",

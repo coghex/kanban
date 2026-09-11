@@ -21,7 +21,7 @@ import Kanban.Domain (BoardItem (..), Issue (..), PullRequest (..))
 import Kanban.Models (OperatingMode (..), ProviderName (..), noAgentModeMessage)
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolveWorkflow (..))
-import Kanban.UI.Board (boardFooterHintLine, boardHintLine, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
+import Kanban.UI.Board (BoardMarks (..), boardFooterHintLine, boardHintLine, defaultBoardMarks, filterFooterHintLine, footerHintLine, overlayHintChips, searchFooterHintLine)
 import Kanban.UI.Filter (toggleFilterPanel)
 import Kanban.UI.Keys
 import Kanban.UI.Overlay (drawOverlay, helpLines, mouseHelpEntries)
@@ -141,6 +141,19 @@ spec = describe "keybinding table" $ do
         [ (chip, chip `elem` map footerHint boardBindings) `shouldBe` (chip, True)
           | chip <- Text.splitOn "  " footerHintLine
         ]
+
+    -- Issue #664. The excerpt chip is the one label on the line that is not
+    -- constant, and both of its spellings are "Kanban.UI.Keys"' own rather
+    -- than a second copy kept beside the footer.
+    it "respells the excerpt chip from the board's own state, leaving the rest of the line alone" $ do
+      let brief = boardFooterHintLine DualMode defaultBoardMarks {marksExcerptsVisible = False}
+      excerptFooterHint True `shouldBe` footerHint (binding ToggleExcerpts)
+      excerptFooterHint False `shouldNotBe` excerptFooterHint True
+      Text.splitOn "  " footerHintLine `shouldSatisfy` elem (excerptFooterHint True)
+      Text.splitOn "  " brief `shouldSatisfy` elem (excerptFooterHint False)
+      length (Text.splitOn "  " brief) `shouldBe` length (Text.splitOn "  " footerHintLine)
+      filter (`notElem` Text.splitOn "  " footerHintLine) (Text.splitOn "  " brief)
+        `shouldBe` [excerptFooterHint False]
 
     it "includes the entries the hand-written line had dropped" $
       sequence_
@@ -416,7 +429,7 @@ spec = describe "keybinding table" $ do
 
     it "leaves the footer line itself alone in dual and single-agent mode" $
       sequence_
-        [ (name, boardFooterHintLine mode False) `shouldBe` (name, footerHintLine)
+        [ (name, boardFooterHintLine mode defaultBoardMarks) `shouldBe` (name, footerHintLine)
           | (name, mode) <- loadedModes
         ]
 
@@ -515,7 +528,7 @@ recoveryBindings = [KillWorking, ShowProcesses]
 
 -- | The board's footer line with no provider loaded and nothing filtering.
 noAgentFooterHintLine :: Text
-noAgentFooterHintLine = boardFooterHintLine NoAgentMode False
+noAgentFooterHintLine = boardFooterHintLine NoAgentMode defaultBoardMarks
 
 -- | The two modes a session key is decoded in, with no optional binding
 -- enabled and something still there to read what the session types.

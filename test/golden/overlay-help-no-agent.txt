@@ -24,24 +24,24 @@
 ║┃                          ┃┃     │ Write the envel┃ d / click        start or stop PR drainer                                                   ┃       │ ┃  │ ordinary wheel events.             │ ┃║
 ║┃                          ┃┃     │ of the payload ┃ m                merge the selected approved PR in Done                                     ┃       │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃     │ write is detect┃ c                collapse / expand sidebar                                                  ┃       │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰────────────────┃ o                settings                                                                   ┃───────╯ ┃                                         ┃║
-║┃                          ┃┃                      ┃ ?                this help overlay                                                          ┃         ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                      ┃ Ctrl-L           repaint                                                                    ┃         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ▸ #701  Input routin┃ q / Ctrl-C       quit                                                                       ┃         ┃  │ snapshot loader                    │ ┃║
-║┃                          ┃┃  complete            ┃ Tab              next session in an open solve/PR/review overlay                            ┃         ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  STANDALONE          ┃ Ctrl-C           interrupt agent turn; guidance resumes it, r restarts canonical review     ┃         ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  ╭───────────────────┃ i                session overlay: type into the draft (insert mode)                         ┃         ┃  │ updated 3h ago                     │ ┃║
-║┃                          ┃┃  │ #756 Define the pe┃ j / k            session overlay normal mode: scroll transcript one line                    ┃         ┃  │ Reads the cache through the        │ ┃║
-║┃                          ┃┃  │ contract          ┃ g / G            session overlay normal mode: transcript beginning / live tail              ┃         ┃  │ versioned envelope and reports a   │ ┃║
-║┃                          ┃┃  │  architecture     ┃ Ctrl-D / Ctrl-U  session overlay normal mode: scroll transcript sixteen lines               ┃         ┃  │ truncated payload.                 │ ┃║
-║┃                          ┃┃  │ unassigned · updat┃ q                session overlay normal mode: hide the overlay                              ┃         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
-║┃                          ┃┃  │ Document root owne┃ left click       select card; click selected card for details                               ┃         ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃  │ barriers, and the ┃ mouse wheel      scroll column under pointer                                                ┃         ┃                                         ┃║
-║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ envelope before im┃ right click      close card details, windowed or fullscreen                                 ┃         ┃                                         ┃║
-║┃ ┃ drain_prs.py ┃         ┃┃  ╰───────────────────┃ outside click    close card details, while it is windowed                                   ┃         ┃                                         ┃║
-║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                      ┃                                                                                             ┃         ┃                                         ┃║
-║┃ off                      ┃┃  ╭───────────────────┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛         ┃                                         ┃║
-║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
+║┃                          ┃┃     ╰────────────────┃ v                show / hide card body excerpts                                             ┃───────╯ ┃                                         ┃║
+║┃                          ┃┃                      ┃ o                settings                                                                   ┃         ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                      ┃ ?                this help overlay                                                          ┃         ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃  ▸ #701  Input routin┃ Ctrl-L           repaint                                                                    ┃         ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  complete            ┃ q / Ctrl-C       quit                                                                       ┃         ┃  │  reviewed:approve   feature        │ ┃║
+║┃                          ┃┃  STANDALONE          ┃ Tab              next session in an open solve/PR/review overlay                            ┃         ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  ╭───────────────────┃ Ctrl-C           interrupt agent turn; guidance resumes it, r restarts canonical review     ┃         ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  │ #756 Define the pe┃ i                session overlay: type into the draft (insert mode)                         ┃         ┃  │ Reads the cache through the        │ ┃║
+║┃                          ┃┃  │ contract          ┃ j / k            session overlay normal mode: scroll transcript one line                    ┃         ┃  │ versioned envelope and reports a   │ ┃║
+║┃                          ┃┃  │  architecture     ┃ g / G            session overlay normal mode: transcript beginning / live tail              ┃         ┃  │ truncated payload.                 │ ┃║
+║┃                          ┃┃  │ unassigned · updat┃ Ctrl-D / Ctrl-U  session overlay normal mode: scroll transcript sixteen lines               ┃         ┃  │ ◐ CI 9/12 · behind                 │ ┃║
+║┃                          ┃┃  │ Document root owne┃ q                session overlay normal mode: hide the overlay                              ┃         ┃  ╰────────────────────────────────────╯ ┃║
+║┃                          ┃┃  │ barriers, and the ┃ left click       select card; click selected card for details                               ┃         ┃                                         ┃║
+║┃ ┏━━━━━━━━━━━━━━┓         ┃┃  │ envelope before im┃ mouse wheel      scroll column under pointer                                                ┃         ┃                                         ┃║
+║┃ ┃ drain_prs.py ┃         ┃┃  ╰───────────────────┃ right click      close card details, windowed or fullscreen                                 ┃         ┃                                         ┃║
+║┃ ┗━━━━━━━━━━━━━━┛         ┃┃                      ┃ outside click    close card details, while it is windowed                                   ┃         ┃                                         ┃║
+║┃ off                      ┃┃  ╭───────────────────┃                                                                                             ┃         ┃                                         ┃║
+║┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛║
 ║ f fullscreen  esc close  q/Ctrl-C quit                                                                                                                                                               ║
 ║ board: updated 3h ago · history: current                                                                                                                                                             ║
 ║ Cached GitHub snapshot loaded · press u to update                                                                                                                                                    ║

@@ -54,7 +54,7 @@ import Kanban.UI.Types
     SolvePhase (..),
     SolveSession,
   )
-import Kanban.UI.Board (unmeasuredLayoutInputs)
+import Kanban.UI.Board (defaultExcerptsVisible, unmeasuredLayoutInputs)
 import Spec.Support.Board (inertRefreshCoordinator)
 import Spec.Support.Fixtures (epoch, testOptions, testResolvedConfig)
 
@@ -91,6 +91,7 @@ testAppState board = do
         appExpandedTrackers = Set.empty,
         appSearch = Nothing,
         appSidebarVisible = True,
+        appExcerptsVisible = defaultExcerptsVisible,
         appSettings = defaultSettings,
         -- The pure compiled value, not a load: a test state must not read
         -- the developer's real XDG configuration. A test naming another

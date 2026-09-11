@@ -103,6 +103,7 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `e` | Expand or collapse an epic |
 | `u` | Refresh GitHub, Codex usage, and Claude usage — the sidebar's `↻` button does the same thing |
 | `c` | Hide or show the sidebar |
+| `v` | Hide or show the body excerpt on every card |
 | `o` | Change how much agent output is shown |
 | `p` | Open the jobs and processes list |
 | `i` | Open the list of everything needing attention |
@@ -114,6 +115,16 @@ Kanban loads its last saved board when it starts, then requests fresh data. It d
 | `q` / `Ctrl-C` | Quit |
 
 The footer in the application shows the main controls.
+
+### Scanning a long column
+
+Press `v` to take the body excerpt off every card. Titles, labels, ages and
+status stay exactly where they were, so the cards get shorter and more of the
+column fits on screen; the selected card stays selected and stays in view.
+Press `v` again to bring the excerpts back. The footer chip says which of the
+two the board is in — `v excerpts` or `v brief` — and `Enter` opens the full
+body in either. Nothing is saved: every start shows excerpts again, at the
+height `excerpt_lines` sets.
 
 ### Opening a card on GitHub
 
