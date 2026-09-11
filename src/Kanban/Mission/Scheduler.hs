@@ -104,13 +104,17 @@ import Kanban.Mission.Types
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory
   ( XdgDirectory (XdgCache),
+    createDirectory,
     getXdgDirectory,
     removeDirectoryRecursive,
+    removePathForcibly,
   )
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (IOMode (ReadMode), hClose, openFile)
+import System.IO.Error (isAlreadyExistsError)
+import System.Posix.Files (getSymbolicLinkStatus, setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Process
   ( CreateProcess (..),
@@ -394,6 +398,22 @@ advanceMissions executable options repository scratch admitted = do
 
     launch (index, mission) = do
       let resultPath = scratch </> ("child-" <> show index <> ".json")
+      -- The result document is read back by path, and a document that was
+      -- already there is indistinguishable from one this child wrote. That is
+      -- not hypothetical: a pass that was killed leaves its children's
+      -- documents behind, and a later pass whose scratch directory resolved to
+      -- the same place would read one of them as the account of a child that
+      -- in fact wrote nothing — a stale @already_advancing@ beside a fresh
+      -- non-zero exit reads as ordinary contention, which is a successful
+      -- pass over a mission that failed. So the path is cleared and its
+      -- absence established before anything is started, and a path that
+      -- cannot be cleared refuses the launch rather than being launched over.
+      cleared <- clearResultPath resultPath
+      case cleared of
+        Left detail -> pure (LaunchRefused mission detail)
+        Right () -> start mission resultPath
+
+    start mission resultPath = do
       started <-
         try @IOException
           ( bracket (openFile "/dev/null" ReadMode) hClose $ \devNull ->
@@ -453,6 +473,25 @@ advanceMissions executable options repository scratch admitted = do
       releaseCapture outputCapture
       releaseCapture errorCapture
       readChildResult mission resultPath exitCode
+
+-- | Removes whatever occupies a child's result path, and proves it is gone.
+--
+-- Two steps rather than one, because a removal that fails is exactly the case
+-- that matters: @removePathForcibly@ succeeds on a path that was never there,
+-- so its success says nothing, and the question this has to answer is whether
+-- the path is empty /now/.
+clearResultPath :: FilePath -> IO (Either Text ())
+clearResultPath path = do
+  _ <- try @IOException (removePathForcibly path)
+  occupied <- try @IOException (getSymbolicLinkStatus path)
+  pure $ case occupied of
+    Left _ -> Right ()
+    Right _ ->
+      Left
+        ( "the result path "
+            <> Text.pack path
+            <> " was already occupied and could not be cleared, so this mission was not started"
+        )
 
 -- | One launched mission child, or the reason there is none to wait for.
 --
@@ -521,8 +560,7 @@ readChildResult mission resultPath exitCode = do
 -- that the test suite cannot compile.
 runMissionSchedulerMode :: Options -> ResolvedConfig -> Repository -> MissionStore -> IO (MissionPassReport, Int)
 runMissionSchedulerMode options config repository store = do
-  scratch <- passScratchDirectory
-  prepared <- try @IOException (createPrivateDirectory XdgCache scratch)
+  prepared <- newPassScratchDirectory
   report <- case prepared of
     Left exception -> do
       now <- getCurrentTime
@@ -536,25 +574,57 @@ runMissionSchedulerMode options config repository store = do
             missionPassAttention = [],
             missionPassDetail = "this pass could not prepare its scratch directory: " <> Text.pack (show exception)
           }
-    Right () -> do
+    Right scratch -> do
       seams <- liveMissionSchedulerSeams options repository store scratch
       runMissionSchedulerPass seams config.resolvedMissions store repository
   -- Every child has been waited for by now, so nothing is still writing in
-  -- there. A removal that fails is left alone: the directory is named by this
-  -- process's identifier, so a leftover collides with nothing and reporting it
-  -- would put a word about a cache directory into a document about missions.
-  _ <- try @IOException (removeDirectoryRecursive scratch)
+  -- there. A removal that fails is left alone: the directory's name is unique
+  -- to this pass, so a leftover collides with nothing and reporting it would
+  -- put a word about a cache directory into a document about missions.
+  mapM_ (\scratch -> try @IOException (removeDirectoryRecursive scratch) :: IO (Either IOException ())) prepared
   pure (report, missionPassExitCode report.missionPassTermination)
 
--- | Where this pass's children leave their result documents.
+-- | A directory this pass's children leave their result documents in, which
+-- no other pass has ever used.
 --
 -- Under the cache root rather than in the mission store: these are transient
 -- handoffs between one process and its own children, they are removed when the
 -- pass ends, and a mission's own directory is durable state that a crashed
--- pass has no business littering. Named by process identifier so two passes —
--- two repositories, or a stale one — cannot collide.
-passScratchDirectory :: IO FilePath
-passScratchDirectory = do
+-- pass has no business littering.
+--
+-- Created with @createDirectory@ rather than @createDirectoryIfMissing@, and
+-- that is the whole point of it. A name built from the process identifier
+-- alone is /reused/ — the kernel recycles identifiers, and a pass that was
+-- killed leaves its children's documents behind — so a later pass could open a
+-- directory that already held a @child-0.json@ and read it as the account of
+-- a child that wrote nothing. An exclusive create cannot return a directory
+-- that was already there, so the only way to get one is to have made it.
+--
+-- The token is the time and the identifier together, the spelling
+-- "Kanban.Mission.Lease" uses for the same purpose; a collision is retried a
+-- bounded number of times rather than assumed away.
+newPassScratchDirectory :: IO (Either IOException FilePath)
+newPassScratchDirectory = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
-  processId <- getProcessID
-  pure (cacheRoot </> "mission-scheduler" </> show processId)
+  let root = cacheRoot </> "mission-scheduler"
+  prepared <- try @IOException (createPrivateDirectory XdgCache root)
+  case prepared of
+    Left exception -> pure (Left exception)
+    Right () -> attempt root (8 :: Int)
+  where
+    attempt root remaining = do
+      token <- passToken
+      let directory = root </> token
+      created <- try @IOException (createDirectory directory)
+      case created of
+        Right () -> do
+          _ <- try @IOException (setFileMode directory 0o700) :: IO (Either IOException ())
+          pure (Right directory)
+        Left exception
+          | isAlreadyExistsError exception, remaining > 0 -> attempt root (remaining - 1)
+          | otherwise -> pure (Left exception)
+
+    passToken = do
+      now <- getCurrentTime
+      processId <- getProcessID
+      pure (filter (`notElem` ("-:. TZ" :: String)) (show now) <> "-" <> show processId)

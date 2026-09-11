@@ -1073,7 +1073,7 @@ def _parse_repositories_table(
         if not isinstance(repo_value, dict):
             raise KanbanConfigError(f"{child_path} must be a table")
         repo_table = dict(repo_value)
-        for forbidden in ("cache", "remote_name", "usage"):
+        for forbidden in ("cache", "remote_name", "usage", "missions"):
             if forbidden in repo_table:
                 raise KanbanConfigError(
                     f"{child_path}.{forbidden} is not valid in a repository override; "

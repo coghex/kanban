@@ -756,7 +756,7 @@ repositoryOverrideParser = do
   limitsOverride <- optKeyOf "limits" (parseTableFromValue limitsOverrideParser)
   timeoutsOverride <- optKeyOf "timeouts" (parseTableFromValue timeoutsOverrideParser)
   checkoutPath <- optKeyOf "path" parseCheckoutPath
-  mapM_ forbidRepositoryKey ["cache", "remote_name", "usage"]
+  mapM_ forbidRepositoryKey ["cache", "remote_name", "usage", "missions"]
   pure
     RepositoryOverride
       { repositoryOverrideWorkflow = fromMaybe emptyWorkflowOverride workflowOverride,

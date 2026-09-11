@@ -449,6 +449,100 @@ class PassReportTests(unittest.TestCase):
                 ),
                 0,
             ),
+            # A Boolean is an `int` in Python and `True == 1`, so an exit status
+            # checked with `==` alone agrees with two of the three terminations.
+            "boolean exit code": (
+                json.dumps({**pass_document(termination="completed"), "exit_code": False}),
+                0,
+            ),
+            "boolean exit code on a failed pass": (
+                json.dumps(
+                    {
+                        **pass_document(
+                            termination="failed",
+                            admitted=[admitted_entry(disposition="failed")],
+                        ),
+                        "exit_code": True,
+                    }
+                ),
+                1,
+            ),
+            "admitted detail that is not text": (
+                json.dumps(pass_document(admitted=[{**admitted_entry(), "detail": 7}])),
+                0,
+            ),
+            "attention detail that is neither absent nor text": (
+                json.dumps(pass_document(attention=[{**attention_entry(), "detail": 7}])),
+                0,
+            ),
+            # The target is reproduced into the status document a dashboard
+            # renders, so every way it can be malformed is refused here rather
+            # than passed through.
+            "target that is not an object": (
+                json.dumps(pass_document(attention=[{**attention_entry(), "target": "issue#844"}])),
+                0,
+            ),
+            "target with the wrong fields": (
+                json.dumps(
+                    pass_document(
+                        attention=[{**attention_entry(), "target": {"kind": "issue"}}]
+                    )
+                ),
+                0,
+            ),
+            "target with an extra field": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {
+                                **attention_entry(),
+                                "target": {"kind": "issue", "number": 844, "title": "no"},
+                            }
+                        ]
+                    )
+                ),
+                0,
+            ),
+            "unknown target kind": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "target": {"kind": "discussion", "number": 844}}
+                        ]
+                    )
+                ),
+                0,
+            ),
+            "target number that is text": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "target": {"kind": "issue", "number": "844"}}
+                        ]
+                    )
+                ),
+                0,
+            ),
+            "target number that is a Boolean": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "target": {"kind": "issue", "number": True}}
+                        ]
+                    )
+                ),
+                0,
+            ),
+            "target number that is not positive": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {**attention_entry(), "target": {"kind": "issue", "number": 0}}
+                        ]
+                    )
+                ),
+                0,
+            ),
         }
         for label, (stdout, returncode) in cases.items():
             with self.subTest(report=label):
@@ -464,6 +558,20 @@ class PassReportTests(unittest.TestCase):
             detail="1 failed",
         )
         self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
+
+    def test_an_absent_target_and_both_kinds_are_accepted(self):
+        # The negative control for the target cases above: refusing everything
+        # would pass that table while accepting no real report at all.
+        for target in (
+            None,
+            {"kind": "issue", "number": 844},
+            {"kind": "pull_request", "number": 12},
+        ):
+            with self.subTest(target=target):
+                document = pass_document(
+                    attention=[{**attention_entry(), "target": target}]
+                )
+                self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
 
     def test_a_refused_pass_is_accepted_with_nothing_admitted(self):
         document = pass_document(termination="refused", detail="nothing to run")
@@ -639,7 +747,37 @@ class IdentityTests(MissionRunnerFixture):
         self.assertIn(str(plain), str(raised.exception))
 
     def test_an_explicit_executable_is_taken(self):
-        self.assertEqual(service.resolve_kanban(str(self.scheduler)), self.scheduler)
+        # Compared against the resolved path: what is stored is absolute and
+        # symlink-free, because the checkout a pass runs from is not the
+        # directory the controller was started in.
+        self.assertEqual(service.resolve_kanban(str(self.scheduler)), self.scheduler.resolve())
+
+    def test_a_relative_executable_is_resolved_before_it_is_stored(self):
+        # A pass runs with the *checkout* as its working directory, so a
+        # relative path is checked against one directory and launched from
+        # another. Storing the relative spelling would pass every check at
+        # startup and then fail every pass.
+        previous = os.getcwd()
+        os.chdir(self.root)
+        try:
+            resolved = service.resolve_kanban("./fake kanban")
+        finally:
+            os.chdir(previous)
+        self.assertTrue(resolved.is_absolute())
+        self.assertEqual(resolved, self.scheduler.resolve())
+
+    def test_a_relative_executable_from_path_is_resolved_too(self):
+        # `shutil.which` returns a relative path for a relative PATH entry, so
+        # the same hazard reaches a controller that named no executable at all.
+        previous = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with mock.patch.object(service.shutil, "which", lambda _: "./fake kanban"):
+                resolved = service.resolve_kanban(None)
+        finally:
+            os.chdir(previous)
+        self.assertTrue(resolved.is_absolute())
+        self.assertEqual(resolved, self.scheduler.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +799,38 @@ class LifecycleTests(MissionRunnerFixture):
         self.assertEqual(call["argv"][call["argv"].index("--repo") + 1], self.identity)
         self.assertEqual(Path(call["cwd"]).resolve(), self.repo.resolve())
         self.assertFalse(call["stdin_is_a_terminal"])
+
+    def test_a_relative_executable_still_runs_from_a_different_checkout(self):
+        # The end of the same thread: the controller is started from a
+        # directory that is not the checkout and names its executable
+        # relatively, and the pass still runs.
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(CONTROLLER.parent),
+                str(self.account),
+                "run",
+                "--path",
+                str(self.repo),
+                "--kanban",
+                "./fake kanban",
+                "--interval",
+                "0.05",
+                "--passes",
+                "1",
+            ],
+            cwd=str(self.root),
+            env=self.environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.processes.append(child)
+        _stdout, stderr = child.communicate(timeout=40)
+        self.assertEqual(child.returncode, 0, stderr)
+        self.assertEqual(len(self.recorded()), 1)
 
     def test_a_configured_path_reaches_every_pass_absolutely(self):
         configuration = self.root / "a config.toml"

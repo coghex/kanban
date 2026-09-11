@@ -2105,8 +2105,10 @@ report did not name.
   configured command is run through the bounded command-capture seam with three
   appended arguments — the repository identity, the typed target or the word
   `none`, and `attention-required`. No title, summary, recommendation, or
-  filesystem path is ever passed. A zero exit establishes that the command
-  completed and nothing more.
+  filesystem path is ever passed. The command runs in its own process group and
+  that group is swept on every path out, so neither a command that outlived its
+  bound nor a descendant it backgrounded survives the pass. A zero exit
+  establishes that the command completed and nothing more.
 - **Mandatory/optional:** optional. A Kanban that never runs a mission runner
   never resolves `kanban` as an external command and writes none of this state.
 

@@ -24,8 +24,8 @@
 -- the mechanism rather than about a fixture.
 module Spec.Mission.Scheduler (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, try)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, void)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -53,6 +53,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), hClose, hPutStrLn, openFile)
 import System.Posix.Files (setFileMode)
+import System.Posix.Signals (nullSignal, signalProcess)
 import Test.Hspec
 
 spec :: Spec
@@ -168,6 +169,36 @@ leaseSpec = describe "a mission another process is already advancing" $ do
     withStore $ \store -> do
       putMission store "mission-a" MissionRunning
       missionLeaseHeld store (MissionId "mission-a") `shouldReturn` Nothing
+
+  -- Only the kernel saying there is nothing at the path admits the mission.
+  -- A lease this account cannot even look at is a lease whose occupancy is
+  -- undecided, and an undecided lease is held — the same direction an
+  -- unverifiable holder fails in. Staged by making the mission's own directory
+  -- unsearchable, which is what an `lstat` of the lease inside it meets.
+  it "counts a lease it cannot inspect as held" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      case missionDirectory store.missionStoreDirectory (MissionId "mission-a") of
+        Left message -> expectationFailure (Text.unpack message)
+        Right directory -> do
+          setFileMode directory 0o000
+          held <- missionLeaseHeld store (MissionId "mission-a")
+          setFileMode directory 0o700
+          case held of
+            Nothing -> expectationFailure "an uninspectable lease was read as free"
+            Just reason -> ("could not be inspected" `Text.isInfixOf` reason) `shouldBe` True
+
+  it "does not admit a mission whose lease it cannot inspect" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      putMission store "mission-b" MissionRunning
+      case missionDirectory store.missionStoreDirectory (MissionId "mission-a") of
+        Left message -> expectationFailure (Text.unpack message)
+        Right directory -> do
+          setFileMode directory 0o000
+          (_, advanced) <- passWith store defaultMissionsConfig id
+          setFileMode directory 0o700
+          readIORef advanced `shouldReturn` [[MissionId "mission-b"]]
 
   -- Requirement 6. The lease was free when the mission was selected and taken
   -- by somebody else before the child started, so the child refuses; that is
@@ -396,6 +427,37 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
             ("NOISE" `Text.isInfixOf` result.missionChildResultDetail) `shouldBe` False
             result.missionChildResultOutcome `shouldBe` MissionChildAdvanced
           other -> expectationFailure ("unexpected results: " <> show other)
+
+  -- A pass that was killed leaves its children's documents behind. Nothing
+  -- about the path says which pass wrote one, so a document that was already
+  -- there must never be read as the account of a child that wrote nothing —
+  -- and this is the shape that matters most, because a stale
+  -- @already_advancing@ beside a fresh non-zero exit agrees with itself and
+  -- reads as ordinary contention, which is a *successful* pass over a mission
+  -- that failed.
+  it "never reads a result document it did not just see written" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        writeFile (scratch </> "child-0.json") staleRefusalDocument
+        fake <- writeFakeKanban scratch "#!/bin/sh\nexit 1\n"
+        putMission store "mission-a" MissionRunning
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        case map snd results of
+          [Left message] -> ("wrote no result document" `Text.isInfixOf` message) `shouldBe` True
+          other -> expectationFailure ("a stale document was accepted: " <> show other)
+
+  -- And the disposition that stale document would have produced, so the
+  -- example above is pinned to the outcome it prevents rather than merely to a
+  -- message.
+  it "fails the pass a stale contention document would have made succeed" $
+    withStore $ \store ->
+      withScratch $ \scratch -> do
+        writeFile (scratch </> "child-0.json") staleRefusalDocument
+        fake <- writeFakeKanban scratch "#!/bin/sh\nexit 1\n"
+        putMission store "mission-a" MissionRunning
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        let report = disposedPass store results
+        report >>= \dispositions -> map (.missionDispositionValue) dispositions `shouldBe` [MissionDispositionFailed]
 
   it "fails a child that wrote no result document" $
     withStore $ \store ->
@@ -759,6 +821,50 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
     attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros []
     attempt.missionNotificationAttemptState `shouldBe` MissionNotificationLaunchFailed
 
+  -- The bound decides how long the command *may* take and ends nothing when it
+  -- expires, so without the sweep a notifier that hangs is still running when
+  -- the pass has finished with it — one stuck process per waiting episode.
+  -- Staged against a command that ignores SIGTERM, so what this proves is the
+  -- escalation rather than the command's cooperation.
+  it "ends a command that outlived its bound" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "stubborn.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          ( unlines
+              [ "#!/bin/sh",
+                "trap '' TERM INT",
+                "echo $$ > " <> show marker,
+                "sleep 120"
+              ]
+          )
+      attempt <- runMissionNotificationCommand (300 * 1000) [Text.pack command]
+      attempt.missionNotificationAttemptState `shouldBe` MissionNotificationTimedOut
+      recorded <- read . takeWhile (/= '\n') <$> readFile marker
+      awaitGone recorded
+
+  -- And a command that exits cleanly having backgrounded something: the group
+  -- outlives the leader, so a sweep that only looked at the direct child would
+  -- leave the descendant running.
+  it "ends a descendant a command left behind" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "descendant.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          ( unlines
+              [ "#!/bin/sh",
+                "( trap '' TERM INT; echo $$ > " <> show marker <> "; sleep 120 ) &",
+                "while [ ! -s " <> show marker <> " ]; do sleep 0.02; done",
+                "exit 0"
+              ]
+          )
+      attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros [Text.pack command]
+      attempt.missionNotificationAttemptState `shouldBe` MissionNotificationCompleted
+      recorded <- read . takeWhile (/= '\n') <$> readFile marker
+      awaitGone recorded
+
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
@@ -1091,6 +1197,32 @@ recordingNotifier invocations attempt argv = do
 -- Fake executables
 -- ---------------------------------------------------------------------------
 
+-- | A result document a previous pass's child left in a reused scratch
+-- directory: well-formed, about the mission this pass is advancing, and
+-- agreeing with the non-zero status a child that wrote nothing exits with.
+staleRefusalDocument :: String
+staleRefusalDocument =
+  "{\"schema\":\"kanban-mission-child-result\",\"version\":1,"
+    <> "\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\","
+    <> "\"outcome\":\"refused\",\"refusal\":\"already_advancing\","
+    <> "\"detail\":\"from a pass that is long gone\"}"
+
+-- | The dispositions a pass would draw from these child results.
+disposedPass :: MissionStore -> [(MissionId, Either Text MissionChildResult)] -> IO [MissionDispositionRecord]
+disposedPass store results = do
+  report <-
+    runMissionSchedulerPass
+      MissionSchedulerSeams
+        { missionSchedulerNow = getCurrentTime,
+          missionSchedulerLeaseHeld = missionLeaseHeld store,
+          missionSchedulerAdvance = \_ -> pure results,
+          missionSchedulerNotify = \_ -> fail "this example runs no notification command"
+        }
+      defaultMissionsConfig
+      store
+      boardRepository
+  pure report.missionPassAdmitted
+
 -- | A stand-in for @kanban@ on the scheduler's own child path.
 writeFakeKanban :: FilePath -> String -> IO FilePath
 writeFakeKanban directory body = do
@@ -1164,3 +1296,18 @@ resultLine mission repository outcome =
 
 withScratch :: (FilePath -> IO result) -> IO result
 withScratch = withTemporaryCacheRoot
+
+-- | Waits for one process identifier to stop resolving.
+--
+-- Bounded, and a failure rather than a spin: the sweep signals and escalates,
+-- so \"it is gone\" is reached after a grace period rather than instantly, and
+-- a sweep that did nothing has to fail here rather than hang.
+awaitGone :: Int -> IO ()
+awaitGone processId = go (600 :: Int)
+  where
+    go 0 = expectationFailure ("process " <> show processId <> " outlived the command that started it")
+    go remaining = do
+      alive <- try @IOException (signalProcess nullSignal (fromIntegral processId))
+      case alive of
+        Left _ -> pure ()
+        Right () -> threadDelay 20000 >> go (remaining - 1)

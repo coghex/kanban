@@ -133,7 +133,8 @@ worker_deadline_seconds = 14400
 # application-owned scratch directory with closed standard input, in its own
 # process group, with both of its streams captured, and it is bounded: a
 # command that has not exited within ten seconds is reported as having timed
-# out rather than holding the pass open.
+# out rather than holding the pass open, and its process group is then ended —
+# along with anything it backgrounded — rather than left running.
 #
 # Three arguments are appended to whatever you write here, in this order:
 #
@@ -159,7 +160,10 @@ worker_deadline_seconds = 14400
 # observe, and no record claims it did. A failed notification never resolves
 # the mission's attention and never stops the scheduler.
 #
-# Both keys are global, like [usage]; they cannot be set per repository.
+# Both keys are global, like [usage]; setting `missions` inside a
+# [repositories."owner/name"] table is a startup error rather than a warning,
+# because a notification command is the operator's rather than one
+# repository's.
 [missions.notifications]
 enabled = false
 # command = ["/usr/local/bin/notify-send", "kanban"]

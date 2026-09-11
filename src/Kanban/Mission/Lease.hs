@@ -277,7 +277,9 @@ acquireMissionLeaseWith holderPresence store mission =
 -- Occupancy is an @lstat@ rather than a directory test, so a lease directory
 -- replaced by a file, or by a symbolic link pointing nowhere, is still read as
 -- occupied — the same thing 'createDirectory' would be told, and the same
--- direction the rest of this module fails in.
+-- direction the rest of this module fails in. And only @ENOENT@ is read as
+-- absence: a permission error or an I\/O failure means the question was not
+-- answered, which on this module's terms is a lease that stays held.
 missionLeaseHeld :: MissionStore -> MissionId -> IO (Maybe Text)
 missionLeaseHeld = missionLeaseHeldWith missionHolderPresence
 
@@ -291,8 +293,26 @@ missionLeaseHeldWith holderPresence store mission =
       Right (leaseDirectory, ownerPath) -> do
         occupied <- try @IOException (getSymbolicLinkStatus leaseDirectory)
         case occupied of
-          Left _ -> pure Nothing
           Right _ -> holderStillHeld holderPresence store mission ownerPath
+          Left exception
+            -- The kernel saying there is nothing at this path is the one
+            -- answer that admits the mission. Every other failure — a
+            -- directory this account may not search, an I/O error on the
+            -- store — leaves occupancy undecided, and an undecided lease is
+            -- held, exactly as an unverifiable holder is above. Treating
+            -- those as absence is how a scheduler starts a second runner on a
+            -- mission that is already being advanced.
+            | isDoesNotExistError exception -> pure Nothing
+            | otherwise ->
+                pure
+                  ( Just
+                      ( "mission "
+                          <> mission.unMissionId
+                          <> " may already be being advanced: its lease could not be inspected ("
+                          <> Text.pack (show exception)
+                          <> ")"
+                      )
+                  )
 
 -- | Whether an existing lease is still held, and why.
 --

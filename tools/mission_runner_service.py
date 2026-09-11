@@ -137,6 +137,11 @@ PASS_ADMITTED_FIELDS = frozenset({"mission", "disposition", "detail"})
 PASS_ATTENTION_FIELDS = frozenset(
     {"mission", "attention_id", "target", "notification", "detail"}
 )
+# The typed item an attention entry may name, mirrored from the `target` object
+# `Kanban.Mission.Pass.encodeMissionPassReport` writes and the two kinds its
+# `targetKindTag` spells.
+PASS_TARGET_FIELDS = frozenset({"kind", "number"})
+PASS_TARGET_KINDS = frozenset({"issue", "pull_request"})
 
 # The executable a pass is. Resolved from `PATH` unless `--kanban` names one,
 # and refused by name when neither is usable, because a controller that started
@@ -510,9 +515,18 @@ def resolve_kanban(explicit: str | None) -> Path:
     written, because a controller that started with nothing runnable would
     publish one failed pass per interval rather than the one sentence that says
     what is wrong.
+
+    Whatever is resolved is made absolute before it is stored, and that is not
+    tidiness. Every pass runs with the repository checkout as its working
+    directory, so a relative path — one a caller typed, and equally one `PATH`
+    returned for a relative entry — is resolved against *this* process's
+    directory when it is checked here and against the *checkout* when it is
+    launched. Those are different files, and the second one usually does not
+    exist, so a controller that stored the relative spelling would pass every
+    check at startup and then fail every pass.
     """
     if explicit:
-        candidate = Path(explicit).expanduser()
+        candidate = Path(explicit).expanduser().resolve()
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             raise ServiceError(
                 f"--kanban {explicit} does not name an executable file, so no "
@@ -526,7 +540,7 @@ def resolve_kanban(explicit: str | None) -> Path:
             "scheduler pass can be run. Install it, or pass --kanban with the "
             "path to the executable."
         )
-    return Path(found)
+    return Path(found).resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -609,8 +623,18 @@ def pid_alive(pid: Any) -> bool:
     return True
 
 
+def is_plain_integer(value: Any) -> bool:
+    """An integer that is not a Boolean.
+
+    `bool` is a subclass of `int` and `True == 1`, so every numeric check on a
+    document another process wrote has to exclude it explicitly or accept
+    `true` wherever it accepts `1`.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def pinned_version(value: Any, expected: int) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+    return is_plain_integer(value) and value == expected
 
 
 def tail(text: str | None, lines: int = CAPTURED_STDERR_LINES) -> str | None:
@@ -969,7 +993,10 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
             f"The mission scheduler report has unknown termination {termination!r}."
         )
     expected_exit = PASS_EXIT_CODES[termination]
-    if document["exit_code"] != expected_exit:
+    # `is_plain_integer` rather than `==`, because `True == 1` and `False == 0`:
+    # a report carrying a Boolean where its exit status belongs would otherwise
+    # agree with two of the three terminations and be believed.
+    if not is_plain_integer(document["exit_code"]) or document["exit_code"] != expected_exit:
         raise PassFailure(
             f"The mission scheduler report says it terminated {termination!r} and "
             f"names exit status {document['exit_code']!r}, not {expected_exit}."
@@ -1020,6 +1047,11 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         if disposition not in PASS_DISPOSITIONS:
             raise PassFailure(
                 f"A mission scheduler report names unknown disposition {disposition!r}."
+            )
+        if not isinstance(entry["detail"], str):
+            raise PassFailure(
+                f"A mission scheduler report's admitted entry carries no detail: "
+                f"{entry['detail']!r}."
             )
         failing = failing or disposition in PASS_FAILING_DISPOSITIONS
     # The two halves of one report held against each other. A pass that
@@ -1072,6 +1104,46 @@ def _require_attention(attention: Any) -> None:
             raise PassFailure(
                 f"A mission scheduler report names unknown notification state {state!r}."
             )
+        _require_target(entry["target"])
+        if entry["detail"] is not None and not isinstance(entry["detail"], str):
+            raise PassFailure(
+                f"A mission scheduler report's attention detail is neither absent nor "
+                f"text: {entry['detail']!r}."
+            )
+
+
+def _require_target(target: Any) -> None:
+    """The typed item an attention entry is about, or nothing.
+
+    Checked to the same depth as everything else this controller reads, because
+    it is the part a reader is most tempted to pass straight through: it is
+    reproduced in the status document a dashboard will render, so a `kind` that
+    is not one of the two, or a `number` that is a string, a Boolean, or
+    negative, would travel from a malformed report into a durable document
+    describing a repository's state.
+    """
+    if target is None:
+        return
+    if not isinstance(target, dict):
+        raise PassFailure(
+            f"A mission scheduler report's attention target is not an object: "
+            f"{type(target).__name__}."
+        )
+    keys = set(target)
+    if keys != PASS_TARGET_FIELDS:
+        raise PassFailure(
+            f"A mission scheduler report's attention target has the wrong fields: "
+            f"{sorted(keys)}."
+        )
+    if target["kind"] not in PASS_TARGET_KINDS:
+        raise PassFailure(
+            f"A mission scheduler report names unknown target kind {target['kind']!r}."
+        )
+    if not is_plain_integer(target["number"]) or target["number"] <= 0:
+        raise PassFailure(
+            f"A mission scheduler report's attention target names no positive number: "
+            f"{target['number']!r}."
+        )
 
 
 def pass_state(document: dict[str, Any]) -> str:

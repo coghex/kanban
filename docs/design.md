@@ -314,7 +314,10 @@ records attention too; only a scheduler pass observes and notifies.
 Notifications are off by default (section 16). When they are on, the operator's
 configured command is run through the same bounded capture seam a usage command
 uses, with the repository, the typed target and the word `attention-required`
-appended and nothing else — no title, no summary, no path. Delivery is at most
+appended and nothing else — no title, no summary, no path. It runs in its own
+process group, and that group is swept on every path out, so a command that
+outlived its bound is ended rather than left running and a descendant it
+backgrounded goes with it. Delivery is at most
 once per waiting episode: a durable suppression record is written before the
 command is launched and the identity is never retried afterwards, whatever the
 outcome, so a crash in that window loses the notification rather than risking a

@@ -90,6 +90,7 @@ import Kanban.Mission.Types
     missionNotificationSchemaVersion,
   )
 import Kanban.Paths (createPrivateDirectory)
+import Kanban.Process (managedProcess, sweepCommandGroup)
 import Kanban.Text (sanitizeText)
 import System.Directory (XdgDirectory (XdgCache), getXdgDirectory)
 import System.Exit (ExitCode (..))
@@ -100,6 +101,7 @@ import System.Process
     ProcessHandle,
     StdStream (CreatePipe, NoStream),
     createProcess,
+    getPid,
     proc,
   )
 
@@ -265,6 +267,14 @@ attemptMissionNotification runCommand store mission identity argv = do
 -- twice over here — the scheduler's stdout carries exactly one JSON document,
 -- and a notification command that wrote to it would corrupt the very report
 -- this attempt is about to appear in.
+--
+-- And the group is swept on every path out, which is the other half of the
+-- bound. 'awaitCommandOutcome' decides how long the command /may/ take and
+-- ends nothing when that runs out, and releasing the captures closes pipes
+-- rather than processes — so a command that outlived its deadline is still
+-- running when this returns, and so is anything it backgrounded before
+-- exiting cleanly. A pass that left those behind would accumulate one stuck
+-- notifier per waiting episode on a host whose notifier hangs.
 runMissionNotificationCommand :: Int -> [Text] -> IO MissionNotificationAttempt
 runMissionNotificationCommand _ [] =
   pure
@@ -316,12 +326,18 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
 
     observe :: ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
     observe processHandle outputHandle errorHandle = do
+      -- Captured before anything can reap the leader: 'getPid' goes 'Nothing'
+      -- the moment a clean exit reaps it below, so the identifier the sweep
+      -- needs is taken now while it is guaranteed available.
+      (managed, _groupLeaderProblem) <- managedProcess processHandle
+      rootPid <- getPid processHandle
       outputCapture <- startCapture outputHandle
       errorCapture <- startCapture errorHandle
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}
       completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
       releaseCapture outputCapture
       releaseCapture errorCapture
+      sweepCommandGroup rootPid managed
       pure $ case completed of
         CommandUnfinished ->
           MissionNotificationAttempt
