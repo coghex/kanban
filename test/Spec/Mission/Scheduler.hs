@@ -300,8 +300,34 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
       (report, _) <- passWith store defaultMissionsConfig id
       report.missionPassTermination `shouldBe` MissionPassFailed
 
-  -- The negative control: an absent snapshot really is silent, so the two
-  -- examples above are about decoding rather than about enumeration.
+  -- Enumeration, not decoding. `listMissions` reads a store directory it could
+  -- not list as an empty one, which is the right answer for a caller looking
+  -- for a mission and the wrong one for a pass reporting on a repository: it
+  -- would exit zero over "0 of 0 missions" while every mission in there was
+  -- unreachable.
+  it "fails the pass on a store directory it cannot enumerate" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      setFileMode store.missionStoreDirectory 0o000
+      (report, advanced) <- passWith store defaultMissionsConfig id
+      setFileMode store.missionStoreDirectory 0o700
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      ("could not be listed" `Text.isInfixOf` report.missionPassDetail) `shouldBe` True
+
+  -- And an identifier the store will not resolve to a root at all: a mission
+  -- recorded under both the current and the pre-#615 ambiguous root is
+  -- refused rather than addressed, and `listMissions` drops it.
+  it "fails the pass on a mission whose root cannot be resolved" $
+    withStore $ \store -> do
+      putMission store "mission-a" MissionRunning
+      stageRootCollision store (MissionId "mission-a")
+      (report, _) <- passWith store defaultMissionsConfig id
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      report.missionPassAdmitted `shouldBe` []
+
+  -- The negative control: an absent snapshot really is silent, so the examples
+  -- above are about decoding and enumeration rather than about a quiet store.
   it "stays completed when a listed mission has no snapshot at all" $
     withStore $ \store -> do
       putMission store "mission-a" MissionRunning
@@ -1237,6 +1263,27 @@ currentSnapshot store mission = do
   case readBack of
     MissionPresent snapshot -> pure snapshot
     other -> fail ("the snapshot did not read back: " <> show (() <$ other))
+
+-- | One identifier recorded under both the current root and the ambiguous one
+-- a release before #615 wrote to, which 'missionRoot' refuses to resolve.
+--
+-- Built by writing the legacy history through the writers that own it, rooted
+-- at that directory, which is how the release that produced this state
+-- produced it.
+stageRootCollision :: MissionStore -> MissionId -> IO ()
+stageRootCollision store mission = do
+  let legacy =
+        store
+          { missionStoreDirectory = store.missionStoreLegacyDirectory,
+            -- Its own legacy root is a name that does not exist, so this
+            -- writer lands at the ambiguous directory rather than resolving
+            -- away from it — exactly as the release that wrote one did.
+            missionStoreLegacyDirectory = store.missionStoreLegacyDirectory </> "no-legacy-root-here"
+          }
+  created <- createMissionSpecification legacy (specificationFor mission)
+  created `shouldBe` Right MissionCreated
+  written <- writeMissionSnapshot legacy (snapshotFor mission MissionRunning)
+  written `shouldBe` Right ()
 
 -- | A snapshot that decodes and names another repository, which this store
 -- refuses rather than adopts.

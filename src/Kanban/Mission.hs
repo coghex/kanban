@@ -58,6 +58,7 @@ module Kanban.Mission
     openMissionStore,
     missionStoreRoot,
     listMissions,
+    listMissionsStrictly,
     MissionRead (..),
 
     -- * Identity
@@ -382,6 +383,7 @@ import Kanban.Mission.Store
     createMissionSpecification,
     deleteMission,
     listMissions,
+    listMissionsStrictly,
     missionDispositionRefusalMessage,
     missionSealFailureMessage,
     openMissionStore,

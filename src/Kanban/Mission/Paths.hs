@@ -70,6 +70,7 @@ module Kanban.Mission.Paths
     commitNoReplace,
     ensureMissionDirectory,
     listMissionEntries,
+    listMissionEntriesStrictly,
     isPlainDirectory,
     MissionEntry (..),
     missionEntryAt,
@@ -874,11 +875,32 @@ commitNoReplace staged path = do
 -- Nothing here follows what it finds: the caller decides what to do with each
 -- name, and 'listMissionEntries' never resolves one.
 listMissionEntries :: FilePath -> IO [FilePath]
-listMissionEntries store = do
+listMissionEntries store = either (const []) id <$> listMissionEntriesStrictly store
+
+-- | The same enumeration, keeping the failure instead of flattening it.
+--
+-- 'listMissionEntries' answers \"what is in here\" and reads a directory it
+-- could not list as an empty one, which is the right answer for a caller that
+-- is looking for something and the wrong one for a caller that is /reporting/
+-- on everything. An unreadable store directory and an empty store directory
+-- are the same value to the first and opposite answers to the second: a
+-- scheduler that could not enumerate a repository must not report a quiet
+-- repository.
+--
+-- A directory that is not there is still 'Right []'. A store whose missions
+-- have never been created is empty rather than broken, and 'openMissionStore'
+-- creates the root before any caller reaches here.
+listMissionEntriesStrictly :: FilePath -> IO (Either Text [FilePath])
+listMissionEntriesStrictly store = do
   exists <- doesDirectoryExist store
   if not exists
-    then pure []
-    else either (const []) (filter safeMissionComponent) <$> try @IOException (listDirectory store)
+    then pure (Right [])
+    else do
+      listed <- try @IOException (listDirectory store)
+      pure $ case listed of
+        Left exception ->
+          Left (Text.pack store <> " could not be listed: " <> Text.pack (show exception))
+        Right entries -> Right (filter safeMissionComponent entries)
 
 ignoreFileOperation :: IO () -> IO ()
 ignoreFileOperation operation = void (try @IOException operation)

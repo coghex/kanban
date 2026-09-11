@@ -135,6 +135,16 @@ PASS_NOTIFICATION_STATES = frozenset(
     }
 )
 PASS_ADMITTED_FIELDS = frozenset({"mission", "disposition", "detail"})
+# The compiled ceiling `Kanban.Mission.Scheduler.missionAdmissionCeiling`
+# declares. Mirrored rather than trusted, because "at most two" is a contract a
+# report can violate: three otherwise well-formed admitted entries would
+# otherwise be published as a healthy pass that quietly ignored the ceiling.
+PASS_ADMISSION_CEILING = 2
+# The notification state a scheduler writes when it could not resolve which
+# items an episode is about. The writer treats that as indeterminate mission
+# state and terminates the pass `failed`, so a successful pass carrying one is
+# two halves of a report contradicting each other.
+PASS_UNRESOLVED_NOTIFICATION = "unresolved"
 PASS_ATTENTION_FIELDS = frozenset(
     {"mission", "attention_id", "targets", "notification", "detail"}
 )
@@ -1010,7 +1020,7 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
             f"exits {expected_exit}, but the pass exited with status {returncode}."
         )
     _require_admitted(document["admitted"], termination)
-    _require_attention(document["attention"])
+    _require_attention(document["attention"], termination)
     detail = document["detail"]
     if not isinstance(detail, str):
         raise PassFailure(f"The mission scheduler report carries no detail: {detail!r}.")
@@ -1027,6 +1037,16 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         raise PassFailure(
             f"The mission scheduler report's admitted missions are not a list: "
             f"{type(admitted).__name__}."
+        )
+    # The ceiling is a contract about what a pass may do, not merely about what
+    # it happens to do, so it is checked here rather than assumed: a report
+    # naming more missions than one pass may admit describes a scheduler this
+    # controller was not built to supervise, and publishing it as healthy would
+    # hide exactly that.
+    if len(admitted) > PASS_ADMISSION_CEILING:
+        raise PassFailure(
+            f"The mission scheduler report names {len(admitted)} admitted missions; "
+            f"one pass admits at most {PASS_ADMISSION_CEILING}."
         )
     failing = False
     for entry in admitted:
@@ -1080,7 +1100,7 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         )
 
 
-def _require_attention(attention: Any) -> None:
+def _require_attention(attention: Any, termination: str) -> None:
     if not isinstance(attention, list):
         raise PassFailure(
             f"The mission scheduler report's attention is not a list: "
@@ -1114,6 +1134,17 @@ def _require_attention(attention: Any) -> None:
             raise PassFailure(
                 f"A mission scheduler report's attention detail is neither absent nor "
                 f"text: {entry['detail']!r}."
+            )
+        # The writer reaches `unresolved` only when a mission's own
+        # specification could not be read, which it treats as indeterminate
+        # state and terminates `failed` for. A report that carries one and
+        # calls itself completed is contradicting itself, and believing the
+        # cheerful half publishes a healthy waiting state over a mission
+        # nobody can account for.
+        if state == PASS_UNRESOLVED_NOTIFICATION and termination != PASS_FAILED:
+            raise PassFailure(
+                f"The mission scheduler report terminated {termination!r} while naming "
+                "attention whose targets it could not resolve."
             )
 
 

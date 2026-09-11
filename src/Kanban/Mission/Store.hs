@@ -42,6 +42,7 @@ module Kanban.Mission.Store
     MissionStore (..),
     openMissionStore,
     listMissions,
+    listMissionsStrictly,
 
     -- * The specification
     MissionCreation (..),
@@ -89,6 +90,9 @@ import Kanban.Mission.Paths
     ignoreFileOperation,
     isPlainDirectory,
     listMissionEntries,
+    listMissionEntriesStrictly,
+    MissionEntry (..),
+    missionEntryAt,
     missionRoot,
     withMissionRoot,
     missionArchiveDirectory,
@@ -171,6 +175,51 @@ listMissions store = do
   filterM resolves candidates
   where
     resolves mission = either (const False) (const True) <$> missionRoot store mission
+
+-- | The same enumeration, keeping every question it could not answer.
+--
+-- 'listMissions' is built for a caller that wants the missions it can act on,
+-- and it is right to drop what it cannot resolve: a legacy directory
+-- attributable to nobody, an identifier recorded under both roots, and an
+-- entry whose stat failed are each a mission nothing could read, write, or
+-- delete, and offering one would be offering a mission that is not there.
+--
+-- A caller that /reports/ on a repository needs the opposite. The scheduler
+-- says whether this repository is quiet, and \"no mission is runnable\" and
+-- \"some missions could not be enumerated\" are not the same sentence: reading
+-- the second as the first publishes a healthy idle pass over durable state
+-- nobody can account for. So this returns both halves — what resolved, and one
+-- reason per thing that did not — and leaves what to do about the second to
+-- the caller.
+--
+-- Three failures are preserved, and they are the three 'listMissions'
+-- swallows: an enumeration that could not be taken at all, an entry whose
+-- non-following stat could not be taken, and an identifier 'missionRoot'
+-- refuses to resolve — the ambiguous-root collision and the unattributable
+-- legacy mission among them.
+listMissionsStrictly :: MissionStore -> IO ([MissionId], [Text])
+listMissionsStrictly store = do
+  listed <- listMissionEntriesStrictly store.missionStoreDirectory
+  legacyListed <- listMissionEntriesStrictly store.missionStoreLegacyDirectory
+  case (listed, legacyListed) of
+    (Left reason, _) -> pure ([], [reason])
+    (_, Left reason) -> pure ([], [reason])
+    (Right entries, Right _) -> do
+      -- Each entry's own stat, kept rather than filtered: an entry this store
+      -- cannot classify is an entry it cannot say is not a mission.
+      classified <- mapM (\entry -> (,) entry <$> missionEntryAt (store.missionStoreDirectory </> entry)) entries
+      let directories = [entry | (entry, MissionEntryDirectory) <- classified]
+          undecidable =
+            [ Text.pack entry <> " could not be classified: " <> reason
+            | (entry, MissionEntryUndecidable reason) <- classified
+            ]
+      legacy <- adoptedLegacyMissions store
+      let candidates = sort (nub (map (MissionId . Text.pack) directories <> legacy))
+      resolutions <- mapM (\mission -> (,) mission <$> missionRoot store mission) candidates
+      pure
+        ( [mission | (mission, Right _) <- resolutions],
+          undecidable <> [reason | (_, Left reason) <- resolutions]
+        )
 
 -- | Whether a specification was written, or one was already there.
 data MissionCreation

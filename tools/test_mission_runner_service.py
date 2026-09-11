@@ -287,6 +287,17 @@ class MirroredPassContractTests(unittest.TestCase):
         }
         self.assertEqual({name.lower() for name in failing}, service.PASS_FAILING_DISPOSITIONS)
 
+    def test_the_admission_ceiling_matches(self):
+        # Mirrored like everything else the controller copies: a ceiling raised
+        # in the scheduler and not here would have the controller rejecting
+        # every pass its own scheduler produced.
+        scheduler = (
+            REPO_ROOT / "src" / "Kanban" / "Mission" / "Scheduler.hs"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"^missionAdmissionCeiling = (\d+)$", scheduler, re.MULTILINE)
+        self.assertIsNotNone(match, "missionAdmissionCeiling is not declared")
+        self.assertEqual(service.PASS_ADMISSION_CEILING, int(match.group(1)))
+
     def test_the_report_fields_match(self):
         encoder = re.search(
             r"^encodeMissionPassReport report =\n((?:.*\n)+?)^  where", self.source, re.MULTILINE
@@ -529,6 +540,33 @@ class PassReportTests(unittest.TestCase):
                 ),
                 0,
             ),
+            # The ceiling is a contract about what a pass may do. Three
+            # otherwise valid admitted missions describe a scheduler this
+            # controller was not built to supervise.
+            "more admitted missions than one pass may admit": (
+                json.dumps(
+                    pass_document(
+                        admitted=[
+                            admitted_entry(mission="mission-a"),
+                            admitted_entry(mission="mission-b"),
+                            admitted_entry(mission="mission-c"),
+                        ]
+                    )
+                ),
+                0,
+            ),
+            # `unresolved` means the writer could not say which items an
+            # episode is about, which it treats as indeterminate state and
+            # terminates `failed` for. A completed pass carrying one is two
+            # halves of a report contradicting each other.
+            "unresolved attention under a completed pass": (
+                json.dumps(pass_document(attention=[attention_entry(state="unresolved")])),
+                0,
+            ),
+            "unresolved attention under a refused pass": (
+                json.dumps(pass_document(termination="refused", attention=[attention_entry(state="unresolved")])),
+                2,
+            ),
             "target number that is not positive": (
                 json.dumps(
                     pass_document(
@@ -571,6 +609,25 @@ class PassReportTests(unittest.TestCase):
                     attention=[{**attention_entry(), "targets": targets}]
                 )
                 self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_the_admission_ceiling_is_accepted_up_to_its_limit(self):
+        # The negative control for the over-capacity case: rejecting every
+        # multi-mission report would pass that entry while accepting no real
+        # advancing pass at all.
+        document = pass_document(
+            admitted=[admitted_entry(mission="mission-a"), admitted_entry(mission="mission-b")]
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_unresolved_attention_is_accepted_under_a_failed_pass(self):
+        # And the control for the unresolved cases: the shape the writer really
+        # produces has to decode.
+        document = pass_document(
+            termination="failed",
+            attention=[attention_entry(state="unresolved")],
+            detail="1 waiting on a person; its specification will not decode",
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
 
     def test_a_pass_level_failure_with_nothing_admitted_is_accepted(self):
         # The exact shape `runMissionSchedulerMode` writes when it cannot even

@@ -321,8 +321,9 @@ records attention too; only a scheduler pass observes and notifies.
 
 Notifications are off by default (section 16). When they are on, the operator's
 configured command is run through the same bounded capture seam a usage command
-uses, with the repository and the word `attention-required` appended, followed
-by one argument per item the episode is about — the waiting step's own when it
+uses, with the repository and the word `attention-required` appended after the
+command's own arguments — so only their order is fixed, not their position —
+followed by one argument per item the episode is about — the waiting step's own when it
 names one, otherwise every target the mission's selector resolved to, and none
 at all when it names none. Nothing else is passed: no title, no summary, no
 path. The items come last so the two fixed positions do not move with their

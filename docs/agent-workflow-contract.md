@@ -2107,10 +2107,12 @@ report did not name.
   is at most once per waiting episode and a crash between the record and the
   launch loses that notification by design.
 - **Notifications:** off by default, and when enabled the operator's own
-  configured command is run through the bounded command-capture seam with three
-  appended arguments — the repository identity and `attention-required`,
-  followed by one argument per typed item the episode is about, which may be
-  none. No title, summary, recommendation, or filesystem path is ever passed,
+  configured command is run through the bounded command-capture seam with two
+  fixed values appended — the repository identity and `attention-required` —
+  followed by zero or more typed items, one argument each. Every one of those
+  is appended *after* whatever arguments the configured command itself carries,
+  so their absolute positions depend on that prefix and only their order is
+  fixed. No title, summary, recommendation, or filesystem path is ever passed,
   and nothing at all is launched for an episode whose mission specification
   cannot be read. The command runs in its own process group and that group is
   swept on every path out, so neither a command that outlived its bound nor a

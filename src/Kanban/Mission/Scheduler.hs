@@ -92,7 +92,7 @@ import Kanban.Mission.Pass
     missionPassExitCode,
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..))
-import Kanban.Mission.Store (listMissions, readMissionSnapshot, readMissionSpecification)
+import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
   ( MissionAttention (..),
     MissionId (..),
@@ -263,7 +263,13 @@ runMissionSchedulerPass seams missions store repository = do
 -- is better than an arbitrary one.
 readInventory :: MissionStore -> IO ([(MissionId, MissionSnapshot)], [Text])
 readInventory store = do
-  missions <- listMissions store
+  -- The strict enumeration, because the ordinary one is built for a caller
+  -- looking for missions rather than reporting on a repository: it reads a
+  -- store directory it could not list as an empty one, and drops an entry it
+  -- could not stat or an identifier that resolves to no root. Each of those is
+  -- durable state nobody can account for, and a pass that enumerated its way
+  -- past them would exit zero over \"0 of 0 missions\".
+  (missions, unenumerable) <- listMissionsStrictly store
   loaded <- forM (sortOn (.unMissionId) missions) $ \mission -> do
     snapshot <- readMissionSnapshot store mission
     pure $ case snapshot of
@@ -273,7 +279,7 @@ readInventory store = do
         (Nothing, Just ("mission " <> mission.unMissionId <> " has an unreadable snapshot: " <> detail))
       MissionRefused detail ->
         (Nothing, Just ("mission " <> mission.unMissionId <> " has a snapshot this store refused: " <> detail))
-  pure (catMaybes (map fst loaded), catMaybes (map snd loaded))
+  pure (catMaybes (map fst loaded), unenumerable <> catMaybes (map snd loaded))
 
 -- | The runnable missions nothing else is already advancing, in order.
 --
