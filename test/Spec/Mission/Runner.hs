@@ -33,6 +33,7 @@ import Control.Exception (bracket_)
 import Control.Monad (forM_, join, void)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -120,6 +121,7 @@ spec :: Spec
 spec = describe "the foreground mission runner" $ do
   launchModeSpec
   selectionSpec
+  progressionSpec
   startupSpec
   legacyRootSpec
   leaseSpec
@@ -139,6 +141,121 @@ spec = describe "the foreground mission runner" $ do
   openEffectRecoverySpec
   directionSpec
   registryJudgementSpec
+
+-- ---------------------------------------------------------------------------
+-- Progression
+-- ---------------------------------------------------------------------------
+
+-- | The step after the first, which may not start until the first succeeded.
+theSecondStep :: MissionStepId
+theSecondStep = MissionStepId "review-844"
+
+theSecondTarget :: MissionTarget
+theSecondTarget =
+  MissionTarget
+    { missionTargetKind = MissionTargetPullRequest,
+      missionTargetNumber = 900,
+      missionTargetTitle = Just "the pull request"
+    }
+
+-- | A mission whose plan is two steps, the second depending on the first.
+twoStepSpecification :: MissionSpecification
+twoStepSpecification =
+  theSpecification
+    { missionSpecificationPlan =
+        theSpecification.missionSpecificationPlan
+          <> [ MissionPlanStep
+                 { missionPlanStepId = theSecondStep,
+                   missionPlanStepAction = "review_pull_request",
+                   missionPlanStepSummary = "review the pull request the first step opened",
+                   missionPlanStepTarget = Just theSecondTarget,
+                   missionPlanStepDependsOn = [theStep]
+                 }
+             ]
+    }
+
+-- | 'withMission', over the two-step plan above.
+withTwoStepMission :: MissionSnapshot -> (MissionStore -> Stage -> IO result) -> IO result
+withTwoStepMission snapshot action = withStateRoot $ \_ store stage -> do
+  created <- createMissionSpecification store twoStepSpecification
+  created `shouldBe` Right MissionCreated
+  written <- writeMissionSnapshot store snapshot
+  written `shouldBe` Right ()
+  action store stage
+
+-- | Requirement 1's progression, over more than one step and with no dashboard
+-- anywhere near it.
+--
+-- The single-step examples elsewhere in this module each stage one iteration
+-- and read what it decided. This one hands the loop a plan it has to get all
+-- the way through — dispatch, settle, reconcile, dispatch the dependent step,
+-- settle, reconcile, and only then settle the mission — because \"it advances
+-- a mission\" and \"it advances a mission twice\" are different claims, and the
+-- second is the one an unattended scheduler depends on.
+--
+-- Nothing here is staged per iteration. The evidence is a function of the step
+-- record the controller hands it, so the run reaches each transition by having
+-- got to the state that earns it rather than by a fixture taking a turn.
+progressionSpec :: Spec
+progressionSpec = describe "a mission with two sequential steps" $
+  it "advances through both, keeps both sessions, and records the sequence" $
+    withTwoStepMission
+      ( (snapshotWith MissionRunning [stepRecord MissionStepPending [], pendingSecondStep] [])
+          {missionSnapshotNextSteps = [theStep, theSecondStep]}
+      )
+      $ \store stage -> do
+        -- Every session either step can register, named before either exists:
+        -- the driver only asks whether the identifier is in this set, so the
+        -- run reaches each observation on its own schedule.
+        writeIORef stage.stageSessions [MissionSessionId "solve-844-0001", MissionSessionId "review-844-0001"]
+        -- Satisfied only once a step is really running, so a pending step is
+        -- dispatched rather than reconciled straight past its own work.
+        writeIORef stage.stageEvidence $ \evidence ->
+          if evidence.missionEvidenceLifecycle == MissionStepRunning
+            then evidence {missionEvidenceSatisfied = Just "the work landed"}
+            else evidence
+        report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
+        case report of
+          Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+          Right run ->
+            run.missionRunConclusion
+              `shouldBe` Right (MissionHaltTerminal MissionCompleted)
+        -- Both steps were dispatched, in dependency order and once each.
+        dispatched <- readIORef stage.stageDispatches
+        map (.missionDispatchStep.missionPlanStepId) dispatched `shouldBe` [theStep, theSecondStep]
+        snapshot <- currentSnapshot store
+        snapshot.missionSnapshotLifecycle `shouldBe` MissionCompleted
+        map (\record -> (record.missionStepRecordId, record.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
+          `shouldBe` [(theStep, MissionStepSucceeded), (theSecondStep, MissionStepSucceeded)]
+        -- Both sessions are still in the mission's own tree, each with the
+        -- observation that ended it: a run that forgot one would leave a
+        -- registered session nothing could ever account for.
+        map (.missionSessionId) snapshot.missionSnapshotSessions
+          `shouldBe` [MissionSessionId "solve-844-0001", MissionSessionId "review-844-0001"]
+        map (isJust . (.missionSessionObservation)) snapshot.missionSnapshotSessions
+          `shouldBe` [True, True]
+        -- And the order is durable rather than merely observed in memory: the
+        -- journal is what a later run, or a dashboard, reads it back from.
+        journal <- readMissionJournal store theMission 0
+        case journal of
+          Left detail -> expectationFailure (Text.unpack detail)
+          Right (lines', _) ->
+            [ event.missionEventKind
+            | MissionJournalEvent event <- lines'
+            ]
+              `shouldBe` [ "controller_started",
+                           "step_dispatching",
+                           "step_running",
+                           "session_settled",
+                           "step_succeeded",
+                           "step_dispatching",
+                           "step_running",
+                           "session_settled",
+                           "step_succeeded",
+                           "completed"
+                         ]
+  where
+    pendingSecondStep = (stepRecord MissionStepPending []) {missionStepRecordId = theSecondStep}
 
 -- ---------------------------------------------------------------------------
 -- Fixtures
@@ -644,7 +761,10 @@ selectionSpec = describe "which mission it runs" $ do
   it "requires an identifier" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \_ _ -> do
       refused <- runMissionMode testOptions runnerConfig boardRepository "   "
-      refused `shouldBe` Left "--mission takes the identifier of exactly one mission"
+      -- The typed refusal rather than its rendering, because the mission
+      -- scheduler reads which refusal it was and only the message reaches a
+      -- terminal.
+      refused `shouldBe` Left (MissionIdentifierUnusable "   " "--mission takes the identifier of exactly one mission")
 
   it "refuses a malformed identifier rather than resolving one" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
@@ -1039,7 +1159,7 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
     withMission (snapshotWith MissionWaitingInput [stepRecord MissionStepNeedsInput []] []) $ \store stage -> do
       report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> do
           run.missionRunConclusion `shouldBe` Right (MissionHaltBlocked MissionWaitingInput "it is waiting for an answer this runner cannot supply")
           missionRunSucceeded run `shouldBe` True
@@ -1343,7 +1463,7 @@ preconditionSpec = describe "the exact-version precondition" $ do
       writeIORef stage.stageTargets [Right (issueVersion ["reviewed:approve"]), Left "GitHub is unreachable"]
       report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> do
           run.missionRunConclusion `shouldBe` Left "GitHub is unreachable"
           missionRunSucceeded run `shouldBe` False
@@ -2122,7 +2242,7 @@ durableCommandSpec = describe "answering a command durably" $ do
       written `shouldBe` Right ()
       report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> do
           run.missionRunConclusion
             `shouldBe` Right
@@ -2983,7 +3103,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       openChildInvocation store "r-60"
       report <- runMissionWith Nothing store boardRepository theMission (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> do
           run.missionRunConclusion
             `shouldSatisfy` either (const False) missionHaltIsIndeterminate
@@ -3338,7 +3458,7 @@ directionSpec = describe "directing a run that has blocked" $ do
       hClose writeEnd
       report <- awaitConsole finished
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> do
           run.missionRunConclusion
             `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
@@ -3360,7 +3480,7 @@ directionSpec = describe "directing a run that has blocked" $ do
         report <- withConsole typed $ \handle ->
           runMissionWith (Just (spokenConsole handle said)) store boardRepository theMission (stagedDriver stage)
         case report of
-          Left detail -> expectationFailure (Text.unpack detail)
+          Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
           Right run ->
             run.missionRunConclusion
               `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
@@ -3382,7 +3502,7 @@ directionSpec = describe "directing a run that has blocked" $ do
           theMission
           (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run ->
           run.missionRunConclusion
             `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
@@ -3396,7 +3516,7 @@ directionSpec = describe "directing a run that has blocked" $ do
       report <- withConsole "resume\n" $ \handle ->
         runMissionWith (Just (spokenConsole handle said)) store boardRepository theMission (stagedDriver stage)
       case report of
-        Left detail -> expectationFailure (Text.unpack detail)
+        Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run -> run.missionRunConclusion `shouldBe` Right (MissionHaltTerminal MissionCompleted)
       readIORef said `shouldReturn` []
 

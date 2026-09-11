@@ -7,6 +7,7 @@ module Kanban.CLI
     launchMode,
     launchModeNeedsProvider,
     launchModeRefusal,
+    missionSelectionConflict,
     optionsParserInfo,
   )
 where
@@ -51,6 +52,17 @@ data Options = Options
     -- identifier" and "this repository has no such mission" are the same
     -- refusal to a parser and two different ones to the person who typed it.
     optionMission :: Maybe String,
+    -- | @--mission-scheduler@: advance this repository's runnable missions for
+    -- one bounded pass. Repository-scoped where @--mission@ is mission-scoped,
+    -- which is why the two are refused together rather than ordered against
+    -- each other — see 'missionSelectionConflict'.
+    optionMissionScheduler :: Bool,
+    -- | @--mission-result FILE@: where a mission run writes the machine-
+    -- readable account of what it did. Internal, and the scheduler is its only
+    -- caller: a child's disposition has to be derived from a typed document
+    -- rather than from the terminal report, and an invocation that names no
+    -- file writes none and behaves exactly as it always has.
+    optionMissionResult :: Maybe FilePath,
     optionWorkerSpec :: Maybe FilePath,
     optionReviewTools :: Maybe FilePath
   }
@@ -99,6 +111,17 @@ data LaunchMode
     -- invocation that also names an observational mode gets the observation
     -- and starts nothing (§5).
     MissionMode String
+  | -- | @--mission-scheduler@: one bounded repository-wide pass.
+    --
+    -- After 'MissionMode' rather than before it, on the ordering §5 already
+    -- fixes: the modes above each answer a question and exit, @--mission@
+    -- advances the one mission it was handed, and this advances whichever of
+    -- the repository's missions are runnable. An invocation naming both is
+    -- refused outright by 'missionSelectionConflict' instead of resolving
+    -- here, because \"this mission\" and \"whichever missions\" are not two
+    -- spellings of one request and silently picking either would start work
+    -- the operator did not ask for.
+    MissionSchedulerMode
   | -- | The dashboard.
     DashboardMode
   deriving stock (Eq, Show)
@@ -113,7 +136,22 @@ launchMode options = case (options.optionWorkerSpec, options.optionReviewTools) 
     | options.optionUsage -> UsageQueryMode
     | not (null options.optionPing) -> PingQueryMode
     | Just mission <- options.optionMission -> MissionMode mission
+    | options.optionMissionScheduler -> MissionSchedulerMode
     | otherwise -> DashboardMode
+
+-- | Why this invocation names no single mission selection, if it names two.
+--
+-- Reported ahead of mode selection, exactly as a malformed @--ping@ is and for
+-- the same reason: the conflict has to be reported as /itself/ rather than
+-- resolved by whichever of the two the selector happens to reach first. One
+-- names a mission and the other names a policy for choosing them, so there is
+-- no reading under which obeying one of them is obeying the invocation.
+missionSelectionConflict :: Options -> Maybe Text
+missionSelectionConflict options
+  | Just _ <- options.optionMission,
+    options.optionMissionScheduler =
+      Just "--mission names one mission and --mission-scheduler selects them; name only one of the two"
+  | otherwise = Nothing
 
 -- | Whether this mode reaches a model provider, and so has nothing to do when
 -- the roster loads none.
@@ -156,6 +194,11 @@ launchModeNeedsProvider mode = case mode of
   GlyphTestMode -> False
   DoctorMode -> False
   MissionMode _ -> False
+  -- The scheduler advances missions through children that load their own
+  -- rosters, and the pass itself observes attention and notifies, neither of
+  -- which reaches a provider. Refusing it on a roster that loads nothing would
+  -- stop a pass that can still settle and report every mission it finds.
+  MissionSchedulerMode -> False
   DashboardMode -> False
 
 -- | What a mode says instead of running, given the roster the invocation
@@ -273,6 +316,17 @@ optionsParser =
           ( long "mission"
               <> metavar "MISSION_ID"
               <> help "Advance exactly this mission in the foreground, then exit"
+          )
+      )
+    <*> switch
+      ( long "mission-scheduler"
+          <> help "Advance this repository's runnable missions for one bounded pass, then exit"
+      )
+    <*> optional
+      ( strOption
+          ( long "mission-result"
+              <> metavar "FILE"
+              <> internal
           )
       )
     <*> optional

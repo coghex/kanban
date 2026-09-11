@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Kanban.ApprovalService (ApprovalActivity (..), ApprovalState (..), ApprovalStatus (..))
-import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal)
+import Kanban.CLI (LaunchMode (..), Options (..), launchMode, launchModeNeedsProvider, launchModeRefusal, missionSelectionConflict)
 import Kanban.Domain
 import Kanban.Drainer (DrainerActivity (..), DrainerState (..), DrainerStatus (..))
 import Kanban.Filter (FilterCriteria (..), LifecycleFacet (..))
@@ -412,7 +412,7 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
   -- Requirement 6. @app/Main.hs@ is not built by this suite, so the decision
   -- is here and that module only reports what it answered.
   it "names exactly the two modes that reach a provider" $
-    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False, False]
+    map launchModeNeedsProvider everyMode `shouldBe` [False, False, False, False, True, True, False, False, False]
 
   -- The mission runner is the one mode that reaches providers and still
   -- answers 'False', and the reason is requirements 6 and 7: reattaching to a
@@ -425,6 +425,24 @@ commandLineSpec = describe "the run-and-exit modes it refuses" $ do
     launchModeNeedsProvider (MissionMode "mission-0001") `shouldBe` False
     launchModeRefusal (MissionMode "mission-0001") (Right noAgentRoster) `shouldBe` Nothing
     launchModeRefusal (MissionMode "mission-0001") (Left unusableRoster) `shouldBe` Nothing
+
+  -- And the scheduler above it, for the same reason one level up: its pass
+  -- reads durable records and launches mission children that load their own
+  -- rosters, so a repository whose @models.toml@ loads nothing can still be
+  -- swept, reported on, and notified about.
+  it "lets the mission scheduler start on a roster that loads nothing" $ do
+    launchModeNeedsProvider MissionSchedulerMode `shouldBe` False
+    launchModeRefusal MissionSchedulerMode (Right noAgentRoster) `shouldBe` Nothing
+    launchModeRefusal MissionSchedulerMode (Left unusableRoster) `shouldBe` Nothing
+
+  -- Requirement 1's exclusivity. Two mission selections is not a precedence
+  -- question, so the conflict is reported as itself and neither one runs.
+  it "refuses an invocation that names a mission and the scheduler together" $ do
+    missionSelectionConflict testOptions {optionMission = Just "mission-0001", optionMissionScheduler = True}
+      `shouldBe` Just "--mission names one mission and --mission-scheduler selects them; name only one of the two"
+    missionSelectionConflict testOptions {optionMission = Just "mission-0001"} `shouldBe` Nothing
+    missionSelectionConflict testOptions {optionMissionScheduler = True} `shouldBe` Nothing
+    missionSelectionConflict testOptions `shouldBe` Nothing
 
   it "refuses --usage and --ping with the roster's own words" $
     sequence_
@@ -473,6 +491,7 @@ everyMode =
       testOptions {optionUsage = True},
       testOptions {optionPing = ["codex"]},
       testOptions {optionMission = Just "mission-0001"},
+      testOptions {optionMissionScheduler = True},
       testOptions
     ]
 

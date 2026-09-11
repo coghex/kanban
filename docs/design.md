@@ -131,6 +131,8 @@ Initial options:
                                   model request, then exit
 --mission MISSION_ID              advance exactly that mission in the foreground,
                                   then exit
+--mission-scheduler               advance this repository's runnable missions for
+                                  one bounded pass, then exit
 --ascii                            emergency non-Unicode border fallback
 --no-cache                        do not read or write snapshots
 --config FILE                     override the global configuration path
@@ -185,10 +187,11 @@ remote. It never enters the TUI and never starts a background refresh.
 
 `--ping` short-circuits it on the same terms as `--usage`, and after it: the
 run-and-exit modes are selected in the fixed order `--glyph-test`, `--doctor`,
-`--usage`, `--ping`, and exactly one of them runs. `--mission` is not among
-them — it is not run-and-exit, it advances durable work — but it is selected
-after all four and before the dashboard, so an invocation naming a mission and
-an observational mode runs the observation and starts nothing. A ping is the
+`--usage`, `--ping`, and exactly one of them runs. `--mission` and
+`--mission-scheduler` are not among them — neither is run-and-exit, both
+advance durable work — but both are selected after all four and before the
+dashboard, in that order, so an invocation naming a mission and an
+observational mode runs the observation and starts nothing. A ping is the
 only mode that spends the user's quota (section 14), so every observational
 mode wins
 over it; an invocation naming one of them — `kanban --doctor --ping codex` —
@@ -250,6 +253,74 @@ never merges a pull request, never applies a verdict label, and never reports
 an indeterminate result as a success — and absence is not a result: a target
 that has left the open read is an outcome nobody can settle from that read, not
 a step that succeeded.
+
+An invocation naming both `--mission` and `--mission-scheduler` is refused
+outright, before any mode is selected and whatever else it names, exactly as a
+malformed `--ping` is. The two are not two spellings of one request — one names
+the mission to advance and the other says to choose among them — so there is no
+reading under which obeying either one is obeying the invocation, and selection
+order would silently start work that was not asked for.
+
+`--mission-scheduler` advances this repository's runnable missions for one
+bounded pass and then exits. It is not a daemon: repeating passes and deciding
+how long to wait between them belong to the supervisor above it
+(`tools/mission_runner_service.py`), which is invoked directly and installs
+nothing.
+
+A pass admits at most two missions, and the ceiling is a compiled value with no
+configuration surface; fair rotation, a configurable capacity, and priority for
+a direct operator command are deliberately deferred. A mission is runnable when
+it is nonterminal, unpaused, and not waiting on operator input, a barrier, or
+capacity. A mission whose advancement lease is already held is skipped and does
+not consume an admission slot, and the holder-liveness rule is the acquisition's
+own — an owner that cannot be shown to be gone counts as holding it. Losing that
+lease to somebody else between selection and launch is reported as the ordinary
+contention it is rather than as a failed pass.
+
+Each admitted mission is advanced through its own `kanban --mission` child,
+launched with a non-terminal standard input, its output captured rather than
+inherited, this process's own working directory as the checkout, and the same
+resolved repository and absolute configuration the pass was given. A pass does
+not return while a child it launched is still running, and the children stay in
+the pass's own process group so a signal to that group reaches all of them.
+
+The pass writes exactly one JSON document to stdout and every word of narration
+to stderr. That document names its schema and version, the repository, each
+admitted mission and its disposition, each outstanding attention identity and
+what became of its notification, and a termination reason of `completed`,
+`refused`, or `failed` — exiting 0, 2, and 1 respectively. Dispositions are
+derived from the child's own machine-readable result, its exit status, and the
+mission's durable snapshot, never from terminal text; to that end `--mission`
+gains an internal `--mission-result FILE`, which writes a typed account of what
+one run did and is written only when a caller asks for one, so an operator's own
+`--mission` run is unchanged.
+
+A pass reaches no network. The runnable set, the lease decision, and every
+disposition come from durable records on this machine, so a pass with nothing to
+advance launches no child and makes no GitHub request at all. What it still does
+in that case is observe attention: a mission waiting on a person is precisely
+the one nothing is advancing, and its outstanding attention is reported, and
+notified about once, whether or not any mission was admitted.
+
+Attention itself is created by the transition, not by the pass. Entering
+`waiting_input` opens a waiting episode and gives it a stable,
+repository-qualified identity that repeated observations and a restart both
+preserve; leaving that state ends the episode, and a later re-entry is a new one
+with a new identity. The other waits raise none: a barrier and a capacity wait
+are this machine's own arithmetic, and a pause is something an operator already
+did. Because the transition creates it, an interactive `kanban --mission` run
+records attention too; only a scheduler pass observes and notifies.
+
+Notifications are off by default (section 16). When they are on, the operator's
+configured command is run through the same bounded capture seam a usage command
+uses, with the repository, the typed target and the word `attention-required`
+appended and nothing else — no title, no summary, no path. Delivery is at most
+once per waiting episode: a durable suppression record is written before the
+command is launched and the identity is never retried afterwards, whatever the
+outcome, so a crash in that window loses the notification rather than risking a
+second one. A command that exits zero has completed, which is not proof that
+anybody was shown anything, and no record says otherwise. A notification that
+failed resolves no attention and stops no scheduling.
 
 Its own terminal is the authenticated console, and it is authenticated by
 being unreachable rather than by presenting anything. A line typed there is
@@ -3527,7 +3598,11 @@ Suggested paths:
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/lease/owner.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
+~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
 ~/.local/state/kanban/missions/.deleted/<token>/
+~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/status.json
+~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/incidents/<id>.json
+~/Library/Application Support/kanban/mission-runner/locks/<owner>.<repo>.lock
 ```
 
 Defaults:
@@ -3595,6 +3670,31 @@ Defaults:
   no integer version, or fails to decode under a version Kanban does recognise
   is corruption and keeps its warning. Settings follow the same rule, falling
   back to the defaults silently for an unknown version.
+- A mission's `notifications` directory holds one record per attention
+  identity: the durable suppression the unattended scheduler writes *before* it
+  launches an operator's notification command. Its existence is the whole
+  contract — a record that is there, whatever it says and whether or not it
+  decodes, means that identity has had its one attempt and will never get
+  another, including after a restart and including when the attempt failed.
+  The outcome is written into it afterwards and may never arrive, because a
+  crash between the create and the launch loses that notification; delivery is
+  at most once per waiting episode and is not guaranteed. The file is named by
+  a digest of the identity because the identity itself spells a repository, a
+  mission and a timestamp and is not a path component; the record inside
+  carries it in full. It lives inside the mission's own directory so archiving
+  or deleting a mission takes its notification history with it.
+- The mission runner's runtime documents are the unattended supervisor's, not
+  Kanban's: `tools/mission_runner_service.py` writes one status document and
+  one incident directory per canonical repository, under the account's own
+  service root — `~/Library/Application Support/kanban/mission-runner` on
+  macOS, `$XDG_DATA_HOME/kanban/mission-runner` when that names an absolute
+  directory, and `~/.local/share/kanban/mission-runner` otherwise. Each carries
+  its own schema and integer version and records the repository it describes,
+  so a reader can reject one written for another repository or by another
+  release. The per-identity run lock beside them is what makes a second
+  wrapper for one repository refuse rather than interleave. Nothing in Kanban
+  reads any of it yet: discovery and decoding are a later slice's, and until
+  then `status` is the only reader.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository
@@ -4181,8 +4281,18 @@ outside the board as well: `kanban --mission` claims that mission's own
 advancement lease, reconciles its durable record against live worker and
 GitHub state, journals every effect before attempting it, and makes at most
 one transition per pass through the workflow action registry until the mission
-is terminal, paused, or blocked. Repository-wide mission selection, capacity
-arbitration, and unattended scheduling are not implemented. Board frames are
+is terminal, paused, or blocked. Repository-wide selection and unattended
+scheduling are now implemented too: `kanban --mission-scheduler` advances at
+most two runnable missions per bounded pass, skipping any whose advancement
+lease is held, observes whatever attention is outstanding anywhere in the
+repository, notifies about each waiting episode at most once through a command
+the operator configured, and writes one machine-readable pass report;
+`tools/mission_runner_service.py` repeats those passes for one repository,
+publishes a versioned status document and opens an incident on a failed pass,
+and refuses a second wrapper for the same repository. Installing that wrapper
+as a managed job, decoding its runtime from the dashboard, capacity
+arbitration, fair rotation, and descendant-tree termination are not
+implemented. Board frames are
 bounded as section 7 describes: each column is laid out once per change to what
 it shows, and a frame builds the cards its viewport can reach rather than every
 card the column holds. The

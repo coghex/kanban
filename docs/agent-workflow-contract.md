@@ -2048,6 +2048,68 @@ approved item itself, so the destination is proved instead. The outcomes
 differ; the analysis does not, and neither action may write to an endpoint its
 report did not name.
 
+### 2.12 Unattended capability — the mission runner
+
+- **Owning source:** `tools/mission_runner_service.py` (the foreground `run`
+  that supervises repeated scheduler passes, the read-only `status`, and the
+  durable status and incident documents), over
+  `src/Kanban/Mission/Scheduler.hs` (one bounded repository-wide pass),
+  `src/Kanban/Mission/Pass.hs` (the two machine-readable documents a pass is
+  made of), and `src/Kanban/Mission/Notify.hs` (the attention notification and
+  its durable suppression record). There is no in-app surface yet: Kanban-side
+  discovery, status decoding, and dashboard start/stop are a later slice's, so
+  today the runtime documents have exactly one writer and no reader but
+  `status`.
+- **Installation:** none. This capability is invoked directly — the wrapper is
+  run in a terminal or under whatever supervisor the operator already has — and
+  has no service-manager namespace, no discovery record, no installed script
+  links, and no per-repository log directory. Making it a managed job is a
+  later slice's, and until then nothing here may be discovered the way §2.4's
+  and §2.8's jobs are.
+- **Invocation:** the controller never imports Haskell. Every pass is a child
+  process running `kanban --mission-scheduler` — resolved from `PATH` unless
+  `--kanban` names one, and refused by name when neither is usable — in the
+  checkout it was started for, carrying that checkout's canonical `--repo`
+  identity and, when one was given, an absolute `--config`. The environment is
+  inherited whole, because `$XDG_DATA_HOME` and `$XDG_STATE_HOME` are what
+  decide which mission store a pass advances and which runtime describes it.
+- **The pass contract:** one JSON document on stdout and narration on stderr,
+  carrying `kanban-mission-scheduler-pass` version 1, the repository identity,
+  each admitted mission and its disposition, each outstanding attention
+  identity and what became of its notification, and a termination reason of
+  `completed`, `refused`, or `failed` — exiting 0, 2, and 1 respectively. The
+  schema, the version, the three vocabularies and that exit mapping are
+  declared once in `Kanban.Mission.Pass` and mirrored as constants in the
+  controller, which cannot import them;
+  `tools/test_mission_runner_service.py` holds the mirror equal to the
+  declaration. A report that is absent, unreadable, of another schema or
+  version, about another repository, carrying an unknown disposition or
+  notification state, or contradicting the status its child exited with is a
+  failed pass, never a quiet one.
+- **Authority:** none beyond what a mission already had. A pass admits at most
+  two runnable missions and advances each through its own `kanban --mission`
+  child, which dispatches through the workflow action registry exactly as a
+  board key press does. Neither the scheduler nor the controller merges a pull
+  request, applies a verdict label, or reports an indeterminate result as a
+  success, and neither performs a GitHub request of its own — a pass with
+  nothing runnable makes none at all.
+- **Durable state:** a status document and an incident directory per canonical
+  repository under the runtime root §4's `mission-runner-runtime-dir` rows
+  name, a per-identity run lock under `mission-runner-lock-dir`, and — inside
+  each mission's own record in the mission store — one notification suppression
+  record per attention identity. The suppression record is written before the
+  configured command is launched and is never retried afterwards, so delivery
+  is at most once per waiting episode and a crash between the record and the
+  launch loses that notification by design.
+- **Notifications:** off by default, and when enabled the operator's own
+  configured command is run through the bounded command-capture seam with three
+  appended arguments — the repository identity, the typed target or the word
+  `none`, and `attention-required`. No title, summary, recommendation, or
+  filesystem path is ever passed. A zero exit establishes that the command
+  completed and nothing more.
+- **Mandatory/optional:** optional. A Kanban that never runs a mission runner
+  never resolves `kanban` as an external command and writes none of this state.
+
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -2256,6 +2318,13 @@ grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/sk
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
+kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-runtime-dir | personal-path | /Library/Application Support/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-runtime-dir-xdg | personal-path | /.local/share/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-lock-dir | personal-path | /Library/Application Support/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-lock-dir-xdg | personal-path | /.local/share/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
 ```
 
 The six issue-review `personal-path` rows are three locations times two
@@ -2415,10 +2484,47 @@ their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms �
 there the literal carries the leading separator, so no reconciling comment is
 needed.
 
+The six `mission-runner` `personal-path` rows are three locations times two
+platform conventions, as the issue-review and drainer rows are and unlike the
+issue-approval ones: `tools/mission_runner_service.py` resolves its root
+through `kanban_config.is_macos()`, taking `~/Library/Application
+Support/kanban/mission-runner` on macOS and the XDG data root — `$XDG_DATA_HOME`
+when it names an absolute directory, and `~/.local/share/kanban/mission-runner`
+when it does not — everywhere else. That absolute-only rule is the drainer's
+rather than issue-review's, and for the drainer's stated reason: the unit that
+will eventually run this job and the paths that locate it have to read the
+environment identically. `mission-runner-service-root` is the service root and
+the parent of the other two; `mission-runner-runtime-dir` is the runtime root,
+one directory per identity beneath it holding that identity's status document
+and incident directory; and `mission-runner-lock-dir` holds the per-identity run
+lock. No installation directory, discovery record, or log root appears among
+them, because this slice installs nothing: `kanban --mission-scheduler` is
+supervised by a wrapper invoked directly, and making it a managed job is a later
+slice's (§2.12).
+
+Those six name `tools/mission_runner_service.py` alone, and that is the same
+statement the four issue-approval rows make: the module composes each location
+segment by segment, so a `files` entry can only be grounded in the module if the
+literals are written down there. Two of them are, by the scan below —
+`mission-runner-service-root` in both spellings, and the XDG runtime and lock
+trees the scan resolves the service root to — and the remaining `~/Library`
+runtime and lock spellings are written out in the docstring of the helper that
+builds each, because the scan follows exactly one of a helper's returns and the
+row still has to be grounded in the module that owns it.
+
+`kanban-cli` is the executable a pass *is*. Every other dependency in this table
+is something Kanban invokes; this one is Kanban, invoked by
+`tools/mission_runner_service.py` as an ordinary external command because the
+controller is a separate process by design — it supervises passes and never
+imports the code that performs them (§2.12). The row is `mandatory | no` for the
+same reason `codex` and `claude` are: a Kanban that never runs a mission runner
+never needs to resolve it.
+
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
-`tools/approve_issues_service.py`, `tools/install_issue_approval.py`, and
-`tools/service_manager.py` as parsed modules — following a name to its binding
+`tools/approve_issues_service.py`, `tools/install_issue_approval.py`,
+`tools/service_manager.py`, and `tools/mission_runner_service.py` as parsed
+modules — following a name to its binding
 and a helper to its return — and reconciles every chain that reaches a home root
 against the `personal-path` tokens here. It is the counterpart of the Haskell and
 markdown scans above, over a third surface that spells its paths in neither of
@@ -3280,11 +3386,12 @@ runs) parses the manifest in §4 and:
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on
   real ones. That discovered surface is executable-only; the home-relative
-  paths a `tools/` module builds are reconciled only for the three named in
+  paths a `tools/` module builds are reconciled only for the four named in
   the next bullet;
 - fails if `tools/approve_issues_service.py`,
-  `tools/install_issue_approval.py`, or `tools/service_manager.py` — §2.8's
-  owning sources — builds a home-relative path that has no matching
+  `tools/install_issue_approval.py`, `tools/service_manager.py`, or
+  `tools/mission_runner_service.py` — §2.8's and §2.12's owning sources —
+  builds a home-relative path that has no matching
   `personal-path` manifest entry. These are Python, so they need an extractor
   of their own beside the Haskell one, and it resolves the parsed module rather
   than matching text, because the shape it has to recover is not local to one
@@ -3297,7 +3404,7 @@ runs) parses the manifest in §4 and:
   `$HOME/`-prefixed literal, joining the result into the same slash-prefixed
   shape the Haskell and markdown scans compare. Quote style and line wrapping
   are not distinctions the parsed tree makes. What it recovers from each of the
-  three is pinned, so a refactor that stops matching fails here rather than
+  four is pinned, so a refactor that stops matching fails here rather than
   passing with an empty discovered set — including the pin that the installer
   builds none of its own — and fixture regressions prove that an undeclared
   segment is reported, that a tail hung off a binding or a helper is recovered

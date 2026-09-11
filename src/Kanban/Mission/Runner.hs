@@ -38,6 +38,8 @@ module Kanban.Mission.Runner
     missionRunReportLines,
     missionRunSucceeded,
     runMissionMode,
+    missionChildResultOf,
+    writeMissionChildResult,
     MissionConsole (..),
     terminalMissionConsole,
     runMissionWith,
@@ -107,7 +109,7 @@ import Kanban.Mission.Controller
     MissionDriver (..),
     MissionInventory (..),
     MissionIteration (..),
-    MissionStartRefusal,
+    MissionStartRefusal (..),
     MissionTransition,
     missionControllerIteration,
     missionStartRefusalMessage,
@@ -115,6 +117,12 @@ import Kanban.Mission.Controller
     missionTransitionMessage,
     startMissionController,
     stopMissionController,
+  )
+import Kanban.Mission.Pass
+  ( MissionChildOutcome (..),
+    MissionChildRefusal (..),
+    MissionChildResult (..),
+    encodeMissionChildResult,
   )
 import Kanban.Mission.Invocation (MissionInvocationId (..), MissionStaleVersion (..), MissionTargetVersion (..), missionStaleVersionMessage, missionVersionHolds)
 import Kanban.Mission.Paths (openMissionStore)
@@ -162,6 +170,7 @@ import Kanban.Worker
     readWorkerState,
     terminateWorker,
   )
+import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Text.IO as TextIO
 import System.IO (Handle, hGetLine, hIsTerminalDevice, hReady, stdin, stdout)
 
@@ -238,14 +247,14 @@ missionRunnerIterationBudget = 10000
 -- specification belonging to another repository, and a mission another
 -- controller is already advancing are each reported as themselves, and none of
 -- them resolves to a different mission.
-runMissionMode :: Options -> ResolvedConfig -> Repository -> Text -> IO (Either Text MissionRunReport)
+runMissionMode :: Options -> ResolvedConfig -> Repository -> Text -> IO (Either MissionStartRefusal MissionRunReport)
 runMissionMode options config repository identifier
   | Text.null (Text.strip identifier) =
-      pure (Left "--mission takes the identifier of exactly one mission")
+      pure (Left (MissionIdentifierUnusable identifier "--mission takes the identifier of exactly one mission"))
   | otherwise = do
       opened <- openMissionStore repository
       case opened of
-        Left detail -> pure (Left detail)
+        Left detail -> pure (Left (MissionStoreUnusable detail))
         Right store ->
           runMissionWith
             -- This process's own terminal is the authenticated console
@@ -257,6 +266,65 @@ runMissionMode options config repository identifier
             repository
             (MissionId (Text.strip identifier))
             (liveMissionDriver options config repository)
+
+-- | The machine-readable account one run leaves for a scheduler that started
+-- it, from what that run actually did.
+--
+-- The whole reason this document exists is the first case below. A typed
+-- startup refusal and a run that broke are different things, and
+-- @app\/Main.hs@ maps both to a non-zero exit because a terminal has no use
+-- for the distinction; a scheduler does, because losing a race for an
+-- advancement lease is ordinary contention and failing is not (requirement 6).
+--
+-- A run that /reached/ a halt is reported as having advanced the mission,
+-- including one that stopped for an operator: the mission moved, and saying
+-- where it moved to is the durable snapshot's job rather than this document's.
+-- The one halt that is not is an indeterminate one — a step whose effect
+-- nobody can establish — which 'missionRunSucceeded' already refuses to call a
+-- success and which this refuses to call an advance, for the same reason
+-- (requirement 18).
+missionChildResultOf :: Text -> MissionId -> Either MissionStartRefusal MissionRunReport -> MissionChildResult
+missionChildResultOf repository mission outcome = case outcome of
+  Left refusal ->
+    MissionChildResult
+      { missionChildResultRepository = repository,
+        missionChildResultMission = mission,
+        missionChildResultOutcome = MissionChildRefused,
+        missionChildResultRefusal = Just (childRefusal refusal),
+        missionChildResultDetail = missionStartRefusalMessage refusal
+      }
+  Right report ->
+    MissionChildResult
+      { missionChildResultRepository = repository,
+        missionChildResultMission = mission,
+        missionChildResultOutcome = if missionRunSucceeded report then MissionChildAdvanced else MissionChildFailed,
+        missionChildResultRefusal = Nothing,
+        missionChildResultDetail = conclusion report
+      }
+  where
+    conclusion report = case report.missionRunConclusion of
+      Right halt -> missionHaltMessage halt
+      Left detail -> "stopped: " <> detail
+
+    childRefusal refusal = case refusal of
+      MissionAlreadyAdvancing _ _ -> MissionChildAlreadyAdvancing
+      MissionUnknown _ -> MissionChildUnknownMission
+      MissionRecordUnreadable _ _ -> MissionChildUnreadableRecord
+      MissionRepositoryMismatched {} -> MissionChildRepositoryMismatched
+      MissionIdentifierUnusable _ _ -> MissionChildIdentifierUnusable
+      MissionStoreUnusable _ -> MissionChildStoreUnusable
+
+-- | Leaves that account where the scheduler that asked for it will look.
+--
+-- Best effort by design. The file is a convenience for a caller that asked for
+-- one, and a run that advanced a mission must not be turned into a failed run
+-- because a scratch path became unwritable; the scheduler already treats an
+-- absent document as a failure of the child, which is the right answer from
+-- its side without this one having to exit differently.
+writeMissionChildResult :: FilePath -> MissionChildResult -> IO (Either Text ())
+writeMissionChildResult path result = do
+  written <- try @IOException (LazyByteString.writeFile path (encodeMissionChildResult result))
+  pure (either (Left . Text.pack . show) Right written)
 
 -- | The operator's end of a run: where an authenticated line comes from, and
 -- where this run says something back.
@@ -306,11 +374,11 @@ missionConsoleDetachWords = ["detach", "quit", "exit"]
 --
 -- The seam a fixture uses: everything below this point is the controller's own
 -- progression, and everything the driver does is the outside world.
-runMissionWith :: Maybe MissionConsole -> MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either Text MissionRunReport)
+runMissionWith :: Maybe MissionConsole -> MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either MissionStartRefusal MissionRunReport)
 runMissionWith console store repository mission buildDriver = do
   started <- startMissionController store repository mission buildDriver
   case started of
-    Left refusal -> pure (Left (missionStartRefusalMessage (refusal :: MissionStartRefusal)))
+    Left refusal -> pure (Left refusal)
     Right controller -> do
       report <- loop controller missionRunnerIterationBudget []
       stopMissionController controller

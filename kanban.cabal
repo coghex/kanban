@@ -206,9 +206,12 @@ library kanban-internal
     Kanban.Mission.Invocation
     Kanban.Mission.Journal
     Kanban.Mission.Lease
+    Kanban.Mission.Notify
+    Kanban.Mission.Pass
     Kanban.Mission.Paths
     Kanban.Mission.Reconcile
     Kanban.Mission.Runner
+    Kanban.Mission.Scheduler
     Kanban.Mission.Session
     Kanban.Mission.Store
     Kanban.Mission.Types
@@ -265,6 +268,7 @@ executable kanban
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   build-depends:
     base,
+    bytestring,
     kanban:kanban-internal,
     optparse-applicative,
     text
@@ -317,6 +321,7 @@ test-suite kanban-test
     Spec.ManagedPaths
     Spec.Mission
     Spec.Mission.Runner
+    Spec.Mission.Scheduler
     Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity

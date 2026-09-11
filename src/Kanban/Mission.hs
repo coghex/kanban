@@ -84,6 +84,9 @@ module Kanban.Mission
     MissionStepRecord (..),
     MissionPause (..),
     MissionAttention (..),
+    MissionAttentionId (..),
+    missionAttentionIdentity,
+    MissionNotificationRecord (..),
     MissionRetryCounter (..),
     MissionReconciliation (..),
     writeMissionSnapshot,
@@ -239,6 +242,7 @@ module Kanban.Mission
     MissionTransition (..),
     missionTransitionMessage,
     MissionIteration (..),
+    applyMissionLifecycle,
     missionControllerIteration,
     submitConsoleCommand,
     childInvocationId,
@@ -249,6 +253,8 @@ module Kanban.Mission
     missionRunReportLines,
     missionRunSucceeded,
     runMissionMode,
+    missionChildResultOf,
+    writeMissionChildResult,
     runMissionWith,
     liveMissionDriver,
     decidingWorkerReading,
@@ -261,6 +267,54 @@ module Kanban.Mission
     missionRunnerPollMicros,
     missionRunnerIterationBudget,
 
+    -- * The repository scheduler
+    MissionSchedulerSeams (..),
+    missionAdmissionCeiling,
+    missionIsRunnable,
+    advanceMissions,
+    runMissionSchedulerPass,
+    runMissionSchedulerMode,
+
+    -- * The pass and child-result contracts
+    MissionChildResult (..),
+    MissionChildOutcome (..),
+    missionChildOutcomes,
+    missionChildOutcomeTag,
+    MissionChildRefusal (..),
+    missionChildRefusals,
+    missionChildRefusalTag,
+    missionChildResultSchema,
+    missionChildResultVersion,
+    encodeMissionChildResult,
+    decodeMissionChildResult,
+    MissionPassReport (..),
+    MissionDispositionRecord (..),
+    MissionDisposition (..),
+    missionDispositions,
+    missionDispositionTag,
+    missionDispositionIsFailure,
+    MissionAttentionRecord (..),
+    MissionNotificationState (..),
+    missionNotificationStates,
+    missionNotificationStateTag,
+    MissionPassTermination (..),
+    missionPassTerminations,
+    missionPassTerminationTag,
+    missionPassExitCode,
+    missionPassSchema,
+    missionPassVersion,
+    encodeMissionPassReport,
+    missionPassNarration,
+
+    -- * Attention notifications
+    MissionNotificationAttempt (..),
+    attemptMissionNotification,
+    missionNotificationArguments,
+    missionNotificationDigest,
+    missionNotificationTarget,
+    missionNotificationTimeoutMicros,
+    runMissionNotificationCommand,
+
     -- * The lease
     MissionLease (..),
     MissionLeaseOwner (..),
@@ -269,6 +323,8 @@ module Kanban.Mission
     acquireMissionLease,
     acquireMissionLeaseWith,
     missionHolderPresence,
+    missionLeaseHeld,
+    missionLeaseHeldWith,
     releaseMissionLease,
     readMissionLeaseOwner,
   )
@@ -286,12 +342,32 @@ import Kanban.Mission.Lease
     acquireMissionLease,
     acquireMissionLeaseWith,
     missionHolderPresence,
+    missionLeaseHeld,
+    missionLeaseHeldWith,
     readMissionLeaseOwner,
     releaseMissionLease,
   )
 import Kanban.Mission.Paths (MissionRead (..), missionDirectory, missionInvocationPath, missionJournalPath, missionStoreRoot)
+import Kanban.Mission.Notify
+  ( MissionNotificationAttempt (..),
+    attemptMissionNotification,
+    missionNotificationArguments,
+    missionNotificationDigest,
+    missionNotificationTarget,
+    missionNotificationTimeoutMicros,
+    runMissionNotificationCommand,
+  )
+import Kanban.Mission.Pass
 import Kanban.Mission.Reconcile
 import Kanban.Mission.Runner
+import Kanban.Mission.Scheduler
+  ( MissionSchedulerSeams (..),
+    advanceMissions,
+    missionAdmissionCeiling,
+    missionIsRunnable,
+    runMissionSchedulerMode,
+    runMissionSchedulerPass,
+  )
 import Kanban.Mission.Session
   ( MissionSessionTreeError (..),
     missionSessionTreeErrorMessage,
@@ -321,6 +397,9 @@ import Kanban.Mission.Store
 import Kanban.Mission.Types
   ( MissionArchiveState (..),
     MissionAttention (..),
+    MissionAttentionId (..),
+    MissionNotificationRecord (..),
+    missionAttentionIdentity,
     MissionAutonomy (..),
     MissionDecisionPolicy (..),
     MissionEvent (..),

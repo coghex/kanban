@@ -49,6 +49,8 @@ module Kanban.Mission.Paths
     missionControlDirectory,
     missionControlTokenPath,
     missionControlRequestDirectory,
+    missionNotificationDirectory,
+    missionNotificationPath,
     missionLeasePath,
     missionLeaseOwnerPath,
     missionArchiveDirectory,
@@ -290,7 +292,7 @@ missionDirectory store mission
   where
     name = Text.unpack mission.unMissionId
 
-missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionInvocationPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory, missionControlDirectory, missionControlTokenPath, missionControlRequestDirectory :: FilePath -> MissionId -> Either Text FilePath
+missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionInvocationPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory, missionControlDirectory, missionControlTokenPath, missionControlRequestDirectory, missionNotificationDirectory :: FilePath -> MissionId -> Either Text FilePath
 missionSpecificationPath store mission = (</> "specification.json") <$> missionDirectory store mission
 missionSnapshotPath store mission = (</> "snapshot.json") <$> missionDirectory store mission
 missionJournalPath store mission = (</> "events.jsonl") <$> missionDirectory store mission
@@ -301,6 +303,27 @@ missionArchiveDirectory store mission = (</> "archive") <$> missionDirectory sto
 missionControlDirectory store mission = (</> "control") <$> missionDirectory store mission
 missionControlTokenPath store mission = (</> "token.json") <$> missionControlDirectory store mission
 missionControlRequestDirectory store mission = (</> "requests") <$> missionControlDirectory store mission
+missionNotificationDirectory store mission = (</> "notifications") <$> missionDirectory store mission
+
+-- | Where one attention identity's notification record lives.
+--
+-- Named by a digest of the identity rather than by the identity itself: an
+-- attention identity carries a repository, a mission and a timestamp, so it
+-- spells @\/@ and @#@ and is not a path component at all. The digest is
+-- "Kanban.Mission.Digest"'s, which spawns nothing, and the record inside
+-- carries the identity in full so a reader never has to invert it.
+--
+-- Inside the mission's own directory, so the record travels with the mission:
+-- archiving or deleting one takes its notification history with it, and a
+-- store restored for another repository carries no suppression that could
+-- silence this one.
+missionNotificationPath :: FilePath -> MissionId -> Text -> Either Text FilePath
+missionNotificationPath store mission digest = do
+  directory <- missionNotificationDirectory store mission
+  let name = Text.unpack digest <> ".json"
+  if safeMissionComponent name
+    then Right (directory </> name)
+    else Left ("notification identity " <> Text.pack (show digest) <> " cannot name a record file")
 
 -- | The archived copy of one session's log, and the seal record beside it.
 --

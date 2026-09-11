@@ -1,0 +1,968 @@
+"""Unit and fixture tests for the mission runner controller.
+
+Hermetic throughout. The account root every runtime document hangs off is
+redirected into a temporary directory, the scheduler is a fake script that
+writes whatever report a test asks for, and the repositories are temporary `git
+init` checkouts whose remotes name repositories nothing here ever contacts. No
+test reaches the network, a GitHub account, a model, or a service manager.
+
+The lifecycle runs are real: a real controller process supervises a real
+scheduler child in its own session, and the containment assertions are made
+against what those processes actually did. The process-containment case in
+particular stages a mission child that *ignores* `SIGTERM`, so what it proves
+is the controller's escalation to `SIGKILL` rather than a child's cooperation.
+
+The mirror checks read `src/Kanban/Mission/Pass.hs` and hold every constant
+this module copies equal to the Haskell declaration it copies. That is the only
+thing standing between the two halves of a pass contract that cannot import
+each other.
+"""
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import mission_runner_service as service
+
+
+CONTROLLER = Path(__file__).resolve().parent / "mission_runner_service.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PASS_MODULE = REPO_ROOT / "src" / "Kanban" / "Mission" / "Pass.hs"
+
+# Runs the tracked controller with its account root redirected, so a fixture's
+# subprocess writes where the fixture can see it. Only `account_home` is
+# replaced: every lock, every signal, and every real scheduler child below it
+# is the tracked module's own.
+CONTROLLER_WRAPPER = '''#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+account = Path(sys.argv[2])
+del sys.argv[1:3]
+
+import mission_runner_service as service
+
+service.account_home = lambda: account
+raise SystemExit(service.main())
+'''
+
+# Stands in for `kanban --mission-scheduler`. It records every invocation --
+# argv, working directory, and the parts of the environment a pass depends on
+# -- then writes whatever report the plan file names and exits with the status
+# that report implies. A test asserts nothing about this script itself; it
+# exists so the controller can be asserted against a scheduler that schedules
+# nothing.
+FAKE_SCHEDULER = '''#!/usr/bin/env python3
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+CALLS = os.environ["FAKE_SCHEDULER_CALLS"]
+PLAN = os.environ["FAKE_SCHEDULER_PLAN"]
+
+# A mission child that refuses to stop politely. Its whole purpose is to make
+# the controller's escalation the thing under test.
+STUBBORN = (
+    "import os, signal, sys, time\\n"
+    "signal.signal(signal.SIGINT, signal.SIG_IGN)\\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+    "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
+    "time.sleep(300)\\n"
+)
+
+
+def read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (FileNotFoundError, ValueError):
+        return default
+
+
+def record(entry):
+    with open(CALLS, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\\n")
+
+
+def recorded():
+    try:
+        with open(CALLS, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def main():
+    plan = read_json(PLAN, {})
+    index = len(recorded())
+    record(
+        {
+            "argv": sys.argv[1:],
+            "cwd": os.getcwd(),
+            "stdin_is_a_terminal": sys.stdin.isatty(),
+            "xdg_data_home": os.environ.get("XDG_DATA_HOME"),
+            "xdg_state_home": os.environ.get("XDG_STATE_HOME"),
+            "path": os.environ.get("PATH"),
+        }
+    )
+    child_marker = plan.get("mission_child")
+    if child_marker:
+        # A mission child in this pass's own process group, which is what the
+        # controller's stop has to reach.
+        subprocess.Popen([sys.executable, "-c", STUBBORN, child_marker])
+        while not os.path.exists(child_marker):
+            time.sleep(0.01)
+    reports = plan.get("reports") or []
+    report = reports[index] if index < len(reports) else plan.get("report")
+    if report is None:
+        report = {"kind": "idle"}
+    if report.get("stderr"):
+        print(report["stderr"], file=sys.stderr)
+    hold = report.get("hold_seconds")
+    if hold:
+        time.sleep(hold)
+    if report.get("raw") is not None:
+        sys.stdout.write(report["raw"])
+        sys.stdout.flush()
+        return report.get("status", 0)
+    sys.stdout.write(json.dumps(report["document"]))
+    sys.stdout.flush()
+    return report.get("status", 0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def wait_until(predicate, *, timeout=25.0, message="condition"):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {message}")
+
+
+def process_gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def pass_document(
+    *,
+    repository="acme/widgets",
+    termination="completed",
+    admitted=(),
+    attention=(),
+    detail="nothing to do",
+    exit_code=None,
+):
+    """One well-formed pass report, in the shape the scheduler writes."""
+    return {
+        "schema": service.PASS_SCHEMA,
+        "version": service.PASS_VERSION,
+        "repository": repository,
+        "started_at": "2026-09-11T00:00:00Z",
+        "finished_at": "2026-09-11T00:00:01Z",
+        "termination": termination,
+        "exit_code": service.PASS_EXIT_CODES[termination] if exit_code is None else exit_code,
+        "admitted": list(admitted),
+        "attention": list(attention),
+        "detail": detail,
+    }
+
+
+def admitted_entry(mission="mission-a", disposition="advanced", detail="advanced"):
+    return {"mission": mission, "disposition": disposition, "detail": detail}
+
+
+def attention_entry(mission="mission-a", state="disabled"):
+    return {
+        "mission": mission,
+        "attention_id": f"acme/widgets#{mission}@2026-09-11T00:00:00Z",
+        "target": {"kind": "issue", "number": 844},
+        "notification": state,
+        "detail": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The mirrored contract
+# ---------------------------------------------------------------------------
+
+
+class MirroredPassContractTests(unittest.TestCase):
+    """Every constant this controller copies, against the Haskell that owns it.
+
+    The controller cannot import `Kanban.Mission.Pass`, so the schema name, the
+    version, the three vocabularies and the exit-status mapping are copied. A
+    copy nothing holds to its original is a copy that drifts, and the way it
+    drifts is silent: the controller goes on refusing reports the scheduler has
+    started writing, or accepting a field that no longer means what it did.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = PASS_MODULE.read_text(encoding="utf-8")
+
+    def declared(self, name):
+        """The string literal a nullary Haskell binding is defined as."""
+        match = re.search(rf'^{name} = "([^"]*)"$', self.source, re.MULTILINE)
+        self.assertIsNotNone(match, f"{name} is not declared in {PASS_MODULE.name}")
+        return match.group(1)
+
+    def declared_int(self, name):
+        match = re.search(rf"^{name} = (\d+)$", self.source, re.MULTILINE)
+        self.assertIsNotNone(match, f"{name} is not declared in {PASS_MODULE.name}")
+        return int(match.group(1))
+
+    def tags(self, function):
+        """Every wire tag one total case expression spells."""
+        body = re.search(
+            rf"^{function} \w+ = case \w+ of\n((?:  .*\n)+)", self.source, re.MULTILINE
+        )
+        self.assertIsNotNone(body, f"{function} is not a total case in {PASS_MODULE.name}")
+        return {
+            match.group(1)
+            for match in re.finditer(r'-> "([^"]*)"', body.group(1))
+        }
+
+    def test_the_schema_and_version_match(self):
+        self.assertEqual(service.PASS_SCHEMA, self.declared("missionPassSchema"))
+        self.assertEqual(service.PASS_VERSION, self.declared_int("missionPassVersion"))
+
+    def test_the_vocabularies_match(self):
+        self.assertEqual(service.PASS_TERMINATIONS, self.tags("missionPassTerminationTag"))
+        self.assertEqual(service.PASS_DISPOSITIONS, self.tags("missionDispositionTag"))
+        self.assertEqual(
+            service.PASS_NOTIFICATION_STATES, self.tags("missionNotificationStateTag")
+        )
+
+    def test_the_exit_statuses_match(self):
+        body = re.search(
+            r"^missionPassExitCode \w+ = case \w+ of\n((?:  .*\n)+)",
+            self.source,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(body)
+        declared = {
+            match.group(1): int(match.group(2))
+            for match in re.finditer(r"MissionPass(\w+) -> (\d+)", body.group(1))
+        }
+        self.assertEqual(
+            {name.lower(): code for name, code in declared.items()},
+            service.PASS_EXIT_CODES,
+        )
+
+    def test_the_failing_disposition_matches(self):
+        body = re.search(
+            r"^missionDispositionIsFailure \w+ = case \w+ of\n((?:  .*\n)+)",
+            self.source,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(body)
+        failing = {
+            match.group(1)
+            for match in re.finditer(r"MissionDisposition(\w+) -> True", body.group(1))
+        }
+        self.assertEqual({name.lower() for name in failing}, service.PASS_FAILING_DISPOSITIONS)
+
+    def test_the_report_fields_match(self):
+        encoder = re.search(
+            r"^encodeMissionPassReport report =\n((?:.*\n)+?)^  where", self.source, re.MULTILINE
+        )
+        self.assertIsNotNone(encoder)
+        fields = {match.group(1) for match in re.finditer(r'"([a-z_]+)" \.=', encoder.group(1))}
+        self.assertEqual(service.PASS_FIELDS, fields)
+
+
+# ---------------------------------------------------------------------------
+# Locations
+# ---------------------------------------------------------------------------
+
+
+class LocationTests(unittest.TestCase):
+    """Where this service's runtime lives, on each platform's terms."""
+
+    def test_the_macos_root_is_the_application_support_tree(self):
+        with mock.patch.object(service, "account_home", lambda: Path("/accounts/me")):
+            with mock.patch.object(service.kanban_config, "is_macos", lambda: True):
+                self.assertEqual(
+                    service.service_root(),
+                    Path("/accounts/me/Library/Application Support/kanban/mission-runner"),
+                )
+                self.assertEqual(
+                    service.runtime_root(),
+                    Path(
+                        "/accounts/me/Library/Application Support/kanban/mission-runner/runtime"
+                    ),
+                )
+
+    def test_an_absolute_xdg_data_home_selects_the_xdg_root(self):
+        with mock.patch.object(service, "account_home", lambda: Path("/accounts/me")):
+            with mock.patch.object(service.kanban_config, "is_macos", lambda: False):
+                with mock.patch.dict(os.environ, {"XDG_DATA_HOME": "/data"}):
+                    self.assertEqual(
+                        service.service_root(), Path("/data/kanban/mission-runner")
+                    )
+
+    def test_an_unset_empty_or_relative_xdg_data_home_selects_the_home_spelling(self):
+        # The drainer's absolute-only rule rather than issue-review's, so a
+        # systemd unit and the paths that locate it read the environment the
+        # same way.
+        expected = Path("/accounts/me/.local/share/kanban/mission-runner")
+        with mock.patch.object(service, "account_home", lambda: Path("/accounts/me")):
+            with mock.patch.object(service.kanban_config, "is_macos", lambda: False):
+                for value in (None, "", "relative/data"):
+                    with self.subTest(xdg_data_home=value):
+                        environment = dict(os.environ)
+                        environment.pop("XDG_DATA_HOME", None)
+                        if value is not None:
+                            environment["XDG_DATA_HOME"] = value
+                        with mock.patch.dict(os.environ, environment, clear=True):
+                            self.assertEqual(service.service_root(), expected)
+
+    def test_the_lock_is_named_by_the_identity_rather_than_the_checkout(self):
+        with mock.patch.object(service, "account_home", lambda: Path("/accounts/me")):
+            with mock.patch.object(service.kanban_config, "is_macos", lambda: True):
+                first = service.job_for_identity(Path("/one"), "acme/widgets")
+                second = service.job_for_identity(Path("/two"), "acme/widgets")
+                self.assertEqual(first.lock_path, second.lock_path)
+                self.assertEqual(first.runtime_dir, second.runtime_dir)
+                other = service.job_for_identity(Path("/one"), "acme/other")
+                self.assertNotEqual(first.lock_path, other.lock_path)
+
+    def test_the_slug_is_injective_over_separator_heavy_identities(self):
+        identities = ["a-b/c.d", "a/b-c.d", "a.b/c-d", "a--b/c"]
+        slugs = [service.repository_slug(identity) for identity in identities]
+        self.assertEqual(len(set(slugs)), len(identities))
+        for slug in slugs:
+            self.assertRegex(slug, r"\A[A-Za-z0-9_.-]+\Z")
+
+
+# ---------------------------------------------------------------------------
+# The report decoder
+# ---------------------------------------------------------------------------
+
+
+class PassReportTests(unittest.TestCase):
+    """What a pass has to say before this controller will act on it.
+
+    Requirement 9 in one table. Each case below is a document a supervisor
+    might otherwise read as a healthy quiet repository, and none of them may
+    become one.
+    """
+
+    def test_a_well_formed_idle_pass_is_accepted(self):
+        document = pass_document()
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+        self.assertEqual(service.pass_state(document), service.STATE_IDLE)
+
+    def test_an_advancing_pass_reads_as_running(self):
+        document = pass_document(admitted=[admitted_entry()])
+        self.assertEqual(service.pass_state(document), service.STATE_RUNNING)
+
+    def test_a_waiting_mission_wins_over_an_idle_pass(self):
+        document = pass_document(attention=[attention_entry()])
+        self.assertEqual(service.pass_state(document), service.STATE_WAITING)
+
+    def test_every_unusable_report_is_refused(self):
+        cases = {
+            "absent": ("", 0),
+            "blank": ("   \n", 0),
+            "truncated": ('{"schema":"kanban-mission', 0),
+            "not an object": ("[]", 0),
+            "unknown schema": (
+                json.dumps({**pass_document(), "schema": "something-else"}),
+                0,
+            ),
+            "unknown version": (json.dumps({**pass_document(), "version": 2}), 0),
+            "string version": (json.dumps({**pass_document(), "version": "1"}), 0),
+            "missing field": (
+                json.dumps({k: v for k, v in pass_document().items() if k != "detail"}),
+                0,
+            ),
+            "extra field": (json.dumps({**pass_document(), "surprise": 1}), 0),
+            "no repository": (json.dumps({**pass_document(), "repository": ""}), 0),
+            "unknown termination": (
+                json.dumps({**pass_document(), "termination": "nearly"}),
+                0,
+            ),
+            "self-contradicting exit code": (
+                json.dumps(pass_document(exit_code=7)),
+                0,
+            ),
+            "contradicting the child's status": (json.dumps(pass_document()), 1),
+            "unknown disposition": (
+                json.dumps(
+                    pass_document(admitted=[admitted_entry(disposition="nearly")])
+                ),
+                0,
+            ),
+            "failed mission under a completed pass": (
+                json.dumps(pass_document(admitted=[admitted_entry(disposition="failed")])),
+                0,
+            ),
+            "failed pass naming no failed mission": (
+                json.dumps(pass_document(termination="failed", admitted=[admitted_entry()])),
+                1,
+            ),
+            "refused pass naming admitted missions": (
+                json.dumps(pass_document(termination="refused", admitted=[admitted_entry()])),
+                2,
+            ),
+            "admitted entry with the wrong fields": (
+                json.dumps(pass_document(admitted=[{"mission": "mission-a"}])),
+                0,
+            ),
+            "unknown notification state": (
+                json.dumps(pass_document(attention=[attention_entry(state="nearly")])),
+                0,
+            ),
+            "attention entry with the wrong fields": (
+                json.dumps(pass_document(attention=[{"mission": "mission-a"}])),
+                0,
+            ),
+            "attention naming no identity": (
+                json.dumps(
+                    pass_document(attention=[{**attention_entry(), "attention_id": ""}])
+                ),
+                0,
+            ),
+        }
+        for label, (stdout, returncode) in cases.items():
+            with self.subTest(report=label):
+                with self.assertRaises(service.PassFailure):
+                    service.parse_pass_report(stdout, returncode)
+
+    def test_a_failed_pass_is_accepted_and_then_acted_on_by_the_controller(self):
+        # The decoder's job ends at "this is a well-formed failed pass"; what
+        # the controller then does with it is the fixture's.
+        document = pass_document(
+            termination="failed",
+            admitted=[admitted_entry(disposition="failed", detail="the child died")],
+            detail="1 failed",
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
+
+    def test_a_refused_pass_is_accepted_with_nothing_admitted(self):
+        document = pass_document(termination="refused", detail="nothing to run")
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 2), document)
+
+
+# ---------------------------------------------------------------------------
+# The fixture
+# ---------------------------------------------------------------------------
+
+
+class MissionRunnerFixture(unittest.TestCase):
+    """A temporary account root, a temporary checkout, and a fake scheduler."""
+
+    identity = "acme/widgets"
+    remote_url = "git@github.com:acme/widgets.git"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        # What `account_home` answers for every test in this fixture. Distinct
+        # from the redirected `$HOME` below so that a path which quietly went
+        # back to reading the environment would land somewhere visible rather
+        # than somewhere indistinguishable.
+        self.account = self.root / "account"
+        self.account.mkdir()
+        patched = mock.patch.object(service, "account_home", lambda: self.account)
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.wrapper = self.root / "run_controller.py"
+        self.wrapper.write_text(CONTROLLER_WRAPPER, encoding="utf-8")
+        # A checkout whose name carries a space, so every path this fixture
+        # hands the controller exercises requirement 5's "without shell
+        # reinterpretation".
+        self.repo = self.root / "a checkout"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", self.remote_url], cwd=self.repo, check=True
+        )
+        self.scheduler = self.root / "fake kanban"
+        self.scheduler.write_text(FAKE_SCHEDULER, encoding="utf-8")
+        self.scheduler.chmod(0o700)
+        self.calls = self.root / "calls.jsonl"
+        self.plan = self.root / "plan.json"
+        self.write_plan({"report": {"document": pass_document()}})
+        self.processes = []
+        self.addCleanup(self.reap)
+
+    def reap(self):
+        for child in self.processes:
+            if child.poll() is None:
+                with contextlib_suppress():
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=10)
+
+    def write_plan(self, plan):
+        self.plan.write_text(json.dumps(plan), encoding="utf-8")
+
+    def recorded(self):
+        if not self.calls.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.calls.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def job(self, *, config_path=None):
+        return service.job_for_identity(self.repo, self.identity, config_path=config_path)
+
+    def environment(self, **extra):
+        """The environment a managed run would be handed.
+
+        Deliberately not this process's: a service manager starts a job with
+        almost nothing, and the XDG roots that decide where a mission store
+        lives have to reach the pass from whatever this controller resolved
+        rather than from an inherited shell.
+        """
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(self.home),
+            "FAKE_SCHEDULER_CALLS": str(self.calls),
+            "FAKE_SCHEDULER_PLAN": str(self.plan),
+        }
+        environment.update(extra)
+        return environment
+
+    def start_controller(self, *arguments, environment=None):
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(CONTROLLER.parent),
+                str(self.account),
+                "run",
+                "--path",
+                str(self.repo),
+                "--kanban",
+                str(self.scheduler),
+                "--interval",
+                "0.05",
+                *arguments,
+            ],
+            env=environment or self.environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.processes.append(child)
+        return child
+
+    def run_controller(self, *arguments, environment=None, timeout=40):
+        child = self.start_controller(*arguments, environment=environment)
+        stdout, stderr = child.communicate(timeout=timeout)
+        return child.returncode, stdout, stderr
+
+    def status(self):
+        return service.status_snapshot(self.job())
+
+
+class contextlib_suppress:
+    """`contextlib.suppress(OSError)` without the import, for cleanup."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, trace):
+        return isinstance(value, OSError)
+
+
+# ---------------------------------------------------------------------------
+# Identity and refusals
+# ---------------------------------------------------------------------------
+
+
+class IdentityTests(MissionRunnerFixture):
+    def test_the_identity_comes_from_the_configured_remote(self):
+        job = service.resolve_job(self.repo)
+        self.assertEqual(job.identity, self.identity)
+        self.assertEqual(job.runtime_dir, service.runtime_root() / job.slug)
+
+    def test_a_checkout_with_no_github_remote_is_refused(self):
+        other = self.root / "not-a-clone"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        with self.assertRaises(service.ServiceError) as raised:
+            service.resolve_job(other)
+        self.assertIn(str(other), str(raised.exception))
+
+    def test_another_repository_is_refused_by_name(self):
+        job = self.job()
+        service.require_requested_identity(job, "acme/widgets")
+        with self.assertRaises(service.ServiceError) as raised:
+            service.require_requested_identity(job, "acme/other")
+        self.assertIn("acme/other", str(raised.exception))
+
+    def test_an_absent_executable_is_a_named_refusal(self):
+        with mock.patch.dict(os.environ, {"PATH": str(self.root / "empty")}):
+            with self.assertRaises(service.ServiceError) as raised:
+                service.resolve_kanban(None)
+        self.assertIn("kanban", str(raised.exception))
+
+    def test_a_non_executable_path_is_a_named_refusal(self):
+        plain = self.root / "not-executable"
+        plain.write_text("", encoding="utf-8")
+        with self.assertRaises(service.ServiceError) as raised:
+            service.resolve_kanban(str(plain))
+        self.assertIn(str(plain), str(raised.exception))
+
+    def test_an_explicit_executable_is_taken(self):
+        self.assertEqual(service.resolve_kanban(str(self.scheduler)), self.scheduler)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+class LifecycleTests(MissionRunnerFixture):
+    def test_a_pass_runs_in_the_checkout_with_the_repository_and_no_terminal(self):
+        # Requirement 8's identity inputs and requirement 5's child contract,
+        # observed from what the scheduler was actually handed.
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        calls = self.recorded()
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call["argv"][0], service.SCHEDULER_FLAG)
+        self.assertIn("--repo", call["argv"])
+        self.assertEqual(call["argv"][call["argv"].index("--repo") + 1], self.identity)
+        self.assertEqual(Path(call["cwd"]).resolve(), self.repo.resolve())
+        self.assertFalse(call["stdin_is_a_terminal"])
+
+    def test_a_configured_path_reaches_every_pass_absolutely(self):
+        configuration = self.root / "a config.toml"
+        configuration.write_text("cache = true\n", encoding="utf-8")
+        status, _stdout, stderr = self.run_controller(
+            "--passes", "1", "--config", str(configuration)
+        )
+        self.assertEqual(status, 0, stderr)
+        argv = self.recorded()[0]["argv"]
+        self.assertIn("--config", argv)
+        recorded = argv[argv.index("--config") + 1]
+        self.assertTrue(Path(recorded).is_absolute())
+        self.assertEqual(Path(recorded), configuration.resolve())
+
+    def test_the_usable_xdg_context_reaches_a_pass_from_an_empty_manager_environment(self):
+        # The scheduler resolves the mission store from the XDG roots, so a
+        # manager that starts this controller with almost nothing must not
+        # leave the pass resolving a different store than the runtime describes.
+        data_home = self.root / "data"
+        state_home = self.root / "state"
+        environment = self.environment(
+            XDG_DATA_HOME=str(data_home), XDG_STATE_HOME=str(state_home)
+        )
+        status, _stdout, stderr = self.run_controller("--passes", "1", environment=environment)
+        self.assertEqual(status, 0, stderr)
+        call = self.recorded()[0]
+        self.assertEqual(call["xdg_data_home"], str(data_home))
+        self.assertEqual(call["xdg_state_home"], str(state_home))
+
+    def test_an_idle_pass_leaves_an_idle_status(self):
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["passes"], 1)
+        self.assertEqual(snapshot["last_pass"]["termination"], "completed")
+
+    def test_a_waiting_mission_is_reported_through_the_status_document(self):
+        self.write_plan(
+            {
+                "reports": [
+                    {"document": pass_document(attention=[attention_entry()])},
+                ]
+            }
+        )
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        snapshot = self.status()
+        self.assertEqual(len(snapshot["attention"]), 1)
+        self.assertEqual(snapshot["attention"][0]["mission"], "mission-a")
+
+    def test_a_second_wrapper_refuses_and_starts_no_scheduler(self):
+        # Requirement 11. The first run is held open by a pass that will not
+        # finish, so the second one meets a live holder rather than a race.
+        self.write_plan({"report": {"document": pass_document(), "hold_seconds": 30}})
+        first = self.start_controller()
+        wait_until(lambda: self.recorded(), message="the first pass to start")
+        before = len(self.recorded())
+        status, _stdout, stderr = self.run_controller(timeout=30)
+        self.assertEqual(status, 1)
+        self.assertIn("already running", stderr)
+        self.assertEqual(len(self.recorded()), before)
+        os.killpg(first.pid, signal.SIGTERM)
+        first.wait(timeout=30)
+
+    def test_a_stop_ends_the_run_without_recording_a_failure(self):
+        self.write_plan({"report": {"document": pass_document(), "hold_seconds": 30}})
+        child = self.start_controller()
+        wait_until(lambda: self.recorded(), message="a pass to start")
+        os.killpg(child.pid, signal.SIGTERM)
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["open_incidents"], [])
+
+    def test_stopping_leaves_no_mission_child_of_the_active_pass_running(self):
+        # Requirement 11's containment, staged against a mission child that
+        # ignores SIGTERM: what this proves is the controller's escalation
+        # rather than the child's cooperation.
+        marker = self.root / "mission-child.pid"
+        self.write_plan(
+            {
+                "mission_child": str(marker),
+                "report": {"document": pass_document(), "hold_seconds": 60},
+            }
+        )
+        child = self.start_controller()
+        wait_until(marker.exists, message="the mission child to register itself")
+        mission_pid = int(marker.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: process_gone(mission_pid) or os.kill(mission_pid, signal.SIGKILL))
+        os.killpg(child.pid, signal.SIGTERM)
+        child.wait(timeout=40)
+        wait_until(
+            lambda: process_gone(mission_pid),
+            message="the mission child to be ended by the stop",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Failures
+# ---------------------------------------------------------------------------
+
+
+class FailureTests(MissionRunnerFixture):
+    def assert_incident(self, kind):
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_FAILED)
+        self.assertEqual(len(snapshot["open_incidents"]), 1)
+        self.assertEqual(snapshot["open_incidents"][0]["kind"], kind)
+        return snapshot["open_incidents"][0]
+
+    def test_a_failed_pass_opens_an_incident_and_ends_the_run(self):
+        self.write_plan(
+            {
+                "report": {
+                    "document": pass_document(
+                        termination="failed",
+                        admitted=[admitted_entry(disposition="failed", detail="the child died")],
+                        detail="1 failed",
+                    ),
+                    "status": 1,
+                    "stderr": "the scheduler said this",
+                }
+            }
+        )
+        status, _stdout, _stderr = self.run_controller()
+        self.assertEqual(status, 1)
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        self.assertIn("1 failed", incident["summary"])
+        self.assertIn("the scheduler said this", incident["detail"])
+
+    def test_a_refused_pass_opens_an_incident_rather_than_looking_quiet(self):
+        self.write_plan(
+            {
+                "report": {
+                    "document": pass_document(
+                        termination="refused", detail="nothing to run"
+                    ),
+                    "status": 2,
+                }
+            }
+        )
+        status, _stdout, _stderr = self.run_controller()
+        self.assertEqual(status, 1)
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        self.assertIn("nothing to run", incident["summary"])
+
+    def test_an_unreadable_report_is_a_failure_rather_than_an_idle_pass(self):
+        for label, report in (
+            ("no output", {"raw": "", "status": 0}),
+            ("truncated", {"raw": '{"schema":"kanban-mission', "status": 0}),
+            (
+                "another repository",
+                {"document": pass_document(repository="acme/other"), "status": 0},
+            ),
+            (
+                "contradicting the exit status",
+                {"document": pass_document(), "status": 1},
+            ),
+        ):
+            with self.subTest(report=label):
+                self.calls.unlink(missing_ok=True)
+                for path in sorted(self.job().incident_dir.glob("*.json")):
+                    path.unlink()
+                self.write_plan({"report": report})
+                status, _stdout, _stderr = self.run_controller()
+                self.assertEqual(status, 1)
+                self.assert_incident(service.PASS_INCIDENT_KIND)
+
+    def test_an_incident_can_be_acknowledged_without_changing_the_service(self):
+        self.write_plan({"report": {"raw": "", "status": 0}})
+        self.run_controller()
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        resolved = service.acknowledge_incident(self.job(), incident["incident_id"], "seen")
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertEqual(self.status()["open_incidents"], [])
+        # And the state it left behind is still the failure it was.
+        self.assertEqual(self.status()["state"], service.STATE_FAILED)
+
+    def test_acknowledging_a_missing_incident_is_refused(self):
+        with self.assertRaises(service.ServiceError):
+            service.acknowledge_incident(self.job(), "incident-20260911T000000Z-1", None)
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+
+class StatusTests(MissionRunnerFixture):
+    def test_an_absent_document_reads_as_unknown_rather_than_stopped(self):
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+        self.assertIn("no status document", snapshot["reason"])
+
+    def test_every_unbelievable_document_reads_as_unknown_with_a_reason(self):
+        job = self.job()
+        base = {
+            "schema": service.STATUS_SCHEMA,
+            "version": service.STATUS_VERSION,
+            "state": service.STATE_IDLE,
+            "repository": self.identity,
+            "runner_pid": os.getpid(),
+        }
+        cases = {
+            "unreadable": "{",
+            "another schema": json.dumps({**base, "schema": "something-else"}),
+            "another version": json.dumps({**base, "version": 2}),
+            "another repository": json.dumps({**base, "repository": "acme/other"}),
+            "an unknown state": json.dumps({**base, "state": "nearly"}),
+            "a dead runner": json.dumps({**base, "runner_pid": 2 ** 31 - 1}),
+        }
+        for label, contents in cases.items():
+            with self.subTest(document=label):
+                job.status_path.parent.mkdir(parents=True, exist_ok=True)
+                job.status_path.write_text(contents, encoding="utf-8")
+                snapshot = service.status_snapshot(job)
+                self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+                self.assertTrue(snapshot["reason"])
+
+    def test_status_repairs_nothing_it_reads(self):
+        job = self.job()
+        self.assertFalse(job.runtime_dir.exists())
+        service.status_snapshot(job)
+        self.assertFalse(job.runtime_dir.exists())
+
+    def test_the_status_operation_reports_read_only(self):
+        status = service.main(["status", "--path", str(self.repo), "--json"])
+        self.assertEqual(status, 0)
+
+    def test_a_live_state_under_a_running_runner_is_believed(self):
+        job = self.job()
+        job.status_path.parent.mkdir(parents=True, exist_ok=True)
+        job.status_path.write_text(
+            json.dumps(
+                {
+                    "schema": service.STATUS_SCHEMA,
+                    "version": service.STATUS_VERSION,
+                    "state": service.STATE_WAITING,
+                    "repository": self.identity,
+                    "repo": str(self.repo),
+                    "runner_pid": os.getpid(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        snapshot = service.status_snapshot(job)
+        self.assertEqual(snapshot["state"], service.STATE_WAITING)
+        self.assertIsNone(snapshot["reason"])
+        self.assertEqual(snapshot["runner_pid"], os.getpid())
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+
+class ExclusionTests(MissionRunnerFixture):
+    def test_only_one_run_lock_holder_wins_in_this_process(self):
+        job = self.job()
+        held = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        def hold():
+            with service.run_lock(job):
+                held.set()
+                release.wait(20)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        held.wait(20)
+        # A second acquisition from another *process*, because `flock` is
+        # per-open-file-description and two threads of one process would not
+        # contend the way two runs do.
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;"
+                f"sys.path.insert(0, {str(CONTROLLER.parent)!r});"
+                "import mission_runner_service as service;"
+                "from pathlib import Path;"
+                f"service.account_home = lambda: Path({str(self.account)!r});"
+                f"job = service.job_for_identity(Path({str(self.repo)!r}), {self.identity!r});"
+                "import contextlib\n"
+                "try:\n"
+                "    with service.run_lock(job):\n"
+                "        print('acquired')\n"
+                "except service.ServiceError as exc:\n"
+                "    print('refused')\n",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        outcome["stdout"] = contender.stdout
+        release.set()
+        self.assertIn("refused", outcome["stdout"])
+
+
+if __name__ == "__main__":
+    unittest.main()

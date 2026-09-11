@@ -45,6 +45,8 @@ module Kanban.Mission.Lease
     acquireMissionLease,
     acquireMissionLeaseWith,
     missionHolderPresence,
+    missionLeaseHeld,
+    missionLeaseHeldWith,
     releaseMissionLease,
     readMissionLeaseOwner,
   )
@@ -76,7 +78,7 @@ import Kanban.Mission.Types
 import System.Directory (createDirectory, removeDirectoryRecursive, renameDirectory)
 import System.FilePath ((</>))
 import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (getSymbolicLinkStatus, setFileMode)
 import System.Posix.Process (getProcessID)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Types (CPid)
@@ -257,6 +259,40 @@ acquireMissionLeaseWith holderPresence store mission =
                         Left _ -> pure ()
                         Right () -> ignoreFileOperation (removeDirectoryRecursive retiredPath)
                       attempt leaseDirectory ownerPath False
+
+-- | Whether this mission's lease is held right now, without trying to take it.
+--
+-- The read-only half of 'acquireMissionLeaseWith', and deliberately the /same/
+-- half: the caller that needs this is a scheduler deciding whether to bother
+-- launching a child for a mission, and a second implementation of \"is the
+-- holder still there\" would be a second set of answers to the question the
+-- retirement rule above is built on. It runs 'holderStillHeld' and nothing
+-- else, so an undecidable holder counts as held here exactly as it does there.
+--
+-- Fails closed in both directions above that call. A mission whose root or
+-- lease path cannot be resolved reads as held, because a scheduler that
+-- treated \"I cannot tell\" as \"nobody has it\" would launch a second runner
+-- on a mission that may well be advancing.
+--
+-- Occupancy is an @lstat@ rather than a directory test, so a lease directory
+-- replaced by a file, or by a symbolic link pointing nowhere, is still read as
+-- occupied — the same thing 'createDirectory' would be told, and the same
+-- direction the rest of this module fails in.
+missionLeaseHeld :: MissionStore -> MissionId -> IO (Maybe Text)
+missionLeaseHeld = missionLeaseHeldWith missionHolderPresence
+
+-- | 'missionLeaseHeld' with the liveness probe injected, so a fixture can
+-- stage a holder that cannot be checked and prove the mission is skipped.
+missionLeaseHeldWith :: (Int -> IO MissionHolderPresence) -> MissionStore -> MissionId -> IO (Maybe Text)
+missionLeaseHeldWith holderPresence store mission =
+  withMissionRoot store mission Just $ \root ->
+    case (,) <$> missionLeasePath root mission <*> missionLeaseOwnerPath root mission of
+      Left message -> pure (Just message)
+      Right (leaseDirectory, ownerPath) -> do
+        occupied <- try @IOException (getSymbolicLinkStatus leaseDirectory)
+        case occupied of
+          Left _ -> pure Nothing
+          Right _ -> holderStillHeld holderPresence store mission ownerPath
 
 -- | Whether an existing lease is still held, and why.
 --

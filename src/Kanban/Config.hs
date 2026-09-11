@@ -5,6 +5,9 @@ module Kanban.Config
     TimeoutsConfig (..),
     UsageCommandConfig (..),
     UsageConfig (..),
+    MissionNotificationCommand (..),
+    MissionNotificationConfig (..),
+    MissionsConfig (..),
     WorkflowOverride (..),
     LimitsOverride (..),
     TimeoutsOverride (..),
@@ -16,6 +19,9 @@ module Kanban.Config
     defaultWorkerDeadlineSeconds,
     maximumWorkerDeadlineSeconds,
     defaultUsageConfig,
+    defaultMissionsConfig,
+    defaultMissionNotificationConfig,
+    missionNotificationRefusal,
     defaultRawConfig,
     emptyWorkflowOverride,
     emptyLimitsOverride,
@@ -197,6 +203,62 @@ usageSolveRoundEstimates usage =
       Just estimate <- [usageSolveRoundEstimate usage provider]
     ]
 
+-- | The command an operator configured to be told that a mission needs them:
+-- executable followed by literal arguments, launched directly without a shell,
+-- exactly as a usage command is.
+newtype MissionNotificationCommand = MissionNotificationCommand {missionNotificationArgv :: [Text]}
+  deriving stock (Eq, Show)
+
+-- | @[missions.notifications]@: whether Kanban tells anybody that a mission is
+-- waiting on a person, and what it runs to do so.
+--
+-- Off by default and deliberately so: an unattended scheduler that launched an
+-- unconfigured command on the first waiting mission would be a surprise, and
+-- there is no command a desktop can be assumed to have. The two keys are
+-- siblings rather than nested, so a command can be written down and left
+-- switched off, which is how an operator tries one out.
+data MissionNotificationConfig = MissionNotificationConfig
+  { missionNotificationEnabled :: Bool,
+    missionNotificationCommand :: Maybe MissionNotificationCommand
+  }
+  deriving stock (Eq, Show)
+
+-- | @[missions]@ and what hangs off it.
+--
+-- One table rather than a bare @[missions.notifications]@ so that the mission
+-- runner's later settings have somewhere to go without moving this one.
+newtype MissionsConfig = MissionsConfig {missionsNotifications :: MissionNotificationConfig}
+  deriving stock (Eq, Show)
+
+defaultMissionNotificationConfig :: MissionNotificationConfig
+defaultMissionNotificationConfig =
+  MissionNotificationConfig
+    { missionNotificationEnabled = False,
+      missionNotificationCommand = Nothing
+    }
+
+defaultMissionsConfig :: MissionsConfig
+defaultMissionsConfig = MissionsConfig {missionsNotifications = defaultMissionNotificationConfig}
+
+-- | Why this notification configuration cannot be acted on, if it cannot.
+--
+-- Enabling notifications with nothing to run is the one combination that is
+-- neither \"off\" nor usable, and it is reported as itself rather than being
+-- read as off: an operator who switched notifications on and then lost the
+-- command line to an edit is owed the difference between a scheduler that is
+-- staying quiet on purpose and one that cannot speak.
+--
+-- Not a load-time error, because it is not one for every invocation: a
+-- dashboard, a usage query and a named mission run all read this file and none
+-- of them notifies, so refusing the whole configuration would take the
+-- repository away over a setting only the scheduler consults.
+missionNotificationRefusal :: MissionNotificationConfig -> Maybe Text
+missionNotificationRefusal notifications
+  | not notifications.missionNotificationEnabled = Nothing
+  | Nothing <- notifications.missionNotificationCommand =
+      Just "missions.notifications.enabled is true and missions.notifications.command is not set, so there is nothing to run"
+  | otherwise = Nothing
+
 -- | Per-field overrides for '[workflow]', decoded identically at the global
 -- and per-repository level. Global values apply defaults for any field left
 -- 'Nothing'; a repository override only replaces the fields it sets.
@@ -295,6 +357,7 @@ data RawConfig = RawConfig
     rawLimits :: LimitsConfig,
     rawTimeouts :: TimeoutsConfig,
     rawUsage :: UsageConfig,
+    rawMissions :: MissionsConfig,
     rawRepositories :: Map Text RepositoryOverride
   }
   deriving stock (Eq, Show)
@@ -308,6 +371,7 @@ defaultRawConfig =
       rawLimits = defaultLimitsConfig,
       rawTimeouts = defaultTimeoutsConfig,
       rawUsage = defaultUsageConfig,
+      rawMissions = defaultMissionsConfig,
       rawRepositories = Map.empty
     }
 
@@ -319,7 +383,10 @@ data ResolvedConfig = ResolvedConfig
     resolvedWorkflow :: WorkflowConfig,
     resolvedLimits :: LimitsConfig,
     resolvedTimeouts :: TimeoutsConfig,
-    resolvedUsage :: UsageConfig
+    resolvedUsage :: UsageConfig,
+    -- | Global like 'resolvedUsage': the scheduler is repository-scoped but
+    -- the command it would run is the operator's, not one repository's.
+    resolvedMissions :: MissionsConfig
   }
   deriving stock (Eq, Show)
 
@@ -380,7 +447,8 @@ resolveGlobalConfig raw =
       resolvedWorkflow = raw.rawWorkflow,
       resolvedLimits = raw.rawLimits,
       resolvedTimeouts = raw.rawTimeouts,
-      resolvedUsage = raw.rawUsage
+      resolvedUsage = raw.rawUsage,
+      resolvedMissions = raw.rawMissions
     }
 
 resolveConfig :: Text -> RawConfig -> ResolvedConfig
@@ -391,7 +459,8 @@ resolveConfig ownerName raw =
       resolvedWorkflow = applyWorkflowOverride raw.rawWorkflow override.repositoryOverrideWorkflow,
       resolvedLimits = applyLimitsOverride raw.rawLimits override.repositoryOverrideLimits,
       resolvedTimeouts = applyTimeoutsOverride raw.rawTimeouts override.repositoryOverrideTimeouts,
-      resolvedUsage = raw.rawUsage
+      resolvedUsage = raw.rawUsage,
+      resolvedMissions = raw.rawMissions
     }
   where
     -- Override keys are canonical lowercase, so the lookup is the one place
@@ -528,6 +597,7 @@ rawConfigParser = do
   limitsOverride <- optKeyOf "limits" (parseTableFromValue limitsOverrideParser)
   timeoutsOverride <- optKeyOf "timeouts" (parseTableFromValue timeoutsOverrideParser)
   usage <- optKeyOf "usage" (parseTableFromValue usageConfigParser)
+  missions <- optKeyOf "missions" (parseTableFromValue missionsConfigParser)
   repositories <- optKeyOf "repositories" parseRepositories
   pure
     RawConfig
@@ -537,6 +607,7 @@ rawConfigParser = do
         rawLimits = applyLimitsOverride defaultLimitsConfig (fromMaybe emptyLimitsOverride limitsOverride),
         rawTimeouts = applyTimeoutsOverride defaultTimeoutsConfig (fromMaybe emptyTimeoutsOverride timeoutsOverride),
         rawUsage = fromMaybe defaultUsageConfig usage,
+        rawMissions = fromMaybe defaultMissionsConfig missions,
         rawRepositories = fromMaybe Map.empty repositories
       }
 
@@ -614,6 +685,30 @@ usageProviderTableParser = do
   command <- optKeyOf "command" parseCommandArgv
   estimate <- optKeyOf "estimated_percent_per_solve_round" parseSolveRoundPercent
   pure (command, estimate)
+
+missionsConfigParser :: ParseTable Position MissionsConfig
+missionsConfigParser = do
+  notifications <- optKeyOf "notifications" (parseTableFromValue missionNotificationParser)
+  pure MissionsConfig {missionsNotifications = fromMaybe defaultMissionNotificationConfig notifications}
+
+-- | Both keys of @[missions.notifications]@, each optional. A command with no
+-- @enabled@ stays off, which is what lets one be written down and tried later;
+-- an @enabled@ with no command is refused by 'missionNotificationRefusal' where
+-- it is acted on rather than here, because only the scheduler reads it.
+missionNotificationParser :: ParseTable Position MissionNotificationConfig
+missionNotificationParser = do
+  enabled <- optKey "enabled"
+  command <- optKeyOf "command" parseNotificationArgv
+  pure
+    MissionNotificationConfig
+      { missionNotificationEnabled = fromMaybe False enabled,
+        missionNotificationCommand = command
+      }
+
+parseNotificationArgv :: Value' l -> Matcher l MissionNotificationCommand
+parseNotificationArgv value = do
+  UsageCommandConfig argv <- parseCommandArgv value
+  pure (MissionNotificationCommand argv)
 
 parseRepositories :: Value' Position -> Matcher Position (Map Text RepositoryOverride)
 parseRepositories = mapOf parseRepositoryKey (\_ value -> parseTableFromValue repositoryOverrideParser value)

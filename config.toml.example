@@ -116,6 +116,54 @@ worker_deadline_seconds = 14400
 # command = ["/usr/local/bin/my-claude-usage", "--json"]
 # estimated_percent_per_solve_round = 12
 
+# Whether Kanban tells you that a mission is waiting on a person, and what it
+# runs to do so. Read only by `kanban --mission-scheduler`, which is the
+# unattended pass `tools/mission_runner_service.py` supervises; no other mode
+# consults it.
+#
+# `enabled` defaults to false. Off means the command is never launched, not
+# that it is launched and ignored, so a command can be written down here and
+# tried later by flipping one key. `enabled = true` with no `command` is a
+# named refusal: the pass advances nothing and says why, rather than being read
+# as "notifications are off".
+#
+# `command` is an executable followed by literal arguments, launched directly
+# without a shell, exactly as a [usage.*] command is. It must be a non-empty
+# array whose first element is a non-empty string. It is run from an
+# application-owned scratch directory with closed standard input, in its own
+# process group, with both of its streams captured, and it is bounded: a
+# command that has not exited within ten seconds is reported as having timed
+# out rather than holding the pass open.
+#
+# Three arguments are appended to whatever you write here, in this order:
+#
+#   1. the repository, as `owner/name`;
+#   2. the item the mission is waiting about, as `issue#844` or
+#      `pull_request#12`, or the word `none` when the mission names neither;
+#   3. the literal word `attention-required`.
+#
+# Nothing else is passed. No title, no summary, no recommendation, and no
+# filesystem path — a notification command is frequently a one-liner piped into
+# something that logs, and the mission's own text is the part most likely to
+# carry a tracker title or a checkout path.
+#
+# Delivery is at most once per waiting episode, and it is not guaranteed. A
+# durable suppression record is written before the command is launched, so two
+# observations of one episode cannot both notify; once that record exists the
+# episode is never retried, including after a restart and including when the
+# attempt failed, timed out, or could not be launched at all. A crash between
+# the record and the launch therefore loses that notification, which is the
+# price of never sending two. A later, distinct waiting episode is a new
+# identity and gets its own single attempt. A command that exits zero has
+# completed; whether a desktop displayed anything is not something Kanban can
+# observe, and no record claims it did. A failed notification never resolves
+# the mission's attention and never stops the scheduler.
+#
+# Both keys are global, like [usage]; they cannot be set per repository.
+[missions.notifications]
+enabled = false
+# command = ["/usr/local/bin/notify-send", "kanban"]
+
 # The quoted key must be a canonical lowercase owner/name: two non-empty
 # segments of [a-z0-9._-] around exactly one slash, with no uppercase letters,
 # surrounding whitespace, URL or SSH remote syntax, `.git` suffix, or extra
@@ -127,7 +175,8 @@ worker_deadline_seconds = 14400
 # `coghex/kanban` key below.
 #
 # Only [workflow], [limits], [timeouts], and `path` may appear below the key.
-# `cache`, `remote_name`, and `usage` are global-only and fail if set here.
+# `cache`, `remote_name`, `usage`, and `missions` are global-only and fail if
+# set here.
 # Omitted values inherit from the global table; an array replaces the global
 # array in full rather than extending it.
 #

@@ -54,6 +54,7 @@ import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
 import qualified Spec.Mission.Runner as MissionRunner
+import qualified Spec.Mission.Scheduler as MissionScheduler
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -214,6 +215,11 @@ suiteGroups =
     -- outside world is staged, so this group starts no process and reads no
     -- network and can ride in the cheapest lane.
     SuiteGroup "Spec.Mission.Runner" PingLane MissionRunner.spec,
+    -- The scheduler group does start processes -- fake @kanban@ children and
+    -- fake notification commands -- so it sits beside the other groups whose
+    -- churn the swept-process assertions are measured against, for the reason
+    -- @Spec.Mission@'s comment above gives.
+    SuiteGroup "Spec.Mission.Scheduler" UsageLane MissionScheduler.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,

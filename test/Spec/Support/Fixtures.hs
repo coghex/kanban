@@ -334,6 +334,8 @@ testOptions =
       optionNoCache = False,
       optionConfig = Nothing,
       optionMission = Nothing,
+      optionMissionScheduler = False,
+      optionMissionResult = Nothing,
       optionWorkerSpec = Nothing,
       optionReviewTools = Nothing
     }
@@ -346,7 +348,8 @@ testResolvedConfig =
       resolvedWorkflow = defaultWorkflowConfig,
       resolvedLimits = defaultLimitsConfig,
       resolvedTimeouts = defaultTimeoutsConfig,
-      resolvedUsage = defaultUsageConfig
+      resolvedUsage = defaultUsageConfig,
+      resolvedMissions = defaultMissionsConfig
     }
 
 fullFixtureToml :: Text

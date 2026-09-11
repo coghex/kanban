@@ -42,6 +42,7 @@ import Kanban.Domain (Repository (..))
 import Kanban.Mission
   ( MissionArchiveState (..),
     MissionAttention (..),
+    missionAttentionIdentity,
     MissionAutonomy (MissionConfirmOnAmbiguity),
     MissionControlEndpoint (..),
     MissionCommandPayload (MissionResumeCommand),
@@ -272,7 +273,8 @@ snapshotWith lifecycle steps sessions worktrees =
       missionSnapshotAttention =
         Just
           MissionAttention
-            { missionAttentionSummary = "the reviewer asked a product question",
+            { missionAttentionId = missionAttentionIdentity (MissionRepository "coghex" "kanban") theMission fixedTime,
+              missionAttentionSummary = "the reviewer asked a product question",
               missionAttentionStep = Just (MissionStepId "solve-592"),
               missionAttentionRaisedAt = fixedTime
             },
