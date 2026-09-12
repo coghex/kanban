@@ -4798,6 +4798,35 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
             "the bounded command-capture seam (issue #666 requirement 14)",
         )
 
+    def test_the_notifier_guards_its_command_for_the_whole_of_its_life(self):
+        # A notification command is the one thing the scheduler starts in a
+        # process group of its own, which is exactly what the supervisor's
+        # signal to the scheduler's group cannot reach — so the scheduler
+        # sweeps it from a signal handler, and *when* that handler is in place
+        # is the whole of the guarantee. An examination of the span rather than
+        # of behaviour, because the alternative is a test that has to win a
+        # race: installed after the spawn leaves setup unguarded, released
+        # before the final sweep leaves teardown unguarded, and neither gap is
+        # reliably reproducible from outside.
+        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
+        guard = content.find("withStopSweep (")
+        spawn = content.find("createProcess (spec directory)")
+        last_sweep = content.rfind("sweepCommandGroup rootPid managed")
+        for label, index in (("withStopSweep", guard), ("createProcess", spawn), ("sweepCommandGroup", last_sweep)):
+            self.assertNotEqual(index, -1, f"{MISSION_NOTIFIER_MODULE} no longer spells {label}")
+        self.assertLess(
+            guard,
+            spawn,
+            f"{MISSION_NOTIFIER_MODULE} must install its stop handler before it "
+            "starts the command, or a stop during setup leaves the command running",
+        )
+        self.assertLess(
+            spawn,
+            last_sweep,
+            f"{MISSION_NOTIFIER_MODULE} must sweep after the command has been "
+            "waited for, inside the guarded span",
+        )
+
 
 
 class IssueGateInstructionParityTests(unittest.TestCase):

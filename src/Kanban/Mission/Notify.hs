@@ -48,6 +48,7 @@ module Kanban.Mission.Notify
 where
 
 import Control.Exception (IOException, bracket, try)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -90,7 +91,7 @@ import Kanban.Mission.Types
     missionNotificationSchemaVersion,
   )
 import Kanban.Paths (createPrivateDirectory)
-import Kanban.Process (managedProcess, sweepCommandGroup)
+import Kanban.Process (ManagedProcess, managedProcess, sweepCommandGroup)
 import Kanban.Text (sanitizeText)
 import System.Directory (XdgDirectory (XdgCache), getXdgDirectory)
 import System.Exit (ExitCode (..))
@@ -105,6 +106,7 @@ import System.Posix.Signals
   )
 import System.Process
   ( CreateProcess (..),
+    Pid,
     ProcessHandle,
     StdStream (CreatePipe, NoStream),
     createProcess,
@@ -285,6 +287,15 @@ attemptMissionNotification runCommand store mission identity argv = do
 -- because attention is observed one mission after another. So the window that
 -- needs covering is exactly this call.
 --
+-- It is installed /before/ the spawn and released only after the final sweep,
+-- which is what makes that window the whole of the command's life rather than
+-- most of it: a handler established after the spawn leaves the setup between
+-- them unguarded, and one released before the sweep leaves the teardown
+-- unguarded, and a stop landing in either of those would end this process with
+-- the command still running in a group nothing else can reach. Before the
+-- spawn the sweep has nothing recorded and does nothing, which is the right
+-- answer there.
+--
 -- The handler sweeps and then lets the signal do what it was sent to do: the
 -- default disposition is restored and the signal re-raised, so this process
 -- still dies of it rather than absorbing it and carrying on past a stop.
@@ -342,22 +353,37 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
             (Just ("the notification command's scratch directory could not be prepared: " <> Text.pack (show exception)))
         )
     Right directory -> do
-      started <- try @IOException (createProcess (spec directory))
-      case started of
-        Left exception ->
-          pure
-            ( MissionNotificationAttempt
-                MissionNotificationLaunchFailed
-                (Just (Text.pack (show exception)))
-            )
-        Right (_, Just outputHandle, Just errorHandle, processHandle) ->
-          observe processHandle outputHandle errorHandle
-        Right _ ->
-          pure
-            ( MissionNotificationAttempt
-                MissionNotificationUncertain
-                (Just "the notification command did not provide stdout and stderr pipes")
-            )
+      -- What a stop has to end, recorded the moment there is anything to
+      -- record. The handler is installed *before* the spawn and stays
+      -- installed through the final sweep, so there is no interval — not
+      -- starting the captures, not releasing them, not sweeping — in which a
+      -- signal would find the previous disposition in place and leave the
+      -- command behind. Until the spawn there is nothing to end, so the
+      -- handler reads an empty box and does nothing.
+      live <- newIORef Nothing
+      withStopSweep (readIORef live >>= mapM_ (uncurry sweepCommandGroup)) $ do
+        started <- try @IOException (createProcess (spec directory))
+        case started of
+          Left exception ->
+            pure
+              ( MissionNotificationAttempt
+                  MissionNotificationLaunchFailed
+                  (Just (Text.pack (show exception)))
+              )
+          Right (_, Just outputHandle, Just errorHandle, processHandle) ->
+            observe live processHandle outputHandle errorHandle
+          Right (_, _, _, processHandle) -> do
+            -- No pipes to capture, and still a process this call created: it
+            -- is recorded and swept like any other rather than abandoned.
+            (managed, _) <- managedProcess processHandle
+            rootPid <- getPid processHandle
+            writeIORef live (Just (rootPid, managed))
+            sweepCommandGroup rootPid managed
+            pure
+              ( MissionNotificationAttempt
+                  MissionNotificationUncertain
+                  (Just "the notification command did not provide stdout and stderr pipes")
+              )
   where
     prepareScratch = do
       cacheRoot <- getXdgDirectory XdgCache "kanban"
@@ -374,27 +400,20 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
           create_group = True
         }
 
-    observe :: ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
-    observe processHandle outputHandle errorHandle = do
+    observe :: IORef (Maybe (Maybe Pid, ManagedProcess)) -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
+    observe live processHandle outputHandle errorHandle = do
       -- Captured before anything can reap the leader: 'getPid' goes 'Nothing'
       -- the moment a clean exit reaps it below, so the identifier the sweep
       -- needs is taken now while it is guaranteed available.
       (managed, _groupLeaderProblem) <- managedProcess processHandle
       rootPid <- getPid processHandle
+      -- Recorded before the captures start, so every step from here on is
+      -- covered by the handler installed above.
+      writeIORef live (Just (rootPid, managed))
       outputCapture <- startCapture outputHandle
       errorCapture <- startCapture errorHandle
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}
-      -- The sweep also has to happen if this process is /stopped/ while the
-      -- command is running, and that is not the same path. The command runs in
-      -- a process group of its own, so the supervisor above this process
-      -- signals the scheduler's group and cannot reach it; without a handler
-      -- the scheduler would die here and leave a stuck notifier — and its
-      -- descendants — behind, which is exactly what the sweep below exists to
-      -- prevent on every other path out.
-      completed <-
-        withStopSweep
-          (sweepCommandGroup rootPid managed)
-          (awaitCommandOutcome bounds processHandle outputCapture errorCapture)
+      completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
       releaseCapture outputCapture
       releaseCapture errorCapture
       sweepCommandGroup rootPid managed
