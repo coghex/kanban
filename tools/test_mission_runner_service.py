@@ -375,6 +375,58 @@ class MirroredPassContractTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class PassProgressTests(unittest.TestCase):
+    """Which passes count as having moved something.
+
+    `--interval` is documented as the wait after a pass that advanced nothing,
+    so the split matters: a pass that admitted two missions and was refused the
+    lease for both advanced nothing at all, and treating admission as progress
+    would poll flat out for as long as the contention lasted.
+    """
+
+    def document(self, *dispositions, attention=()):
+        return pass_document(
+            admitted=[
+                admitted_entry(mission=f"mission-{index}", disposition=disposition)
+                for index, disposition in enumerate(dispositions)
+            ],
+            attention=list(attention),
+        )
+
+    def test_a_child_that_ran_is_progress(self):
+        for disposition in ("advanced", "settled", "blocked"):
+            with self.subTest(disposition=disposition):
+                self.assertTrue(service.pass_advanced(self.document(disposition)))
+
+    def test_a_child_that_declined_is_not(self):
+        for disposition in ("lease_refused", "refused"):
+            with self.subTest(disposition=disposition):
+                self.assertFalse(service.pass_advanced(self.document(disposition)))
+
+    def test_one_advancing_mission_beside_a_refusal_is_progress(self):
+        self.assertTrue(service.pass_advanced(self.document("lease_refused", "advanced")))
+
+    def test_an_empty_pass_is_not_progress(self):
+        self.assertFalse(service.pass_advanced(self.document()))
+
+    def test_a_contended_pass_reads_idle_rather_than_running(self):
+        # The state follows the same split: whatever holds that lease is the
+        # thing making progress, not this pass.
+        self.assertEqual(service.pass_state(self.document("lease_refused")), service.STATE_IDLE)
+        self.assertEqual(service.pass_state(self.document("advanced")), service.STATE_RUNNING)
+
+    def test_the_progress_and_failing_vocabularies_partition_the_rest(self):
+        # Every disposition is accounted for: three are progress, one fails the
+        # pass, and the two refusals are neither. A disposition added to the
+        # scheduler and to nothing here would show up as an unclassified one.
+        self.assertEqual(
+            service.PASS_DISPOSITIONS
+            - service.PASS_PROGRESS_DISPOSITIONS
+            - service.PASS_FAILING_DISPOSITIONS,
+            {"lease_refused", "refused"},
+        )
+
+
 class PollIntervalTests(unittest.TestCase):
     """The wait between passes, as a real positive number of seconds."""
 
@@ -1421,6 +1473,17 @@ class FailureTests(MissionRunnerFixture):
                 status, _stdout, _stderr = self.run_controller()
                 self.assertEqual(status, 1)
                 self.assert_incident(service.PASS_INCIDENT_KIND)
+
+    def test_acknowledging_leaves_the_status_document_alone(self):
+        # `ack` is bookkeeping and nothing else: it resolves one incident and
+        # is powerless over the service, so what the failed run recorded stays
+        # exactly as it was.
+        self.write_plan({"report": {"raw": "", "status": 0}})
+        self.run_controller()
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        before = self.job().status_path.read_text(encoding="utf-8")
+        service.acknowledge_incident(self.job(), incident["incident_id"], "seen")
+        self.assertEqual(self.job().status_path.read_text(encoding="utf-8"), before)
 
     def test_an_incident_can_be_acknowledged_without_changing_the_service(self):
         self.write_plan({"report": {"raw": "", "status": 0}})

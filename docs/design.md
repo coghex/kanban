@@ -3730,7 +3730,12 @@ Defaults:
   release. The per-identity run lock beside them is what makes a second
   wrapper for one repository refuse rather than interleave. Nothing in Kanban
   reads any of it yet: discovery and decoding are a later slice's, and until
-  then `status` is the only reader.
+  then the wrapper's own `status` is the only reader. One command mutates it,
+  and only for bookkeeping: `ack` marks a single open incident resolved and is
+  powerless over the service, so acknowledging the incident a failed pass
+  opened does not make the next pass succeed. `status` itself writes nothing —
+  it is the diagnostic reached for when the runtime is already in a bad state,
+  and a reader that repaired what it read would destroy the evidence.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository

@@ -2051,8 +2051,8 @@ report did not name.
 ### 2.12 Unattended capability — the mission runner
 
 - **Owning source:** `tools/mission_runner_service.py` (the foreground `run`
-  that supervises repeated scheduler passes, the read-only `status`, and the
-  durable status and incident documents), over
+  that supervises repeated scheduler passes, the read-only `status`, the
+  bookkeeping `ack`, and the durable status and incident documents), over
   `src/Kanban/Mission/Scheduler.hs` (one bounded repository-wide pass),
   `src/Kanban/Mission/Pass.hs` (the two machine-readable documents a pass is
   made of), and `src/Kanban/Mission/Notify.hs` (the attention notification and
@@ -2112,6 +2112,15 @@ report did not name.
   configured command is launched and is never retried afterwards, so delivery
   is at most once per waiting episode and a crash between the record and the
   launch loses that notification by design.
+- **Commands:** three. `run` is the supervisor; `status` reads and repairs
+  nothing — no directory created, no document rewritten, no incident opened or
+  resolved — because it is the diagnostic reached for when the runtime is
+  already in a bad state, and a reader that repaired what it read would destroy
+  the evidence it was called to show. `ack` is the only one that changes
+  anything, and only bookkeeping: it marks one open incident resolved, writes
+  no status document, creates nothing, and refuses an identifier naming no open
+  incident. It is deliberately powerless over the service, so acknowledging the
+  incident a failed pass opened does not make the next pass succeed.
 - **Notifications:** off by default, and when enabled the operator's own
   configured command is run through the bounded command-capture seam with two
   fixed values appended — the repository identity and `attention-required` —

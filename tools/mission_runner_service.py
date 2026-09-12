@@ -123,6 +123,14 @@ PASS_DISPOSITIONS = frozenset(
 # already reflects in its termination. Mirrored so a report whose dispositions
 # and termination disagree is caught rather than believed.
 PASS_FAILING_DISPOSITIONS = frozenset({"failed"})
+# The dispositions under which a child actually ran and moved the mission. The
+# other three did not: both refusals mean the child declined to start, and a
+# failure ends the run. `--interval` is documented as the wait "after a pass
+# that advanced nothing", so it is these — not merely a non-empty admitted
+# list — that earn the immediate next pass. A pass that admitted two missions
+# and was refused the lease for both advanced nothing at all, and treating that
+# as progress spins passes back to back for as long as the contention lasts.
+PASS_PROGRESS_DISPOSITIONS = frozenset({"advanced", "settled", "blocked"})
 PASS_NOTIFICATION_STATES = frozenset(
     {
         "disabled",
@@ -1341,19 +1349,36 @@ def _require_target(target: Any) -> None:
         )
 
 
+def pass_advanced(document: dict[str, Any]) -> bool:
+    """Whether this pass moved any mission.
+
+    Not "did it admit anything": admission is what the scheduler *tried*, and a
+    mission whose advancement lease was taken by somebody else between
+    selection and launch is admitted and then declines. A run that read
+    admission as progress would poll flat out for as long as another process
+    held that lease.
+    """
+    return any(
+        entry["disposition"] in PASS_PROGRESS_DISPOSITIONS
+        for entry in document["admitted"]
+    )
+
+
 def pass_state(document: dict[str, Any]) -> str:
     """The status state one accepted report leaves behind.
 
     `waiting` wins over `idle`, because a repository with a mission waiting on
     a person is not quiet -- it is stuck, and that is the state an operator
-    needs to see. A pass that admitted something leaves `running`: the next
-    pass starts immediately, so the service is advancing work rather than
-    sitting between polls. Only a pass that admitted nothing and saw nobody
-    waiting leaves `idle`.
+    needs to see. A pass that *moved* something leaves `running`: the next pass
+    starts immediately, so the service is advancing work rather than sitting
+    between polls. A pass that admitted a mission and was refused its lease
+    moved nothing, and reads `idle` like any other quiet pass -- which is the
+    honest answer, because whatever is holding that lease is the thing making
+    progress.
     """
     if document["attention"]:
         return STATE_WAITING
-    if document["admitted"]:
+    if pass_advanced(document):
         return STATE_RUNNING
     return STATE_IDLE
 
@@ -1749,7 +1774,7 @@ class Controller:
         self.log(f"Pass {self._passes}: {document['detail']}")
         if not self.passes_remain():
             return
-        self.sleep(ADVANCE_DELAY_SECONDS if document["admitted"] else self.interval)
+        self.sleep(ADVANCE_DELAY_SECONDS if pass_advanced(document) else self.interval)
 
 
 # ---------------------------------------------------------------------------
@@ -1830,7 +1855,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--interval",
         type=poll_interval,
         default=DEFAULT_INTERVAL_SECONDS,
-        help="Seconds to wait after a pass that advanced nothing.",
+        help=(
+            "Seconds to wait after a pass that advanced nothing -- which "
+            "includes a pass whose admitted missions all declined."
+        ),
     )
     runner.add_argument(
         "--passes",
