@@ -4798,33 +4798,86 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
             "the bounded command-capture seam (issue #666 requirement 14)",
         )
 
+    def notifier_command_body(self):
+        """The whole of `runMissionNotificationCommand`, `where` clause and all."""
+        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
+        start = content.find("runMissionNotificationCommand :: ")
+        self.assertNotEqual(
+            start,
+            -1,
+            f"{MISSION_NOTIFIER_MODULE} no longer declares runMissionNotificationCommand",
+        )
+        # To the next top-level declaration, or the end of the module. Searched
+        # from the line after the signature, so this declaration's own name
+        # does not end the span it opens. The `where` bindings are part of this
+        # function and every assertion below is about one of them, so the span
+        # has to include them.
+        opened = content.index("\n", start) + 1
+        following = re.search(r"^[a-z][A-Za-z0-9_']* ::", content[opened:], re.MULTILINE)
+        end = len(content) if following is None else opened + following.start()
+        return content[start:end]
+
     def test_the_notifier_guards_its_command_for_the_whole_of_its_life(self):
         # A notification command is the one thing the scheduler starts in a
         # process group of its own, which is exactly what the supervisor's
-        # signal to the scheduler's group cannot reach — so the scheduler
-        # sweeps it from a signal handler, and *when* that handler is in place
-        # is the whole of the guarantee. An examination of the span rather than
-        # of behaviour, because the alternative is a test that has to win a
-        # race: installed after the spawn leaves setup unguarded, released
-        # before the final sweep leaves teardown unguarded, and neither gap is
-        # reliably reproducible from outside.
-        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
-        guard = content.find("withStopSweep (")
-        spawn = content.find("createProcess (spec directory)")
-        last_sweep = content.rfind("sweepCommandGroup rootPid managed")
-        for label, index in (("withStopSweep", guard), ("createProcess", spawn), ("sweepCommandGroup", last_sweep)):
-            self.assertNotEqual(index, -1, f"{MISSION_NOTIFIER_MODULE} no longer spells {label}")
-        self.assertLess(
-            guard,
-            spawn,
-            f"{MISSION_NOTIFIER_MODULE} must install its stop handler before it "
-            "starts the command, or a stop during setup leaves the command running",
+        # signal to the scheduler's group cannot reach. So the scheduler has to
+        # end it itself, on every way out of that call, and *which* ways are
+        # covered is the whole of the guarantee. An examination of the
+        # structure rather than of behaviour, because the alternative is a test
+        # per exit that has to win a race: a stop landing during setup, a
+        # failure while the output is read, a caller's bound expiring — none of
+        # those gaps is reliably reproducible from outside.
+        body = self.notifier_command_body()
+        # The signal handler is installed outside everything, because a stop
+        # arriving during setup or teardown is still a stop.
+        self.assertIn(
+            "withStopSweep (sweepRecorded live) $",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must install its stop handler around the "
+            "whole of the command's life",
         )
-        self.assertLess(
+        # And the sweep is a bracket's release rather than a line on the happy
+        # path, which is what makes a synchronous or asynchronous exception
+        # end the group too.
+        self.assertIn(
+            "bracket (spawn live directory) (const (retire live))",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must acquire the command and release it "
+            "through bracket, so every exit sweeps",
+        )
+        retire = re.search(r"^    retire live = do\n((?:      .*\n)+)", body, re.MULTILINE)
+        self.assertIsNotNone(
+            retire, f"{MISSION_NOTIFIER_MODULE} no longer declares the bracket's release"
+        )
+        self.assertIn(
+            "sweepRecorded live",
+            retire.group(1),
+            f"{MISSION_NOTIFIER_MODULE}'s bracket release must sweep the command's group",
+        )
+        # The acquisition both starts the command and records what a stop has
+        # to end, under a mask: bracket runs no release for an acquisition that
+        # threw, so an asynchronous exception between the two would leave a
+        # process nothing had been told about.
+        spawn = re.search(
+            r"^    spawn live directory = mask \$ \\restore -> do\n((?:      .*\n)+)",
+            body,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
             spawn,
-            last_sweep,
-            f"{MISSION_NOTIFIER_MODULE} must sweep after the command has been "
-            "waited for, inside the guarded span",
+            f"{MISSION_NOTIFIER_MODULE} must acquire under mask, or a cancellation "
+            "between the spawn and the registration leaks the command",
+        )
+        self.assertIn("createProcess (spec directory)", spawn.group(1))
+        self.assertIn("writeIORef live (NotifierLive", spawn.group(1))
+        # Nothing sweeps inline. `sweepCommandGroup` belongs to `sweepRecorded`
+        # alone, so there is one sweep on one path and no second spelling to
+        # drift from it.
+        self.assertNotIn(
+            "sweepCommandGroup",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must sweep only through its bracket release; "
+            "an inline sweep is skipped by every exception",
         )
 
 
