@@ -2334,6 +2334,50 @@ class LinkDependencyTests(InstallerFixture):
         marker = service.dependant_marker(self.install_dir, self.identity)
         self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
 
+    def test_a_symlinked_markers_parent_is_refused_before_anything_is_removed(self):
+        # `unlink` removes a name rather than following it, but the name is
+        # resolved through every directory above -- so a redirected parent would
+        # delete a same-named file in somebody else's tree. Through the
+        # controller's own uninstall, which is the route that does not pass the
+        # installer's earlier reads.
+        self.install()
+        victim_dir = self.root / "victim"
+        victim_dir.mkdir()
+        victim = victim_dir / service.repository_slug(self.identity)
+        victim.write_text("mine\n", encoding="utf-8")
+
+        markers = service.dependants_dir(self.install_dir)
+        shutil.rmtree(markers)
+        markers.symlink_to(victim_dir)
+
+        job = service.resolve_job(self.repo)
+        with self.assertRaises(service.ServiceError) as raised:
+            service.uninstall_job(job, self.install_dir)
+        self.assertIn(str(markers), str(raised.exception))
+        # Nothing outside the installation was touched, and the job is whole.
+        self.assertEqual(victim.read_text(encoding="utf-8"), "mine\n")
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertIn(self.identity, self.entries())
+
+    def test_a_directory_valued_marker_is_refused_before_anything_is_removed(self):
+        # `unlink` cannot remove a directory, and discovering that after the
+        # manager has forgotten the job leaves a partial uninstall the dry run
+        # said would succeed.
+        self.install()
+        marker = service.dependant_marker(self.install_dir, self.identity)
+        marker.unlink()
+        marker.mkdir()
+
+        job = service.resolve_job(self.repo)
+        with self.assertRaises(service.ServiceError) as raised:
+            service.uninstall_job(job, self.install_dir)
+        self.assertIn(str(marker), str(raised.exception))
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertIn(self.identity, self.entries())
+        # And the dry run agrees, rather than promising a removal that fails.
+        with self.assertRaises(service.ServiceError):
+            service.uninstall_plan(job, self.install_dir)
+
 
 class LinkDependencySystemdTests(SystemdShapeMixin, LinkDependencyTests):
     pass
@@ -2356,9 +2400,17 @@ class StartCommandTests(InstallerFixture):
         result = self.install_at(repo, install_dir)
 
         argv = shlex.split(installer.start_command(result))
-        self.assertEqual(argv[0], "python3")
-        self.assertEqual(argv[1], str(install_dir / service.CONTROLLER_NAME))
-        self.assertEqual(argv[2], "start")
+        self.assertEqual(argv[0], "env")
+        # Bound to this installation's directory, because the controller
+        # resolves its own through `job_install_dir`, which gives the
+        # environment precedence over the record -- and a `start` refuses to
+        # move an installation rather than performing one.
+        self.assertEqual(
+            argv[1], f"{service.INSTALL_DIR_ENV}={install_dir}"
+        )
+        self.assertEqual(argv[2], "python3")
+        self.assertEqual(argv[3], str(install_dir / service.CONTROLLER_NAME))
+        self.assertEqual(argv[4], "start")
         self.assertEqual(argv[argv.index("--path") + 1], str(repo))
         # Bound to the identity this install recorded rather than left to be
         # re-derived: the shared configuration's `remote_name` decides which
@@ -2367,7 +2419,7 @@ class StartCommandTests(InstallerFixture):
         self.assertEqual(argv[argv.index("--repo") + 1], "acme/spaced")
 
         # And it is a command the controller's own parser accepts.
-        parsed = service.parse_args(argv[2:])
+        parsed = service.parse_args(argv[4:])
         self.assertEqual(parsed.operation, "start")
         self.assertEqual(parsed.path, str(repo))
         self.assertEqual(parsed.repo, "acme/spaced")
@@ -2379,6 +2431,55 @@ class StartCommandTests(InstallerFixture):
             installer.print_plan(result, uninstalling=False)
         self.assertIn(installer.start_command(result), printed.getvalue())
         self.assertNotIn("from Kanban", printed.getvalue())
+
+    def test_a_start_refuses_to_move_an_installation(self):
+        # `job_install_dir` gives the environment precedence over the record,
+        # which is right for a controller launched out of a custom installation
+        # and wrong as a way to move one: a start refreshes the definition and
+        # the record entry, and only the installer releases the marker and the
+        # links the old directory is left holding.
+        self.install()
+        elsewhere = self.root / "elsewhere"
+        job = service.resolve_job(self.repo)
+        with self.assertRaises(service.ServiceError) as raised:
+            service.start_service(job, elsewhere)
+        message = str(raised.exception)
+        self.assertIn(str(self.install_dir), message)
+        self.assertIn(str(elsewhere), message)
+        self.assertIn(service.INSTALL_DIR_ENV, message)
+        # Refused without moving anything.
+        self.assertEqual(
+            service.installed_install_dir(self.identity), str(self.install_dir)
+        )
+        self.assertEqual(
+            service.marker_dependants(self.install_dir), [self.identity]
+        )
+        self.assertIsNone(service.marker_dependants(elsewhere))
+
+    def test_the_printed_command_works_against_a_conflicting_environment(self):
+        # An install made with an explicit --install-dir while the variable
+        # names somewhere else: the command has to select the installation it
+        # was printed for, or the shell it is pasted into refuses it.
+        elsewhere = self.root / "elsewhere"
+        result = self.install_at(self.repo, self.install_dir)
+        argv = shlex.split(installer.start_command(result))
+        self.assertEqual(
+            argv[1], f"{service.INSTALL_DIR_ENV}={self.install_dir}"
+        )
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: str(elsewhere)}):
+            # What the ambient variable alone would have selected.
+            job = service.resolve_job(self.repo)
+            self.assertEqual(service.job_install_dir(job), elsewhere)
+            with self.assertRaises(service.ServiceError):
+                service.start_service(job, service.job_install_dir(job))
+            # And what the printed command selects instead.
+            with mock.patch.dict(
+                os.environ, {service.INSTALL_DIR_ENV: argv[1].split("=", 1)[1]}
+            ):
+                job = service.resolve_job(self.repo)
+                self.assertEqual(service.job_install_dir(job), self.install_dir)
+                started = service.start_service(job, service.job_install_dir(job))
+                self.assertTrue(started["started"])
 
 
 class StartCommandSystemdTests(SystemdShapeMixin, StartCommandTests):

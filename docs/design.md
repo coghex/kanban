@@ -3637,7 +3637,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   status of its own — so neither signal, nor both together, can say whose run
   wrote the status a start is looking at. Only the document naming the run that
   wrote it can, and a start confirmed without it would report a foreground
-  process as the job it started. Each installed job's definition also pins the
+  process as the job it started. A start also refuses to run against any
+  directory but the one the record names, because refreshing the definition and
+  the record entry somewhere else *moves* the installation — and only the
+  installer releases the claim and the shared links the old directory is left
+  holding, so a start that moved a job would orphan them. Each installed job's definition also pins the
   XDG config base its installer resolved the repository identity through,
   because a job started from a cold manager re-resolves that identity and
   refuses to act when it disagrees with the one its own definition records. The script links are shared — one installed copy of

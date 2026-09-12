@@ -963,16 +963,28 @@ def start_command(result: dict[str, Any]) -> str:
 
     Quoted, because this installation's own default path contains a space on
     macOS -- `Library/Application Support` -- and a checkout may contain one
-    anywhere. And bound to the identity the install recorded rather than left to
-    be re-derived: the shared configuration's `remote_name` decides which
+    anywhere.
+
+    Bound to the identity the install recorded rather than left to be
+    re-derived: the shared configuration's `remote_name` decides which
     repository a checkout resolves to, so a command without `--repo` would
     quietly act on a different job if that setting changed, where one with it is
     refused by name.
+
+    And bound to this installation's directory, because the controller resolves
+    its own through `job_install_dir`, which gives `INSTALL_DIR_ENV` precedence
+    over the record. An install made with an explicit `--install-dir` while that
+    variable names somewhere else would otherwise print a command that the very
+    shell it was printed into refuses -- `start` will not move an installation.
+    Carried through `env` rather than a `VAR=value` prefix so the whole line is
+    one argument vector, which is what makes it checkable.
     """
     controller = Path(result["install_dir"]) / mission_runner_service.CONTROLLER_NAME
     return " ".join(
         shlex.quote(part)
         for part in (
+            "env",
+            f"{mission_runner_service.INSTALL_DIR_ENV}={result['install_dir']}",
             "python3",
             str(controller),
             "start",

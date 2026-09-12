@@ -2189,8 +2189,10 @@ report did not name.
   `tools/install_mission_runner.py` calls rather than spawns: `install` loads a
   stopped job and records it, `uninstall` unloads it and drops its entry,
   `start` kicks it and confirms the run it launched really is the one that
-  published a status, and `stop` asks it to end and waits until the manager
-  agrees it has. None of them takes an install-directory option: the copy that
+  published a status — and refuses to run against any directory but the one the
+  record names, because relocating an installation is the installer's operation
+  and only it takes back what the old directory is left holding — and `stop`
+  asks it to end and waits until the manager agrees it has. None of them takes an install-directory option: the copy that
   runs them is the installation they are about, and it reads its own location
   from the environment that launched it.
 - **Notifications:** off by default, and when enabled the operator's own

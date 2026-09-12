@@ -2733,13 +2733,45 @@ def record_dependant(install_dir: Path, identity: str) -> None:
             temporary.unlink()
 
 
+def require_removable_dependant(install_dir: Path, identity: str) -> None:
+    """Refuse to withdraw a claim through an occupant that cannot be withdrawn.
+
+    Two shapes, and both are checked before a transition touches the job or the
+    record so that a refusal leaves the installation whole rather than half
+    removed.
+
+    A `dependants` directory that is a symlink is the first. `unlink` removes a
+    *name* rather than following it, but the name it removes is resolved through
+    every directory above it — so a redirected parent would delete a same-named
+    file in somebody else's tree.
+
+    A marker that is a directory is the second. `unlink` cannot remove one at
+    all, and discovering that after the manager has already forgotten the job
+    leaves a partial uninstall that the dry run said would succeed.
+    """
+    require_safe_dependants_dir(install_dir)
+    marker = dependant_marker(install_dir, identity)
+    if os.path.lexists(marker) and not marker.is_symlink() and not marker.is_file():
+        raise ServiceError(
+            f"Refusing to remove {marker}, which is not a file this "
+            "installation can withdraw. It is left untouched; move or remove it "
+            "yourself, then re-run."
+        )
+
+
 def forget_dependant(install_dir: Path, identity: str) -> None:
     """Take back the claim `record_dependant` made.
 
     Absent is success: unloading a job that was never installed here has
-    nothing to withdraw. `unlink` removes a link rather than following one, so
-    an occupant somebody redirected goes too.
+    nothing to withdraw. Everything else is checked first -- see
+    `require_removable_dependant` -- because this is reached from the
+    controller's own uninstall as well as from the installer, and neither may
+    delete outside the installation or fail halfway through one.
+
+    `unlink` removes the name rather than following it, so a marker somebody
+    redirected goes rather than the file it points at.
     """
+    require_removable_dependant(install_dir, identity)
     dependant_marker(install_dir, identity).unlink(missing_ok=True)
 
 
@@ -3434,16 +3466,24 @@ def require_stopped_for_uninstall(job: MissionRunnerJob) -> None:
         )
 
 
-def uninstall_plan(job: MissionRunnerJob) -> dict[str, Any]:
+def uninstall_plan(
+    job: MissionRunnerJob, install_dir: Path | None = None
+) -> dict[str, Any]:
     """Exactly what `uninstall_job` would do, without writing anything.
 
     Led by the same host check, for the same reason: a removal is a mutation
     too, and a host this service cannot run on is one whose job nothing here
-    should be reasoning about.
+    should be reasoning about. The claim this uninstall has to withdraw is
+    checked here as well, so an occupant that cannot be removed is refused
+    before the manager has forgotten anything rather than after.
     """
     require_supported_host()
     backend = service_backend()
     require_usable_record()
+    require_removable_dependant(
+        install_dir if install_dir is not None else job_install_dir(job),
+        job.identity,
+    )
     require_stopped_for_uninstall(job)
     label = service_label(job)
     return {
@@ -3485,7 +3525,7 @@ def uninstall_job(
 
 
 def _uninstall_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
-    plan = uninstall_plan(job)
+    plan = uninstall_plan(job, install_dir)
     with exclusive_of_runs(
         job,
         "uninstalling this job; removing it under a live runner would leave one "
@@ -3528,13 +3568,42 @@ def _uninstall_write(
     }
 
 
+def require_recorded_installation(job: MissionRunnerJob, install_dir: Path) -> None:
+    """Refuse to start a job from an installation it is not recorded in.
+
+    A start refreshes the definition and the record entry, so starting against
+    a different directory than the recorded one *relocates* the installation —
+    and relocation is the installer's operation, not this one's: only it
+    releases the marker and the shared links the old directory is left holding.
+    A start that moved a job would orphan them with nothing left to find them
+    by.
+
+    Reachable because `job_install_dir` gives `INSTALL_DIR_ENV` precedence over
+    the record, which is right for a controller launched out of a custom
+    installation and wrong as a way to move one. So a mismatch is named rather
+    than performed.
+    """
+    recorded = installed_install_dir(job.identity)
+    if recorded is None or same_checkout(recorded, str(install_dir)):
+        return
+    raise ServiceError(
+        f"The mission runner for {job.identity} is installed in {recorded}, not "
+        f"{install_dir}, and starting it from another directory would move the "
+        f"installation without taking back what it left behind. Unset "
+        f"{INSTALL_DIR_ENV}, or run `python3 tools/install_mission_runner.py "
+        f"--install-dir {install_dir}` to move it deliberately."
+    )
+
+
 def start_service(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
     """Start this repository's job, and confirm it is really running.
 
     The install is refreshed first, on the drainer's precedent: a start is the
     moment a stale definition or a missing record would matter, and repairing
-    both costs one write nobody notices. What the manager then starts outlives
-    this process by construction — it is the manager's child, not this one's.
+    both costs one write nobody notices. What it may *not* do is refresh it
+    somewhere else — see `require_recorded_installation`. What the manager then
+    starts outlives this process by construction — it is the manager's child,
+    not this one's.
 
     Held under both locks from the first check to the confirmed start, so a
     start and a removal can never interleave in either direction — neither in
@@ -3546,6 +3615,7 @@ def start_service(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
 
 
 def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
+    require_recorded_installation(job, install_dir)
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
