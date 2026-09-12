@@ -149,6 +149,29 @@ if __name__ == "__main__":
 '''
 
 
+def haskell_string_characters(literal):
+    """The characters a Haskell string literal denotes.
+
+    Read rather than compared as written: `"/\\\\\\NUL"` in the source is the
+    three characters `/`, `\\` and NUL, and a test that compared the escapes
+    would be pinning how the literal is spelled rather than what it says.
+    """
+    characters = set()
+    index = 0
+    while index < len(literal):
+        if literal[index] != "\\":
+            characters.add(literal[index])
+            index += 1
+            continue
+        if literal.startswith("\\NUL", index):
+            characters.add("\0")
+            index += 4
+        else:
+            characters.add(literal[index + 1])
+            index += 2
+    return characters
+
+
 def wait_until(predicate, *, timeout=25.0, message="condition"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -287,6 +310,31 @@ class MirroredPassContractTests(unittest.TestCase):
             for match in re.finditer(r"MissionDisposition(\w+) -> True", body.group(1))
         }
         self.assertEqual({name.lower() for name in failing}, service.PASS_FAILING_DISPOSITIONS)
+
+    def test_the_mission_identifier_constraints_match(self):
+        # Mirrored from `Kanban.Mission.Paths.safeMissionComponent`, which is
+        # the one place a mission identifier is decided to be addressable.
+        paths = (REPO_ROOT / "src" / "Kanban" / "Mission" / "Paths.hs").read_text(
+            encoding="utf-8"
+        )
+        body = re.search(
+            r"^safeMissionComponent name =\n((?:  .*\n)+)", paths, re.MULTILINE
+        )
+        self.assertIsNotNone(body, "safeMissionComponent is not declared")
+        reserved = re.search(r'notElem`? \[(.*?)\]', body.group(1))
+        self.assertIsNotNone(reserved)
+        self.assertEqual(
+            service.PASS_RESERVED_MISSION_NAMES,
+            {name.strip().strip('"') for name in reserved.group(1).split(",")},
+        )
+        # The forbidden characters are one Haskell string literal, read as the
+        # characters it denotes rather than as the escapes it is written with.
+        forbidden = re.search(r'`elem` \("(.*?)" :: String\)', body.group(1))
+        self.assertIsNotNone(forbidden)
+        self.assertEqual(
+            haskell_string_characters(forbidden.group(1)),
+            service.PASS_UNSAFE_MISSION_CHARACTERS,
+        )
 
     def test_the_admission_ceiling_matches(self):
         # Mirrored like everything else the controller copies: a ceiling raised
@@ -715,6 +763,39 @@ class PassReportTests(unittest.TestCase):
             ),
             # The refusal returns before the inventory is read, so a refused
             # pass cannot have observed anything.
+            # A mission identifier is a single plain path component in the
+            # store, so a scheduler cannot name one this rejects — every path
+            # it derives goes through that same check.
+            "an admitted mission that is not a plain component": (
+                json.dumps(pass_document(admitted=[admitted_entry(mission="../x")])),
+                0,
+            ),
+            "an admitted mission that is a separator": (
+                json.dumps(pass_document(admitted=[admitted_entry(mission="a/b")])),
+                0,
+            ),
+            "an admitted mission that is the current directory": (
+                json.dumps(pass_document(admitted=[admitted_entry(mission=".")])),
+                0,
+            ),
+            "an admitted mission carrying a NUL": (
+                json.dumps(pass_document(admitted=[admitted_entry(mission="a\u0000b")])),
+                0,
+            ),
+            "an attention mission that is not a plain component": (
+                json.dumps(
+                    pass_document(
+                        attention=[
+                            {
+                                **attention_entry(),
+                                "mission": "../x",
+                                "attention_id": "acme/widgets#../x@2026-09-11T00:00:00Z",
+                            }
+                        ]
+                    )
+                ),
+                0,
+            ),
             "a refused pass naming attention": (
                 json.dumps(pass_document(termination="refused", attention=[attention_entry()])),
                 2,

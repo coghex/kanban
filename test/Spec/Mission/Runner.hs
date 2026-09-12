@@ -106,7 +106,7 @@ import Kanban.Preflight (IssueOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolverBrand (..), SolveOutcome (..))
 import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
 import System.Posix.Files (setFileMode)
@@ -198,12 +198,30 @@ withTwoStepMission snapshot action = withStateRoot $ \_ store stage -> do
 -- got to the state that earns it rather than by a fixture taking a turn.
 progressionSpec :: Spec
 progressionSpec = describe "a mission with two sequential steps" $
-  it "advances through both, keeps both sessions, and records the sequence" $
+  it "advances through both, retains both complete logs, and records the sequence" $
     withTwoStepMission
       ( (snapshotWith MissionRunning [stepRecord MissionStepPending [], pendingSecondStep] [])
           {missionSnapshotNextSteps = [theStep, theSecondStep]}
       )
       $ \store stage -> do
+        -- Each step's own log, sealed as its dispatch happens — which is the
+        -- moment a real launch has one to seal. Two sources with different
+        -- contents, so "both survived" cannot pass by one of them standing in
+        -- for the other.
+        sealed <- newIORef []
+        writeIORef stage.stageOnDispatch $ do
+          seen <- readIORef sealed
+          let session = MissionSessionId (if null seen then "solve-844-0001" else "review-844-0001")
+              body = "log for " <> Text.unpack session.unMissionSessionId
+          source <- sealSourceFile store session body
+          archive <- sealMissionLog store theMission session MissionEventStreamLog source
+          case archive of
+            Left failure -> expectationFailure ("could not seal a step's log: " <> Text.unpack (missionSealFailureMessage failure))
+            Right entry -> do
+              -- The source goes, exactly as a collector would take it: what
+              -- survives has to be the archived copy rather than the original.
+              removeFile source
+              atomicModifyIORef' sealed (\entries -> (entries <> [(entry, body)], ()))
         -- Every session either step can register, named before either exists:
         -- the driver only asks whether the identifier is in this set, so the
         -- run reaches each observation on its own schedule.
@@ -234,6 +252,28 @@ progressionSpec = describe "a mission with two sequential steps" $
           `shouldBe` [MissionSessionId "solve-844-0001", MissionSessionId "review-844-0001"]
         map (isJust . (.missionSessionObservation)) snapshot.missionSnapshotSessions
           `shouldBe` [True, True]
+        -- Both logs are still there, complete, after the mission finished.
+        -- Read back from the store rather than from what the seals returned,
+        -- so this is about what survived rather than about what was written.
+        archives <- readMissionSealedArchives store theMission
+        recorded <- readIORef sealed
+        case archives of
+          Left message -> expectationFailure (Text.unpack message)
+          Right entries -> do
+            map (.missionSealedSession) entries
+              `shouldBe` [MissionSessionId "review-844-0001", MissionSessionId "solve-844-0001"]
+            -- Verified, which is the whole point of a seal: the digest and the
+            -- byte length say the copy is the log rather than merely a file
+            -- with the right name.
+            forM_ entries $ \entry -> do
+              verified <- verifyMissionSealedArchive store theMission entry
+              (entry.missionSealedSession, verified) `shouldBe` (entry.missionSealedSession, Right ())
+            -- And each one still holds its own step's bytes, so neither was
+            -- truncated and neither stood in for the other.
+            forM_ recorded $ \(entry, body) -> do
+              contents <- readSealedArchive store entry
+              (entry.missionSealedSession, contents) `shouldBe` (entry.missionSealedSession, body)
+
         -- And the order is durable rather than merely observed in memory: the
         -- journal is what a later run, or a dashboard, reads it back from.
         journal <- readMissionJournal store theMission 0
@@ -256,6 +296,20 @@ progressionSpec = describe "a mission with two sequential steps" $
                          ]
   where
     pendingSecondStep = (stepRecord MissionStepPending []) {missionStepRecordId = theSecondStep}
+
+-- | A provider log for one session, where a worker would have left it.
+sealSourceFile :: MissionStore -> MissionSessionId -> String -> IO FilePath
+sealSourceFile store session body = do
+  let path = store.missionStoreDirectory </> (Text.unpack session.unMissionSessionId <> ".source.log")
+  writeFile path body
+  pure path
+
+-- | What one sealed archive holds, read from where the seal says it is.
+readSealedArchive :: MissionStore -> MissionSealedArchive -> IO String
+readSealedArchive store entry =
+  case missionDirectory store.missionStoreDirectory theMission of
+    Left message -> fail (Text.unpack message)
+    Right directory -> readFile (directory </> "archive" </> entry.missionSealedName)
 
 -- ---------------------------------------------------------------------------
 -- Fixtures

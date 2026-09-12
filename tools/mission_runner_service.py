@@ -142,6 +142,14 @@ PASS_ADMITTED_FIELDS = frozenset({"mission", "disposition", "detail"})
 # report can violate: three otherwise well-formed admitted entries would
 # otherwise be published as a healthy pass that quietly ignored the ceiling.
 PASS_ADMISSION_CEILING = 2
+# What `Kanban.Mission.Paths.safeMissionComponent` admits, mirrored: a mission
+# identifier is a single plain path component, so it is non-empty, is neither
+# `.` nor `..`, and contains no separator and no NUL. A scheduler cannot name a
+# mission this rejects — every path it derives goes through that check — so a
+# report that does is malformed rather than merely surprising, and accepting
+# one would retain a mission identity nothing in the store could address.
+PASS_UNSAFE_MISSION_CHARACTERS = frozenset({"/", "\\", "\0"})
+PASS_RESERVED_MISSION_NAMES = frozenset({".", ".."})
 # The notification state a scheduler writes when it could not resolve which
 # items an episode is about. The writer treats that as indeterminate mission
 # state and terminates the pass `failed`, so a successful pass carrying one is
@@ -1061,6 +1069,19 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
     return document
 
 
+def _require_mission_identifier(value: Any, what: str) -> str:
+    """One mission identifier, held to what a mission store can address."""
+    if not isinstance(value, str) or not value.strip():
+        raise PassFailure(f"{what} names no mission: {value!r}.")
+    if value in PASS_RESERVED_MISSION_NAMES or any(
+        character in PASS_UNSAFE_MISSION_CHARACTERS for character in value
+    ):
+        raise PassFailure(
+            f"{what} is not a single plain mission identifier: {value!r}."
+        )
+    return value
+
+
 def _require_vocabulary(value: Any, allowed: frozenset[str], what: str) -> str:
     """One value from a closed vocabulary, type-checked before it is looked up.
 
@@ -1128,11 +1149,9 @@ def _require_admitted(admitted: Any, termination: str) -> None:
                 "A mission scheduler report's admitted entry has the wrong fields: "
                 f"{sorted(keys)}."
             )
-        if not isinstance(entry["mission"], str) or not entry["mission"].strip():
-            raise PassFailure(
-                f"A mission scheduler report's admitted entry names no mission: "
-                f"{entry['mission']!r}."
-            )
+        _require_mission_identifier(
+            entry["mission"], "A mission scheduler report's admitted entry"
+        )
         disposition = _require_vocabulary(
             entry["disposition"],
             PASS_DISPOSITIONS,
@@ -1210,12 +1229,14 @@ def _require_attention(attention: Any, termination: str, repository: str) -> Non
                 "A mission scheduler report's attention entry has the wrong fields: "
                 f"{sorted(keys)}."
             )
-        for field in ("mission", "attention_id"):
-            if not isinstance(entry[field], str) or not entry[field].strip():
-                raise PassFailure(
-                    f"A mission scheduler report's attention entry names no {field}: "
-                    f"{entry[field]!r}."
-                )
+        _require_mission_identifier(
+            entry["mission"], "A mission scheduler report's attention entry"
+        )
+        if not isinstance(entry["attention_id"], str) or not entry["attention_id"].strip():
+            raise PassFailure(
+                f"A mission scheduler report's attention entry names no attention_id: "
+                f"{entry['attention_id']!r}."
+            )
         state = _require_vocabulary(
             entry["notification"],
             PASS_NOTIFICATION_STATES,
