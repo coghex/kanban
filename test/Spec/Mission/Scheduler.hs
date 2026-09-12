@@ -49,6 +49,7 @@ import Kanban.Domain (Repository (..))
 import Kanban.Mission
 import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.NotifyProbe (withStubbornNotifier)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), hClose, hPutStrLn, openFile)
@@ -1226,6 +1227,18 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
     withScratch $ \scratch -> do
       attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros [Text.pack (scratch </> "no-such-notifier")]
       attempt.missionNotificationAttemptState `shouldBe` MissionNotificationLaunchFailed
+
+  -- Requirement 11 reaches the notifier too, and by a different route than
+  -- the mission children. Those stay in the scheduler's own process group, so
+  -- the supervisor's signal to that group reaches them; a notification command
+  -- is deliberately in a group of its own, which is what lets the ordinary
+  -- sweep end its descendants — and which means that same signal cannot reach
+  -- it. So the scheduler has to sweep it while being stopped, and that is what
+  -- this observes, from a process the example really kills.
+  it "ends a notification command when the process running it is stopped" $
+    withScratch $ \scratch -> do
+      notifier <- withStubbornNotifier scratch pure
+      awaitGone notifier
 
   it "refuses an empty command rather than launching a shell" $ do
     attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros []

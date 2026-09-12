@@ -69,6 +69,7 @@ import Spec.Support.Lanes
   )
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
+import Spec.Support.NotifyProbe (notifyProbeVariable, runNotifyProbe)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
@@ -114,7 +115,12 @@ import System.IO (stdin, stdout)
 -- a reader sharing nothing with the writer, and a lease holder there is
 -- something to kill).
 --
--- All four are asked about before the suite and deliberately so: a lane
+-- 'notifyProbeVariable' makes it one running a notification command, which is
+-- the one thing this process starts in a process group of its own and
+-- therefore the one thing a stop cannot reach by signalling this group (see
+-- "Spec.Support.NotifyProbe").
+--
+-- All five are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -138,12 +144,14 @@ main = do
       usageWriter <- lookupEnv usageWriterVariable
       leaseProbe <- lookupEnv leaseProbeVariable
       missionProbe <- lookupEnv missionProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, missionProbe) of
-        (Just probeRoot, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath) -> runMissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+      notifyProbe <- lookupEnv notifyProbeVariable
+      case (localeProbe, usageWriter, leaseProbe, missionProbe, notifyProbe) of
+        (Just probeRoot, _, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath, _) -> runMissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Just directory) -> runNotifyProbe directory
+        (Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --

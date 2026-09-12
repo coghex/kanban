@@ -47,7 +47,7 @@ module Kanban.Mission.Notify
   )
 where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, bracket, try)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -96,6 +96,13 @@ import System.Directory (XdgDirectory (XdgCache), getXdgDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (Handle)
+import System.Posix.Signals
+  ( Handler (CatchOnce, Default),
+    installHandler,
+    raiseSignal,
+    sigINT,
+    sigTERM,
+  )
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -270,6 +277,38 @@ attemptMissionNotification runCommand store mission identity argv = do
         MissionNotificationRecordingFailed
         (Just ("the notification suppression record could not be written, so nothing was launched: " <> message))
 
+-- | Runs @body@ with an intentional stop performing @sweep@ first.
+--
+-- Installed for the life of one command and restored afterwards, rather than
+-- held for the whole process: a notification is the only thing this process
+-- starts in a group of its own, and only one is ever in flight at a time
+-- because attention is observed one mission after another. So the window that
+-- needs covering is exactly this call.
+--
+-- The handler sweeps and then lets the signal do what it was sent to do: the
+-- default disposition is restored and the signal re-raised, so this process
+-- still dies of it rather than absorbing it and carrying on past a stop.
+--
+-- 'CatchOnce' because a second signal must not re-enter a sweep that is
+-- already running. An operator who asks twice is obeyed by the supervisor's
+-- own escalation, which kills the group outright — and that escalation is why
+-- this is best effort rather than a guarantee: a @SIGKILL@ runs no handler,
+-- and the sweep then depends on the grace period the supervisor waits out
+-- first.
+withStopSweep :: IO () -> IO a -> IO a
+withStopSweep sweep body = bracket install restore (const body)
+  where
+    stops = [sigTERM, sigINT]
+
+    install = mapM (\signal -> (,) signal <$> installHandler signal (CatchOnce (handle signal)) Nothing) stops
+
+    restore = mapM_ (\(signal, previous) -> installHandler signal previous Nothing)
+
+    handle signal = do
+      sweep
+      _ <- installHandler signal Default Nothing
+      raiseSignal signal
+
 -- | Runs the configured command, bounded, and says only what was observed.
 --
 -- The process shape is "Kanban.UsageCommand"'s: direct exec with ordinary
@@ -345,7 +384,17 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
       outputCapture <- startCapture outputHandle
       errorCapture <- startCapture errorHandle
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}
-      completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
+      -- The sweep also has to happen if this process is /stopped/ while the
+      -- command is running, and that is not the same path. The command runs in
+      -- a process group of its own, so the supervisor above this process
+      -- signals the scheduler's group and cannot reach it; without a handler
+      -- the scheduler would die here and leave a stuck notifier — and its
+      -- descendants — behind, which is exactly what the sweep below exists to
+      -- prevent on every other path out.
+      completed <-
+        withStopSweep
+          (sweepCommandGroup rootPid managed)
+          (awaitCommandOutcome bounds processHandle outputCapture errorCapture)
       releaseCapture outputCapture
       releaseCapture errorCapture
       sweepCommandGroup rootPid managed
