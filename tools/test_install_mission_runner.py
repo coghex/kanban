@@ -1975,109 +1975,196 @@ class RecordRepairSystemdTests(SystemdShapeMixin, RecordRepairTests):
     pass
 
 
-class UnknowableRecordTests(InstallerFixture):
-    """A record this account's installed jobs cannot be read off may name every
-    one of them, so nothing shared is taken away on the strength of it."""
+class LinkDependencyTests(InstallerFixture):
+    """Which jobs run from a directory's links is a fact about that directory.
+
+    The discovery record is a cache of that answer kept somewhere else: it can
+    be absent while every job it named is still loaded, it can be corrupt, it
+    can decode partially, and repairing it rebuilds it around the one entry the
+    repairer knows about. Every one of those reads as "nothing depends on
+    these" to a reader that asks the record, so none of them may decide a
+    removal.
+    """
 
     other_identity = "acme/gadgets"
+    third_identity = "acme/gizmos"
 
     def setUp(self):
         super().setUp()
         self.other_repo = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.third_repo = self.checkout("gizmos", "git@github.com:acme/gizmos.git")
 
-    def corrupt_record(self, content=b"\xff\xfe not json at all"):
-        service.discovery_record_path().write_bytes(content)
-
-    def test_the_probe_admits_only_a_record_it_can_read_the_jobs_off(self):
-        record = service.discovery_record_path()
-        # Absent is unknown, not empty: a record can be deleted while every job
-        # it named is still loaded in the service manager, and nothing here can
-        # enumerate a manager's jobs to find out.
-        self.assertFalse(service.installed_jobs_are_knowable())
-        self.install()
-        self.assertTrue(service.installed_jobs_are_knowable())
-        for content in (
-            b"\xff\xfe not json at all",
-            b"[]",
-            b'"a string"',
-            b'{"repositories": "not a table"}',
-        ):
-            with self.subTest(content=content):
-                record.write_bytes(content)
-                self.assertFalse(service.installed_jobs_are_knowable())
-        # An empty table is different from every one of those: something wrote
-        # it, and what it says is that nothing is installed.
-        record.write_text('{"repositories": {}}', encoding="utf-8")
-        self.assertTrue(service.installed_jobs_are_knowable())
-
-    def assert_sibling_keeps_its_links(self, result):
-        self.assertTrue(result["uninstalled"])
-        self.assertFalse(result["dependants_known"])
-        # Empty for the same reason the record could not be read, which is
-        # exactly why it may not be taken as "nothing depends on these".
-        self.assertEqual(result["dependent_repositories"], [])
-        for name in installer.LINKED_MODULES:
-            self.assertTrue((self.install_dir / name).is_symlink(), name)
-            self.assertTrue((self.install_dir / name).resolve().is_file(), name)
-        # The sibling's job is still loaded, and still has a controller to run.
-        self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
-
-    def test_an_undecodable_record_keeps_the_links_a_sibling_runs_from(self):
-        self.install()
-        self.install(repo=self.other_repo)
-        self.corrupt_record()
-        self.assert_sibling_keeps_its_links(self.uninstall())
-
-    def test_an_absent_record_keeps_the_links_a_sibling_runs_from(self):
-        # The manager is still holding both jobs; only the document that says
-        # so is gone.
-        self.install()
-        self.install(repo=self.other_repo)
-        service.discovery_record_path().unlink()
-        self.assert_sibling_keeps_its_links(self.uninstall())
-
-    def test_the_dry_run_reports_that_retention_too(self):
-        self.install()
-        self.install(repo=self.other_repo)
-        for removal in (self.corrupt_record, self.delete_record):
-            with self.subTest(record=removal.__name__):
-                removal()
-                planned = self.uninstall(dry_run=True)
-                self.assertFalse(planned["dependants_known"])
-                self.assertEqual(
-                    {name: link["result"] for name, link in planned["links"].items()},
-                    {name: "kept" for name in installer.LINKED_MODULES},
-                )
+    def corrupt_record(self):
+        service.discovery_record_path().write_bytes(b"\xff\xfe not json at all")
 
     def delete_record(self):
         record = service.discovery_record_path()
         if record.exists():
             record.unlink()
 
-    def test_a_record_with_no_dependants_still_lets_them_go(self):
-        # The positive control the retention above needs: "nothing depends on
-        # these" has to keep meaning what it says.
-        self.install()
-        result = self.uninstall()
-        self.assertTrue(result["dependants_known"])
+    def empty_record(self):
+        service.discovery_record_path().write_text(
+            '{"repositories": {}}', encoding="utf-8"
+        )
+
+    def partial_record(self):
+        service.discovery_record_path().write_text("{}", encoding="utf-8")
+
+    def assert_links_present(self):
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+            self.assertTrue((self.install_dir / name).resolve().is_file(), name)
+
+    def assert_links_absent(self):
         for name in installer.LINKED_MODULES:
             self.assertFalse(os.path.lexists(self.install_dir / name), name)
 
-    def test_a_relocation_releases_nothing_it_cannot_account_for(self):
-        # The same question on the other transition. A reinstall elsewhere takes
-        # back the links it left behind, and an unreadable record may say
-        # somebody still needs them -- and also loses the one thing that says
-        # where this repository was, so there is no directory to release and
-        # nothing is taken away.
+    # -- the directory is the authority ------------------------------------
+
+    def test_an_install_claims_the_directory_and_an_uninstall_withdraws_it(self):
+        self.install()
+        self.assertEqual(
+            installer.link_dependants(self.install_dir), [self.identity]
+        )
+        self.install(repo=self.other_repo)
+        self.assertEqual(
+            installer.link_dependants(self.install_dir),
+            sorted([self.identity, self.other_identity]),
+        )
+        self.uninstall()
+        self.assertEqual(
+            installer.link_dependants(self.install_dir), [self.other_identity]
+        )
+
+    def test_a_directory_that_was_never_installed_into_cannot_say(self):
+        # Fail closed, and free: there are no links there to remove either.
+        self.assertIsNone(installer.link_dependants(self.root / "never"))
+        self.assertFalse(installer.may_remove_links(self.root / "never"))
+
+    def test_a_marker_that_cannot_be_read_is_still_a_dependant(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        marker = installer.dependant_marker(self.install_dir, self.other_identity)
+        marker.write_bytes(b"\xff\xfe")
+        # Named by its file name rather than discounted.
+        self.assertEqual(len(installer.link_dependants(self.install_dir)), 2)
+        self.uninstall()
+        self.assert_links_present()
+
+    # -- every shape of record the reviewer's cases reach -------------------
+
+    def test_no_state_of_the_record_lets_a_siblings_links_go(self):
+        for damage in (
+            self.corrupt_record,
+            self.delete_record,
+            self.empty_record,
+            self.partial_record,
+        ):
+            with self.subTest(record=damage.__name__):
+                self.install()
+                self.install(repo=self.other_repo)
+                damage()
+                result = self.uninstall()
+                self.assertTrue(result["uninstalled"])
+                self.assert_links_present()
+                self.assertTrue(
+                    self.manager.is_loaded(self.label(self.other_identity))
+                )
+                # And the directory still says who is left, whatever the record
+                # has to say about it.
+                self.assertEqual(
+                    installer.link_dependants(self.install_dir),
+                    [self.other_identity],
+                )
+                self.uninstall(repo=self.other_repo)
+                self.assert_links_absent()
+
+    def test_sequential_uninstalls_after_corruption_keep_the_last_job_running(self):
+        # The reviewer's multi-sibling case. Removing one repository rewrites an
+        # undecodable record as a small, perfectly readable table -- so a reader
+        # that asked the record would keep the links on the first uninstall and
+        # take them on the second, while the third job was still loaded.
+        for repo in (self.repo, self.other_repo, self.third_repo):
+            self.install(repo=repo)
+        self.corrupt_record()
+        self.uninstall()
+        self.assert_links_present()
+        self.uninstall(repo=self.other_repo)
+        self.assert_links_present()
+        self.assertTrue(self.manager.is_loaded(self.label(self.third_identity)))
+        self.assertEqual(
+            installer.link_dependants(self.install_dir), [self.third_identity]
+        )
+        # And the last one out still takes them.
+        self.uninstall(repo=self.third_repo)
+        self.assert_links_absent()
+
+    def test_repairing_the_record_does_not_forget_a_sibling(self):
+        # Reinstalling rebuilds `repositories` around the repository being
+        # repaired, which is the whole of what the record then says. The
+        # directory goes on naming both.
+        for damage in (self.corrupt_record, self.delete_record):
+            with self.subTest(record=damage.__name__):
+                self.install()
+                self.install(repo=self.other_repo)
+                damage()
+                self.install()
+                self.assertEqual(
+                    sorted(self.entries()), [self.identity], "the record forgot it"
+                )
+                self.assertEqual(
+                    installer.link_dependants(self.install_dir),
+                    sorted([self.identity, self.other_identity]),
+                )
+                self.uninstall()
+                self.assert_links_present()
+                self.assertTrue(
+                    self.manager.is_loaded(self.label(self.other_identity))
+                )
+                self.uninstall(repo=self.other_repo)
+                self.assert_links_absent()
+
+    def test_the_dry_run_reports_the_same_retention(self):
         self.install()
         self.install(repo=self.other_repo)
         self.corrupt_record()
-        self.install(install_dir=self.root / "elsewhere")
+        planned = self.uninstall(dry_run=True)
+        self.assertEqual(
+            {name: link["result"] for name, link in planned["links"].items()},
+            {name: "kept" for name in installer.LINKED_MODULES},
+        )
+        self.assertEqual(planned["dependent_repositories"], [self.other_identity])
+
+    def test_the_last_job_out_still_takes_the_links(self):
+        # The positive control every retention above needs: "nothing runs from
+        # these" has to keep meaning what it says.
+        self.install()
+        result = self.uninstall()
+        self.assertEqual(result["dependent_repositories"], [])
+        self.assert_links_absent()
+
+    def test_a_relocation_takes_back_only_what_it_left(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        elsewhere = self.root / "elsewhere"
+        self.install(install_dir=elsewhere)
+        self.assertEqual(
+            installer.link_dependants(self.install_dir), [self.other_identity]
+        )
+        self.assertEqual(installer.link_dependants(elsewhere), [self.identity])
+        self.assert_links_present()
         for name in installer.LINKED_MODULES:
-            self.assertTrue((self.install_dir / name).is_symlink(), name)
+            self.assertTrue((elsewhere / name).is_symlink(), name)
+
+    def test_a_relocation_out_of_a_directory_nobody_else_needs_clears_it(self):
+        self.install()
+        elsewhere = self.root / "elsewhere"
+        self.install(install_dir=elsewhere)
+        self.assertEqual(installer.link_dependants(self.install_dir), [])
+        self.assert_links_absent()
 
 
-class UnknowableRecordSystemdTests(SystemdShapeMixin, UnknowableRecordTests):
+class LinkDependencySystemdTests(SystemdShapeMixin, LinkDependencyTests):
     pass
 
 
@@ -2286,7 +2373,7 @@ handle = open(sys.argv[1], "a+", encoding="utf-8")
 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 handle.seek(0)
 handle.truncate()
-handle.write(json.dumps({"pid": os.getpid(), "mode": "run"}))
+handle.write(json.dumps({"pid": os.getpid(), "mode": sys.argv[3]}))
 handle.flush()
 open(sys.argv[2], "w").write("ready")
 time.sleep(300)
@@ -2318,12 +2405,12 @@ class RunExclusionTests(InstallerFixture):
         self.assertIn(proc.returncode, (0, 1), proc.stderr)
         return proc.returncode == 0
 
-    def hold_run_lock(self):
+    def hold_run_lock(self, *, mode="run"):
         path = self.lock_path()
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        ready = self.root / "run-lock-ready"
+        ready = self.root / f"run-lock-ready-{mode}"
         proc = subprocess.Popen(
-            [sys.executable, "-c", RUN_LOCK_HOLDER, str(path), str(ready)]
+            [sys.executable, "-c", RUN_LOCK_HOLDER, str(path), str(ready), mode]
         )
         self.addCleanup(self.stop_holder, proc)
         wait_until(ready.exists, message="the run lock holder to take the lock")
@@ -2398,6 +2485,79 @@ class RunExclusionTests(InstallerFixture):
         self.assertTrue(self.manager.is_loaded(self.label()))
         self.assertIn(self.identity, self.entries())
         self.assertEqual(self.manager.call_names(), before)
+
+    def test_a_run_cannot_begin_while_a_relocation_releases_links(self):
+        # The release is the third mutation, and the one that used to sit
+        # outside the exclusion: it runs after the record already names the new
+        # directory, so a run beginning in that window would have found the old
+        # installation's modules deleted underneath it -- and the install would
+        # have reported them removed whether they were or not.
+        self.install()
+        observed = []
+        original = installer.remove_symlink
+
+        def observing(destination, name):
+            observed.append(self.run_lock_free())
+            return original(destination, name)
+
+        with mock.patch.object(installer, "remove_symlink", observing):
+            result = self.install(install_dir=self.root / "elsewhere")
+        self.assertEqual(len(observed), len(installer.LINKED_MODULES))
+        self.assertNotIn(
+            True,
+            observed,
+            "a foreground run could have begun while the old links were released",
+        )
+        self.assertEqual(
+            {name: link["result"] for name, link in result["released_links"].items()},
+            {name: "removed" for name in installer.LINKED_MODULES},
+        )
+
+    def test_the_release_reports_only_what_it_really_did(self):
+        # Both outcomes, against the filesystem rather than against the plan
+        # that predicted them: reporting a link removed while it is still there
+        # is how an orphaned installation stops being findable.
+        other_repo = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+        self.install()
+        self.install(repo=other_repo)
+        kept = self.install(install_dir=self.root / "elsewhere")
+        self.assert_release_matches(kept)
+        self.assertEqual(
+            {link["result"] for link in kept["released_links"].values()}, {"kept"}
+        )
+
+        moved = installer.install(
+            other_repo,
+            self.root / "second",
+            asset_root=other_repo,
+            config_path=None,
+            dry_run=False,
+        )
+        self.assert_release_matches(moved)
+        self.assertEqual(
+            {link["result"] for link in moved["released_links"].values()}, {"removed"}
+        )
+
+    def assert_release_matches(self, result):
+        for name, link in result["released_links"].items():
+            destination = Path(link["destination"])
+            with self.subTest(module=name, result=link["result"]):
+                if link["result"] == "removed":
+                    self.assertFalse(os.path.lexists(destination))
+                else:
+                    self.assertTrue(os.path.lexists(destination))
+
+    def test_a_contending_transition_is_named_as_one_rather_than_as_a_run(self):
+        # A run and a transition take the very same lock, so the refusal has to
+        # say which it lost to: "stop the mission runner" is the wrong repair
+        # for an installer that is simply still going.
+        self.hold_run_lock(mode="transition")
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        message = str(raised.exception)
+        self.assertIn("An install or uninstall of", message)
+        self.assertIn(self.identity, message)
+        self.assertNotIn("is running", message)
 
 
 class RunExclusionSystemdTests(SystemdShapeMixin, RunExclusionTests):

@@ -3641,14 +3641,20 @@ above are unchanged, and persistence the user switched off is not a failure.
   serves every repository — while the job, its runtime state, its logs, and its
   `--config` selection are the repository's own, so installing a second
   repository adds an entry beside the first and uninstalling one takes that
-  entry and that job alone. Every mutation either makes — the shared links as
-  much as the job, its definition and its record entry — is performed while
+  entry and that job alone; which repositories still run from a directory's
+  links is read off that directory rather than out of the discovery record, so
+  no state of the record can strand a job that is still loaded. Every mutation
+  either makes — the shared links as
+  much as the job, its definition and its record entry, and the links a
+  relocation takes back from the directory it is leaving — is performed while
   holding that repository's own run lock, because a foreground run takes none
   of the locks that serialize managed transitions against each other and the run
   lock is the only thing the two contend for: without it an install would
   repoint the links and only then discover a run that began after it planned,
   and an uninstall would delete the modules a run starting in that moment is
-  about to execute. Kanban reads none of it yet; discovery, status and
+  about to execute. Because that lock is never waited for, a contender is
+  refused rather than queued, and the refusal says whether it lost to a run to
+  be stopped or to a transition to be waited for. Kanban reads none of it yet; discovery, status and
   incident decoding, and the start/stop seam are a later slice's.
 - That service's discovery record is `config.json` in its own resolved
   directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
@@ -3719,6 +3725,7 @@ Suggested paths:
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
 ~/.local/state/kanban/missions/.deleted/<token>/
 ~/Library/Application Support/kanban/mission-runner/config.json
+~/Library/Application Support/kanban/mission-runner/dependants/<owner>.<repo>
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/status.json
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/incidents/<id>.json
 ~/Library/Application Support/kanban/mission-runner/locks/<owner>.<repo>.lock
@@ -3846,15 +3853,19 @@ Defaults:
   that is missing, unreadable, or stale is repaired by reinstalling rather than
   leaving the component undiscoverable; a record path occupied by something that
   is not a plain file is refused by name, before anything is written, rather
-  than replaced. A record the installed jobs cannot be read off — one that will
-  not decode, and equally one that is simply *absent*, since it can be deleted
-  while every job it named is still loaded — is an unknown set rather than an
-  empty one, and nothing shared is taken away on the strength of it: an
-  uninstall performed against one removes that repository's job and keeps the
-  script links every other job would run from, because keeping a link nothing
-  needs is recoverable and removing one a live job runs from is not. An empty
-  `repositories` table is the different case that does let them go: something
-  wrote it, and what it says is that nothing is installed.
+  than replaced. What the record deliberately does *not* decide is whether an
+  installation's shared script links may go. That is a question about the
+  directory the links are in, and the record is a copy of the answer kept
+  somewhere else: it can be absent while every job it named is still loaded, it
+  can be corrupt, it can decode partially, and repairing it rebuilds it around
+  the one entry the repairer knows about — so the next reader sees a small,
+  perfectly readable table and takes it for the whole truth. Every one of those
+  reads as "nothing depends on these". The install directory therefore carries
+  its own `dependants` directory, one marker file per installed identity holding
+  that repository's canonical name, written and withdrawn in the same locked
+  transition that writes and withdraws the links themselves; the links go
+  exactly when it is empty, and a directory that has none at all cannot say and
+  keeps them.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository

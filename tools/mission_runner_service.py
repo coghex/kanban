@@ -1106,18 +1106,47 @@ def describe_run_owner(owner: dict[str, Any]) -> str:
     return ""
 
 
+def lock_contention_message(owner: dict[str, Any], identity: str, action: str) -> str:
+    """What a contender for this identity's run lock lost to, and what to do.
+
+    A `run` and a transition take the very same lock -- that is how the two are
+    made mutually exclusive -- so "a mission runner is already running" is the
+    wrong sentence for half of the encounters, and carries the wrong repair with
+    it: an install that is simply still going is waited for, not stopped.
+
+    Whoever holds the lock says which it is, and an owner that says nothing is
+    read as a run. That is what a lock file written by a release before this one
+    looks like, and being told to stop a runner that turns out to be an
+    installer costs less than being told to wait for an installer that is
+    really a runner.
+    """
+    if owner.get("mode") == "transition":
+        return (
+            f"An install or uninstall of {identity} is already in "
+            f"progress{describe_run_owner(owner)}. Wait for it to finish, then "
+            "re-run."
+        )
+    return (
+        f"A mission runner for {identity} is already "
+        f"running{describe_run_owner(owner)}. Stop it before {action}."
+    )
+
+
 @contextlib.contextmanager
 def held_exclusively(
     path: Path,
     job: MissionRunnerJob,
-    refusal: Callable[[str], str],
+    refusal: Callable[[dict[str, Any]], str],
     *,
     mode: str = "run",
 ) -> Iterator[None]:
     """Hold one non-blocking exclusive lock, or refuse with `refusal`.
 
-    `refusal` is called with a description of the owner rather than
-    interpolated into, so no repository path can be read as a format field.
+    `refusal` is handed whatever the current owner recorded about itself and
+    builds the whole sentence from it, rather than being interpolated into: no
+    repository path can be read as a format field, and a caller whose contender
+    may be a transition rather than a run can say which it lost to and what to
+    do about it.
 
     `mode` is what the holder is doing, recorded so a contender can say which
     it lost to. A `run` and a transition that must exclude one take the very
@@ -1141,7 +1170,7 @@ def held_exclusively(
     except BlockingIOError as exc:
         owner = _read_lock_owner(handle)
         handle.close()
-        raise ServiceError(refusal(describe_run_owner(owner))) from exc
+        raise ServiceError(refusal(owner)) from exc
     except OSError:
         handle.close()
         raise
@@ -1185,8 +1214,9 @@ def run_lock(job: MissionRunnerJob) -> Iterator[None]:
         job.lock_path,
         job,
         lambda owner: (
-            f"A mission runner for {job.identity} is already running{owner}. "
-            "One repository runs one mission runner at a time."
+            f"A mission runner for {job.identity} is already "
+            f"running{describe_run_owner(owner)}. One repository runs one "
+            "mission runner at a time."
         ),
     ):
         yield
@@ -2401,10 +2431,7 @@ def exclusive_of_runs(job: MissionRunnerJob, action: str) -> Iterator[None]:
     with held_exclusively(
         job.lock_path,
         job,
-        lambda owner: (
-            f"A mission runner for {job.identity} is running{owner}. "
-            f"Stop it before {action}."
-        ),
+        lambda owner: lock_contention_message(owner, job.identity, action),
         mode="transition",
     ):
         # Recorded so this thread's own advisory probes do not report the lock
@@ -2569,37 +2596,6 @@ def installed_repository_records() -> dict[str, dict[str, Any]]:
         for identity, record in records.items()
         if isinstance(identity, str) and isinstance(record, dict)
     }
-
-
-def installed_jobs_are_knowable() -> bool:
-    """Whether the set of installed jobs can be read off the discovery record.
-
-    Not the same question as "is this repository installed?", which
-    `installed_repository_records` answers by reporting an unreadable or absent
-    document as no repositories. That is the right answer for a reader and a
-    dangerous one for a writer deciding whether shared script links may go: the
-    links are what *every* job installed into a directory runs from, and a
-    record that cannot be read may name all of them.
-
-    Absence is unknown for the same reason an undecodable document is, and not
-    for a weaker one. A record can be deleted while every job it named is still
-    loaded in the service manager, and nothing here can enumerate a manager's
-    jobs to find out — that boundary is deliberately total and has no verb for
-    it. An empty `repositories` table is different: something wrote it, and what
-    it says is that nothing is installed.
-
-    So a caller that cannot account for a directory's dependants keeps its
-    links. Keeping a link nothing needs is recoverable by a later uninstall;
-    removing one a live job runs from is not.
-    """
-    path = discovery_record_path()
-    if not os.path.lexists(path):
-        return False
-    document = _read_json_document(path)
-    if not isinstance(document, dict):
-        return False
-    records = document.get(RECORD_REPOSITORIES_KEY)
-    return records is None or isinstance(records, dict)
 
 
 def installed_repository_record(identity: str) -> dict[str, Any]:
@@ -2897,10 +2893,7 @@ def require_no_live_run(job: MissionRunnerJob, action: str) -> None:
     """
     owner = run_lock_owner(job)
     if owner is not None:
-        raise ServiceError(
-            f"A mission runner for {job.identity} is already "
-            f"running{describe_run_owner(owner)}. Stop it before {action}."
-        )
+        raise ServiceError(lock_contention_message(owner, job.identity, action))
     if job_is_running(job):
         raise ServiceError(
             f"The {service_backend().backend_name()} manager still holds a live "

@@ -2597,7 +2597,12 @@ which no option moves. `mission-runner-job-label` is the eleventh row and is
 not a location at all: it is the identifier prefix
 `tools/service_manager.py` derives an installed job's identifier from, on the
 terms `drainer-launchagent-label` and `issue-approval-job-label` are described
-under above.
+under above. The `dependants` directory each installation keeps beside its
+script links — one marker per installed identity, naming which repositories
+still run from them — declares no row of its own: it is composed from whatever
+`--install-dir` resolved to rather than spelled, so there is no literal for a
+row to be grounded in, and it sits inside the install directory
+`mission-runner-service-root` already declares.
 
 All ten name `tools/mission_runner_service.py`, and that is the same
 statement the four issue-approval rows make: the module composes each location
