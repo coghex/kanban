@@ -24,7 +24,7 @@
 -- the mechanism rather than about a fixture.
 module Spec.Mission.Scheduler (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Control.Exception (IOException, SomeException, try)
@@ -60,6 +60,7 @@ import System.IO (IOMode (WriteMode), hClose, hPutStrLn, openFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Exit (ExitCode (..))
+import System.Timeout (timeout)
 import System.Process
   ( CreateProcess (..),
     Pid,
@@ -1473,6 +1474,45 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
           (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
       attempt <- runMissionNotificationCommand (2 * 1000 * 1000) [Text.pack command]
       attempt.missionNotificationAttemptState `shouldBe` MissionNotificationTimedOut
+      recorded <- awaitRecordedPid marker
+      awaitGone recorded
+
+  -- A signal is not the only way out of this call, and the other ways leave
+  -- the same thing behind. A notification command runs in a process group of
+  -- its own — that is what lets an ordinary sweep end everything it spawned —
+  -- and the price is that the supervisor's signal to the scheduler's group
+  -- cannot reach it. So an exception that unwound past an inline sweep would
+  -- leave a process nothing can address.
+  --
+  -- Staged deterministically: the command records its identifier, and the
+  -- exception is thrown only once that identifier has been read, so the
+  -- window is entered rather than raced for.
+  it "ends the command when the call is cancelled" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "cancelled.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
+      -- A bound far longer than this example, so nothing here can be the
+      -- ordinary timed-out path wearing a disguise.
+      thread <- forkIO (void (runMissionNotificationCommand (600 * 1000 * 1000) [Text.pack command]))
+      notifier <- awaitRecordedPid marker
+      killThread thread
+      awaitGone notifier
+
+  -- The same hazard by the route a caller is most likely to take: a bound of
+  -- its own around a pass. 'timeout' throws into this thread exactly as
+  -- 'killThread' does, and the group has to go the same way.
+  it "ends the command when a caller's own bound unwinds it" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "unwound.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
+      outcome <- timeout (5 * 1000 * 1000) (runMissionNotificationCommand (600 * 1000 * 1000) [Text.pack command])
+      (outcome >> Just ()) `shouldBe` Nothing
       recorded <- awaitRecordedPid marker
       awaitGone recorded
 

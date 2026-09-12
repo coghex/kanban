@@ -367,7 +367,11 @@ at all when it names none. Nothing else is passed: no title, no summary, no
 path. The items come last so the two fixed positions do not move with their
 number. It runs in its own process group, and that group is swept on every path
 out, so a command that outlived its bound is ended rather than left running and
-a descendant it backgrounded goes with it. A mission whose own specification
+a descendant it backgrounded goes with it. Every path means every path: an
+operator's stop, a failure while the command's output is being read, and a
+caller's own bound expiring around the pass all end that group, because the
+group being its own is exactly what puts it out of reach of a signal sent to
+the pass's. A mission whose own specification
 cannot be read launches nothing, because that is indistinguishable from a
 mission that names no item and notifying on the second reading would spend the
 episode's one attempt on a false claim; the episode is reported and stays

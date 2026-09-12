@@ -50,7 +50,7 @@ module Kanban.Mission.Notify
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, mask, try)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -376,6 +376,14 @@ withStopSweep sweep body = bracket install restore (const body)
 -- running when this returns, and so is anything it backgrounded before
 -- exiting cleanly. A pass that left those behind would accumulate one stuck
 -- notifier per waiting episode on a host whose notifier hangs.
+--
+-- \"Every path\" is meant literally, and it is why the sweep is a bracket's
+-- release rather than a line at the end. An operator's stop arrives as a
+-- signal and is handled by 'withStopSweep'; a failure while the output is
+-- being read arrives as a synchronous exception; a caller's own bound around
+-- the pass arrives as an asynchronous one. All three unwind past anything
+-- written inline, and the group they would leave behind is the one thing this
+-- process starts that a signal to its own group cannot reach.
 runMissionNotificationCommand :: Int -> [Text] -> IO MissionNotificationAttempt
 runMissionNotificationCommand _ [] =
   pure
@@ -401,47 +409,77 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
       -- command behind. Until the spawn there is nothing to end, so the
       -- handler reads an empty box and does nothing.
       live <- newIORef NotifierIdle
-      withStopSweep (sweepRecorded live) $ do
-        -- Announced before the spawn, so a stop landing between the kernel
-        -- creating the process and this one learning its identifier waits for
-        -- that identifier rather than sweeping nothing. Blocking the signal
-        -- across the spawn instead would be worse than the hole: a mask held
-        -- over 'createProcess' is inherited through the child's @exec@, and
-        -- the notifier would come up immune to the very signal used to stop
-        -- it.
-        writeIORef live NotifierStarting
-        started <- try @IOException (createProcess (spec directory))
-        case started of
-          Left exception -> do
-            writeIORef live NotifierIdle
-            pure
-              ( MissionNotificationAttempt
-                  MissionNotificationLaunchFailed
-                  (Just (Text.pack (show exception)))
-              )
-          Right (_, Just outputHandle, Just errorHandle, processHandle) -> do
-            -- Registered before anything that could block. The only work
-            -- between the spawn and this line is reading the handle's own
-            -- identifier, so the interval a stop could fall into no longer
-            -- contains an external command — which is what it did contain
-            -- while this went through 'managedProcess' and its @ps@ snapshot.
-            spawned <- unverifiedManagedProcess processHandle
-            rootPid <- getPid processHandle
-            writeIORef live (NotifierLive rootPid spawned)
-            observe live rootPid spawned processHandle outputHandle errorHandle
-          Right (_, _, _, processHandle) -> do
-            -- No pipes to capture, and still a process this call created: it
-            -- is recorded and swept like any other rather than abandoned.
-            spawned <- unverifiedManagedProcess processHandle
-            rootPid <- getPid processHandle
-            writeIORef live (NotifierLive rootPid spawned)
-            sweepCommandGroup rootPid spawned
-            pure
-              ( MissionNotificationAttempt
-                  MissionNotificationUncertain
-                  (Just "the notification command did not provide stdout and stderr pipes")
-              )
+      withStopSweep (sweepRecorded live) $
+        -- The sweep is the bracket's release rather than a line at the end of
+        -- the happy path, because a signal is not the only way out of here.
+        -- A synchronous failure while the captures are running, and an
+        -- asynchronous one — a 'System.Timeout.timeout' around the pass, a
+        -- 'Control.Concurrent.killThread' — both unwind past any sweep
+        -- written inline, and the group they leave behind is the one thing
+        -- this process starts that no signal to its own group can reach.
+        bracket (spawn live directory) (const (retire live)) $ \started ->
+          case started of
+            Left exception ->
+              pure
+                ( MissionNotificationAttempt
+                    MissionNotificationLaunchFailed
+                    (Just (Text.pack (show exception)))
+                )
+            Right (Just outputHandle, Just errorHandle, processHandle) ->
+              observe processHandle outputHandle errorHandle
+            Right (_, _, _) ->
+              -- No pipes to capture, and still a process this call created:
+              -- it is recorded and swept by the same release as any other
+              -- rather than abandoned.
+              pure
+                ( MissionNotificationAttempt
+                    MissionNotificationUncertain
+                    (Just "the notification command did not provide stdout and stderr pipes")
+                )
   where
+    -- The bracket's acquisition: start the command and record what a stop has
+    -- to end, with nothing interruptible between the two.
+    --
+    -- 'mask' rather than a plain sequence, because the gap is the whole
+    -- hazard. 'bracket' does not run its release for an acquisition that
+    -- threw, so an asynchronous exception landing after 'createProcess'
+    -- returned and before the registration would leave a process nothing had
+    -- been told about. Under the mask the only delivery point left is
+    -- 'createProcess' itself, which either made a process or did not.
+    --
+    -- Restoring across that call is deliberate, and it is also why the mask
+    -- is not held over the spawn for its own sake: a mask held over the child
+    -- would survive its @exec@, and the notifier would come up immune to the
+    -- very signal used to stop it.
+    spawn live directory = mask $ \restore -> do
+      -- Announced before the spawn, so a stop landing between the kernel
+      -- creating the process and this one learning its identifier waits for
+      -- that identifier rather than sweeping nothing.
+      writeIORef live NotifierStarting
+      started <- try @IOException (restore (createProcess (spec directory)))
+      case started of
+        Left exception -> do
+          writeIORef live NotifierIdle
+          pure (Left exception)
+        Right (_, outputHandle, errorHandle, processHandle) -> do
+          -- Registered before anything that could block. The only work
+          -- between the spawn and this line is reading the handle's own
+          -- identifier, so the interval a stop could fall into no longer
+          -- contains an external command — which is what it did contain
+          -- while this went through 'managedProcess' and its @ps@ snapshot.
+          spawned <- unverifiedManagedProcess processHandle
+          rootPid <- getPid processHandle
+          writeIORef live (NotifierLive rootPid spawned)
+          pure (Right (outputHandle, errorHandle, processHandle))
+
+    -- The bracket's release, and the only sweep on any path. Emptied
+    -- afterwards so a signal arriving between here and the handler's own
+    -- removal finds nothing rather than a process identifier the kernel is
+    -- free to have reissued.
+    retire live = do
+      sweepRecorded live
+      writeIORef live NotifierIdle
+
     prepareScratch = do
       cacheRoot <- getXdgDirectory XdgCache "kanban"
       let directory = cacheRoot </> "mission-notify"
@@ -457,18 +495,18 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
           create_group = True
         }
 
-    -- The identifier and the handle are taken by the caller, before the
-    -- registration, and passed in: 'getPid' goes 'Nothing' the moment a clean
-    -- exit reaps the child, so asking again here could come back empty.
-    observe :: IORef NotifierState -> Maybe Pid -> ManagedProcess -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
-    observe _live rootPid managed processHandle outputHandle errorHandle = do
-      outputCapture <- startCapture outputHandle
-      errorCapture <- startCapture errorHandle
+    -- The captures are bracketed for the same reason the process is: an
+    -- exception out of 'awaitCommandOutcome' would otherwise leave two reader
+    -- threads holding pipes open on a command this call is done with.
+    -- Everything the outcome carries is a value by the time it is read, so
+    -- releasing before the answer is inspected takes nothing away.
+    observe :: ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
+    observe processHandle outputHandle errorHandle = do
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}
-      completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
-      releaseCapture outputCapture
-      releaseCapture errorCapture
-      sweepCommandGroup rootPid managed
+      completed <-
+        bracket (startCapture outputHandle) releaseCapture $ \outputCapture ->
+          bracket (startCapture errorHandle) releaseCapture $ \errorCapture ->
+            awaitCommandOutcome bounds processHandle outputCapture errorCapture
       pure $ case completed of
         CommandUnfinished ->
           MissionNotificationAttempt
