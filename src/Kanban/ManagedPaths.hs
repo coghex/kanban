@@ -11,7 +11,8 @@
 --
 -- Every record is discovered the same way: the XDG location first and the
 -- @~\/Library@ location second, on both platforms, taking the first that is
--- occupied. Nothing an operator already installed has to move, and only when
+-- occupied — though not every one of them hangs off the same home directory,
+-- for the reason 'managedRecordHome' gives. Nothing an operator already installed has to move, and only when
 -- neither is occupied is the answer this platform's own write default. That
 -- is @installed_issue_review_dir@ and @installed_drainer_dir@ in
 -- @tools\/kanban_config.py@ and @installed_service_root@ in
@@ -22,6 +23,7 @@
 module Kanban.ManagedPaths
   ( ManagedComponent (..),
     managedRecordCandidates,
+    managedRecordHome,
     managedRecordPath,
     managedRecordPathAt,
     managedRecordWriteDefault,
@@ -35,6 +37,7 @@ import System.Directory (doesPathExist, getHomeDirectory, pathIsSymbolicLink)
 import System.Environment (lookupEnv)
 import System.FilePath (isAbsolute, joinPath, (</>))
 import System.Info (os)
+import System.Posix.User (getRealUserID, getUserEntryForID, homeDirectory)
 
 -- | Which managed installation's record is being located. The three are
 -- separate installations with separate installers, and — see
@@ -183,6 +186,43 @@ managedRecordPathAt hostOperatingSystem home xdgDataHome component = do
           then libraryCandidate
           else managedRecordWriteDefault hostOperatingSystem component home xdgDataHome
 
+-- | The home directory this component's record hangs off.
+--
+-- Not one answer, and the difference is the Python side's rather than this
+-- module's. @tools\/kanban_config.py@ anchors the issue-review and drainer
+-- locations to @Path.home()@, which is @$HOME@ whenever that is set, while
+-- @tools\/mission_runner_service.account_home@ resolves the account from the
+-- passwd database and deliberately ignores @$HOME@ — a location a caller's
+-- environment can move cannot serialize anything. Answering what those modules
+-- answer means carrying that difference here too: on a host whose @$HOME@ names
+-- something other than its passwd home, one spelling for all three would have
+-- the dashboard looking for the mission runner's record where its own
+-- controller never writes one.
+managedRecordHome :: ManagedComponent -> IO FilePath
+managedRecordHome MissionRunnerComponent = accountHome
+managedRecordHome IssueReviewComponent = getHomeDirectory
+managedRecordHome DrainerComponent = getHomeDirectory
+
+-- | The passwd database's home directory for the account this process runs as.
+--
+-- The counterpart of @tools\/mission_runner_service.account_home@, down to
+-- requiring an absolute directory. Where that function refuses a host it cannot
+-- answer for, this one falls back to 'getHomeDirectory': a refusal there is the
+-- controller declining to write anything at all, so there is no installation
+-- for this reader to find and no diagnostic it could usefully publish, while
+-- throwing from a path resolution would take a dashboard down over a record it
+-- was only asking about.
+accountHome :: IO FilePath
+accountHome = do
+  entry <- try @IOException (getRealUserID >>= getUserEntryForID)
+  case entry of
+    Right user
+      | let home = homeDirectory user,
+        not (null home),
+        isAbsolute home ->
+          pure home
+    _ -> getHomeDirectory
+
 -- | Where this host's record for @component@ is, against the real
 -- environment.
 --
@@ -194,6 +234,6 @@ managedRecordPathAt hostOperatingSystem home xdgDataHome component = do
 -- with it.
 managedRecordPath :: ManagedComponent -> IO FilePath
 managedRecordPath component = do
-  home <- getHomeDirectory
+  home <- managedRecordHome component
   xdgDataHome <- lookupEnv "XDG_DATA_HOME"
   managedRecordPathAt os home xdgDataHome component

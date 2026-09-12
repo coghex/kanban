@@ -814,9 +814,26 @@ def discovery_remote_name() -> str:
 
 
 def resolve_job(repo_path: Path, *, config_path: str | None = None) -> MissionRunnerJob:
+    """This checkout's job, with the configuration its installation selected.
+
+    An explicit `--config` wins; otherwise the one recorded for this identity
+    at install time is used. That fallback is what makes the selection durable:
+    a `start` issued with no flags, or a job relaunched by a service manager
+    into an empty environment, has to run with the configuration the operator
+    installed rather than silently reverting to the shared default — and a
+    start refreshes the definition, so without it the recorded `--config` would
+    survive in the record while disappearing from the job that reads it.
+
+    Resolvable only because the identity does not depend on `--config`: the
+    record is keyed by identity, and the remote that resolves that identity is
+    the shared configuration's rather than this one (see
+    `discovery_remote_name`), so a configuration that could move the identity
+    could not be found by it.
+    """
     names = repository_names(repo_path, discovery_remote_name())
+    selected = config_path or installed_config_path(names.canonical)
     return job_for_identity(
-        repo_path, names.canonical, spelling=names.spelling, config_path=config_path
+        repo_path, names.canonical, spelling=names.spelling, config_path=selected
     )
 
 

@@ -2601,9 +2601,18 @@ cannot serialize anything — and `tools/kanban_config.py`'s resolvers are
 `Path.home()`-anchored. One spelling per language is the property these rows
 protect; which module carries the Python one is the component's own answer, and
 `src/Kanban/ManagedPaths.hs` is the Haskell counterpart of all three.
-`test/Spec/ManagedPaths.hs` holds the two halves together for this component by
-running the tracked Python resolver over every combination of occupancy and
-environment and comparing its answer with the Haskell one, rather than by
+
+That difference reaches the Haskell resolver as well, because *which home* is
+part of the answer: `managedRecordHome` takes the passwd database's home for
+the mission runner and `getHomeDirectory` for the other two. Answering what
+those Python modules answer means carrying the difference rather than picking
+one — on a host whose `$HOME` names something other than its passwd home, a
+single spelling would have the board looking for one of the three records
+where nothing writes it. `test/Spec/ManagedPaths.hs` holds both halves together
+for this component: it compares that home against the tracked controller's own
+account root with nothing patched, and separately runs the tracked Python
+resolver over every combination of occupancy and
+environment and compares its answer with the Haskell one, rather than by
 restating either.
 
 `kanban-cli` is the executable a pass *is*. Every other dependency in this table

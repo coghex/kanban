@@ -1362,6 +1362,67 @@ class RediscoveryTests(InstallerFixture):
             str(installer.selected_install_dir(self.repo, None)), str(elsewhere)
         )
 
+    def configured_argument(self, label=None):
+        """The `--config` the installed definition currently carries, or None."""
+        definition = json.loads(
+            self.manager.definition_path(label or self.label()).read_text(
+                encoding="utf-8"
+            )
+        )
+        arguments = definition["program_arguments"]
+        if "--config" not in arguments:
+            return None
+        return arguments[arguments.index("--config") + 1]
+
+    def test_a_start_told_nothing_keeps_the_recorded_config(self):
+        # A start refreshes the definition, so a job resolved without the
+        # recorded `--config` would rewrite the definition without it while the
+        # record went on naming it -- leaving the runner on the shared default
+        # and the installation claiming otherwise.
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(config_path=str(config))
+        job = service.resolve_job(self.repo)
+        self.assertEqual(job.config_path, str(config.resolve()))
+
+        service.start_service(job, self.install_dir)
+        self.assertEqual(self.configured_argument(), str(config.resolve()))
+        self.assertEqual(
+            service.installed_config_path(self.identity), str(config.resolve())
+        )
+
+    def test_a_reinstall_told_nothing_keeps_the_recorded_config(self):
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(config_path=str(config))
+        self.install()
+        self.assertEqual(self.configured_argument(), str(config.resolve()))
+        self.assertEqual(
+            service.installed_config_path(self.identity), str(config.resolve())
+        )
+
+    def test_a_process_holding_no_environment_resolves_the_recorded_config(self):
+        # The service manager's own case: it reruns the installed controller
+        # with nothing but the definition's environment, and the refresh that
+        # runs there has to find the same configuration.
+        config = self.root / "kanban.toml"
+        config.write_text("", encoding="utf-8")
+        self.install(config_path=str(config))
+        self.controller("install", "--path", str(self.repo), "--json")
+        self.assertEqual(self.configured_argument(), str(config.resolve()))
+
+    def test_an_explicit_config_still_overrides_the_recorded_one(self):
+        first = self.root / "first.toml"
+        second = self.root / "second.toml"
+        for path in (first, second):
+            path.write_text("", encoding="utf-8")
+        self.install(config_path=str(first))
+        self.install(config_path=str(second))
+        self.assertEqual(self.configured_argument(), str(second.resolve()))
+        self.assertEqual(
+            service.installed_config_path(self.identity), str(second.resolve())
+        )
+
 
 class RediscoverySystemdTests(SystemdShapeMixin, RediscoveryTests):
     pass
@@ -1840,6 +1901,60 @@ class IdentityTests(InstallerFixture):
             os.path.realpath(self.install_dir / service.CONTROLLER_NAME),
             os.path.realpath(archive / "tools" / service.CONTROLLER_NAME),
         )
+
+    def unmarked_archive(self, unmarked):
+        """An asset root with every linked module present, one of which is not
+        Kanban's own module of that name."""
+        archive = self.root / "archive"
+        (archive / "tools").mkdir(parents=True)
+        for name in installer.LINKED_MODULES:
+            shutil.copy(TOOLS_DIR / name, archive / "tools" / name)
+        (archive / "tools" / unmarked).write_text(
+            "# somebody else's module of this name\n", encoding="utf-8"
+        )
+        return archive
+
+    def test_an_asset_root_supplying_an_unmarked_module_is_refused(self):
+        # Present is not enough: the installed controller imports its siblings
+        # out of the install directory, so an archive holding the genuine
+        # controller beside an unmarked `kanban_config.py` would have the job
+        # this installer loaded execute a file nobody could show was Kanban's.
+        archive = self.unmarked_archive("kanban_config.py")
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install(asset_root=archive)
+        self.assertIn("not Kanban's own module", str(raised.exception))
+        self.assertIn("kanban_config.py", str(raised.exception))
+        # Refused before the first write.
+        for name in installer.LINKED_MODULES:
+            self.assertFalse(os.path.lexists(self.install_dir / name), name)
+        self.assertEqual(self.manager.call_names(), [])
+        self.assertEqual(self.entries(), {})
+
+    def test_every_linked_module_is_checked_rather_than_the_first(self):
+        for unmarked in installer.LINKED_MODULES:
+            with self.subTest(module=unmarked):
+                if unmarked == service.CONTROLLER_NAME:
+                    # A controller that is not Kanban's own is caught by the
+                    # parity check first, and refused for that reason instead.
+                    continue
+                archive = self.unmarked_archive(unmarked)
+                with self.assertRaises(installer.InstallError) as raised:
+                    self.install(asset_root=archive)
+                self.assertIn(unmarked, str(raised.exception))
+                shutil.rmtree(archive)
+
+    def test_the_named_asset_root_refuses_it_before_anything_is_planned(self):
+        # `main` resolves the asset root before `install` is entered, so the
+        # refusal an operator sees names the tree rather than a link.
+        archive = self.unmarked_archive("service_manager.py")
+        with self.assertRaises(installer.InstallError) as raised:
+            installer.asset_root(archive)
+        self.assertIn("not Kanban's own module", str(raised.exception))
+
+    def test_the_dry_run_refuses_an_unmarked_module_too(self):
+        archive = self.unmarked_archive("kanban_config.py")
+        with self.assertRaises(installer.InstallError):
+            self.install(asset_root=archive, dry_run=True)
 
     def test_an_asset_root_missing_a_linked_module_is_not_installable(self):
         archive = self.root / "archive"

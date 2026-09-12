@@ -25,6 +25,7 @@ import Kanban.Drainer (drainerRecordPath)
 import Kanban.ManagedPaths
   ( ManagedComponent (..),
     managedRecordCandidates,
+    managedRecordHome,
     managedRecordPathAt,
   )
 import Kanban.Review (issueReviewerRecordPath)
@@ -41,6 +42,7 @@ import System.Directory
   )
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
+import System.Posix.User (getRealUserID, getUserEntryForID, homeDirectory)
 import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
@@ -230,13 +232,43 @@ spec = describe "Managed discovery record locations" $ do
                 managedRecordPathAt "linux" home Nothing MissionRunnerComponent
                   `shouldReturn` runnerBaseline
 
+  describe "the home a record hangs off" $ do
+    it "anchors the mission runner to the passwd home rather than to $HOME" $
+      withTemporaryCacheRoot $ \home -> do
+        -- The two Python resolvers disagree here on purpose:
+        -- tools/kanban_config.py is `Path.home()`-anchored and
+        -- tools/mission_runner_service.account_home reads the passwd database,
+        -- so a host whose $HOME names something else has two homes and this
+        -- module has to carry both. A single spelling would send the dashboard
+        -- looking for one of the three records where nothing writes it.
+        passwd <- passwdHome
+        withEnvironmentValue "HOME" home $ do
+          managedRecordHome DrainerComponent `shouldReturn` home
+          managedRecordHome IssueReviewComponent `shouldReturn` home
+          managedRecordHome MissionRunnerComponent `shouldReturn` passwd
+
+    it "agrees with the mission runner controller's own account root" $
+      withTemporaryCacheRoot $ \home ->
+        -- Against the tracked module with nothing patched, so the agreement
+        -- this asserts is between the two real implementations rather than
+        -- between two statements of one rule. Read-only: neither side writes
+        -- anything at the answer.
+        withEnvironmentValue "HOME" home $ do
+          expected <- managedRecordHome MissionRunnerComponent
+          actual <- pythonAccountHome
+          actual `shouldBe` expected
+
   describe "the mission runner's Python resolver" $
     -- One answer per host, asserted rather than described. Everything else in
     -- this module states what tools/ answers and trusts the statement; here the
-    -- real module is run, with its account root redirected exactly as its own
-    -- suite redirects it, over every combination of occupancy and environment
+    -- real module is run over every combination of occupancy and environment
     -- above. Two resolvers that agreed on the cases somebody wrote out and
     -- differed on the rule would pass a restated expectation and fail a host.
+    --
+    -- The account root is redirected in the child, because a fixture cannot
+    -- move a passwd entry; that the two agree on the *unredirected* root is
+    -- what the case above asserts, so between them nothing about this
+    -- component's location is taken on trust.
     forM_ hostOperatingSystems $ \hostOperatingSystem ->
       forM_ xdgBaseCases $ \(baseLabel, baseFor) ->
         forM_ occupancyCases $ \(occupancyLabel, occupy') ->
@@ -347,6 +379,38 @@ pythonProbe =
       "kanban_config.is_macos = lambda: macos",
       "print(service.discovery_record_path())"
     ]
+
+-- | What @tools\/mission_runner_service.account_home@ answers on this host,
+-- with nothing patched.
+pythonAccountHome :: IO FilePath
+pythonAccountHome = do
+  (code, out, err) <-
+    readProcessWithExitCode "python3" ["-c", accountHomeProbe, "tools"] ""
+  case code of
+    ExitSuccess -> pure (trim out)
+    ExitFailure status -> do
+      expectationFailure
+        ( "tools/mission_runner_service.py could not be asked for its account "
+            <> "root (exit "
+            <> show status
+            <> "): "
+            <> err
+        )
+      pure ""
+
+accountHomeProbe :: String
+accountHomeProbe =
+  unlines
+    [ "import sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "import mission_runner_service as service",
+      "print(service.account_home())"
+    ]
+
+-- | This account's home directory as the passwd database gives it, which is
+-- what the controller resolves and what @$HOME@ may disagree with.
+passwdHome :: IO FilePath
+passwdHome = homeDirectory <$> (getRealUserID >>= getUserEntryForID)
 
 trim :: String -> String
 trim = dropWhile isSpace . reverse . dropWhile isSpace . reverse

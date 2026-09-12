@@ -132,6 +132,13 @@ def asset_root(requested: Path) -> Path:
     supported sources are a development checkout and the unpacked `cabal sdist`
     release archive, and only one of those has a `.git` directory. Requiring
     one would refuse the release exactly where it is documented as runnable.
+
+    Present is not enough. What a link points at is executed by the installed
+    controller, so each file has to be recognizable as Kanban's own module of
+    that name before it is linked -- see `require_managed_sources`. This is the
+    early, named refusal `main` reports; `install` asks again of the files it is
+    actually about to link, because it can be called with an asset root that
+    never came through here.
     """
     path = requested.expanduser().resolve()
     missing = [
@@ -144,6 +151,7 @@ def asset_root(requested: Path) -> Path:
             "Asset root does not contain the required mission runner files: "
             + ", ".join(missing)
         )
+    require_managed_sources({name: path / "tools" / name for name in LINKED_MODULES})
     return path
 
 
@@ -208,6 +216,37 @@ def is_managed_asset(path: Path, name: str) -> bool:
     except OSError:
         return False
     return bool(managed_asset_pattern(name).search(content))
+
+
+def require_managed_sources(sources: dict[str, Path]) -> None:
+    """Refuse to link a file that is not Kanban's own module of that name.
+
+    Requirement 4's other half. An existing link is only ever replaced when its
+    current target carries the marker, but that says nothing about the file the
+    new link would point *at*: an asset root holding the genuine controller
+    beside an unmarked `kanban_config.py` would otherwise be accepted, and the
+    installed controller imports its siblings out of the install directory --
+    so the job this installer loaded would execute a file nobody could show was
+    Kanban's.
+
+    Verified by content, exactly as `is_managed_asset` verifies a link's target
+    and for the same reason: a path proves nothing about who wrote what is at
+    the end of it. Raised before any mutation, so an asset root that fails here
+    leaves the installation exactly as it was.
+    """
+    unrecognized = [
+        str(path)
+        for name, path in sorted(sources.items())
+        if not is_managed_asset(path, name)
+    ]
+    if unrecognized:
+        raise InstallError(
+            "Refusing to install a link to a file that is not Kanban's own "
+            "module of that name: "
+            + ", ".join(unrecognized)
+            + ". Point --asset-root at a Kanban checkout or an unpacked release "
+            "archive."
+        )
 
 
 def resolved_link_target(link: Path, target: Path) -> Path:
@@ -576,6 +615,12 @@ def install(
         name: (source.resolve(strict=True), destination)
         for name, (source, destination) in sources.items()
     }
+    # Of the files this install is actually about to link, and before the first
+    # write. `asset_root` asks the same question of the same tree, but `install`
+    # is reachable with an `asset_root` argument that never went through it.
+    require_managed_sources(
+        {name: source for name, (source, _destination) in resolved_sources.items()}
+    )
     link_plans = {
         name: plan_symlink(source, destination)
         for name, (source, destination) in resolved_sources.items()

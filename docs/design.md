@@ -3642,7 +3642,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   or a link that cannot be followed included, and a record this installer cannot
   safely write is refused by name rather than replaced or resolved to the other
   location. `Kanban.ManagedPaths` answers that question for the dashboard in the
-  same order and under the same absolute-only rule, which is what keeps the two
+  same order, under the same absolute-only rule, and off the same account home —
+  the passwd database's rather than `$HOME`'s, which among the three managed
+  components is this one's alone — and that is what keeps the two
   halves of a host from disagreeing about which installation it has. The
   per-repository log directories are under `~/Library/Logs/kanban/mission-runner`
   on macOS and `$XDG_STATE_HOME/kanban/mission-runner` (`~/.local/state` on the
