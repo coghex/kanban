@@ -265,7 +265,19 @@ data MissionDisposition
   | -- | Another process held the advancement lease. Ordinary contention
     -- (requirement 6), and never a failed pass.
     MissionDispositionLeaseRefused
-  | -- | Any other typed startup refusal.
+  | -- | Any other typed startup refusal — an identifier that cannot address a
+    -- mission, a mission this store does not hold, a record that will not
+    -- decode, one recorded against another repository, or a store that will
+    -- not open.
+    --
+    -- A failing disposition, unlike the lease refusal above, and for the
+    -- reason §5 gives about every other reader: a record that is there and
+    -- cannot be acted on is mission state nobody can account for, and the pass
+    -- it appears in is a failed one rather than a quiet repository. The
+    -- inventory reads snapshots and not specifications, so this is the only
+    -- place a mission whose /specification/ is unreadable or foreign is ever
+    -- found — and a pass that shrugged at it would exit zero over exactly the
+    -- state that rule exists for.
     MissionDispositionRefused
   | -- | The child did not produce an account of itself that could be acted on.
     MissionDispositionFailed
@@ -285,17 +297,23 @@ missionDispositionTag disposition = case disposition of
 
 -- | Whether this disposition makes the pass a failed one.
 --
--- Exactly one does. A refusal of either kind is the mission declining to be
--- advanced by this pass, which is information rather than breakage, and the
--- three ordinary outcomes are the pass working.
+-- Two do, and the line between them and the third is what the mission could
+-- not be advanced /for/. Losing a race for an advancement lease is two correct
+-- processes meeting, and the mission is being advanced — by the other one; a
+-- pass that called that a failure would report a healthy repository as broken
+-- every time a dashboard had a mission open. Every other typed refusal is the
+-- opposite: a record that cannot be read, cannot be attributed, or cannot be
+-- addressed, which is mission state nobody can account for.
+--
+-- The three ordinary outcomes are the pass working.
 missionDispositionIsFailure :: MissionDisposition -> Bool
 missionDispositionIsFailure disposition = case disposition of
   MissionDispositionFailed -> True
+  MissionDispositionRefused -> True
   MissionDispositionAdvanced -> False
   MissionDispositionSettled -> False
   MissionDispositionBlocked -> False
   MissionDispositionLeaseRefused -> False
-  MissionDispositionRefused -> False
 
 data MissionDispositionRecord = MissionDispositionRecord
   { missionDispositionMission :: MissionId,

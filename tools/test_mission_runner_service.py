@@ -230,6 +230,17 @@ def attention_entry(mission="mission-a", state="disabled"):
     }
 
 
+def unresolved_attention_entry(mission="mission-a"):
+    """The shape the writer really emits when it could not read a mission's
+    specification: no targets, because there was nothing to resolve them from,
+    and a reason, because that is the only account of what went wrong."""
+    return {
+        **attention_entry(mission=mission, state="unresolved"),
+        "targets": [],
+        "detail": "its specification will not decode",
+    }
+
+
 # ---------------------------------------------------------------------------
 # The mirrored contract
 # ---------------------------------------------------------------------------
@@ -416,14 +427,15 @@ class PassProgressTests(unittest.TestCase):
         self.assertEqual(service.pass_state(self.document("advanced")), service.STATE_RUNNING)
 
     def test_the_progress_and_failing_vocabularies_partition_the_rest(self):
-        # Every disposition is accounted for: three are progress, one fails the
-        # pass, and the two refusals are neither. A disposition added to the
-        # scheduler and to nothing here would show up as an unclassified one.
+        # Every disposition is accounted for: three are progress, two fail the
+        # pass, and exactly one is neither — losing a race for an advancement
+        # lease, which is two correct processes meeting. A disposition added to
+        # the scheduler and to nothing here would show up as unclassified.
         self.assertEqual(
             service.PASS_DISPOSITIONS
             - service.PASS_PROGRESS_DISPOSITIONS
             - service.PASS_FAILING_DISPOSITIONS,
-            {"lease_refused", "refused"},
+            {"lease_refused"},
         )
 
 
@@ -703,12 +715,41 @@ class PassReportTests(unittest.TestCase):
             # terminates `failed` for. A completed pass carrying one is two
             # halves of a report contradicting each other.
             "unresolved attention under a completed pass": (
-                json.dumps(pass_document(attention=[attention_entry(state="unresolved")])),
+                json.dumps(pass_document(attention=[unresolved_attention_entry()])),
                 0,
             ),
             "unresolved attention under a refused pass": (
-                json.dumps(pass_document(termination="refused", attention=[attention_entry(state="unresolved")])),
+                json.dumps(pass_document(termination="refused", attention=[unresolved_attention_entry()])),
                 2,
+            ),
+            # `unresolved` means there was nothing to resolve targets from, so
+            # naming some describes a resolution that cannot have happened.
+            "unresolved attention carrying targets": (
+                json.dumps(
+                    pass_document(
+                        termination="failed",
+                        attention=[{**unresolved_attention_entry(), "targets": [{"kind": "issue", "number": 844}]}],
+                    )
+                ),
+                1,
+            ),
+            "unresolved attention giving no reason": (
+                json.dumps(
+                    pass_document(
+                        termination="failed",
+                        attention=[{**unresolved_attention_entry(), "detail": None}],
+                    )
+                ),
+                1,
+            ),
+            "unresolved attention whose reason is blank": (
+                json.dumps(
+                    pass_document(
+                        termination="failed",
+                        attention=[{**unresolved_attention_entry(), "detail": "   "}],
+                    )
+                ),
+                1,
             ),
             "a mission admitted twice": (
                 json.dumps(
@@ -1004,7 +1045,7 @@ class PassReportTests(unittest.TestCase):
         # produces has to decode.
         document = pass_document(
             termination="failed",
-            attention=[attention_entry(state="unresolved")],
+            attention=[unresolved_attention_entry()],
             detail="1 waiting on a person; its specification will not decode",
         )
         self.assertEqual(service.parse_pass_report(json.dumps(document), 1), document)
@@ -1511,6 +1552,62 @@ class StatusTests(MissionRunnerFixture):
         self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
         self.assertIn("no status document", snapshot["reason"])
 
+    def test_a_recycled_pid_does_not_authenticate_a_stale_live_state(self):
+        # The hazard the start identity closes: a wrapper that crashed leaves a
+        # document whose PID the kernel may since have handed to something
+        # else, and `os.kill(pid, 0)` would confirm that stranger is alive.
+        # This process is alive and is not the runner, which is exactly the
+        # shape a recycled identifier takes.
+        job = self.job()
+        job.status_path.parent.mkdir(parents=True, exist_ok=True)
+        job.status_path.write_text(
+            json.dumps(
+                {
+                    "schema": service.STATUS_SCHEMA,
+                    "version": service.STATUS_VERSION,
+                    "state": service.STATE_RUNNING,
+                    "repository": self.identity,
+                    "repo": str(self.repo),
+                    "runner_pid": os.getpid(),
+                    "runner_identity": "Thu Jan  1 00:00:00 1970",
+                }
+            ),
+            encoding="utf-8",
+        )
+        snapshot = service.status_snapshot(job)
+        self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+        self.assertIn("different process", snapshot["reason"])
+
+    def test_a_live_state_with_no_runner_identity_is_not_believed(self):
+        # A document that records no identity cannot have its process
+        # confirmed, and this boundary fails closed rather than falling back to
+        # the bare liveness check it replaced.
+        job = self.job()
+        job.status_path.parent.mkdir(parents=True, exist_ok=True)
+        job.status_path.write_text(
+            json.dumps(
+                {
+                    "schema": service.STATUS_SCHEMA,
+                    "version": service.STATUS_VERSION,
+                    "state": service.STATE_RUNNING,
+                    "repository": self.identity,
+                    "repo": str(self.repo),
+                    "runner_pid": os.getpid(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        snapshot = service.status_snapshot(job)
+        self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+        self.assertIn("cannot be confirmed", snapshot["reason"])
+
+    def test_a_start_identity_is_stable_for_one_process(self):
+        # The control: the value has to be the same on two reads, or it would
+        # reject every live runner rather than only a recycled identifier.
+        first = service.process_start_identity(os.getpid())
+        self.assertTrue(first)
+        self.assertEqual(first, service.process_start_identity(os.getpid()))
+
     def test_an_unhashable_state_reads_as_unknown_rather_than_crashing(self):
         # `state in STATUS_STATES` raises on a list or an object rather than
         # answering, and this is the read-only diagnostic somebody reaches for
@@ -1576,6 +1673,7 @@ class StatusTests(MissionRunnerFixture):
                     "repository": self.identity,
                     "repo": str(self.repo),
                     "runner_pid": os.getpid(),
+                    "runner_identity": service.process_start_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",

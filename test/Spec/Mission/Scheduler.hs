@@ -216,14 +216,39 @@ leaseSpec = describe "a mission another process is already advancing" $ do
       report.missionPassTermination `shouldBe` MissionPassCompleted
       missionPassExitCode report.missionPassTermination `shouldBe` 0
 
-  it "reports every other typed refusal as a refusal too" $
+  -- Every other typed refusal fails the pass, and the line is what the mission
+  -- could not be advanced *for*. The inventory reads snapshots and not
+  -- specifications, so a mission whose specification is unreadable or foreign
+  -- has a perfectly runnable snapshot and is admitted — and the child's
+  -- refusal is the only place that state is ever found. A pass that shrugged
+  -- at it would exit zero over exactly what §5 says must not look quiet.
+  it "reports every other typed refusal as a failed pass" $
     forM_ [MissionChildUnknownMission, MissionChildUnreadableRecord, MissionChildRepositoryMismatched, MissionChildIdentifierUnusable, MissionChildStoreUnusable] $ \refusal ->
       withStore $ \store -> do
         putMission store "mission-a" MissionRunning
         (report, _) <- passWith store defaultMissionsConfig $ \seams ->
           seams {missionSchedulerAdvance = \admitted -> pure [(mission, Right (childRefusal mission refusal)) | mission <- admitted]}
         (refusal, map (.missionDispositionValue) report.missionPassAdmitted) `shouldBe` (refusal, [MissionDispositionRefused])
-        (refusal, report.missionPassTermination) `shouldBe` (refusal, MissionPassCompleted)
+        (refusal, report.missionPassTermination) `shouldBe` (refusal, MissionPassFailed)
+        (refusal, missionPassExitCode report.missionPassTermination) `shouldBe` (refusal, 1)
+
+  -- The whole path, rather than the disposition alone: a runnable snapshot
+  -- beside a specification this store will not hand over is admitted, its
+  -- child refuses, and the pass says so.
+  it "fails the pass for a runnable mission whose specification will not read" $
+    forM_ ["unreadable", "refused"] $ \shape ->
+      withStore $ \store -> do
+        putMission store "mission-a" MissionRunning
+        breakSpecification store (MissionId "mission-a") shape
+        (report, advanced) <- passWith store defaultMissionsConfig $ \seams ->
+          seams
+            { missionSchedulerAdvance = \admitted ->
+                pure [(mission, Right (childRefusal mission MissionChildUnreadableRecord)) | mission <- admitted]
+            }
+        -- Admitted, because the snapshot is runnable and nothing reads the
+        -- specification before the child does.
+        (shape, ) <$> readIORef advanced `shouldReturn` (shape, [[MissionId "mission-a"]])
+        (shape, report.missionPassTermination) `shouldBe` (shape, MissionPassFailed)
 
 -- ---------------------------------------------------------------------------
 -- Dispositions
@@ -270,8 +295,13 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
       map (.missionDispositionValue) report.missionPassAdmitted `shouldBe` [MissionDispositionFailed]
       report.missionPassTermination `shouldBe` MissionPassFailed
 
-  it "names exactly one failing disposition" $
-    filter missionDispositionIsFailure missionDispositions `shouldBe` [MissionDispositionFailed]
+  -- Two fail, and exactly one refusal does not: losing a race for an
+  -- advancement lease is two correct processes meeting, and the mission is
+  -- being advanced — by the other one.
+  it "names the failing dispositions, and the one refusal that is not" $ do
+    filter missionDispositionIsFailure missionDispositions
+      `shouldBe` [MissionDispositionRefused, MissionDispositionFailed]
+    missionDispositionIsFailure MissionDispositionLeaseRefused `shouldBe` False
 
   -- §16's silence rule covers a record that is *absent* — missing, or written
   -- under a version this release does not know. A record that is there and

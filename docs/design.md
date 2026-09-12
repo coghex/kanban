@@ -275,7 +275,12 @@ capacity. A mission whose advancement lease is already held is skipped and does
 not consume an admission slot, and the holder-liveness rule is the acquisition's
 own — an owner that cannot be shown to be gone counts as holding it. Losing that
 lease to somebody else between selection and launch is reported as the ordinary
-contention it is rather than as a failed pass.
+contention it is rather than as a failed pass; that is the only refusal treated
+that way. Every other one a child reports — an identifier that cannot address a
+mission, a mission the store does not hold, a record that will not decode, one
+recorded against another repository, a store that will not open — fails the
+pass, because the inventory reads snapshots and not specifications, so a
+child's refusal is the only place such a mission is ever found.
 
 Each admitted mission is advanced through its own `kanban --mission` child,
 launched with a non-terminal standard input, its output captured rather than

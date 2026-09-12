@@ -119,10 +119,15 @@ PASS_FAILED = "failed"
 PASS_DISPOSITIONS = frozenset(
     {"advanced", "settled", "blocked", "lease_refused", "refused", "failed"}
 )
-# The one disposition that makes a pass a failed pass, which the scheduler
-# already reflects in its termination. Mirrored so a report whose dispositions
-# and termination disagree is caught rather than believed.
-PASS_FAILING_DISPOSITIONS = frozenset({"failed"})
+# The dispositions that make a pass a failed pass, which the scheduler already
+# reflects in its termination. Mirrored so a report whose dispositions and
+# termination disagree is caught rather than believed.
+#
+# `refused` is among them and `lease_refused` is not, and the line is what the
+# mission could not be advanced *for*: losing a race for an advancement lease
+# is two correct processes meeting, while every other typed refusal is a record
+# that cannot be read, attributed, or addressed.
+PASS_FAILING_DISPOSITIONS = frozenset({"failed", "refused"})
 # The dispositions under which a child actually ran and moved the mission. The
 # other three did not: both refusals mean the child declined to start, and a
 # failure ends the run. `--interval` is documented as the wait "after a pass
@@ -663,6 +668,29 @@ def service_log(job: MissionRunnerJob, message: str) -> None:
     print(f"[{local_stamp()}] {message}", file=sys.stderr, flush=True)
 
 
+def process_start_identity(pid: Any) -> str | None:
+    """When the process holding this identifier started, or None.
+
+    A process identifier alone does not identify a process: the kernel recycles
+    them, so a wrapper that crashed while its status said `running` leaves a
+    document whose `runner_pid` may later belong to something else entirely —
+    and `os.kill(pid, 0)` would confirm that stranger is alive. The start time
+    is what makes the pair unique, which is the same reason
+    `Kanban.Process.ProcessIdentity` carries one.
+
+    `ps -o lstart=` rather than anything computed here, because only the kernel
+    knows. Anything that is not a single readable line is None, which the
+    caller reads as "this cannot be confirmed" rather than as a match.
+    """
+    if not is_plain_integer(pid) or pid <= 0:
+        return None
+    proc = run_command(["ps", "-o", "lstart=", "-p", str(pid)], check=False)
+    if proc.returncode != 0:
+        return None
+    started = (proc.stdout or "").strip()
+    return started or None
+
+
 def pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
@@ -922,11 +950,30 @@ def _classify_status(
         return STATE_UNKNOWN, (
             f"the status document at {job.status_path} records unknown state {state!r}"
         )
-    if state in LIVE_STATES and not pid_alive(stored.get("runner_pid")):
-        return STATE_UNKNOWN, (
-            f"the status document at {job.status_path} records {state} under runner "
-            f"PID {stored.get('runner_pid')!r}, which is not running"
-        )
+    if state in LIVE_STATES:
+        runner_pid = stored.get("runner_pid")
+        if not pid_alive(runner_pid):
+            return STATE_UNKNOWN, (
+                f"the status document at {job.status_path} records {state} under runner "
+                f"PID {runner_pid!r}, which is not running"
+            )
+        # Alive is not enough. The kernel recycles identifiers, so a wrapper
+        # that crashed leaves a document whose PID may since have been handed
+        # to something else — and that stranger being alive would otherwise
+        # authenticate a state nobody is in. The start time the runner recorded
+        # is what pairs the identifier with the process that really wrote it.
+        recorded = stored.get("runner_identity")
+        if not isinstance(recorded, str) or not recorded.strip():
+            return STATE_UNKNOWN, (
+                f"the status document at {job.status_path} records {state} and no "
+                "runner identity, so the process it names cannot be confirmed"
+            )
+        running = process_start_identity(runner_pid)
+        if running != recorded:
+            return STATE_UNKNOWN, (
+                f"the status document at {job.status_path} records {state} under runner "
+                f"PID {runner_pid!r}, which now belongs to a different process"
+            )
     return state, None
 
 
@@ -1262,11 +1309,29 @@ def _require_attention(attention: Any, termination: str, repository: str) -> Non
         # calls itself completed is contradicting itself, and believing the
         # cheerful half publishes a healthy waiting state over a mission
         # nobody can account for.
-        if state == PASS_UNRESOLVED_NOTIFICATION and termination != PASS_FAILED:
-            raise PassFailure(
-                f"The mission scheduler report terminated {termination!r} while naming "
-                "attention whose targets it could not resolve."
-            )
+        if state == PASS_UNRESOLVED_NOTIFICATION:
+            if termination != PASS_FAILED:
+                raise PassFailure(
+                    f"The mission scheduler report terminated {termination!r} while naming "
+                    "attention whose targets it could not resolve."
+                )
+            # `unresolved` means the mission's own specification could not be
+            # read, so there was nothing to resolve targets *from*. A report
+            # that names some anyway is describing a resolution that cannot
+            # have happened, and those targets would be persisted into the
+            # status document a dashboard renders.
+            if entry["targets"]:
+                raise PassFailure(
+                    "The mission scheduler report names attention it could not resolve "
+                    f"and gives it targets anyway: {entry['targets']!r}."
+                )
+            # And it always says why, because that reason is the only account
+            # of what went wrong with the record.
+            if not isinstance(entry["detail"], str) or not entry["detail"].strip():
+                raise PassFailure(
+                    "The mission scheduler report names attention it could not resolve "
+                    "and gives no reason."
+                )
         # The identity is repository-qualified by construction:
         # `Kanban.Mission.Types.missionAttentionIdentity` spells it
         # `<owner>/<name>#<mission>@<raised-at>`. An entry whose identity is
@@ -1424,6 +1489,11 @@ class Controller:
         # fixture asks for, and what an operator uses to make one pass happen.
         self.remaining = passes
         self.started_at = utc_stamp()
+        # Recorded once, from this process, so a reader can tell this runner
+        # from whatever later inherits its identifier. `None` on a host that
+        # will not answer, which a reader treats as unconfirmable rather than
+        # as a match.
+        self.runner_identity = process_start_identity(os.getpid())
         self._child: subprocess.Popen[str] | None = None
         self._stop_requested = False
         self._signals = 0
@@ -1557,6 +1627,7 @@ class Controller:
                 # live state recorded under a runner that is gone is not a
                 # running service.
                 "runner_pid": os.getpid(),
+                "runner_identity": self.runner_identity,
                 "pass_pid": pass_pid,
                 "message": message,
                 "last_pass": self._last_pass,
