@@ -295,9 +295,10 @@ spec = do
                      UsageQueryMode,
                      PingQueryMode,
                      MissionMode "mission-0001",
+                     MissionSchedulerMode,
                      DashboardMode
                    ]
-      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, False, True]
+      map acquiresRepositoryLease everyMode `shouldBe` [False, False, False, False, False, False, False, False, True]
 
     -- A mission runner draws no board and writes no durable `gh` record, so
     -- it has nothing to serialise against; what it does take is that
@@ -307,6 +308,13 @@ spec = do
     -- attached at the same time.
     it "leaves the board lease unclaimed for the mission runner" $
       acquiresRepositoryLease testOptions {optionMission = Just "mission-0001"} `shouldBe` False
+
+    -- And for the scheduler, which draws no board either. What it does take is
+    -- nothing at all: the advancement lease belongs to each mission child it
+    -- launches, so a pass can run beside an open dashboard and beside a
+    -- foreground @--mission@ run of some other mission.
+    it "leaves the board lease unclaimed for the mission scheduler" $
+      acquiresRepositoryLease testOptions {optionMissionScheduler = True} `shouldBe` False
 
     -- The order is §5's, and the reason it is asserted is that an invocation
     -- naming two modes must resolve to the one that does not take the lease.
@@ -404,6 +412,7 @@ everyMode =
     testOptions {optionUsage = True},
     testOptions {optionPing = ["codex"]},
     testOptions {optionMission = Just "mission-0001"},
+    testOptions {optionMissionScheduler = True},
     testOptions {optionColor = ColorNever, optionBorder = BorderOpen}
   ]
 

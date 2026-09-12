@@ -30,11 +30,9 @@ import Kanban.CommandCapture
 import Kanban.Domain (UsageSnapshot (..), UsageWindow (..))
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process
-  ( ManagedProcess,
-    ProcessIdentity (..),
-    defaultProcessSnapshot,
-    killManagedProcess,
+  ( killManagedProcess,
     managedProcess,
+    sweepCommandGroup,
   )
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Text (sanitizeText)
@@ -45,7 +43,6 @@ import System.IO (Handle)
 import System.IO.Error (isDoesNotExistError, isPermissionError)
 import System.Process
   ( CreateProcess (..),
-    Pid,
     ProcessHandle,
     StdStream (CreatePipe, NoStream),
     createProcess,
@@ -123,31 +120,8 @@ runSpawnedUsageCommand timeoutMicros processHandle outputHandle errorHandle = do
   completed <- awaitCommandOutcome bounds processHandle outputCapture errorCapture
   releaseCapture outputCapture
   releaseCapture errorCapture
-  cleanupUsageCommandGroup rootPid managed
+  sweepCommandGroup rootPid managed
   pure (renderUsageCommandResult timeoutMicros fetchedAt completed)
-
--- | Sweeps the launched process group after every completion path -- success,
--- invalid output, nonzero exit, or timeout -- so a descendant the command
--- left behind (e.g. one it backgrounded before exiting) is caught too, not
--- just a direct process that is itself still running. This checks group
--- occupancy directly with a fresh process-table read rather than a
--- discovered descendant list: group membership survives a leader's exit
--- reparenting its children, so it stays correct however late the command
--- forked whatever it left behind, while a list built by walking parent links
--- once would not. The common case -- nothing left -- costs one read; only an
--- occupied group pays 'killManagedProcess's TERM/KILL escalation.
-cleanupUsageCommandGroup :: Maybe Pid -> ManagedProcess -> IO ()
-cleanupUsageCommandGroup Nothing managed = killManagedProcess managed
-cleanupUsageCommandGroup (Just pid) managed = do
-  occupied <- groupStillOccupied (fromIntegral pid)
-  when occupied (killManagedProcess managed)
-
-groupStillOccupied :: Int -> IO Bool
-groupStillOccupied groupPid = do
-  snapshotResult <- defaultProcessSnapshot
-  pure $ case snapshotResult of
-    Left _ -> True
-    Right snapshot -> any ((== groupPid) . (.processIdentityGroupPid)) snapshot
 
 renderUsageCommandResult :: Int -> UTCTime -> CommandOutcome -> Either ProviderError UsageSnapshot
 renderUsageCommandResult timeoutMicros _ CommandUnfinished =

@@ -307,10 +307,17 @@ spec = do
         ["ping_codex_seconds", "ping_claude_seconds"]
       decodeConfigText "[timeouts]\nping_codex_seconds = 1\nping_claude_seconds = 1\n" `shouldSatisfy` isRight
 
-    it "rejects the global-only keys cache, remote_name, and usage inside a repository override" $ do
+    it "rejects the global-only keys cache, remote_name, usage, and missions inside a repository override" $ do
       decodeConfigText "[repositories.\"a/b\"]\ncache = true\n" `shouldSatisfy` errorContains ["cache"]
       decodeConfigText "[repositories.\"a/b\"]\nremote_name = \"origin\"\n" `shouldSatisfy` errorContains ["remote_name"]
       decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".usage]\n" `shouldSatisfy` errorContains ["usage"]
+      -- The scheduler's notification command is the operator's, not one
+      -- repository's, and `config.toml.example` says so. A table that only
+      -- warned here would sit in the file doing nothing while reading as
+      -- configuration that had been applied.
+      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".missions]\n" `shouldSatisfy` errorContains ["missions"]
+      decodeConfigText "[repositories.\"a/b\"]\n[repositories.\"a/b\".missions.notifications]\nenabled = true\n"
+        `shouldSatisfy` errorContains ["missions"]
 
     it "warns, rather than fails, on an unrecognized key while still loading" $ do
       let (_, warnings) = unsafeConfig (decodeConfigText "[workflow]\nunexpected_field = 1\n")

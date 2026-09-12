@@ -41,6 +41,8 @@ module Kanban.Mission.Paths
     missionRoot,
     withMissionRoot,
     adoptedLegacyMissions,
+    LegacyClaim (..),
+    legacyMissionClaim,
     missionDirectory,
     missionSpecificationPath,
     missionSnapshotPath,
@@ -49,6 +51,8 @@ module Kanban.Mission.Paths
     missionControlDirectory,
     missionControlTokenPath,
     missionControlRequestDirectory,
+    missionNotificationDirectory,
+    missionNotificationPath,
     missionLeasePath,
     missionLeaseOwnerPath,
     missionArchiveDirectory,
@@ -68,6 +72,7 @@ module Kanban.Mission.Paths
     commitNoReplace,
     ensureMissionDirectory,
     listMissionEntries,
+    listMissionEntriesStrictly,
     isPlainDirectory,
     MissionEntry (..),
     missionEntryAt,
@@ -105,7 +110,6 @@ import Kanban.Paths (createPrivateDirectory)
 import Data.Time (getCurrentTime)
 import System.Directory
   ( XdgDirectory (XdgState),
-    doesDirectoryExist,
     getXdgDirectory,
     listDirectory,
     removeFile,
@@ -290,7 +294,7 @@ missionDirectory store mission
   where
     name = Text.unpack mission.unMissionId
 
-missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionInvocationPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory, missionControlDirectory, missionControlTokenPath, missionControlRequestDirectory :: FilePath -> MissionId -> Either Text FilePath
+missionSpecificationPath, missionSnapshotPath, missionJournalPath, missionInvocationPath, missionLeasePath, missionLeaseOwnerPath, missionArchiveDirectory, missionControlDirectory, missionControlTokenPath, missionControlRequestDirectory, missionNotificationDirectory :: FilePath -> MissionId -> Either Text FilePath
 missionSpecificationPath store mission = (</> "specification.json") <$> missionDirectory store mission
 missionSnapshotPath store mission = (</> "snapshot.json") <$> missionDirectory store mission
 missionJournalPath store mission = (</> "events.jsonl") <$> missionDirectory store mission
@@ -301,6 +305,27 @@ missionArchiveDirectory store mission = (</> "archive") <$> missionDirectory sto
 missionControlDirectory store mission = (</> "control") <$> missionDirectory store mission
 missionControlTokenPath store mission = (</> "token.json") <$> missionControlDirectory store mission
 missionControlRequestDirectory store mission = (</> "requests") <$> missionControlDirectory store mission
+missionNotificationDirectory store mission = (</> "notifications") <$> missionDirectory store mission
+
+-- | Where one attention identity's notification record lives.
+--
+-- Named by a digest of the identity rather than by the identity itself: an
+-- attention identity carries a repository, a mission and a timestamp, so it
+-- spells @\/@ and @#@ and is not a path component at all. The digest is
+-- "Kanban.Mission.Digest"'s, which spawns nothing, and the record inside
+-- carries the identity in full so a reader never has to invert it.
+--
+-- Inside the mission's own directory, so the record travels with the mission:
+-- archiving or deleting one takes its notification history with it, and a
+-- store restored for another repository carries no suppression that could
+-- silence this one.
+missionNotificationPath :: FilePath -> MissionId -> Text -> Either Text FilePath
+missionNotificationPath store mission digest = do
+  directory <- missionNotificationDirectory store mission
+  let name = Text.unpack digest <> ".json"
+  if safeMissionComponent name
+    then Right (directory </> name)
+    else Left ("notification identity " <> Text.pack (show digest) <> " cannot name a record file")
 
 -- | The archived copy of one session's log, and the seal record beside it.
 --
@@ -851,11 +876,43 @@ commitNoReplace staged path = do
 -- Nothing here follows what it finds: the caller decides what to do with each
 -- name, and 'listMissionEntries' never resolves one.
 listMissionEntries :: FilePath -> IO [FilePath]
-listMissionEntries store = do
-  exists <- doesDirectoryExist store
-  if not exists
-    then pure []
-    else either (const []) (filter safeMissionComponent) <$> try @IOException (listDirectory store)
+listMissionEntries store = either (const []) id <$> listMissionEntriesStrictly store
+
+-- | The same enumeration, keeping the failure instead of flattening it.
+--
+-- 'listMissionEntries' answers \"what is in here\" and reads a directory it
+-- could not list as an empty one, which is the right answer for a caller that
+-- is looking for something and the wrong one for a caller that is /reporting/
+-- on everything. An unreadable store directory and an empty store directory
+-- are the same value to the first and opposite answers to the second: a
+-- scheduler that could not enumerate a repository must not report a quiet
+-- repository.
+--
+-- A directory that is not there is still 'Right []'. A store whose missions
+-- have never been created is empty rather than broken, and 'openMissionStore'
+-- creates the root before any caller reaches here.
+listMissionEntriesStrictly :: FilePath -> IO (Either Text [FilePath])
+listMissionEntriesStrictly store = do
+  -- The root is classified with the non-following stat every other decision
+  -- here uses, not with 'doesDirectoryExist'. That predicate answers False for
+  -- three quite different things — nothing is there, something is there and is
+  -- not a directory, and the question could not be asked because a parent is
+  -- not searchable — and only the first of them means an empty store. Reading
+  -- the other two as empty is how an unreachable repository reports as a quiet
+  -- one.
+  presence <- missionEntryAt store
+  case presence of
+    MissionEntryAbsent -> pure (Right [])
+    MissionEntryUndecidable reason ->
+      pure (Left (Text.pack store <> " could not be inspected: " <> reason))
+    MissionEntryOther ->
+      pure (Left (Text.pack store <> " is not a directory"))
+    MissionEntryDirectory -> do
+      listed <- try @IOException (listDirectory store)
+      pure $ case listed of
+        Left exception ->
+          Left (Text.pack store <> " could not be listed: " <> Text.pack (show exception))
+        Right entries -> Right (filter safeMissionComponent entries)
 
 ignoreFileOperation :: IO () -> IO ()
 ignoreFileOperation operation = void (try @IOException operation)

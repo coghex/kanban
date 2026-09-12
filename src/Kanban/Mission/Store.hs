@@ -42,6 +42,7 @@ module Kanban.Mission.Store
     MissionStore (..),
     openMissionStore,
     listMissions,
+    listMissionsStrictly,
 
     -- * The specification
     MissionCreation (..),
@@ -88,7 +89,12 @@ import Kanban.Mission.Paths
     MissionStore (..),
     ignoreFileOperation,
     isPlainDirectory,
+    LegacyClaim (..),
+    legacyMissionClaim,
     listMissionEntries,
+    listMissionEntriesStrictly,
+    MissionEntry (..),
+    missionEntryAt,
     missionRoot,
     withMissionRoot,
     missionArchiveDirectory,
@@ -114,6 +120,9 @@ import Kanban.Mission.Types
     MissionSessionDisposition (..),
     MissionSessionId (..),
     MissionSessionNode (..),
+    MissionAttention (..),
+    MissionAttentionId (..),
+    MissionLifecycle (..),
     MissionSnapshot (..),
     MissionSpecification (..),
     MissionStepId (..),
@@ -128,6 +137,8 @@ import Kanban.Mission.Types
     missionSealDigestAlgorithm,
     missionSealSchemaVersion,
     missionSessionDisposition,
+    missionAttentionIdentity,
+    missionAttentionIdentityUnrecorded,
     missionSnapshotSchemaVersion,
     missionSpecificationSchemaVersion,
   )
@@ -171,6 +182,68 @@ listMissions store = do
   filterM resolves candidates
   where
     resolves mission = either (const False) (const True) <$> missionRoot store mission
+
+-- | The same enumeration, keeping every question it could not answer.
+--
+-- 'listMissions' is built for a caller that wants the missions it can act on,
+-- and it is right to drop what it cannot resolve: a legacy directory
+-- attributable to nobody, an identifier recorded under both roots, and an
+-- entry whose stat failed are each a mission nothing could read, write, or
+-- delete, and offering one would be offering a mission that is not there.
+--
+-- A caller that /reports/ on a repository needs the opposite. The scheduler
+-- says whether this repository is quiet, and \"no mission is runnable\" and
+-- \"some missions could not be enumerated\" are not the same sentence: reading
+-- the second as the first publishes a healthy idle pass over durable state
+-- nobody can account for. So this returns both halves — what resolved, and one
+-- reason per thing that did not — and leaves what to do about the second to
+-- the caller.
+--
+-- Three failures are preserved, and they are the three 'listMissions'
+-- swallows: an enumeration that could not be taken at all, an entry whose
+-- non-following stat could not be taken, and an identifier 'missionRoot'
+-- refuses to resolve — the ambiguous-root collision and the unattributable
+-- legacy mission among them.
+listMissionsStrictly :: MissionStore -> IO ([MissionId], [Text])
+listMissionsStrictly store = do
+  listed <- listMissionEntriesStrictly store.missionStoreDirectory
+  legacyListed <- listMissionEntriesStrictly store.missionStoreLegacyDirectory
+  case (listed, legacyListed) of
+    (Left reason, _) -> pure ([], [reason])
+    (_, Left reason) -> pure ([], [reason])
+    (Right entries, Right legacyEntries) -> do
+      -- Each entry's own stat, kept rather than filtered: an entry this store
+      -- cannot classify is an entry it cannot say is not a mission.
+      classified <- mapM (classify store.missionStoreDirectory) entries
+      legacyClassified <- mapM (classify store.missionStoreLegacyDirectory) legacyEntries
+      -- The legacy entries are classified here rather than handed back to
+      -- 'adoptedLegacyMissions', which is the fail-open half of this pair: it
+      -- drops an entry whose stat did not answer and one whose ownership claim
+      -- could not be established, both of which are exactly what this function
+      -- exists to report. Only a record /proven/ to belong to another
+      -- repository is excluded, because that one really is invisible here
+      -- (issue #615, requirement 3).
+      claims <-
+        mapM
+          (\entry -> (,) entry <$> legacyMissionClaim store.missionStoreRepository (MissionId (Text.pack entry)) store.missionStoreLegacyDirectory)
+          [entry | (entry, MissionEntryDirectory) <- legacyClassified]
+      let directories = [entry | (entry, MissionEntryDirectory) <- classified]
+          ours = [entry | (entry, LegacyOurs) <- claims]
+          undecidable =
+            [ Text.pack entry <> " could not be classified: " <> reason
+            | (entry, MissionEntryUndecidable reason) <- classified <> legacyClassified
+            ]
+              <> [ "legacy mission " <> Text.pack entry <> " is attributable to nobody: " <> reason
+                 | (entry, LegacyUnattributable reason) <- claims
+                 ]
+          candidates = sort (nub (map (MissionId . Text.pack) (directories <> ours)))
+      resolutions <- mapM (\mission -> (,) mission <$> missionRoot store mission) candidates
+      pure
+        ( [mission | (mission, Right _) <- resolutions],
+          undecidable <> [reason | (_, Left reason) <- resolutions]
+        )
+  where
+    classify root entry = (,) entry <$> missionEntryAt (root </> entry)
 
 -- | Whether a specification was written, or one was already there.
 data MissionCreation
@@ -221,6 +294,115 @@ belongsHere store mission recorded
             <> ", which is not the one this store holds"
         )
 
+-- | Fills in an episode identity a record written before the field existed
+-- does not carry.
+--
+-- Lossless, because the identity is derived: the repository, the mission and
+-- the raised-at time the record already holds are exactly what
+-- 'missionAttentionIdentity' computes from. So a snapshot written by a release
+-- that had no such field reads back with the identity it would have been given
+-- had the field existed, and the checks below then hold for it like any other.
+--
+-- Only an /absent/ identity is restored. One that is present and names another
+-- repository, mission or moment is refused, which is the whole point of
+-- checking it: a record that arrived by restore or by hand is exactly the one
+-- that can carry somebody else's episode.
+restoredAttention :: MissionSnapshot -> MissionSnapshot
+restoredAttention snapshot = case snapshot.missionSnapshotAttention of
+  Just attention
+    | missionAttentionIdentityUnrecorded attention ->
+        snapshot
+          { missionSnapshotAttention =
+              Just
+                attention
+                  { missionAttentionId =
+                      missionAttentionIdentity
+                        snapshot.missionSnapshotRepository
+                        snapshot.missionSnapshotId
+                        attention.missionAttentionRaisedAt
+                  }
+          }
+  _ -> snapshot
+
+-- | Refuses a snapshot whose attention does not belong to it.
+--
+-- 'missionAttentionIdentity' derives an episode's name from three things — the
+-- repository, the mission, and the moment the episode began — so the identity
+-- is not free-form text: it is a statement about which episode of which
+-- mission of which repository this is, and it can be checked against the
+-- record carrying it.
+--
+-- Checking it matters because of what reads it. The scheduler keys a
+-- notification's durable suppression on this identity and attempts delivery
+-- once per identity, for ever; a record whose identity was minted for another
+-- repository, another mission, or another moment therefore consumes an attempt
+-- that belongs to a different episode, and does it permanently. A restored
+-- backup, a copied directory, and a hand-repaired record are each enough to
+-- produce one, which is exactly the class of record the identity checks
+-- elsewhere in this module already refuse.
+--
+-- Held on the way in and on the way out, for the reason 'readMissionSnapshot'
+-- gives about the session tree: the writer's guarantee covers only records
+-- this release wrote.
+wellFormedAttention :: MissionSnapshot -> Either Text ()
+wellFormedAttention snapshot = case attentionIdentityFailure snapshot of
+  Nothing -> Right ()
+  Just reason -> Left ("mission " <> snapshot.missionSnapshotId.unMissionId <> ": " <> reason)
+
+-- | Why this snapshot's attention is not its own, if it is not.
+--
+-- Two things, and the second is the one a reader would otherwise never
+-- question. An episode is /exactly/ a visit to 'MissionWaitingInput': the
+-- controller opens one on entry and clears it on the way out, so attention on
+-- a running, paused or terminal snapshot is a record that contradicts the
+-- lifecycle beside it. A reader that took any @Just@ as an outstanding episode
+-- would report a mission that is running — or finished — as waiting on a
+-- person, and, with notifications on, would spend that episode's one permanent
+-- attempt saying so.
+attentionIdentityFailure :: MissionSnapshot -> Maybe Text
+attentionIdentityFailure snapshot =
+  case (snapshot.missionSnapshotLifecycle, snapshot.missionSnapshotAttention) of
+    -- Deliberately one-directional. Attention present outside
+    -- 'MissionWaitingInput' is a record contradicting itself, and this release
+    -- cannot have written one. Attention *absent* inside it is not: a mission
+    -- that entered @waiting_input@ before episodes existed carries none, and
+    -- refusing that would make every such mission unreadable on upgrade. The
+    -- controller already repairs it — the next transition opens an episode —
+    -- and a reader that finds none simply has nothing outstanding to report.
+    -- A record predating the identity field carries an empty one. It is
+    -- restored rather than refused ('restoredAttention'), and only a reader
+    -- that skipped that restoration would ever see one here.
+    (MissionWaitingInput, Just attention)
+      | missionAttentionIdentityUnrecorded attention ->
+          Just "its attention records no identity, and was not restored before it was checked"
+    (lifecycle, Just attention)
+      | lifecycle /= MissionWaitingInput ->
+          Just
+            ( "it records attention while its lifecycle is "
+                <> missionLifecycleTag lifecycle
+                <> "; an episode is exactly a visit to "
+                <> missionLifecycleTag MissionWaitingInput
+            )
+      | otherwise -> mismatchedIdentity attention
+    _ -> Nothing
+  where
+    mismatchedIdentity attention
+      | attention.missionAttentionId == expected attention = Nothing
+      | otherwise =
+          Just
+            ( "its attention is recorded under "
+                <> attention.missionAttentionId.unMissionAttentionId
+                <> ", which is not the identity this repository, mission and raised-at time name ("
+                <> (expected attention).unMissionAttentionId
+                <> ")"
+            )
+
+    expected attention =
+      missionAttentionIdentity
+        snapshot.missionSnapshotRepository
+        snapshot.missionSnapshotId
+        attention.missionAttentionRaisedAt
+
 -- | Refuses to write a snapshot whose session tree is not one.
 --
 -- This is where D-14 is /enforced/ rather than merely modelled: a duplicate
@@ -268,7 +450,8 @@ writeMissionSnapshot store snapshot =
   withMissionRoot store mission Left $ \root ->
     case (,) <$> missionDirectory root mission <*> missionSnapshotPath root mission
       <* belongsHere store mission snapshot.missionSnapshotRepository
-      <* wellFormedSessions snapshot of
+      <* wellFormedSessions snapshot
+      <* wellFormedAttention snapshot of
       Left message -> pure (Left message)
       Right (directory, path) -> do
         prepared <- ensureMissionDirectory directory
@@ -297,7 +480,7 @@ readMissionSnapshot store mission =
     case missionSnapshotPath root mission of
       Left message -> pure (MissionUnreadable message)
       Right path -> do
-        result <-
+        decoded <-
           readMissionRecordFor
             mission
             [missionSnapshotSchemaVersion]
@@ -305,6 +488,12 @@ readMissionSnapshot store mission =
             missionSnapshotId
             missionSnapshotRepository
             path
+        -- Restored before it is checked, so a record written before the
+        -- identity field existed is migrated rather than reported as
+        -- corruption, and no consumer ever sees an episode without a name.
+        let result = case decoded of
+              MissionPresent snapshot -> MissionPresent (restoredAttention snapshot)
+              other -> other
         pure $ case result of
           MissionPresent snapshot
             | Just reason <- sessionTreeFailure snapshot ->
@@ -316,6 +505,14 @@ readMissionSnapshot store mission =
                       <> " records sessions that are not a tree: "
                       <> reason
                   )
+            -- Reported rather than read as absent, exactly as an invalid
+            -- lineage is: the file is there and does not cohere, which is a
+            -- repair somebody has to make, and handing it over would let a
+            -- foreign episode identity spend this mission's notification
+            -- attempt.
+            | Just reason <- attentionIdentityFailure snapshot ->
+                MissionUnreadable
+                  ("mission " <> mission.unMissionId <> ": " <> Text.pack path <> " " <> reason)
           other -> other
 
 -- | Appends one event to a mission's journal.

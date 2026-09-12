@@ -564,6 +564,22 @@ class RepositoryGlobalOnlyKeyTests(unittest.TestCase):
             'repositories."acme/widgets".usage',
         )
 
+    def test_missions_inside_repository_table_raises(self):
+        # The scheduler's notification command is the operator's rather than
+        # one repository's, and `config.toml.example` says so. A table that
+        # only warned would sit in the file doing nothing while reading as
+        # configuration that had been applied.
+        self._expect_error(
+            '[repositories."acme/widgets".missions]\n',
+            'repositories."acme/widgets".missions',
+        )
+
+    def test_mission_notifications_inside_repository_table_raises(self):
+        self._expect_error(
+            '[repositories."acme/widgets".missions.notifications]\nenabled = true\n',
+            'repositories."acme/widgets".missions',
+        )
+
 
 class RepositoryRosterPathTests(unittest.TestCase):
     """Kanban.Config's `path` key, mirrored here so the shared schema stays one

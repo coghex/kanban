@@ -46,6 +46,7 @@ module Kanban.Mission.Types
     missionLeaseSchemaVersion,
     missionInvocationSchemaVersion,
     missionCommandSchemaVersion,
+    missionNotificationSchemaVersion,
 
     -- * The immutable specification
     MissionSpecification (..),
@@ -61,6 +62,10 @@ module Kanban.Mission.Types
     MissionStepRecord (..),
     MissionPause (..),
     MissionAttention (..),
+    MissionAttentionId (..),
+    missionAttentionIdentity,
+    missionAttentionIdentityUnrecorded,
+    MissionNotificationRecord (..),
     MissionRetryCounter (..),
     MissionReconciliation (..),
 
@@ -101,10 +106,12 @@ module Kanban.Mission.Types
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:!), (.:?), (.=))
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time (UTCTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository (..))
 import Kanban.Process (OwnedProcessGroup, ProcessIdentity)
@@ -179,7 +186,7 @@ instance FromJSON payload => FromJSON (MissionEnvelope payload) where
     withObject "MissionEnvelope" $ \fields ->
       MissionEnvelope <$> fields .: "schemaVersion" <*> fields .: "payload"
 
-missionSpecificationSchemaVersion, missionSnapshotSchemaVersion, missionEventSchemaVersion, missionSealSchemaVersion, missionLeaseSchemaVersion, missionInvocationSchemaVersion, missionCommandSchemaVersion :: Int
+missionSpecificationSchemaVersion, missionSnapshotSchemaVersion, missionEventSchemaVersion, missionSealSchemaVersion, missionLeaseSchemaVersion, missionInvocationSchemaVersion, missionCommandSchemaVersion, missionNotificationSchemaVersion :: Int
 missionSpecificationSchemaVersion = 1
 missionSnapshotSchemaVersion = 1
 missionEventSchemaVersion = 1
@@ -187,6 +194,7 @@ missionSealSchemaVersion = 1
 missionLeaseSchemaVersion = 1
 missionInvocationSchemaVersion = 1
 missionCommandSchemaVersion = 1
+missionNotificationSchemaVersion = 1
 
 -- | What a mission was asked to do, fixed at creation.
 --
@@ -331,11 +339,135 @@ data MissionPause = MissionPause
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
 
+-- | The name one waiting episode is known by, for as long as it lasts.
+--
+-- Repository-qualified, because the thing that reads it is not necessarily
+-- scoped to one repository: a notification suppression record and a pass
+-- report both name attention across whatever store they were pointed at, and
+-- two repositories that happen to spell a mission the same way must not
+-- collapse onto one identity.
+newtype MissionAttentionId = MissionAttentionId {unMissionAttentionId :: Text}
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
 -- | The one thing a mission is waiting for a person to resolve.
+--
+-- The identity is part of the record rather than derived by each reader, and
+-- that is what makes \"the same episode\" a durable fact rather than an
+-- inference. A pass that observes this mission twice, and a pass that observes
+-- it after a restart, both read the identity the transition wrote; a later
+-- re-entry into 'MissionWaitingInput' writes a new one, so the two episodes
+-- are distinguishable without anything having to remember the first.
 data MissionAttention = MissionAttention
-  { missionAttentionSummary :: Text,
+  { missionAttentionId :: MissionAttentionId,
+    missionAttentionSummary :: Text,
     missionAttentionStep :: Maybe MissionStepId,
     missionAttentionRaisedAt :: UTCTime
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (ToJSON)
+
+-- | Decoded with the identity optional, and only the identity.
+--
+-- The field arrived after this record did, and 'missionSnapshotSchemaVersion'
+-- did not move with it — deliberately. A version bump would make every
+-- snapshot written before it read as /absent/ under §16's rule, which for a
+-- mission store means silently forgetting every mission that is currently in
+-- flight; that is a far worse answer than the one this gives.
+--
+-- It is only available because the identity is /derived/. A record written
+-- before the field existed is not missing information: the repository, the
+-- mission and the raised-at time it already carries are exactly what
+-- 'missionAttentionIdentity' is computed from, so the value can be restored
+-- rather than guessed. The restoration needs the snapshot around it, so it
+-- happens in "Kanban.Mission.Store" where that is in hand; what this does is
+-- decode such a record into an identity that is recognisably empty, so the
+-- difference between \"written before the field existed\" and \"written with
+-- the wrong identity\" survives to the place that can tell them apart. The
+-- second is still refused.
+instance FromJSON MissionAttention where
+  parseJSON = withObject "MissionAttention" $ \fields -> do
+    -- @.:!@ rather than @.:?@, and the difference is the whole point: @.:?@
+    -- answers 'Nothing' both for a key that is not there and for one whose
+    -- value is @null@, which would migrate an explicitly malformed record as
+    -- though it were an old one. @.:!@ answers 'Nothing' only for a key that
+    -- is absent and fails on a @null@ it cannot parse.
+    recorded <- fields .:! "missionAttentionId"
+    identity <- case recorded of
+      Nothing -> pure missionAttentionIdentityUnrecordedMarker
+      Just value
+        | Text.null value.unMissionAttentionId ->
+            fail "missionAttentionId is present and empty; an episode names itself or does not record a name at all"
+        -- Unreachable from a document: the marker carries a NUL, which no
+        -- identity this module mints contains. Refused rather than trusted,
+        -- so \"this record predates the field\" stays a fact about the
+        -- document's /shape/ and never something its contents can assert.
+        | value == missionAttentionIdentityUnrecordedMarker ->
+            fail "missionAttentionId names the reserved unrecorded marker"
+        | otherwise -> pure value
+    MissionAttention identity
+      <$> fields .: "missionAttentionSummary"
+      <*> fields .:? "missionAttentionStep"
+      <*> fields .: "missionAttentionRaisedAt"
+
+-- | What a record written before the identity field existed decodes to.
+--
+-- Carries a NUL so no document can spell it and no identity this module mints
+-- can collide with it: 'missionAttentionIdentity' joins an owner, a name, a
+-- mission and a timestamp, none of which contains one.
+missionAttentionIdentityUnrecordedMarker :: MissionAttentionId
+missionAttentionIdentityUnrecordedMarker = MissionAttentionId "\NULunrecorded"
+
+-- | Whether this episode's identity is the one a record predating the field
+-- decodes to — which is to say, whether the key was absent altogether.
+missionAttentionIdentityUnrecorded :: MissionAttention -> Bool
+missionAttentionIdentityUnrecorded attention =
+  attention.missionAttentionId == missionAttentionIdentityUnrecordedMarker
+
+-- | The identity one episode takes, from what identifies it.
+--
+-- Deterministic in the three things that distinguish an episode — the
+-- repository, the mission, and the moment the episode began — so the writer
+-- never has to consult anything to reproduce it and a reader can check it.
+-- The timestamp is rendered at full precision: two episodes of one mission are
+-- separated by at least a snapshot replacement, and the only way to collide
+-- would be to re-enter 'MissionWaitingInput' at the very same picosecond the
+-- previous episode began.
+missionAttentionIdentity :: MissionRepository -> MissionId -> UTCTime -> MissionAttentionId
+missionAttentionIdentity repository mission raisedAt =
+  MissionAttentionId
+    ( repository.missionRepositoryOwner
+        <> "/"
+        <> repository.missionRepositoryName
+        <> "#"
+        <> mission.unMissionId
+        <> "@"
+        <> Text.pack (iso8601Show raisedAt)
+    )
+
+-- | That one attention identity has had its one notification attempt.
+--
+-- Written /before/ the command is launched, which is what makes it a
+-- suppression rather than a receipt: two observations racing one episode both
+-- try to create this file, exactly one of them wins, and the loser never
+-- launches anything. The outcome is filled in afterwards and may never arrive
+-- — a crash between the create and the launch loses that notification, and
+-- requirement 15 accepts that loss in exchange for never sending two.
+--
+-- Nothing here is ever automatically retried. A record that exists suppresses
+-- its identity for good, including after a restart, including when the
+-- outcome it records is a failure, and including when the record itself will
+-- no longer decode: existence is the question, and the filesystem answers it.
+data MissionNotificationRecord = MissionNotificationRecord
+  { missionNotificationRecordMission :: MissionId,
+    missionNotificationRecordRepository :: MissionRepository,
+    missionNotificationRecordAttention :: MissionAttentionId,
+    missionNotificationRecordSuppressedAt :: UTCTime,
+    -- | The state tag "Kanban.Mission.Pass" spells, or 'Nothing' while the
+    -- attempt is still in flight. Text rather than the typed state, because
+    -- this module is the durable vocabulary and that one is the pass's.
+    missionNotificationRecordOutcome :: Maybe Text,
+    missionNotificationRecordDetail :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)

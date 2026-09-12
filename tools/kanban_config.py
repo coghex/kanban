@@ -457,6 +457,28 @@ class UsageConfig:
     claude_estimated_percent_per_solve_round: int | None = None
 
 
+@dataclass(frozen=True)
+class MissionNotificationConfig:
+    """Kanban.Config.MissionNotificationConfig.
+
+    Carried for the reason `UsageConfig`'s estimate is: only
+    `kanban --mission-scheduler` acts on this table, and a key this reader did
+    not know would be reported as unknown by every Python tool that loads the
+    same file — including `tools/mission_runner_service.py`, which supervises
+    the very passes that read it.
+    """
+
+    enabled: bool = False
+    command: UsageCommandConfig | None = None
+
+
+@dataclass(frozen=True)
+class MissionsConfig:
+    notifications: MissionNotificationConfig = field(
+        default_factory=MissionNotificationConfig
+    )
+
+
 # Per-field overrides for [workflow]/[limits]/[timeouts], decoded identically
 # at the global and per-repository level. A field left None inherits the
 # base value; a repository array field replaces the global array in full.
@@ -511,6 +533,7 @@ class RawConfig:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     timeouts: TimeoutsConfig = field(default_factory=TimeoutsConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    missions: MissionsConfig = field(default_factory=MissionsConfig)
     repositories: dict[str, RepositoryOverride] = field(default_factory=dict)
 
 
@@ -522,6 +545,7 @@ class ResolvedConfig:
     limits: LimitsConfig
     timeouts: TimeoutsConfig
     usage: UsageConfig
+    missions: MissionsConfig
 
 
 # --------------------------------------------- coordination-path coverage --
@@ -965,6 +989,37 @@ def _parse_usage_provider(table: dict, key: str, path: str, warnings: list[str])
     return (parsed_command, estimate)
 
 
+def _parse_mission_notifications(table: dict, path: str, warnings: list[str]) -> MissionNotificationConfig:
+    """Both keys of [missions.notifications], neither gating the other.
+
+    A command written down and left switched off is how an operator tries one
+    out, and `enabled = true` with no command is refused where it is acted on
+    rather than here — only the scheduler reads it, and a load-time error would
+    take the repository away from every other mode over a setting none of them
+    consults.
+    """
+    popped = _pop_table(table, "notifications", path)
+    if popped is None:
+        return MissionNotificationConfig()
+    notifications_table, child_path = popped
+    enabled = _pop_bool(notifications_table, "enabled", child_path, False)
+    command = notifications_table.pop("command", None)
+    parsed_command = (
+        _parse_command_argv(command, _join(child_path, "command"))
+        if command is not None
+        else None
+    )
+    _collect_unknown(notifications_table, child_path, warnings)
+    return MissionNotificationConfig(enabled=enabled, command=parsed_command)
+
+
+def _parse_missions_table(value: dict, path: str, warnings: list[str]) -> MissionsConfig:
+    table = dict(value)
+    notifications = _parse_mission_notifications(table, path, warnings)
+    _collect_unknown(table, path, warnings)
+    return MissionsConfig(notifications=notifications)
+
+
 def _parse_usage_table(value: dict, path: str, warnings: list[str]) -> UsageConfig:
     table = dict(value)
     codex_command, codex_estimate = _parse_usage_provider(table, "codex", path, warnings)
@@ -1018,7 +1073,7 @@ def _parse_repositories_table(
         if not isinstance(repo_value, dict):
             raise KanbanConfigError(f"{child_path} must be a table")
         repo_table = dict(repo_value)
-        for forbidden in ("cache", "remote_name", "usage"):
+        for forbidden in ("cache", "remote_name", "usage", "missions"):
             if forbidden in repo_table:
                 raise KanbanConfigError(
                     f"{child_path}.{forbidden} is not valid in a repository override; "
@@ -1097,6 +1152,12 @@ def _decode(data: dict) -> tuple[RawConfig, list[str]]:
         value, child_path = popped
         usage = _parse_usage_table(value, child_path, warnings)
 
+    missions = MissionsConfig()
+    popped = _pop_table(table, "missions", "")
+    if popped is not None:
+        value, child_path = popped
+        missions = _parse_missions_table(value, child_path, warnings)
+
     repositories: dict[str, RepositoryOverride] = {}
     popped = _pop_table(table, "repositories", "")
     if popped is not None:
@@ -1112,6 +1173,7 @@ def _decode(data: dict) -> tuple[RawConfig, list[str]]:
         limits=_merge(LimitsConfig(), limits_override),
         timeouts=_merge(TimeoutsConfig(), timeouts_override),
         usage=usage,
+        missions=missions,
         repositories=repositories,
     )
     _validate_raw_config(raw)
@@ -1182,4 +1244,5 @@ def resolve_config(owner_slash_name: str, raw: RawConfig) -> ResolvedConfig:
         limits=_merge(raw.limits, override.limits),
         timeouts=_merge(raw.timeouts, override.timeouts),
         usage=raw.usage,
+        missions=raw.missions,
     )

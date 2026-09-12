@@ -22,18 +22,20 @@ module Kanban.Process
     liveProcesses,
     liveProcessesWith,
     managedProcess,
+    unverifiedManagedProcess,
     managedProcessGroup,
     managedProcessPid,
     managedProcessStopsWithDashboard,
     matchingIdentities,
     membersStillInGroup,
     readProcessSnapshot,
+    sweepCommandGroup,
   )
 where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, try)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
@@ -47,7 +49,7 @@ import System.IO.Error (isDoesNotExistError)
 import System.Posix.Process (getProcessID)
 import System.Posix.Types (CPid)
 import System.Posix.Signals (Signal, sigINT, sigKILL, sigTERM, signalProcess, signalProcessGroup)
-import System.Process (ProcessHandle, getPid, proc, terminateProcess, waitForProcess)
+import System.Process (Pid, ProcessHandle, getPid, proc, terminateProcess, waitForProcess)
 import Text.Read (readMaybe)
 
 data ProcessIdentity = ProcessIdentity
@@ -126,6 +128,22 @@ data ManagedProcess
 -- would otherwise leave a still-running group member — signalled via the
 -- exact same recorded pgid regardless of the leader's own reap state — with
 -- nothing left to reach it.
+-- | The same handle, without the inspection that confirms the child really
+-- leads its own group.
+--
+-- 'managedProcess' reads a process snapshot to check that, and reading one
+-- spawns @ps@ — an external command with no bound on how long it takes. That
+-- is a fine price for a caller that wants the diagnostic, and the wrong one
+-- for a caller that needs something sweepable the instant the child exists:
+-- a stop arriving while that @ps@ ran would find nothing recorded to end.
+--
+-- The value is identical; only the check is skipped. What the check would have
+-- reported is a @create_group@ that did not take, and 'killManagedProcess'
+-- already handles that case anyway — it falls back to signalling the process
+-- itself when no group is led by its identifier.
+unverifiedManagedProcess :: ProcessHandle -> IO ManagedProcess
+unverifiedManagedProcess processHandle = LocalManagedProcess processHandle <$> getPid processHandle
+
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcess processHandle = do
   spawnedPid <- getPid processHandle
@@ -396,6 +414,42 @@ killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
   ignoreIOException (signalProcessGroup sigKILL processId)
+
+-- | Ends whatever is left of one short-lived command's process group.
+--
+-- Reached on /every/ completion path a bounded command has — a clean exit, a
+-- bad result, a non-zero status, and a deadline that expired — because each of
+-- them can leave something behind and only one of them looks like it does.
+-- 'Kanban.CommandCapture.awaitCommandOutcome' bounds how long a command may
+-- take and never ends it, and releasing its captures closes pipes rather than
+-- processes, so a command that outlived its deadline is still running when its
+-- caller has finished with it.
+--
+-- Group occupancy is read fresh from the process table rather than from a
+-- descendant list built by walking parent links once: group membership
+-- survives a leader's exit reparenting its children, so it stays correct
+-- however late the command forked whatever it left. The common case — nothing
+-- left — costs one read; only an occupied group pays 'killManagedProcess's
+-- TERM/KILL escalation.
+--
+-- A snapshot that cannot be read is treated as occupied, which costs a signal
+-- to a group that is probably empty and is the only direction that cannot
+-- strand a process.
+--
+-- Callers must have placed the command in its own group ('create_group'), or
+-- this reaches whatever group it did land in.
+sweepCommandGroup :: Maybe Pid -> ManagedProcess -> IO ()
+sweepCommandGroup Nothing managed = killManagedProcess managed
+sweepCommandGroup (Just pid) managed = do
+  occupied <- groupStillOccupied (fromIntegral pid)
+  when occupied (killManagedProcess managed)
+
+groupStillOccupied :: Int -> IO Bool
+groupStillOccupied groupPid = do
+  snapshotResult <- defaultProcessSnapshot
+  pure $ case snapshotResult of
+    Left _ -> True
+    Right snapshot -> any ((== groupPid) . (.processIdentityGroupPid)) snapshot
 
 signalOwnedGroup :: Signal -> ProcessHandle -> Maybe CPid -> IO ()
 signalOwnedGroup signal processHandle capturedPid = case capturedPid of

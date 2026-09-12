@@ -56,6 +56,7 @@ module Kanban.Mission.Controller
     stopMissionController,
 
     -- * Advancing
+    applyMissionLifecycle,
     MissionTransition (..),
     missionTransitionMessage,
     MissionIteration (..),
@@ -144,7 +145,8 @@ import Kanban.Mission.Reconcile
   )
 import Kanban.Mission.Store (readMissionSnapshot, readMissionSpecification, recordMissionEvent, writeMissionSnapshot)
 import Kanban.Mission.Types
-  ( MissionEvent (..),
+  ( MissionAttention (..),
+    MissionEvent (..),
     MissionId (..),
     MissionLifecycle (..),
     MissionPause (..),
@@ -163,6 +165,7 @@ import Kanban.Mission.Types
     MissionStepLifecycle (..),
     MissionStepRecord (..),
     MissionTarget (..),
+    missionAttentionIdentity,
     missionLifecycleTag,
     missionRepository,
     missionRepositoryMatches,
@@ -2149,6 +2152,14 @@ applyMissionLifecycle controller snapshot lifecycle detail = do
   let updated =
         snapshot
           { missionSnapshotLifecycle = lifecycle,
+            missionSnapshotAttention =
+              attentionFor
+                controller.missionControllerStore.missionStoreRepository
+                controller.missionControllerMission
+                snapshot
+                lifecycle
+                detail
+                now,
             missionSnapshotPause =
               if lifecycle == MissionPaused
                 then MissionPause {missionPauseRequested = True, missionPauseReason = Just detail, missionPauseAt = Just now}
@@ -2171,6 +2182,49 @@ applyMissionLifecycle controller snapshot lifecycle detail = do
           controller.missionControllerStore
           (missionEvent controller.missionControllerMission controller.missionControllerStore.missionStoreRepository now (missionLifecycleTag lifecycle) (Just detail))
       pure (MissionAdvanced (MissionLifecycleSet lifecycle detail))
+
+-- | The attention a lifecycle write leaves on the snapshot.
+--
+-- One waiting /episode/ is exactly one visit to 'MissionWaitingInput', and
+-- that is the whole definition. The three other waits are not operator-
+-- required: 'MissionWaitingBarrier' and 'MissionWaitingCapacity' are waits on
+-- this machine's own arithmetic, and 'MissionPaused' is something an operator
+-- already did rather than something they have yet to do. None of them raises
+-- attention, and every one of them ends an episode that was open.
+--
+-- Entering the state opens an episode and names it; staying in it keeps that
+-- name, so a scheduler that observes this mission on ten consecutive passes
+-- sees one identity and a notification is attempted at most once for it. What
+-- is refreshed while the episode stands is what it is waiting /on/ — the
+-- summary and the step — because a second transition inside one episode is the
+-- mission saying something new about the same wait. Leaving the state clears
+-- the record, so a later re-entry has nothing to inherit and takes a new
+-- identity from its own moment.
+attentionFor :: MissionRepository -> MissionId -> MissionSnapshot -> MissionLifecycle -> Text -> UTCTime -> Maybe MissionAttention
+attentionFor repository mission snapshot lifecycle detail now
+  | lifecycle /= MissionWaitingInput = Nothing
+  | Just standing <- continuing =
+      Just
+        standing
+          { missionAttentionSummary = detail,
+            missionAttentionStep = snapshot.missionSnapshotCurrentStep
+          }
+  | otherwise =
+      Just
+        MissionAttention
+          { missionAttentionId = missionAttentionIdentity repository mission now,
+            missionAttentionSummary = detail,
+            missionAttentionStep = snapshot.missionSnapshotCurrentStep,
+            missionAttentionRaisedAt = now
+          }
+  where
+    -- The episode standing before this write, if the mission was already in
+    -- it. A snapshot recording 'MissionWaitingInput' with no attention at all
+    -- is a record written before attention existed, or one repaired by hand;
+    -- it opens an episode here rather than going on carrying none for ever.
+    continuing
+      | snapshot.missionSnapshotLifecycle == MissionWaitingInput = snapshot.missionSnapshotAttention
+      | otherwise = Nothing
 
 -- | Adds the session a dispatch produced to the mission's own session tree.
 --

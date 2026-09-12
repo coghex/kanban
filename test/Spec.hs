@@ -54,6 +54,7 @@ import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
 import qualified Spec.Mission.Runner as MissionRunner
+import qualified Spec.Mission.Scheduler as MissionScheduler
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -68,6 +69,8 @@ import Spec.Support.Lanes
   )
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
+import Spec.Support.NotifyProbe (notifyProbeVariable, runNotifyProbe)
+import Spec.Support.SchedulerProbe (runSchedulerProbe, schedulerProbeVariable)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
 import qualified Spec.Suite.Assignment as Assignment
@@ -98,7 +101,7 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stdin, stdout)
 
--- | Ordinarily the suite. Four markers divert it instead, and each names a
+-- | Ordinarily the suite. Six markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
@@ -113,7 +116,17 @@ import System.IO (stdin, stdout)
 -- a reader sharing nothing with the writer, and a lease holder there is
 -- something to kill).
 --
--- All four are asked about before the suite and deliberately so: a lane
+-- 'notifyProbeVariable' makes it one running a notification command, which is
+-- the one thing this process starts in a process group of its own and
+-- therefore the one thing a stop cannot reach by signalling this group (see
+-- "Spec.Support.NotifyProbe").
+--
+-- 'schedulerProbeVariable' makes it a @kanban --mission-scheduler@ invocation,
+-- because requirement 7's claim is about a process: what reaches stdout, what
+-- reaches stderr, and what the process exits with (see
+-- "Spec.Support.SchedulerProbe").
+--
+-- All six are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -122,9 +135,8 @@ main = do
   arguments <- getArgs
   case arguments of
     -- The re-entered review tool server, exactly as @kanban --review-tools@
-    -- serves it. A fifth diversion, and the one that is argv rather than
-    -- environment because that is how the mechanism under test hands it
-    -- over: "Spec.Agent.ToolReentry"'s fake @claude@ spawns whatever
+    -- serves it. The one diversion that is argv rather than environment,
+    -- because that is how the mechanism under test hands it over: "Spec.Agent.ToolReentry"'s fake @claude@ spawns whatever
     -- executable its recorded @--mcp-config@ names, that executable is this
     -- suite's own binary ('System.Environment.getExecutablePath', the same
     -- re-entry a real install performs), and so the served process runs the
@@ -137,12 +149,16 @@ main = do
       usageWriter <- lookupEnv usageWriterVariable
       leaseProbe <- lookupEnv leaseProbeVariable
       missionProbe <- lookupEnv missionProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, missionProbe) of
-        (Just probeRoot, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath) -> runMissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+      notifyProbe <- lookupEnv notifyProbeVariable
+      schedulerProbe <- lookupEnv schedulerProbeVariable
+      case (localeProbe, usageWriter, leaseProbe, missionProbe, notifyProbe, schedulerProbe) of
+        (Just probeRoot, _, _, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _, _, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath, _, _) -> runMissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Just directory, _) -> runNotifyProbe directory
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Just argv) -> runSchedulerProbe argv
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -214,6 +230,11 @@ suiteGroups =
     -- outside world is staged, so this group starts no process and reads no
     -- network and can ride in the cheapest lane.
     SuiteGroup "Spec.Mission.Runner" PingLane MissionRunner.spec,
+    -- The scheduler group does start processes -- fake @kanban@ children and
+    -- fake notification commands -- so it sits beside the other groups whose
+    -- churn the swept-process assertions are measured against, for the reason
+    -- @Spec.Mission@'s comment above gives.
+    SuiteGroup "Spec.Mission.Scheduler" UsageLane MissionScheduler.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,

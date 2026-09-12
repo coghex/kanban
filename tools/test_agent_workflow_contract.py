@@ -10,12 +10,13 @@ command or home-relative path cannot land undocumented.
 
 Home-relative paths are reconciled over two surfaces with two extractors, since
 the same managed location is spelled differently in each. The Haskell modules
-build one as a single literal hung off `home`; the three issue-approval modules
-of docs/agent-workflow-contract.md §2.8 (issue #425) compose one from `pathlib`
+build one as a single literal hung off `home`; the four Python service modules
+of docs/agent-workflow-contract.md §2.8 and §2.12 (issues #425 and #666)
+compose one from `pathlib`
 segments, often across a bound name or a nullary helper, so they are scanned
 separately for that shape — the way the bundled coordinator is scanned
 separately from the `.md` surfaces — by resolving the parsed module rather than
-by matching text. What the extractor recovers from each of the three is pinned,
+by matching text. What the extractor recovers from each of the four is pinned,
 and fixture regressions prove that an undeclared segment is reported, that a
 tail hung off a binding or a helper is recovered whole rather than only to its
 prefix, and that a module which cannot be parsed fails rather than reporting
@@ -276,34 +277,36 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
     "google-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 
-# The issue approval service's own owning sources
-# (docs/agent-workflow-contract.md §2.8), scanned for the home-relative paths
-# they build rather than for the external commands they spawn — those are
-# already covered by the discovered tools/ surface below. They need an
-# extractor of their own because they are Python: none of them spells a managed
-# location as one literal the way the Haskell surface does, and none of them is
-# markdown, so neither existing extractor recovers anything from them.
+# The Python services' own owning sources — the issue approval service's
+# (docs/agent-workflow-contract.md §2.8) and the mission runner's (§2.12) —
+# scanned for the home-relative paths they build rather than for the external
+# commands they spawn; those are already covered by the discovered tools/
+# surface below. They need an extractor of their own because they are Python:
+# none of them spells a managed location as one literal the way the Haskell
+# surface does, and none of them is markdown, so neither existing extractor
+# recovers anything from them.
 # `tools/service_manager.py` is here because it is where both definition
-# directories are built, so scanning only the controller and the installer
-# would leave service-written paths outside the gate. An enumerated list rather
-# than every module under tools/: extending the home-path gate to another
-# module is a deliberate edit, exactly as adding a packaged asset to a plugin
-# surface list is.
-APPROVAL_SERVICE_SURFACE_FILES = [
+# directories are built, so scanning only a controller and an installer would
+# leave service-written paths outside the gate. An enumerated list rather than
+# every module under tools/: extending the home-path gate to another module is
+# a deliberate edit, exactly as adding a packaged asset to a plugin surface
+# list is.
+PYTHON_SERVICE_SURFACE_FILES = [
     "tools/approve_issues_service.py",
     "tools/install_issue_approval.py",
     "tools/service_manager.py",
+    "tools/mission_runner_service.py",
 ]
 
-# What the Python extractor actually recovers from each of the three, pinned
-# the way the plugin surfaces' command sets are: the completeness loop below
+# What the Python extractor actually recovers from each of the four, pinned the
+# way the plugin surfaces' command sets are: the completeness loop below
 # reports no undeclared segment for a module the extractor recovers nothing
 # from, for the same reason it reports none for a module it never opened. The
 # installer's empty set is a pin rather than an omission — it expands whatever
 # `--install-dir` or `--config` it is given and builds no managed location of
 # its own — so a future edit that made it construct one would have to declare
 # it here as well as in the manifest.
-APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS = {
+PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     "tools/approve_issues_service.py": {
         # The service root, and each tree the controller composes from it
         # through a nullary helper: `runtime_root()`, `discovery_record_path()`
@@ -330,6 +333,18 @@ APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS = {
         # below drives.
         "/.config",
         "/.config/systemd/user",
+    },
+    # The mission runner's service root in both platform spellings, and the two
+    # trees it composes from that root through a nullary helper each. Only one
+    # of the root's three returns is followed — the extractor takes the first
+    # that resolves — so the `~/Library` runtime and lock spellings are not
+    # recovered here and are grounded in the module's docstrings instead, as
+    # docs/agent-workflow-contract.md §4 records.
+    "tools/mission_runner_service.py": {
+        "/Library/Application Support/kanban/mission-runner",
+        "/.local/share/kanban/mission-runner",
+        "/.local/share/kanban/mission-runner/runtime",
+        "/.local/share/kanban/mission-runner/locks",
     },
 }
 
@@ -2121,15 +2136,15 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_every_home_relative_path_segment_is_documented(self):
         # Two surfaces, one reconciliation. The Haskell modules spell a managed
-        # location as one literal and the three approval-service modules
-        # compose one from path segments, so each gets its own extractor and
-        # both answer to the same `personal-path` rows.
+        # location as one literal and the four Python service modules compose
+        # one from path segments, so each gets its own extractor and both
+        # answer to the same `personal-path` rows.
         personal_tokens = [
             row["token"]
             for row in self.manifest
             if row["kind"] == "personal-path"
         ]
-        for relative_path in SURFACE_FILES + APPROVAL_SERVICE_SURFACE_FILES:
+        for relative_path in SURFACE_FILES + PYTHON_SERVICE_SURFACE_FILES:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             undeclared = undeclared_home_segments(
                 relative_path, content, personal_tokens
@@ -2142,23 +2157,23 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 "in docs/agent-workflow-contract.md",
             )
 
-    def test_approval_service_home_path_discovery_is_not_vacuous(self):
-        # The three modules reach the loop above by being listed, and a loop
+    def test_python_service_home_path_discovery_is_not_vacuous(self):
+        # The four modules reach the loop above by being listed, and a loop
         # over a module the extractor recovers nothing from reports no
         # undeclared segment for the same reason a loop over nothing does. Pin
         # what each one actually builds so a refactor that stops matching —
         # or a surface list that loses a member — fails here.
-        for relative_path in APPROVAL_SERVICE_SURFACE_FILES:
+        for relative_path in PYTHON_SERVICE_SURFACE_FILES:
             with self.subTest(surface=relative_path):
                 content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
                 self.assertEqual(
                     home_relative_segments_for_surface_file(relative_path, content),
-                    APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS[relative_path],
+                    PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS[relative_path],
                 )
         self.assertEqual(
-            sorted(APPROVAL_SERVICE_EXPECTED_HOME_SEGMENTS),
-            sorted(APPROVAL_SERVICE_SURFACE_FILES),
-            "every scanned approval-service module needs a pinned expectation",
+            sorted(PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS),
+            sorted(PYTHON_SERVICE_SURFACE_FILES),
+            "every scanned Python service module needs a pinned expectation",
         )
 
     def test_an_undeclared_python_home_path_is_reported(self):
@@ -3450,13 +3465,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
         # already have rows: the whole eligible surface spawns exactly these
-        # six, and only launchctl was missing before issue #149 — systemctl
-        # joined it with the systemd backend in issue #329.
+        # seven, and only launchctl was missing before issue #149 — systemctl
+        # joined it with the systemd backend in issue #329, and `ps` with the
+        # mission runner in issue #666, where the controller reads a recorded
+        # runner's start time to tell it from whatever later inherits its
+        # process identifier.
         found = set()
         for path in tool_surface_files():
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
         self.assertEqual(
-            found, {"gh", "git", "codex", "claude", "launchctl", "systemctl"}
+            found, {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps"}
         )
 
     def test_each_service_manager_cli_is_declared_and_load_bearing(self):
@@ -4620,6 +4638,27 @@ class WorkerDeadlineBoundaryTests(unittest.TestCase):
 
 
 
+# The mission modules that start a process, and are therefore excused from the
+# "reaches the outside only through its driver" scan above. Both arrived with
+# issue #666's repository scheduler, and neither is a widening of what a
+# mission may do:
+#
+# * `Scheduler.hs` advances each admitted mission by re-executing *this*
+#   binary as `kanban --mission <id>`, so the work still happens inside a
+#   mission controller that dispatches through the action registry. What it
+#   starts is that controller, not an action.
+# * `Notify.hs` runs the command an operator configured to be told that a
+#   mission is waiting on them, through the same bounded capture seam
+#   `Kanban.UsageCommand` uses. It performs no workflow effect at all.
+#
+# An entry here buys nothing on its own: three assertions below pin what each
+# of the two may start, and a fourth refuses an entry naming a module that no
+# longer spawns.
+MISSION_SCHEDULER_MODULE = "src/Kanban/Mission/Scheduler.hs"
+MISSION_NOTIFIER_MODULE = "src/Kanban/Mission/Notify.hs"
+MISSION_SPAWNING_MODULES = (MISSION_SCHEDULER_MODULE, MISSION_NOTIFIER_MODULE)
+
+
 class MissionRunnerAuthorityTests(unittest.TestCase):
     """Issue #595 requirement 18: the runner broadens nothing.
 
@@ -4658,9 +4697,14 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
     def test_the_controller_reaches_the_outside_only_through_its_driver(self):
         # Every process this codebase starts goes through System.Process. A
         # mission module importing it would be a spawn the action registry's
-        # launch boundary never saw.
+        # launch boundary never saw -- with the two exceptions below, each of
+        # which is pinned by an assertion of its own rather than excused.
+        scanned = 0
         for path in sorted((REPO_ROOT / "src" / "Kanban" / "Mission").rglob("*.hs")):
             relative = path.relative_to(REPO_ROOT).as_posix()
+            if relative in MISSION_SPAWNING_MODULES:
+                continue
+            scanned += 1
             content = path.read_text(encoding="utf-8")
             with self.subTest(module=relative):
                 self.assertEqual(
@@ -4670,6 +4714,199 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
                     "started through the workflow action registry, which is "
                     "where the spawn boundary and its readiness gate live",
                 )
+        # A carve-out that grew to cover the whole directory would leave the
+        # loop above asserting nothing.
+        self.assertGreater(scanned, len(MISSION_SPAWNING_MODULES))
+
+    def test_every_carved_out_mission_module_is_still_there(self):
+        # The other half of the carve-out. A module that stopped spawning, or
+        # that was renamed, has to leave this tuple rather than sit in it
+        # excusing a file that no longer exists.
+        for relative in MISSION_SPAWNING_MODULES:
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                self.assertTrue(path.is_file(), f"{relative} is not in the tree")
+                self.assertNotEqual(
+                    haskell_import_names(path.read_text(encoding="utf-8"), "System.Process"),
+                    set(),
+                    f"{relative} no longer starts a process; take it out of "
+                    "MISSION_SPAWNING_MODULES rather than leaving an excuse "
+                    "nothing needs",
+                )
+
+    def test_the_two_spawning_mission_modules_name_no_executable(self):
+        # What makes the carve-out safe rather than a hole. Issue #666's
+        # scheduler starts one child per admitted mission and its notifier
+        # starts whatever the operator configured, and neither may name a
+        # program: the scheduler re-executes *this* process's own binary, which
+        # `System.Environment.getExecutablePath` answers, and the notifier runs
+        # an argv that came out of the configuration file. A literal executable
+        # name appearing in either is a mission module that acquired the
+        # ability to run something the action registry never saw.
+        for relative in MISSION_SPAWNING_MODULES:
+            with self.subTest(module=relative):
+                content = (REPO_ROOT / relative).read_text(encoding="utf-8")
+                self.assertEqual(
+                    discovered_executables(content),
+                    set(),
+                    f"{relative} names an executable; a mission module may "
+                    "re-execute Kanban itself or run the operator's own "
+                    "configured command, and nothing else",
+                )
+
+    def test_the_scheduler_re_executes_kanban_rather_than_naming_it(self):
+        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
+        self.assertIn(
+            "getExecutablePath",
+            content,
+            f"{MISSION_SCHEDULER_MODULE} must resolve the binary it re-executes "
+            "from this process rather than from a name",
+        )
+        self.assertIn(
+            '"--mission"',
+            content,
+            f"{MISSION_SCHEDULER_MODULE} must advance a mission through the "
+            "foreground mission runner it re-executes",
+        )
+
+    def test_the_scheduler_reads_no_standard_input(self):
+        # Issue #666 requirement 5: a scheduler invoked directly from a
+        # terminal must not prompt. `kanban --mission` decides whether it has
+        # an operator by asking about *its own* standard input, so the way a
+        # pass keeps that promise is by never having a console at all —
+        # neither reading the descriptor nor building the seam that would.
+        content = (REPO_ROOT / MISSION_SCHEDULER_MODULE).read_text(encoding="utf-8")
+        for forbidden in ("stdin", "MissionConsole", "terminalMissionConsole"):
+            with self.subTest(needle=forbidden):
+                self.assertNotIn(
+                    forbidden,
+                    content,
+                    f"{MISSION_SCHEDULER_MODULE} names {forbidden!r}; a pass has "
+                    "no operator console and must not acquire one",
+                )
+        # And the children it starts are handed a descriptor that is readable
+        # and is not a terminal, rather than a closed one: a closed descriptor
+        # makes `hIsTerminalDevice` raise instead of answering.
+        self.assertIn('openFile "/dev/null" ReadMode', content)
+
+    def test_the_notifier_runs_its_command_through_the_bounded_seam(self):
+        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
+        self.assertIn(
+            "Kanban.CommandCapture",
+            content,
+            f"{MISSION_NOTIFIER_MODULE} must run the operator's command through "
+            "the bounded command-capture seam (issue #666 requirement 14)",
+        )
+
+    def notifier_command_body(self):
+        """The whole of `runMissionNotificationCommand`, `where` clause and all."""
+        content = (REPO_ROOT / MISSION_NOTIFIER_MODULE).read_text(encoding="utf-8")
+        start = content.find("runMissionNotificationCommand :: ")
+        self.assertNotEqual(
+            start,
+            -1,
+            f"{MISSION_NOTIFIER_MODULE} no longer declares runMissionNotificationCommand",
+        )
+        # To the next top-level declaration, or the end of the module. Searched
+        # from the line after the signature, so this declaration's own name
+        # does not end the span it opens. The `where` bindings are part of this
+        # function and every assertion below is about one of them, so the span
+        # has to include them.
+        opened = content.index("\n", start) + 1
+        following = re.search(r"^[a-z][A-Za-z0-9_']* ::", content[opened:], re.MULTILINE)
+        end = len(content) if following is None else opened + following.start()
+        return content[start:end]
+
+    def test_the_notifier_guards_its_command_for_the_whole_of_its_life(self):
+        # A notification command is the one thing the scheduler starts in a
+        # process group of its own, which is exactly what the supervisor's
+        # signal to the scheduler's group cannot reach. So the scheduler has to
+        # end it itself, on every way out of that call, and *which* ways are
+        # covered is the whole of the guarantee. An examination of the
+        # structure rather than of behaviour, because the alternative is a test
+        # per exit that has to win a race: a stop landing during setup, a
+        # failure while the output is read, a caller's bound expiring — none of
+        # those gaps is reliably reproducible from outside.
+        body = self.notifier_command_body()
+        # The signal handler is installed outside everything, because a stop
+        # arriving during setup or teardown is still a stop.
+        self.assertIn(
+            "withStopSweep (sweepRecorded live) $",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must install its stop handler around the "
+            "whole of the command's life",
+        )
+        # And the sweep is a bracket's release rather than a line on the happy
+        # path, which is what makes a synchronous or asynchronous exception
+        # end the group too.
+        self.assertIn(
+            "bracket (spawn live directory) (const (retire live))",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must acquire the command and release it "
+            "through bracket, so every exit sweeps",
+        )
+        retire = re.search(r"^    retire live = do\n((?:      .*\n)+)", body, re.MULTILINE)
+        self.assertIsNotNone(
+            retire, f"{MISSION_NOTIFIER_MODULE} no longer declares the bracket's release"
+        )
+        self.assertIn(
+            "sweepRecorded live",
+            retire.group(1),
+            f"{MISSION_NOTIFIER_MODULE}'s bracket release must sweep the command's group",
+        )
+        # The acquisition starts the command; `register` records what a stop
+        # has to end. Bracket runs no release for an acquisition that threw,
+        # so that span is covered twice: masked, so there is no delivery point
+        # in it, and guarded, so a delivery point an unrelated edit introduces
+        # still ends the process rather than stranding it.
+        #
+        # `mask_` rather than `mask`: a restore across the spawn would reopen
+        # exactly this window, and it buys nothing — the POSIX signal mask a
+        # child inherits across exec is a different thing from Haskell's
+        # asynchronous-exception mask, so holding the latter cannot make the
+        # notifier immune to the signal used to stop it.
+        spawn = re.search(
+            r"^    spawn live directory = mask_ \$ do\n((?:      .*\n)+)",
+            body,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            spawn,
+            f"{MISSION_NOTIFIER_MODULE} must acquire under mask_, or a cancellation "
+            "between the spawn and the registration leaks the command",
+        )
+        self.assertIn("createProcess (spec directory)", spawn.group(1))
+        self.assertNotIn(
+            "restore",
+            spawn.group(1),
+            f"{MISSION_NOTIFIER_MODULE} must not restore across the spawn; that is "
+            "the window an unrecorded notifier escapes through",
+        )
+        self.assertIn(
+            "`onException` sweepUnrecorded processHandle",
+            spawn.group(1),
+            f"{MISSION_NOTIFIER_MODULE} must end a command it created but has not "
+            "yet recorded, since bracket's release will not run for it",
+        )
+        register = re.search(
+            r"^    register live outputHandle errorHandle processHandle = do\n((?:      .*\n)+)",
+            body,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            register,
+            f"{MISSION_NOTIFIER_MODULE} no longer declares the acquisition's registration",
+        )
+        self.assertIn("writeIORef live (NotifierLive", register.group(1))
+        # Nothing sweeps inline. `sweepCommandGroup` belongs to `sweepRecorded`
+        # alone, so there is one sweep on one path and no second spelling to
+        # drift from it.
+        self.assertNotIn(
+            "sweepCommandGroup",
+            body,
+            f"{MISSION_NOTIFIER_MODULE} must sweep only through its bracket release; "
+            "an inline sweep is skipped by every exception",
+        )
 
 
 

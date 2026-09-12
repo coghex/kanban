@@ -2066,6 +2066,100 @@ approved item itself, so the destination is proved instead. The outcomes
 differ; the analysis does not, and neither action may write to an endpoint its
 report did not name.
 
+### 2.12 Unattended capability — the mission runner
+
+- **Owning source:** `tools/mission_runner_service.py` (the foreground `run`
+  that supervises repeated scheduler passes, the read-only `status`, the
+  bookkeeping `ack`, and the durable status and incident documents), over
+  `src/Kanban/Mission/Scheduler.hs` (one bounded repository-wide pass),
+  `src/Kanban/Mission/Pass.hs` (the two machine-readable documents a pass is
+  made of), and `src/Kanban/Mission/Notify.hs` (the attention notification and
+  its durable suppression record). There is no in-app surface yet: Kanban-side
+  discovery, status decoding, and dashboard start/stop are a later slice's, so
+  today nothing outside this controller touches the runtime documents at all.
+  Within it the three commands divide as the Commands bullet below sets out:
+  `run` writes the status document and opens incidents, `status` only reads,
+  and `ack` reads the incidents to find the open one it then rewrites.
+- **Installation:** none. This capability is invoked directly — the wrapper is
+  run in a terminal or under whatever supervisor the operator already has — and
+  has no service-manager namespace, no discovery record, no installed script
+  links, and no per-repository log directory. Making it a managed job is a
+  later slice's, and until then nothing here may be discovered the way §2.4's
+  and §2.8's jobs are.
+- **Invocation:** the controller never imports Haskell. Every pass is a child
+  process running `kanban --mission-scheduler` — resolved from `PATH` unless
+  `--kanban` names one, and refused by name when neither is usable — in the
+  checkout it was started for, carrying that checkout's canonical `--repo`
+  identity and, when one was given, an absolute `--config`. The environment is
+  inherited whole, because `$XDG_DATA_HOME` and `$XDG_STATE_HOME` are what
+  decide which mission store a pass advances and which runtime describes it.
+- **The pass contract:** one JSON document on stdout and narration on stderr,
+  carrying `kanban-mission-scheduler-pass` version 1, the repository identity,
+  each admitted mission and its disposition, each outstanding attention
+  identity with the typed items it is about and what became of its
+  notification, and a termination reason of `completed`, `refused`, or `failed`
+  — exiting 0, 2, and 1 respectively. A pass fails for reasons of its own as
+  well as for a mission's: a snapshot that will not decode, one recorded
+  against another repository, a store or legacy root it cannot enumerate, a
+  specification that cannot be read behind a waiting mission, a child that
+  refused for any reason other than losing the advancement lease, and a scratch
+  directory it could not prepare each produce a `failed` pass. That last child
+  case is the only place a mission whose *specification* is unreadable or
+  foreign is found at all — the inventory reads snapshots, so such a mission has
+  a perfectly runnable one and is admitted. Only the last
+  admits nothing by construction — it happens before the pass begins. The
+  others are found while the pass is under way, so a failed pass may well carry
+  dispositions for the missions it did advance, and a supervisor must read the
+  termination rather than infer it from an empty `admitted` list. A `refused`
+  pass is the one that observed nothing at all: it returns before the inventory
+  is read, so both its admitted and its attention lists are empty. The
+  schema, the version, the three vocabularies and that exit mapping are
+  declared once in `Kanban.Mission.Pass` and mirrored as constants in the
+  controller, which cannot import them;
+  `tools/test_mission_runner_service.py` holds the mirror equal to the
+  declaration. A report that is absent, unreadable, of another schema or
+  version, about another repository, carrying an unknown disposition or
+  notification state, or contradicting the status its child exited with is a
+  failed pass, never a quiet one.
+- **Authority:** none beyond what a mission already had. A pass admits at most
+  two runnable missions and advances each through its own `kanban --mission`
+  child, which dispatches through the workflow action registry exactly as a
+  board key press does. Neither the scheduler nor the controller merges a pull
+  request, applies a verdict label, or reports an indeterminate result as a
+  success, and neither performs a GitHub request of its own — a pass with
+  nothing runnable makes none at all.
+- **Durable state:** a status document and an incident directory per canonical
+  repository under the runtime root §4's `mission-runner-runtime-dir` rows
+  name, a per-identity run lock under `mission-runner-lock-dir`, and — inside
+  each mission's own record in the mission store — one notification suppression
+  record per attention identity. The suppression record is written before the
+  configured command is launched and is never retried afterwards, so delivery
+  is at most once per waiting episode and a crash between the record and the
+  launch loses that notification by design.
+- **Commands:** three. `run` is the supervisor; `status` reads and repairs
+  nothing — no directory created, no document rewritten, no incident opened or
+  resolved — because it is the diagnostic reached for when the runtime is
+  already in a bad state, and a reader that repaired what it read would destroy
+  the evidence it was called to show. `ack` is the only one that changes
+  anything, and only bookkeeping: it marks one open incident resolved, writes
+  no status document, creates nothing, and refuses an identifier naming no open
+  incident. It is deliberately powerless over the service, so acknowledging the
+  incident a failed pass opened does not make the next pass succeed.
+- **Notifications:** off by default, and when enabled the operator's own
+  configured command is run through the bounded command-capture seam with two
+  fixed values appended — the repository identity and `attention-required` —
+  followed by zero or more typed items, one argument each. Every one of those
+  is appended *after* whatever arguments the configured command itself carries,
+  so their absolute positions depend on that prefix and only their order is
+  fixed. No title, summary, recommendation, or filesystem path is ever passed,
+  and nothing at all is launched for an episode whose mission specification
+  cannot be read. The command runs in its own process group and that group is
+  swept on every path out, so neither a command that outlived its bound nor a
+  descendant it backgrounded survives the pass. A zero exit establishes that
+  the command completed and nothing more.
+- **Mandatory/optional:** optional. A Kanban that never runs a mission runner
+  never resolves `kanban` as an external command and writes none of this state.
+
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -2233,7 +2327,7 @@ claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | su
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
+ps-cli | executable | ps | src/Kanban/Process.hs;tools/mission_runner_service.py | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
 systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs | kanban | supported | no
@@ -2274,6 +2368,13 @@ grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/sk
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
+kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-runtime-dir | personal-path | /Library/Application Support/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-runtime-dir-xdg | personal-path | /.local/share/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-lock-dir | personal-path | /Library/Application Support/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-lock-dir-xdg | personal-path | /.local/share/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
 ```
 
 The six issue-review `personal-path` rows are three locations times two
@@ -2433,10 +2534,47 @@ their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms �
 there the literal carries the leading separator, so no reconciling comment is
 needed.
 
+The six `mission-runner` `personal-path` rows are three locations times two
+platform conventions, as the issue-review and drainer rows are and unlike the
+issue-approval ones: `tools/mission_runner_service.py` resolves its root
+through `kanban_config.is_macos()`, taking `~/Library/Application
+Support/kanban/mission-runner` on macOS and the XDG data root — `$XDG_DATA_HOME`
+when it names an absolute directory, and `~/.local/share/kanban/mission-runner`
+when it does not — everywhere else. That absolute-only rule is the drainer's
+rather than issue-review's, and for the drainer's stated reason: the unit that
+will eventually run this job and the paths that locate it have to read the
+environment identically. `mission-runner-service-root` is the service root and
+the parent of the other two; `mission-runner-runtime-dir` is the runtime root,
+one directory per identity beneath it holding that identity's status document
+and incident directory; and `mission-runner-lock-dir` holds the per-identity run
+lock. No installation directory, discovery record, or log root appears among
+them, because this slice installs nothing: `kanban --mission-scheduler` is
+supervised by a wrapper invoked directly, and making it a managed job is a later
+slice's (§2.12).
+
+Those six name `tools/mission_runner_service.py` alone, and that is the same
+statement the four issue-approval rows make: the module composes each location
+segment by segment, so a `files` entry can only be grounded in the module if the
+literals are written down there. Two of them are, by the scan below —
+`mission-runner-service-root` in both spellings, and the XDG runtime and lock
+trees the scan resolves the service root to — and the remaining `~/Library`
+runtime and lock spellings are written out in the docstring of the helper that
+builds each, because the scan follows exactly one of a helper's returns and the
+row still has to be grounded in the module that owns it.
+
+`kanban-cli` is the executable a pass *is*. Every other dependency in this table
+is something Kanban invokes; this one is Kanban, invoked by
+`tools/mission_runner_service.py` as an ordinary external command because the
+controller is a separate process by design — it supervises passes and never
+imports the code that performs them (§2.12). The row is `mandatory | no` for the
+same reason `codex` and `claude` are: a Kanban that never runs a mission runner
+never needs to resolve it.
+
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
-`tools/approve_issues_service.py`, `tools/install_issue_approval.py`, and
-`tools/service_manager.py` as parsed modules — following a name to its binding
+`tools/approve_issues_service.py`, `tools/install_issue_approval.py`,
+`tools/service_manager.py`, and `tools/mission_runner_service.py` as parsed
+modules — following a name to its binding
 and a helper to its return — and reconciles every chain that reaches a home root
 against the `personal-path` tokens here. It is the counterpart of the Haskell and
 markdown scans above, over a third surface that spells its paths in neither of
@@ -3298,11 +3436,12 @@ runs) parses the manifest in §4 and:
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on
   real ones. That discovered surface is executable-only; the home-relative
-  paths a `tools/` module builds are reconciled only for the three named in
+  paths a `tools/` module builds are reconciled only for the four named in
   the next bullet;
 - fails if `tools/approve_issues_service.py`,
-  `tools/install_issue_approval.py`, or `tools/service_manager.py` — §2.8's
-  owning sources — builds a home-relative path that has no matching
+  `tools/install_issue_approval.py`, `tools/service_manager.py`, or
+  `tools/mission_runner_service.py` — §2.8's and §2.12's owning sources —
+  builds a home-relative path that has no matching
   `personal-path` manifest entry. These are Python, so they need an extractor
   of their own beside the Haskell one, and it resolves the parsed module rather
   than matching text, because the shape it has to recover is not local to one
@@ -3315,7 +3454,7 @@ runs) parses the manifest in §4 and:
   `$HOME/`-prefixed literal, joining the result into the same slash-prefixed
   shape the Haskell and markdown scans compare. Quote style and line wrapping
   are not distinctions the parsed tree makes. What it recovers from each of the
-  three is pinned, so a refactor that stops matching fails here rather than
+  four is pinned, so a refactor that stops matching fails here rather than
   passing with an empty discovered set — including the pin that the installer
   builds none of its own — and fixture regressions prove that an undeclared
   segment is reported, that a tail hung off a binding or a helper is recovered
