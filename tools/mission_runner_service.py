@@ -2380,9 +2380,24 @@ def exclusive_of_runs(job: MissionRunnerJob, action: str) -> Iterator[None]:
     Deliberately not held across a `start`'s kick and wait: the run being
     started needs this very lock to establish itself, so a start that held it
     would be waiting for something it was itself preventing.
+
+    Re-entrant within one thread, for the reason `held_blocking` is:
+    `tools/install_mission_runner.py` holds this exclusion across the whole of a
+    transition — the shared links as well as the job — and calls the controller
+    operations that take it again as steps of that transition. `flock` is held
+    per open file description rather than per process, so without this the inner
+    acquisition would be refused by the outer one's own hold. Two *threads* are
+    two transitions and go on contending exactly as two processes do.
     """
     depths = _held_depths()
     key = str(job.lock_path)
+    if depths.get(key):
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
     with held_exclusively(
         job.lock_path,
         job,
@@ -2556,23 +2571,31 @@ def installed_repository_records() -> dict[str, dict[str, Any]]:
     }
 
 
-def installed_repository_records_readable() -> bool:
-    """Whether the discovery document can be decoded at all.
+def installed_jobs_are_knowable() -> bool:
+    """Whether the set of installed jobs can be read off the discovery record.
 
-    `installed_repository_records` reports an unreadable or non-object document
-    as *no* repositories, which is the right answer for a reader asking "is this
-    repository installed?" and the wrong one for a writer asking "may these
-    shared links go?". A document nobody can decode may name every installed job
-    on this account, so a caller deciding a removal has to be able to tell the
-    two apart and keep what it cannot account for.
+    Not the same question as "is this repository installed?", which
+    `installed_repository_records` answers by reporting an unreadable or absent
+    document as no repositories. That is the right answer for a reader and a
+    dangerous one for a writer deciding whether shared script links may go: the
+    links are what *every* job installed into a directory runs from, and a
+    record that cannot be read may name all of them.
 
-    Absent counts as readable: nothing is installed, which is a complete answer
-    and the state a first install starts from.
+    Absence is unknown for the same reason an undecodable document is, and not
+    for a weaker one. A record can be deleted while every job it named is still
+    loaded in the service manager, and nothing here can enumerate a manager's
+    jobs to find out — that boundary is deliberately total and has no verb for
+    it. An empty `repositories` table is different: something wrote it, and what
+    it says is that nothing is installed.
+
+    So a caller that cannot account for a directory's dependants keeps its
+    links. Keeping a link nothing needs is recoverable by a later uninstall;
+    removing one a live job runs from is not.
     """
     path = discovery_record_path()
+    if not os.path.lexists(path):
+        return False
     document = _read_json_document(path)
-    if document is None:
-        return not os.path.lexists(path)
     if not isinstance(document, dict):
         return False
     records = document.get(RECORD_REPOSITORIES_KEY)

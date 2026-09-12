@@ -1975,9 +1975,9 @@ class RecordRepairSystemdTests(SystemdShapeMixin, RecordRepairTests):
     pass
 
 
-class UndecodableRecordTests(InstallerFixture):
-    """A record nobody can decode may name every installed job on this
-    account, so nothing shared is taken away on the strength of it."""
+class UnknowableRecordTests(InstallerFixture):
+    """A record this account's installed jobs cannot be read off may name every
+    one of them, so nothing shared is taken away on the strength of it."""
 
     other_identity = "acme/gadgets"
 
@@ -1988,11 +1988,14 @@ class UndecodableRecordTests(InstallerFixture):
     def corrupt_record(self, content=b"\xff\xfe not json at all"):
         service.discovery_record_path().write_bytes(content)
 
-    def test_the_readability_probe_tells_absent_from_undecodable(self):
+    def test_the_probe_admits_only_a_record_it_can_read_the_jobs_off(self):
         record = service.discovery_record_path()
-        self.assertTrue(service.installed_repository_records_readable())
+        # Absent is unknown, not empty: a record can be deleted while every job
+        # it named is still loaded in the service manager, and nothing here can
+        # enumerate a manager's jobs to find out.
+        self.assertFalse(service.installed_jobs_are_knowable())
         self.install()
-        self.assertTrue(service.installed_repository_records_readable())
+        self.assertTrue(service.installed_jobs_are_knowable())
         for content in (
             b"\xff\xfe not json at all",
             b"[]",
@@ -2001,20 +2004,17 @@ class UndecodableRecordTests(InstallerFixture):
         ):
             with self.subTest(content=content):
                 record.write_bytes(content)
-                self.assertFalse(service.installed_repository_records_readable())
+                self.assertFalse(service.installed_jobs_are_knowable())
+        # An empty table is different from every one of those: something wrote
+        # it, and what it says is that nothing is installed.
         record.write_text('{"repositories": {}}', encoding="utf-8")
-        self.assertTrue(service.installed_repository_records_readable())
+        self.assertTrue(service.installed_jobs_are_knowable())
 
-    def test_an_undecodable_record_keeps_the_links_a_sibling_runs_from(self):
-        self.install()
-        self.install(repo=self.other_repo)
-        self.corrupt_record()
-
-        result = self.uninstall()
+    def assert_sibling_keeps_its_links(self, result):
         self.assertTrue(result["uninstalled"])
-        self.assertFalse(result["record_readable"])
-        # Empty for the same reason the record is unreadable, which is exactly
-        # why it may not be read as "nothing depends on these".
+        self.assertFalse(result["dependants_known"])
+        # Empty for the same reason the record could not be read, which is
+        # exactly why it may not be taken as "nothing depends on these".
         self.assertEqual(result["dependent_repositories"], [])
         for name in installer.LINKED_MODULES:
             self.assertTrue((self.install_dir / name).is_symlink(), name)
@@ -2022,23 +2022,44 @@ class UndecodableRecordTests(InstallerFixture):
         # The sibling's job is still loaded, and still has a controller to run.
         self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
 
-    def test_the_dry_run_reports_that_retention_too(self):
+    def test_an_undecodable_record_keeps_the_links_a_sibling_runs_from(self):
         self.install()
         self.install(repo=self.other_repo)
         self.corrupt_record()
-        planned = self.uninstall(dry_run=True)
-        self.assertFalse(planned["record_readable"])
-        self.assertEqual(
-            {name: link["result"] for name, link in planned["links"].items()},
-            {name: "kept" for name in installer.LINKED_MODULES},
-        )
+        self.assert_sibling_keeps_its_links(self.uninstall())
 
-    def test_a_readable_record_with_no_dependants_still_lets_them_go(self):
+    def test_an_absent_record_keeps_the_links_a_sibling_runs_from(self):
+        # The manager is still holding both jobs; only the document that says
+        # so is gone.
+        self.install()
+        self.install(repo=self.other_repo)
+        service.discovery_record_path().unlink()
+        self.assert_sibling_keeps_its_links(self.uninstall())
+
+    def test_the_dry_run_reports_that_retention_too(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        for removal in (self.corrupt_record, self.delete_record):
+            with self.subTest(record=removal.__name__):
+                removal()
+                planned = self.uninstall(dry_run=True)
+                self.assertFalse(planned["dependants_known"])
+                self.assertEqual(
+                    {name: link["result"] for name, link in planned["links"].items()},
+                    {name: "kept" for name in installer.LINKED_MODULES},
+                )
+
+    def delete_record(self):
+        record = service.discovery_record_path()
+        if record.exists():
+            record.unlink()
+
+    def test_a_record_with_no_dependants_still_lets_them_go(self):
         # The positive control the retention above needs: "nothing depends on
         # these" has to keep meaning what it says.
         self.install()
         result = self.uninstall()
-        self.assertTrue(result["record_readable"])
+        self.assertTrue(result["dependants_known"])
         for name in installer.LINKED_MODULES:
             self.assertFalse(os.path.lexists(self.install_dir / name), name)
 
@@ -2056,7 +2077,7 @@ class UndecodableRecordTests(InstallerFixture):
             self.assertTrue((self.install_dir / name).is_symlink(), name)
 
 
-class UndecodableRecordSystemdTests(SystemdShapeMixin, UndecodableRecordTests):
+class UnknowableRecordSystemdTests(SystemdShapeMixin, UnknowableRecordTests):
     pass
 
 
@@ -2230,6 +2251,156 @@ class InstallationSerializationTests(InstallerFixture):
 class InstallationSerializationSystemdTests(
     SystemdShapeMixin, InstallationSerializationTests
 ):
+    pass
+
+
+# How another process asks whether this identity's run lock is free, without
+# holding it for any longer than the question takes. `flock` is held per open
+# file description rather than per process, so a subprocess contends with this
+# one exactly as a real foreground run would -- which is what makes this a
+# question about the lock rather than about the asker.
+RUN_LOCK_PROBE = """
+import fcntl
+import sys
+
+handle = open(sys.argv[1], "a+", encoding="utf-8")
+try:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+raise SystemExit(0)
+"""
+
+# Another process inside a `run` for one identity, holding the lock the
+# controller's own `run_lock` holds and writing the owner metadata a contender
+# reports back.
+RUN_LOCK_HOLDER = """
+import fcntl
+import json
+import os
+import sys
+import time
+
+handle = open(sys.argv[1], "a+", encoding="utf-8")
+fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+handle.seek(0)
+handle.truncate()
+handle.write(json.dumps({"pid": os.getpid(), "mode": "run"}))
+handle.flush()
+open(sys.argv[2], "w").write("ready")
+time.sleep(300)
+"""
+
+
+class RunExclusionTests(InstallerFixture):
+    """No window in a transition lets a foreground run begin beside the links
+    it would execute.
+
+    `job_transition` serializes managed transitions against each other, and a
+    foreground `run` takes neither of its locks -- so the exclusion that keeps
+    the two apart is this identity's run lock, and what matters is that the
+    installer holds it for as long as it is mutating anything.
+    """
+
+    def lock_path(self):
+        return service.run_lock_path(service.repository_slug(self.identity))
+
+    def run_lock_free(self):
+        """Whether another process could take this identity's run lock now."""
+        path = self.lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        proc = subprocess.run(
+            [sys.executable, "-c", RUN_LOCK_PROBE, str(path)],
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        return proc.returncode == 0
+
+    def hold_run_lock(self):
+        path = self.lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ready = self.root / "run-lock-ready"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", RUN_LOCK_HOLDER, str(path), str(ready)]
+        )
+        self.addCleanup(self.stop_holder, proc)
+        wait_until(ready.exists, message="the run lock holder to take the lock")
+        return proc
+
+    def stop_holder(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=30)
+
+    def test_the_probe_finds_the_lock_free_when_nothing_holds_it(self):
+        # The control this whole class rests on: a probe that always answered
+        # "taken" would pass every case below while proving nothing.
+        self.assertTrue(self.run_lock_free())
+        self.install()
+        self.assertTrue(self.run_lock_free())
+
+    def test_a_run_cannot_begin_while_an_install_mutates_links(self):
+        observed = []
+        original = installer.install_symlink
+
+        def observing(source, destination):
+            observed.append(self.run_lock_free())
+            return original(source, destination)
+
+        with mock.patch.object(installer, "install_symlink", observing):
+            self.install()
+        self.assertEqual(len(observed), len(installer.LINKED_MODULES))
+        self.assertNotIn(
+            True,
+            observed,
+            "a foreground run could have begun while the links were written",
+        )
+
+    def test_a_run_cannot_begin_while_an_uninstall_removes_links(self):
+        self.install()
+        observed = []
+        original = installer.remove_symlink
+
+        def observing(destination, name):
+            observed.append(self.run_lock_free())
+            return original(destination, name)
+
+        with mock.patch.object(installer, "remove_symlink", observing):
+            self.uninstall()
+        self.assertEqual(len(observed), len(installer.LINKED_MODULES))
+        self.assertNotIn(
+            True,
+            observed,
+            "a foreground run could have begun while the links were removed",
+        )
+
+    def test_an_install_refused_by_a_live_run_mutates_no_links(self):
+        self.hold_run_lock()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.install()
+        self.assertIn("already running", str(raised.exception))
+        for name in installer.LINKED_MODULES:
+            self.assertFalse(os.path.lexists(self.install_dir / name), name)
+        self.assertEqual(self.manager.call_names(), [])
+        self.assertEqual(self.entries(), {})
+
+    def test_an_uninstall_refused_by_a_live_run_removes_nothing(self):
+        self.install()
+        before = self.manager.call_names()
+        self.hold_run_lock()
+        with self.assertRaises(installer.InstallError) as raised:
+            self.uninstall()
+        self.assertIn("already running", str(raised.exception))
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+        self.assertTrue(self.manager.is_loaded(self.label()))
+        self.assertIn(self.identity, self.entries())
+        self.assertEqual(self.manager.call_names(), before)
+
+
+class RunExclusionSystemdTests(SystemdShapeMixin, RunExclusionTests):
     pass
 
 

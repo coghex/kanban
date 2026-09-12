@@ -45,12 +45,14 @@ and the refusal is the service-manager selection's rather than this module's:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import secrets
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -432,11 +434,36 @@ def dependent_repositories(install_dir: Path, *, excluding: str | None = None) -
     return sorted(dependants)
 
 
+@contextlib.contextmanager
+def exclusive_of_runs(
+    job: mission_runner_service.MissionRunnerJob, action: str
+) -> Iterator[None]:
+    """Hold this identity's run lock across every mutation this installer makes.
+
+    `job_transition` serializes managed transitions against each other, and a
+    foreground `run` takes neither of its locks — so without this the shared
+    links would be mutated outside any exclusion of runs at all. An install
+    repoints them and only then discovers, inside `install_job`, a run that
+    began after it planned; and an uninstall removes them after `uninstall_job`
+    has already given its own exclusion back, leaving a run free to start on
+    modules that are about to be deleted.
+
+    Re-entrant with the controller's own use of it, which is what lets those two
+    operations go on taking it as one step of the transition this holds it
+    across.
+    """
+    try:
+        with mission_runner_service.exclusive_of_runs(job, action):
+            yield
+    except mission_runner_service.ServiceError as exc:
+        raise InstallError(str(exc)) from exc
+
+
 def may_remove_links(
     install_dir: Path,
     *,
     excluding: str | None = None,
-    record_readable: bool | None = None,
+    dependants_known: bool | None = None,
 ) -> bool:
     """Whether this directory's shared links may be taken away.
 
@@ -449,22 +476,23 @@ def may_remove_links(
     the controller and the modules a sibling's loaded job runs from and leave
     the manager holding a job nothing can satisfy.
 
-    So an undecodable record is treated as an unknown dependency set and the
-    links stay. Keeping a link nothing needs is recoverable by a later
-    uninstall; removing one a live job runs from is not.
+    So a record this account's installed jobs cannot be read off -- undecodable,
+    or absent while a manager may still be holding jobs it once named -- is an
+    unknown dependency set and the links stay. Keeping a link nothing needs is
+    recoverable by a later uninstall; removing one a live job runs from is not.
 
-    `record_readable` is for the one caller that must not ask *now*: removing a
-    repository's entry rebuilds an undecodable document around that removal, so
-    a question asked afterwards always answers "readable, and nothing depends on
-    these" -- which is exactly the reading this function exists to refuse. That
-    caller reads it before the removal and hands the answer back in.
+    `dependants_known` is for the one caller that must not ask *now*: removing a
+    repository's entry rewrites the document around that removal, so a question
+    asked afterwards always answers "readable, and nothing depends on these" --
+    which is exactly the reading this function exists to refuse. That caller
+    reads it before the removal and hands the answer back in.
     """
-    readable = (
-        mission_runner_service.installed_repository_records_readable()
-        if record_readable is None
-        else record_readable
+    known = (
+        mission_runner_service.installed_jobs_are_knowable()
+        if dependants_known is None
+        else dependants_known
     )
-    if not readable:
+    if not known:
         return False
     return not dependent_repositories(install_dir, excluding=excluding)
 
@@ -539,7 +567,10 @@ def plan_released_links(
 
 
 def release_links(
-    assets: Path, install_dir: Path, identity: str
+    assets: Path,
+    install_dir: Path,
+    identity: str,
+    job: mission_runner_service.MissionRunnerJob,
 ) -> dict[str, dict[str, str]]:
     """Take back the links of an installation this repository has left.
 
@@ -557,13 +588,25 @@ def release_links(
         # makes it a dependant like any other rather than the one to discount.
         if not may_remove_links(install_dir):
             return plan_released_links(assets, install_dir, identity)
-        return {
-            name: {
-                "destination": str(destination),
-                "result": remove_symlink(destination, name),
-            }
-            for name, (_source, destination) in link_sources(assets, install_dir).items()
-        }
+        try:
+            with exclusive_of_runs(job, "releasing the links it left behind"):
+                return {
+                    name: {
+                        "destination": str(destination),
+                        "result": remove_symlink(destination, name),
+                    }
+                    for name, (_source, destination) in link_sources(
+                        assets, install_dir
+                    ).items()
+                }
+        except InstallError:
+            # Kept rather than refused, and this is the one mutation where that
+            # is right: the job has already been installed in its new directory
+            # by the time this runs, so failing here would turn a completed
+            # install into a reported failure. A run that began in the meantime
+            # may be executing the very modules this would delete, so the links
+            # stay and the next uninstall of that directory takes them.
+            return plan_released_links(assets, install_dir, identity)
 
 
 def require_recorded_installation(
@@ -702,16 +745,21 @@ def install(
     # repository reading the dependants in between would otherwise decide they
     # were unneeded and delete what this install had just created.
     with mission_runner_service.job_transition(job, install_dir):
-        results = {
-            name: install_symlink(source, destination)
-            for name, (source, destination) in sources.items()
-        }
-        for name, result in results.items():
-            document["links"][name]["result"] = result
-        # After the links, so the job's definition can only ever name a
-        # controller that is really there, and so a refused link leaves no job
-        # behind.
-        document["job"] = controller_operation("install_job", job, install_dir)
+        # And across the links as well as the job: `install_job` takes this same
+        # exclusion for itself, but only once the links have already been
+        # written, so a run beginning between the plan and that acquisition
+        # would leave this installation's links repointed and its job refused.
+        with exclusive_of_runs(job, "installing this repository's job"):
+            results = {
+                name: install_symlink(source, destination)
+                for name, (source, destination) in sources.items()
+            }
+            for name, result in results.items():
+                document["links"][name]["result"] = result
+            # After the links, so the job's definition can only ever name a
+            # controller that is really there, and so a refused link leaves no
+            # job behind.
+            document["job"] = controller_operation("install_job", job, install_dir)
 
     previous = document["job"].get("previous_install_dir")
     relocating = previous is not None and not same_directory(previous, install_dir)
@@ -723,7 +771,7 @@ def install(
         # longer among the old one's dependants -- and if it is again, it was
         # reinstalled there and its links stay.
         document["released_links"] = release_links(
-            asset_root, Path(previous), job.identity
+            asset_root, Path(previous), job.identity, job
         )
     else:
         document["released_links"] = {}
@@ -748,7 +796,7 @@ def uninstall(
     # happened: this repository is still recorded, and still running from these
     # links, until it is removed below.
     dependants = dependent_repositories(install_dir, excluding=job.identity)
-    record_readable = mission_runner_service.installed_repository_records_readable()
+    dependants_known = mission_runner_service.installed_jobs_are_knowable()
     sources = link_sources(asset_root, install_dir)
     if not may_remove_links(install_dir, excluding=job.identity):
         link_plans = {name: "kept" for name in sources}
@@ -765,8 +813,9 @@ def uninstall(
         "dependent_repositories": dependants,
         # Reported beside them because an empty dependant list means two
         # different things: nothing else is installed here, or the record that
-        # would say so could not be decoded. Only the first lets the links go.
-        "record_readable": record_readable,
+        # would say so could not be read at all. Only the first lets the links
+        # go.
+        "dependants_known": dependants_known,
         "links": {
             name: {"destination": str(destination), "result": link_plans[name]}
             for name, (_source, destination) in sources.items()
@@ -785,30 +834,40 @@ def uninstall(
         # repository elsewhere since the plan, and removing links here would
         # then strand the ones its job actually runs from.
         require_recorded_installation(job, install_dir)
-        # Read before the removal, because the removal rewrites the document:
-        # `remove_repository_record` rebuilds an undecodable one around this
-        # entry's departure, so asking afterwards would report a readable record
-        # naming nobody -- and the links a sibling still runs from would go.
-        record_readable = (
-            mission_runner_service.installed_repository_records_readable()
-        )
-        # The job first: the links are what it runs from, so removing them
-        # while it was still loaded would leave a job the manager could start
-        # and nothing could satisfy. Handed this directory explicitly so the
-        # lock it takes with the transition is the one already held here.
-        document["job"] = controller_operation("uninstall_job", job, install_dir)
-        # Recomputed inside the lock and with nothing discounted. This
-        # repository's entry is gone by now, so it can only appear by having
-        # been reinstalled -- which no longer happens, because a start takes
-        # this same lock, and which would still be honoured if it did.
-        document["dependent_repositories"] = dependent_repositories(install_dir)
-        document["record_readable"] = record_readable
-        if may_remove_links(install_dir, record_readable=record_readable):
-            for name, (_source, destination) in sources.items():
-                document["links"][name]["result"] = remove_symlink(destination, name)
-        else:
-            for name in sources:
-                document["links"][name]["result"] = "kept"
+        # And across the links as well as the job: `uninstall_job` gives its own
+        # exclusion back when it returns, so a run could otherwise begin on the
+        # installed modules in the moment before they are deleted.
+        with exclusive_of_runs(
+            job,
+            "uninstalling this job; removing it under a live runner would leave "
+            "one running that nothing can see or stop",
+        ):
+            # Read before the removal, because the removal rewrites the
+            # document: `remove_repository_record` rebuilds it around this
+            # entry's departure, so asking afterwards would report a readable
+            # record naming nobody -- and the links a sibling still runs from
+            # would go.
+            dependants_known = mission_runner_service.installed_jobs_are_knowable()
+            # The job first: the links are what it runs from, so removing them
+            # while it was still loaded would leave a job the manager could
+            # start and nothing could satisfy. Handed this directory explicitly
+            # so the lock it takes with the transition is the one already held
+            # here.
+            document["job"] = controller_operation("uninstall_job", job, install_dir)
+            # Recomputed inside the lock and with nothing discounted. This
+            # repository's entry is gone by now, so it can only appear by having
+            # been reinstalled -- which no longer happens, because a start takes
+            # this same lock, and which would still be honoured if it did.
+            document["dependent_repositories"] = dependent_repositories(install_dir)
+            document["dependants_known"] = dependants_known
+            if may_remove_links(install_dir, dependants_known=dependants_known):
+                for name, (_source, destination) in sources.items():
+                    document["links"][name]["result"] = remove_symlink(
+                        destination, name
+                    )
+            else:
+                for name in sources:
+                    document["links"][name]["result"] = "kept"
     return {**document, "uninstalled": True, "dry_run": False}
 
 
@@ -932,7 +991,7 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
             "Shared links kept for still-installed "
             + ", ".join(result["dependent_repositories"])
         )
-    elif uninstalling and not result["record_readable"]:
+    elif uninstalling and not result["dependants_known"]:
         print(
             "Shared links kept: the discovery record could not be read, so "
             "which jobs still run from them is unknown. Reinstall each "

@@ -2093,7 +2093,9 @@ report did not name.
   and an installed job contend for the same per-identity run lock — which is
   why a `start` writes a fresh token into the definition it kicks and accepts
   no status document that does not carry it, rather than reading a live status
-  as proof that the job it started is the run that published one. What this
+  as proof that the job it started is the run that published one, and why every
+  mutation the installer makes is held under that same lock rather than under
+  the transition locks a foreground run does not take. What this
   entry does not yet state is the authority and ownership of the installed
   component, the operator's installing, operating, and recovering guide, and
   the dependency and packaging inventory; those are a later slice's, and until

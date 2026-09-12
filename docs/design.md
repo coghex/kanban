@@ -3641,7 +3641,14 @@ above are unchanged, and persistence the user switched off is not a failure.
   serves every repository — while the job, its runtime state, its logs, and its
   `--config` selection are the repository's own, so installing a second
   repository adds an entry beside the first and uninstalling one takes that
-  entry and that job alone. Kanban reads none of it yet; discovery, status and
+  entry and that job alone. Every mutation either makes — the shared links as
+  much as the job, its definition and its record entry — is performed while
+  holding that repository's own run lock, because a foreground run takes none
+  of the locks that serialize managed transitions against each other and the run
+  lock is the only thing the two contend for: without it an install would
+  repoint the links and only then discover a run that began after it planned,
+  and an uninstall would delete the modules a run starting in that moment is
+  about to execute. Kanban reads none of it yet; discovery, status and
   incident decoding, and the start/stop seam are a later slice's.
 - That service's discovery record is `config.json` in its own resolved
   directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
@@ -3839,12 +3846,15 @@ Defaults:
   that is missing, unreadable, or stale is repaired by reinstalling rather than
   leaving the component undiscoverable; a record path occupied by something that
   is not a plain file is refused by name, before anything is written, rather
-  than replaced. A record that cannot be decoded is also an *unknown* set of
-  installed jobs rather than an empty one, so nothing shared is taken away on
-  the strength of it: an uninstall performed against one removes that
-  repository's job and keeps the script links every other job would run from,
-  because keeping a link nothing needs is recoverable and removing one a live
-  job runs from is not.
+  than replaced. A record the installed jobs cannot be read off — one that will
+  not decode, and equally one that is simply *absent*, since it can be deleted
+  while every job it named is still loaded — is an unknown set rather than an
+  empty one, and nothing shared is taken away on the strength of it: an
+  uninstall performed against one removes that repository's job and keeps the
+  script links every other job would run from, because keeping a link nothing
+  needs is recoverable and removing one a live job runs from is not. An empty
+  `repositories` table is the different case that does let them go: something
+  wrote it, and what it says is that nothing is installed.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository
