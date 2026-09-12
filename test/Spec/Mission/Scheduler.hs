@@ -29,7 +29,7 @@ import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, void)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf, isPrefixOf, nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -46,6 +46,7 @@ import Kanban.Config
   )
 import Kanban.CLI (Options (..))
 import Kanban.Domain (Repository (..))
+import Kanban.Process (ManagedProcess, unverifiedManagedProcess)
 import Kanban.Mission
 import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
@@ -55,6 +56,14 @@ import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), hClose, hPutStrLn, openFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (nullSignal, signalProcess)
+import System.Process
+  ( CreateProcess (..),
+    Pid,
+    StdStream (CreatePipe, NoStream),
+    createProcess,
+    getPid,
+    proc,
+  )
 import Test.Hspec
 
 spec :: Spec
@@ -1240,24 +1249,55 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
       notifier <- withStubbornNotifier scratch pure
       awaitGone notifier
 
-  -- The identifier a stop needs is learned two calls after the spawn, so a
-  -- handler that only knew "nothing yet" and "here it is" would sweep nothing
-  -- in exactly the window a stop is racing. Staged by reading the state while
-  -- a spawn is announced but not yet registered.
-  it "waits out a spawn in progress rather than sweeping nothing" $
+  -- The window between the spawn and the registration, staged rather than
+  -- raced: the handler is handed a state that says "starting", the
+  -- registration lands a beat later, and what is asserted is that the sweep
+  -- waited for it instead of returning and letting the signal through with the
+  -- command still running.
+  it "waits out a registration that has not landed yet" $
     withScratch $ \scratch -> do
       let marker = scratch </> "late.pid"
       command <-
         writeFakeKanban
           scratch
           (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
-      -- The real runner, stopped from another thread the moment its notifier
-      -- is up: the handler has to find the registration that landed while the
-      -- signal was in flight.
-      notifier <- withStubbornNotifier scratch pure
+      live <- newIORef NotifierStarting
+      spawned <- spawnStubbornGroup command
+      notifier <- awaitRecordedPid marker
+      -- Registered only after the sweep is already under way.
+      void . forkIO $ do
+        threadDelay 300000
+        writeIORef live (uncurry NotifierLive spawned)
+      sweepRecorded live
       awaitGone notifier
-      -- And the ordinary bounded path still ends its command, so the waiting
-      -- state cannot have swallowed the sweep.
+
+  -- And a state that never registers does not hold the stop open for ever:
+  -- the wait is bounded, so a spawn that somehow never completes costs a
+  -- delay rather than a service that cannot be stopped.
+  it "gives up on a registration that never lands" $ do
+    live <- newIORef NotifierStarting
+    -- Far shorter than the bound, because what is asserted is that it returns
+    -- at all rather than how long it waits.
+    finished <- newEmptyMVar
+    void . forkIO $ sweepRecorded live >> putMVar finished ()
+    void . forkIO $ threadDelay (20 * 1000 * 1000) >> putMVar finished ()
+    takeMVar finished
+
+  -- Nothing recorded, nothing swept, and no wait at all: before a spawn there
+  -- is no command, which is the right answer there.
+  it "sweeps nothing when no command has been started" $ do
+    live <- newIORef NotifierIdle
+    sweepRecorded live
+
+  -- The ordinary bounded path still ends its command, so the waiting state
+  -- cannot have swallowed the sweep.
+  it "still ends a command that outlived its bound after registering" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "bounded.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
       attempt <- runMissionNotificationCommand (2 * 1000 * 1000) [Text.pack command]
       attempt.missionNotificationAttemptState `shouldBe` MissionNotificationTimedOut
       recorded <- awaitRecordedPid marker
@@ -1972,6 +2012,22 @@ awaitRecordedPid marker = go (600 :: Int)
         Right recorded
           | (digits@(_ : _), _) <- span (`elem` ("0123456789" :: String)) recorded -> pure (read digits)
         _ -> threadDelay 20000 >> go (remaining - 1)
+
+-- | Starts a command in a process group of its own, exactly as the notifier
+-- does, and hands back what a sweep needs to end it.
+spawnStubbornGroup :: FilePath -> IO (Maybe Pid, ManagedProcess)
+spawnStubbornGroup command = do
+  (_, _, _, processHandle) <-
+    createProcess
+      (proc command [])
+        { std_in = NoStream,
+          std_out = CreatePipe,
+          std_err = CreatePipe,
+          create_group = True
+        }
+  managed <- unverifiedManagedProcess processHandle
+  rootPid <- getPid processHandle
+  pure (rootPid, managed)
 
 -- | Waits for one process identifier to stop resolving.
 --

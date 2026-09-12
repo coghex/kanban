@@ -22,6 +22,7 @@ module Kanban.Process
     liveProcesses,
     liveProcessesWith,
     managedProcess,
+    unverifiedManagedProcess,
     managedProcessGroup,
     managedProcessPid,
     managedProcessStopsWithDashboard,
@@ -127,6 +128,22 @@ data ManagedProcess
 -- would otherwise leave a still-running group member — signalled via the
 -- exact same recorded pgid regardless of the leader's own reap state — with
 -- nothing left to reach it.
+-- | The same handle, without the inspection that confirms the child really
+-- leads its own group.
+--
+-- 'managedProcess' reads a process snapshot to check that, and reading one
+-- spawns @ps@ — an external command with no bound on how long it takes. That
+-- is a fine price for a caller that wants the diagnostic, and the wrong one
+-- for a caller that needs something sweepable the instant the child exists:
+-- a stop arriving while that @ps@ ran would find nothing recorded to end.
+--
+-- The value is identical; only the check is skipped. What the check would have
+-- reported is a @create_group@ that did not take, and 'killManagedProcess'
+-- already handles that case anyway — it falls back to signalling the process
+-- itself when no group is led by its identifier.
+unverifiedManagedProcess :: ProcessHandle -> IO ManagedProcess
+unverifiedManagedProcess processHandle = LocalManagedProcess processHandle <$> getPid processHandle
+
 managedProcess :: ProcessHandle -> IO (ManagedProcess, Maybe Text)
 managedProcess processHandle = do
   spawnedPid <- getPid processHandle

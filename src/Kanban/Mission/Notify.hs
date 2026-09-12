@@ -42,6 +42,8 @@ module Kanban.Mission.Notify
     missionNotificationDigest,
     missionNotificationTimeoutMicros,
     MissionNotificationAttempt (..),
+    NotifierState (..),
+    sweepRecorded,
     attemptMissionNotification,
     runMissionNotificationCommand,
   )
@@ -92,7 +94,7 @@ import Kanban.Mission.Types
     missionNotificationSchemaVersion,
   )
 import Kanban.Paths (createPrivateDirectory)
-import Kanban.Process (ManagedProcess, managedProcess, sweepCommandGroup)
+import Kanban.Process (ManagedProcess, sweepCommandGroup, unverifiedManagedProcess)
 import Kanban.Text (sanitizeText)
 import System.Directory (XdgDirectory (XdgCache), getXdgDirectory)
 import System.Exit (ExitCode (..))
@@ -417,15 +419,23 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
                   MissionNotificationLaunchFailed
                   (Just (Text.pack (show exception)))
               )
-          Right (_, Just outputHandle, Just errorHandle, processHandle) ->
-            observe live processHandle outputHandle errorHandle
+          Right (_, Just outputHandle, Just errorHandle, processHandle) -> do
+            -- Registered before anything that could block. The only work
+            -- between the spawn and this line is reading the handle's own
+            -- identifier, so the interval a stop could fall into no longer
+            -- contains an external command — which is what it did contain
+            -- while this went through 'managedProcess' and its @ps@ snapshot.
+            spawned <- unverifiedManagedProcess processHandle
+            rootPid <- getPid processHandle
+            writeIORef live (NotifierLive rootPid spawned)
+            observe live rootPid spawned processHandle outputHandle errorHandle
           Right (_, _, _, processHandle) -> do
             -- No pipes to capture, and still a process this call created: it
             -- is recorded and swept like any other rather than abandoned.
-            (managed, _) <- managedProcess processHandle
+            spawned <- unverifiedManagedProcess processHandle
             rootPid <- getPid processHandle
-            writeIORef live (NotifierLive rootPid managed)
-            sweepCommandGroup rootPid managed
+            writeIORef live (NotifierLive rootPid spawned)
+            sweepCommandGroup rootPid spawned
             pure
               ( MissionNotificationAttempt
                   MissionNotificationUncertain
@@ -447,16 +457,11 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
           create_group = True
         }
 
-    observe :: IORef NotifierState -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
-    observe live processHandle outputHandle errorHandle = do
-      -- Captured before anything can reap the leader: 'getPid' goes 'Nothing'
-      -- the moment a clean exit reaps it below, so the identifier the sweep
-      -- needs is taken now while it is guaranteed available.
-      (managed, _groupLeaderProblem) <- managedProcess processHandle
-      rootPid <- getPid processHandle
-      -- Recorded before the captures start, so every step from here on is
-      -- covered by the handler installed above.
-      writeIORef live (NotifierLive rootPid managed)
+    -- The identifier and the handle are taken by the caller, before the
+    -- registration, and passed in: 'getPid' goes 'Nothing' the moment a clean
+    -- exit reaps the child, so asking again here could come back empty.
+    observe :: IORef NotifierState -> Maybe Pid -> ManagedProcess -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
+    observe _live rootPid managed processHandle outputHandle errorHandle = do
       outputCapture <- startCapture outputHandle
       errorCapture <- startCapture errorHandle
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}

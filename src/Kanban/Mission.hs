@@ -309,6 +309,8 @@ module Kanban.Mission
 
     -- * Attention notifications
     MissionNotificationAttempt (..),
+    NotifierState (..),
+    sweepRecorded,
     attemptMissionNotification,
     missionNotificationArguments,
     missionNotificationDigest,
@@ -351,6 +353,8 @@ import Kanban.Mission.Lease
 import Kanban.Mission.Paths (MissionRead (..), missionDirectory, missionInvocationPath, missionJournalPath, missionStoreRoot)
 import Kanban.Mission.Notify
   ( MissionNotificationAttempt (..),
+    NotifierState (..),
+    sweepRecorded,
     attemptMissionNotification,
     missionNotificationArguments,
     missionNotificationDigest,
