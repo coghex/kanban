@@ -52,6 +52,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -402,217 +403,27 @@ def link_sources(assets: Path, install_dir: Path) -> dict[str, tuple[Path, Path]
     }
 
 
-# Where an installation records which repositories' jobs run from its links.
-#
-# Beside the links, because "may these go?" is a question about this directory
-# and the discovery record is a copy of the answer kept somewhere else: it can
-# be absent while every job it named is still loaded, it can be corrupt, it can
-# decode partially, and repairing it rebuilds it around the one entry the
-# repairer knows about, so the next reader sees a small, perfectly readable
-# table and takes it for the whole truth. A marker here cannot diverge from the
-# links in any of those ways -- it is written and withdrawn in the same locked
-# transition that writes and withdraws them.
-#
-# It is still only one witness. This directory can be deleted, and the next
-# install rebuilds it around that install alone, which is the same laundering
-# in the other direction -- so `link_dependants` unions it with what the record
-# says rather than trusting either.
-#
-# One file per installed identity, named by the slug that names its job, and
-# holding the canonical identity so this directory can say *which* repositories
-# depend on it rather than only how many.
-DEPENDANTS_DIR_NAME = "dependants"
+def may_remove_links(install_dir: Path, *, excluding: str | None = None) -> bool:
+    """Whether this directory's shared links may be taken away.
 
-
-def dependants_dir(install_dir: Path) -> Path:
-    return install_dir / DEPENDANTS_DIR_NAME
-
-
-def dependant_marker(install_dir: Path, identity: str) -> Path:
-    return dependants_dir(install_dir) / mission_runner_service.repository_slug(
-        identity
-    )
-
-
-def record_dependant(install_dir: Path, identity: str) -> None:
-    """Say that this identity's job runs from this directory's links.
-
-    Written before the job is loaded rather than after, so a half-made install
-    leaves a directory that is *over*-claimed rather than under-claimed: a
-    marker with no job behind it keeps links nothing needs, which a reinstall or
-    an uninstall of that repository clears, while a job with no marker behind it
-    would have its links taken away by the next uninstall of somebody else.
+    Only when both of `mission_runner_service.link_dependants`' witnesses are
+    readable and neither names anybody. An installation that cannot say keeps
+    its links, because keeping a link nothing needs is recoverable by a later
+    uninstall and removing one a live job runs from is not.
     """
-    marker = dependant_marker(install_dir, identity)
-    marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker.write_text(identity + "\n", encoding="utf-8")
-
-
-def forget_dependant(install_dir: Path, identity: str) -> None:
-    """Take back the claim `record_dependant` made. Absent is success: an
-    uninstall of a repository that was never installed here has nothing to
-    withdraw."""
-    dependant_marker(install_dir, identity).unlink(missing_ok=True)
-
-
-def marker_dependants(install_dir: Path) -> list[str] | None:
-    """What this directory itself says runs from its links, or None when it
-    says nothing at all.
-
-    None is the fail-closed answer and is reached in one way: the markers
-    directory is not there. Every install into a directory creates it, so its
-    absence means either that nothing was ever installed here -- in which case
-    there are no links to remove and keeping them costs nothing -- or that
-    somebody removed it, which is not a state to delete other people's modules
-    on the strength of.
-
-    An *empty* directory is different and is the ordinary go-ahead: the last
-    install to leave took its own marker with it.
-
-    Every entry that is not a readable regular file -- a directory, a dangling
-    link, bytes that are not UTF-8 -- is a dependant named by its file name
-    rather than an entry skipped. What such an occupant means is unknowable, and
-    the only safe reading of "somebody put something here under a repository's
-    slug" is that the repository is claiming this directory.
-    """
-    markers = dependants_dir(install_dir)
-    try:
-        entries = sorted(markers.iterdir())
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise InstallError(
-            f"Could not read which jobs run from {install_dir}: {exc}"
-        ) from exc
-    dependants = []
-    for entry in entries:
-        identity = ""
-        if entry.is_file():
-            try:
-                # A ValueError rather than an OSError, so bytes that are not
-                # UTF-8 would otherwise escape a reader whose whole job is to
-                # answer "somebody is claiming this directory".
-                identity = entry.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError):
-                identity = ""
-        dependants.append(identity or entry.name)
-    return dependants
-
-
-def recorded_dependants(install_dir: Path) -> list[str] | None:
-    """What the discovery record says runs from this directory's links, or None
-    when the installed jobs cannot be read off it.
-
-    The second witness, and a weaker one: the record is a copy of the answer
-    kept somewhere else, so it can be absent while every job it named is still
-    loaded, it can be corrupt, it can decode partially, and repairing it
-    rebuilds it around the one entry the repairer knows about. Every one of
-    those is None here rather than an empty list, because "I cannot read this"
-    and "nothing is installed" are the two answers a removal must never
-    confuse.
-
-    Fails closed on an entry naming no install directory, too: such a record
-    could have been written by this installation.
-    """
-    if not installed_jobs_are_knowable():
-        return None
-    here = os.path.realpath(install_dir)
-    dependants = []
-    for identity, record in mission_runner_service.installed_repository_records().items():
-        recorded = record.get("install_dir")
-        if not isinstance(recorded, str) or not recorded:
-            dependants.append(identity)
-            continue
-        if os.path.realpath(recorded) == here:
-            dependants.append(identity)
-    return dependants
-
-
-def installed_jobs_are_knowable() -> bool:
-    """Whether the set of installed jobs can be read off the discovery record.
-
-    An explicit, fully decodable repositories table and nothing less. A document
-    that will not parse, one that is not an object, one carrying no
-    `repositories` key, one whose table is not a table, and one holding an entry
-    that is not an object are all states a reader cannot enumerate the
-    installations from -- and an *absent* record is another, because it can be
-    deleted while every job it named is still loaded.
-
-    An empty table is the one shape that does say something: something wrote it,
-    and what it says is that nothing is installed.
-    """
-    path = mission_runner_service.discovery_record_path()
-    if not os.path.lexists(path):
-        return False
-    document = mission_runner_service.read_json(path)
-    if document is None:
-        return False
-    records = document.get(mission_runner_service.RECORD_REPOSITORIES_KEY)
-    if not isinstance(records, dict):
-        return False
-    return all(
-        isinstance(identity, str) and isinstance(record, dict)
-        for identity, record in records.items()
-    )
-
-
-def link_dependants(
-    install_dir: Path, *, excluding: str | None = None
-) -> list[str] | None:
-    """Every repository whose job runs from *these* links, or None when nothing
-    here can say.
-
-    The union of two independent witnesses, never one of them. The markers
-    beside the links cannot diverge from the links -- they are written and
-    withdrawn in the same locked transition -- but a directory somebody deletes
-    is rebuilt by the next install around that install alone, which is exactly
-    the laundering the discovery record does to its own repair. The record
-    cannot be lost by anything that touches the install directory, but it can be
-    corrupted, emptied or rebuilt where the markers cannot. Neither is sound on
-    its own; a claim in either is a claim, and only when *both* are unreadable
-    is the answer unknown.
-
-    Both destroyed at once leaves nothing to be right from -- there is no third
-    place this is written, and the service manager's own job list is behind a
-    boundary with no verb for enumerating it.
-
-    `excluding` is for the one caller asking about a state it has not reached
-    yet: a *plan* describes an uninstall that has not happened, so the
-    repository it is about is still claiming this directory and has to be
-    discounted by hand. Everywhere else the question is asked as things actually
-    stand -- including immediately before links are removed, where a repository
-    that has reappeared since the plan is a dependant like any other, whoever it
-    is.
-    """
-    marked = marker_dependants(install_dir)
-    recorded = recorded_dependants(install_dir)
-    if marked is None and recorded is None:
-        return None
-    # Keyed by slug rather than by the spelling a witness happened to use: a
-    # marker nobody can read comes back as its own file name, which is that
-    # repository's slug, and counting it beside the identity the record gives
-    # for the same repository would report one dependant as two. The identity
-    # wins where both are available, because it says *which* repository.
-    dependants: dict[str, str] = {}
-    for claim in list(recorded or []) + list(marked or []):
-        named = "/" in claim
-        slug = mission_runner_service.repository_slug(claim) if named else claim
-        if named or slug not in dependants:
-            dependants[slug] = claim
-    if excluding is not None:
-        # By slug, which removes both spellings of this repository's own claim.
-        dependants.pop(mission_runner_service.repository_slug(excluding), None)
-    return sorted(dependants.values())
+    return mission_runner_service.link_dependants(install_dir, excluding=excluding) == []
 
 
 def dependent_repositories(install_dir: Path, *, excluding: str | None = None) -> list[str]:
-    """`link_dependants` for a caller that is reporting rather than deciding.
+    """The same question for a caller that is reporting rather than deciding.
 
     An unknowable installation reports no dependants because it names none;
     what it must not do is *decide* a removal, which is `may_remove_links`'s
     job.
     """
-    return link_dependants(install_dir, excluding=excluding) or []
+    return (
+        mission_runner_service.link_dependants(install_dir, excluding=excluding) or []
+    )
 
 
 @contextlib.contextmanager
@@ -638,17 +449,6 @@ def exclusive_of_runs(
             yield
     except mission_runner_service.ServiceError as exc:
         raise InstallError(str(exc)) from exc
-
-
-def may_remove_links(install_dir: Path, *, excluding: str | None = None) -> bool:
-    """Whether this directory's shared links may be taken away.
-
-    Only when both of `link_dependants`' witnesses are readable and neither
-    names anybody. An installation that cannot say keeps its links, because
-    keeping a link nothing needs is recoverable by a later uninstall and
-    removing one a live job runs from is not.
-    """
-    return link_dependants(install_dir, excluding=excluding) == []
 
 
 def require_matching_controller(assets: Path) -> None:
@@ -742,7 +542,7 @@ def release_links(
         # The claim first, and inside the lock: by here the record already names
         # the directory this repository moved to, and the marker it left behind
         # is the last thing saying it still runs from here.
-        forget_dependant(install_dir, identity)
+        mission_runner_service.forget_dependant(install_dir, identity)
         if not may_remove_links(install_dir):
             return {
                 name: {"destination": str(destination), "result": "kept"}
@@ -908,7 +708,7 @@ def install(
             # Before the links, so a half-made install leaves this directory
             # over-claimed rather than under-claimed. `install_job` takes this
             # same exclusion for itself, and finds it already held.
-            record_dependant(install_dir, job.identity)
+            mission_runner_service.record_dependant(install_dir, job.identity)
             results = {
                 name: install_symlink(source, destination)
                 for name, (source, destination) in sources.items()
@@ -1002,7 +802,7 @@ def uninstall(
             # Then this repository's claim on the directory, and only then the
             # links -- which go exactly when the directory says nothing is left
             # to run from them.
-            forget_dependant(install_dir, job.identity)
+            mission_runner_service.forget_dependant(install_dir, job.identity)
             # Recomputed inside the lock and with nothing discounted. This
             # repository is gone by now, so it can only appear by having been
             # reinstalled -- which no longer happens, because a start takes this
@@ -1150,14 +950,38 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
     if dry_run:
         print("Dry run; nothing was changed.")
     elif not uninstalling:
-        # Named rather than deferred to the dashboard: Kanban-side discovery and
-        # start/stop are a later slice's, so "start it from Kanban" would point
-        # an operator at something that does not exist yet.
-        controller = Path(result["install_dir"]) / mission_runner_service.CONTROLLER_NAME
-        print(
-            "The job is loaded but stopped. Start it with "
-            f"`python3 {controller} start --path {result['repo']}`."
+        print("The job is loaded but stopped. Start it with:")
+        print(f"  {start_command(result)}")
+
+
+def start_command(result: dict[str, Any]) -> str:
+    """The command that starts the job this install just loaded.
+
+    Named rather than deferred to the dashboard: Kanban-side discovery and
+    start/stop are a later slice's, so "start it from Kanban" would point an
+    operator at something that does not exist yet.
+
+    Quoted, because this installation's own default path contains a space on
+    macOS -- `Library/Application Support` -- and a checkout may contain one
+    anywhere. And bound to the identity the install recorded rather than left to
+    be re-derived: the shared configuration's `remote_name` decides which
+    repository a checkout resolves to, so a command without `--repo` would
+    quietly act on a different job if that setting changed, where one with it is
+    refused by name.
+    """
+    controller = Path(result["install_dir"]) / mission_runner_service.CONTROLLER_NAME
+    return " ".join(
+        shlex.quote(part)
+        for part in (
+            "python3",
+            str(controller),
+            "start",
+            "--path",
+            result["repo"],
+            "--repo",
+            result["job"]["repository"],
         )
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

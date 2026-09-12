@@ -3646,8 +3646,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   `--config` selection are the repository's own, so installing a second
   repository adds an entry beside the first and uninstalling one takes that
   entry and that job alone; which repositories still run from a directory's
-  links is read off that directory rather than out of the discovery record, so
-  no state of the record can strand a job that is still loaded. Every mutation
+  links is the union of what that directory says and what the discovery record
+  says, so neither one being lost, corrupted, or rebuilt around a single entry
+  can strand a job that is still loaded. Every mutation
   either makes — the shared links as
   much as the job, its definition and its record entry, and the links a
   relocation takes back from the directory it is leaving — is performed while
@@ -3860,19 +3861,30 @@ Defaults:
   that is missing, unreadable, or stale is repaired by reinstalling rather than
   leaving the component undiscoverable; a record path occupied by something that
   is not a plain file is refused by name, before anything is written, rather
-  than replaced. What the record deliberately does *not* decide is whether an
-  installation's shared script links may go. That is a question about the
-  directory the links are in, and the record is a copy of the answer kept
+  than replaced. What the record does not decide *alone* is whether an
+  installation's shared script links may go. It is a copy of that answer kept
   somewhere else: it can be absent while every job it named is still loaded, it
   can be corrupt, it can decode partially, and repairing it rebuilds it around
   the one entry the repairer knows about — so the next reader sees a small,
   perfectly readable table and takes it for the whole truth. Every one of those
   reads as "nothing depends on these". The install directory therefore carries
-  its own `dependants` directory, one marker file per installed identity holding
-  that repository's canonical name, written and withdrawn in the same locked
-  transition that writes and withdraws the links themselves; the links go
-  exactly when it is empty, and a directory that has none at all cannot say and
-  keeps them.
+  its own `dependants` directory as a second witness, one marker file per
+  installed identity holding that repository's canonical name, written and
+  withdrawn in the same locked transition that loads and unloads the job it
+  serves — by whichever route loaded it, not the installer's alone.
+
+  Neither witness is trusted instead of the other, because each launders the
+  same way in the direction the other survives: a `dependants` directory
+  somebody deletes is rebuilt by the next install around that install alone,
+  exactly as the record's repair is, while the record survives anything done to
+  the install directory. So the dependants are the *union* of the two. A claim
+  in either is a claim; a marker that is not a readable regular file, or whose
+  contents name a different repository than its own file name does, is a claim
+  under that file name rather than a claim discounted; and only when both
+  witnesses are unreadable is the answer unknown, which keeps the links. Both
+  destroyed at once leaves nothing to be right from: there is no third place
+  this is written, and the service manager's own job list is behind a boundary
+  with no verb for enumerating it.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository

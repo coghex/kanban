@@ -2647,6 +2647,258 @@ def job_install_dir(job: MissionRunnerJob) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Which jobs run from an installation's shared links
+# ---------------------------------------------------------------------------
+
+
+# Where an installation records which repositories' jobs run from its links.
+#
+# Beside the links, because "may these go?" is a question about that directory
+# and the discovery record is a copy of the answer kept somewhere else: it can
+# be absent while every job it named is still loaded, it can be corrupt, it can
+# decode partially, and repairing it rebuilds it around the one entry the
+# repairer knows about. A marker here cannot diverge from the links in any of
+# those ways -- it is written and withdrawn in the same locked transition that
+# loads and unloads the job they serve.
+#
+# It is still only one witness. This directory can be deleted, and the next
+# install rebuilds it around that install alone, which is the same laundering
+# in the other direction -- so `link_dependants` unions it with what the record
+# says rather than trusting either.
+#
+# One file per installed identity, named by the slug that names its job, and
+# holding the canonical identity so a directory can say *which* repositories
+# depend on it rather than only how many.
+DEPENDANTS_DIR_NAME = "dependants"
+
+
+def dependants_dir(install_dir: Path) -> Path:
+    return install_dir / DEPENDANTS_DIR_NAME
+
+
+def dependant_marker(install_dir: Path, identity: str) -> Path:
+    return dependants_dir(install_dir) / repository_slug(identity)
+
+
+def require_safe_dependants_dir(install_dir: Path) -> Path:
+    """The markers directory, or a refusal naming an occupant that is not one.
+
+    A symlink most of all. `mkdir(exist_ok=True)` and an ordinary write both
+    follow one, so a link standing where this directory belongs would redirect
+    every marker this installation writes into somebody else's tree -- and a
+    link standing where one *marker* belongs would do the same for that file.
+    Neither is a state to write through; both are left exactly as they are and
+    named, because whatever put them there is the thing to deal with.
+    """
+    markers = dependants_dir(install_dir)
+    if os.path.lexists(markers) and (markers.is_symlink() or not markers.is_dir()):
+        raise ServiceError(
+            f"Refusing to use {markers}, which is not a directory this "
+            "installation can own. It is left untouched; move or remove it "
+            "yourself, then re-run."
+        )
+    return markers
+
+
+def record_dependant(install_dir: Path, identity: str) -> None:
+    """Say that this identity's job runs from this directory's links.
+
+    Written whenever a job is loaded, by whichever route loaded it, so no
+    supported way of installing one can leave links claimed by nobody. The
+    installer writes it again before the links themselves, so a half-made
+    install leaves a directory that is *over*-claimed rather than
+    under-claimed: a marker with no job behind it keeps links nothing needs,
+    which a reinstall or an uninstall of that repository clears, while a job
+    with no marker behind it would have its links taken away by the next
+    uninstall of somebody else.
+
+    Replaced rather than written through: `os.replace` renames onto the name and
+    never follows a link standing there, so a marker somebody redirected is
+    taken back rather than used to write somewhere else.
+    """
+    markers = require_safe_dependants_dir(install_dir)
+    markers.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker = markers / repository_slug(identity)
+    fd, temporary_name = tempfile.mkstemp(prefix=".dependant.", dir=markers)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(identity + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, marker)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+
+
+def forget_dependant(install_dir: Path, identity: str) -> None:
+    """Take back the claim `record_dependant` made.
+
+    Absent is success: unloading a job that was never installed here has
+    nothing to withdraw. `unlink` removes a link rather than following one, so
+    an occupant somebody redirected goes too.
+    """
+    dependant_marker(install_dir, identity).unlink(missing_ok=True)
+
+
+def marker_dependants(install_dir: Path) -> list[str] | None:
+    """What this directory itself says runs from its links, or None when it
+    says nothing at all.
+
+    None is the fail-closed answer and is reached in one way: the markers
+    directory is not there. Every install into a directory creates it, so its
+    absence means either that nothing was ever installed here -- in which case
+    there are no links to remove and keeping them costs nothing -- or that
+    somebody removed it, which is not a state to delete other people's modules
+    on the strength of. An *empty* directory is different and is the ordinary
+    go-ahead: the last job to leave took its own marker with it.
+
+    Every entry that is not a readable regular file -- a directory, a dangling
+    link, bytes that are not UTF-8 -- is a dependant named by its file name
+    rather than an entry skipped, and so is one whose contents name some *other*
+    repository than its file name does. What such an occupant means is
+    unknowable, and the only safe reading of "somebody put something here under
+    a repository's slug" is that the repository is claiming this directory.
+    Trusting the contents alone would be worse than ignoring them: a marker
+    holding a second repository's identity would be counted as that repository,
+    and an uninstall discounting its own claim would discount this one with it.
+    """
+    markers = require_safe_dependants_dir(install_dir)
+    try:
+        entries = sorted(markers.iterdir())
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ServiceError(
+            f"Could not read which jobs run from {install_dir}: {exc}"
+        ) from exc
+    dependants = []
+    for entry in entries:
+        dependants.append(marker_claim(entry))
+    return dependants
+
+
+def marker_claim(entry: Path) -> str:
+    """What one marker file claims: the identity it holds when that identity is
+    this file's own, and the file name otherwise."""
+    if entry.is_symlink() or not entry.is_file():
+        return entry.name
+    try:
+        # A ValueError rather than an OSError, so bytes that are not UTF-8
+        # would otherwise escape a reader whose whole job is to answer
+        # "somebody is claiming this directory".
+        identity = entry.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return entry.name
+    if identity and repository_slug(identity) == entry.name:
+        return identity
+    return entry.name
+
+
+def installed_jobs_are_knowable() -> bool:
+    """Whether the set of installed jobs can be read off the discovery record.
+
+    An explicit, fully decodable repositories table and nothing less. A document
+    that will not parse, one that is not an object, one carrying no
+    `repositories` key, one whose table is not a table, and one holding an entry
+    that is not an object are all states a reader cannot enumerate the
+    installations from -- and an *absent* record is another, because it can be
+    deleted while every job it named is still loaded.
+
+    An empty table is the one shape that does say something: something wrote it,
+    and what it says is that nothing is installed.
+    """
+    path = discovery_record_path()
+    if not os.path.lexists(path):
+        return False
+    document = read_json(path)
+    if document is None:
+        return False
+    records = document.get(RECORD_REPOSITORIES_KEY)
+    if not isinstance(records, dict):
+        return False
+    return all(
+        isinstance(identity, str) and isinstance(record, dict)
+        for identity, record in records.items()
+    )
+
+
+def recorded_dependants(install_dir: Path) -> list[str] | None:
+    """What the discovery record says runs from this directory's links, or None
+    when the installed jobs cannot be read off it.
+
+    The second witness, and a weaker one for everything except the thing the
+    first is weak at: it survives anything done to the install directory.
+
+    Fails closed on an entry naming no install directory, too: such a record
+    could have been written by this installation.
+    """
+    if not installed_jobs_are_knowable():
+        return None
+    here = os.path.realpath(install_dir)
+    dependants = []
+    for identity, record in installed_repository_records().items():
+        recorded = record.get("install_dir")
+        if not isinstance(recorded, str) or not recorded:
+            dependants.append(identity)
+            continue
+        if os.path.realpath(recorded) == here:
+            dependants.append(identity)
+    return dependants
+
+
+def link_dependants(
+    install_dir: Path, *, excluding: str | None = None
+) -> list[str] | None:
+    """Every repository whose job runs from this directory's links, or None when
+    nothing here can say.
+
+    The union of two independent witnesses, never one of them. The markers
+    beside the links cannot diverge from the links -- they are written and
+    withdrawn in the same locked transition -- but a directory somebody deletes
+    is rebuilt by the next install around that install alone, which is exactly
+    the laundering the discovery record does to its own repair. The record
+    cannot be lost by anything that touches the install directory, but it can be
+    corrupted, emptied or rebuilt where the markers cannot. Neither is sound on
+    its own; a claim in either is a claim, and only when *both* are unreadable
+    is the answer unknown.
+
+    Both destroyed at once leaves nothing to be right from -- there is no third
+    place this is written, and the service manager's own job list is behind a
+    boundary with no verb for enumerating it.
+
+    `excluding` is for the one caller asking about a state it has not reached
+    yet: a *plan* describes an uninstall that has not happened, so the
+    repository it is about is still claiming this directory and has to be
+    discounted by hand. Everywhere else the question is asked as things actually
+    stand -- including immediately before links are removed, where a repository
+    that has reappeared since the plan is a dependant like any other, whoever it
+    is.
+    """
+    marked = marker_dependants(install_dir)
+    recorded = recorded_dependants(install_dir)
+    if marked is None and recorded is None:
+        return None
+    # Keyed by slug rather than by the spelling a witness happened to use: a
+    # marker nobody can vouch for comes back as its own file name, which is that
+    # repository's slug, and counting it beside the identity the record gives
+    # for the same repository would report one dependant as two. The identity
+    # wins where both are available, because it says *which* repository.
+    dependants: dict[str, str] = {}
+    for claim in list(recorded or []) + list(marked or []):
+        named = "/" in claim
+        slug = repository_slug(claim) if named else claim
+        if named or slug not in dependants:
+            dependants[slug] = claim
+    if excluding is not None:
+        # By slug, which removes both spellings of this repository's own claim.
+        dependants.pop(repository_slug(excluding), None)
+    return sorted(dependants.values())
+
+
+# ---------------------------------------------------------------------------
 # The managed job
 # ---------------------------------------------------------------------------
 
@@ -3119,6 +3371,12 @@ def _install_write(
     backend = service_backend()
     ensure_dirs(job)
     job.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Whichever route reached here. `tools/install_mission_runner.py` writes
+    # this before the links as well, so a half-made install over-claims rather
+    # than under-claims; doing it here too is what keeps a job loaded through
+    # this operation alone -- by hand, or by anything but that installer -- from
+    # leaving links nobody is recorded as running from.
+    record_dependant(install_dir, job.identity)
     label = plan["label"]
     definition_path = backend.write_definition(
         service_definition(job, install_dir, startup_nonce=startup_nonce)
@@ -3221,11 +3479,12 @@ def uninstall_job(
     the two never take two different locks for one directory; this repository's
     recorded one otherwise.
     """
-    with job_transition(job, install_dir or job_install_dir(job)):
-        return _uninstall_locked(job)
+    selected = install_dir or job_install_dir(job)
+    with job_transition(job, selected):
+        return _uninstall_locked(job, selected)
 
 
-def _uninstall_locked(job: MissionRunnerJob) -> dict[str, Any]:
+def _uninstall_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
     plan = uninstall_plan(job)
     with exclusive_of_runs(
         job,
@@ -3235,15 +3494,21 @@ def _uninstall_locked(job: MissionRunnerJob) -> dict[str, Any]:
         # Re-asked with the lock held, so the manager's answer is one no run can
         # invalidate while the removal below acts on it.
         require_stopped_for_uninstall(job)
-        return _uninstall_write(job, plan)
+        return _uninstall_write(job, install_dir, plan)
 
 
-def _uninstall_write(job: MissionRunnerJob, plan: dict[str, Any]) -> dict[str, Any]:
+def _uninstall_write(
+    job: MissionRunnerJob, install_dir: Path, plan: dict[str, Any]
+) -> dict[str, Any]:
     """The removal itself, with every lock this uninstall needs held."""
     backend = service_backend()
     label = plan["label"]
     outcome = backend.uninstall_definition(label)
     record = remove_repository_record(job.identity)
+    # After the job is gone rather than before, for the reason `record_dependant`
+    # gives in the other direction: a claim outliving its job keeps links
+    # nothing needs, and a job outliving its claim loses the links it runs from.
+    forget_dependant(install_dir, job.identity)
     # Asserted rather than assumed: a successful uninstall must leave nothing
     # loaded and nothing running, and a manager that still holds the job after
     # being asked to forget it is a half-finished removal the caller has to hear

@@ -28,6 +28,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import plistlib
 import shutil
 import signal
@@ -1976,14 +1977,17 @@ class RecordRepairSystemdTests(SystemdShapeMixin, RecordRepairTests):
 
 
 class LinkDependencyTests(InstallerFixture):
-    """Which jobs run from a directory's links is a fact about that directory.
+    """Which jobs run from an installation's links, from two witnesses.
 
-    The discovery record is a cache of that answer kept somewhere else: it can
-    be absent while every job it named is still loaded, it can be corrupt, it
-    can decode partially, and repairing it rebuilds it around the one entry the
-    repairer knows about. Every one of those reads as "nothing depends on
-    these" to a reader that asks the record, so none of them may decide a
-    removal.
+    The discovery record is a copy of that answer kept somewhere else: it can be
+    absent while every job it named is still loaded, it can be corrupt, it can
+    decode partially, and repairing it rebuilds it around the one entry the
+    repairer knows about. The markers beside the links cannot be lost that way
+    -- but the directory holding them can be deleted, and the next install
+    rebuilds it around that install alone, which is the same laundering in the
+    direction the record survives. Every one of those reads as "nothing depends
+    on these" to whichever witness it damages, so neither decides a removal on
+    its own.
     """
 
     other_identity = "acme/gadgets"
@@ -2024,32 +2028,32 @@ class LinkDependencyTests(InstallerFixture):
     def test_an_install_claims_the_directory_and_an_uninstall_withdraws_it(self):
         self.install()
         self.assertEqual(
-            installer.link_dependants(self.install_dir), [self.identity]
+            service.link_dependants(self.install_dir), [self.identity]
         )
         self.install(repo=self.other_repo)
         self.assertEqual(
-            installer.link_dependants(self.install_dir),
+            service.link_dependants(self.install_dir),
             sorted([self.identity, self.other_identity]),
         )
         self.uninstall()
         self.assertEqual(
-            installer.link_dependants(self.install_dir), [self.other_identity]
+            service.link_dependants(self.install_dir), [self.other_identity]
         )
 
     def test_a_directory_that_was_never_installed_into_cannot_say(self):
         # Fail closed, and free: there are no links there to remove either.
-        self.assertIsNone(installer.link_dependants(self.root / "never"))
+        self.assertIsNone(service.link_dependants(self.root / "never"))
         self.assertFalse(installer.may_remove_links(self.root / "never"))
 
     def test_a_marker_that_cannot_be_read_is_still_a_dependant(self):
         self.install()
         self.install(repo=self.other_repo)
-        marker = installer.dependant_marker(self.install_dir, self.other_identity)
+        marker = service.dependant_marker(self.install_dir, self.other_identity)
         marker.write_bytes(b"\xff\xfe")
         # Named by its file name rather than discounted -- and counted once,
         # not twice, beside the identity the record gives for the same
         # repository.
-        self.assertEqual(len(installer.link_dependants(self.install_dir)), 2)
+        self.assertEqual(len(service.link_dependants(self.install_dir)), 2)
         self.uninstall()
         self.assert_links_present()
 
@@ -2075,7 +2079,7 @@ class LinkDependencyTests(InstallerFixture):
                 # And the directory still says who is left, whatever the record
                 # has to say about it.
                 self.assertEqual(
-                    installer.link_dependants(self.install_dir),
+                    service.link_dependants(self.install_dir),
                     [self.other_identity],
                 )
                 self.uninstall(repo=self.other_repo)
@@ -2095,7 +2099,7 @@ class LinkDependencyTests(InstallerFixture):
         self.assert_links_present()
         self.assertTrue(self.manager.is_loaded(self.label(self.third_identity)))
         self.assertEqual(
-            installer.link_dependants(self.install_dir), [self.third_identity]
+            service.link_dependants(self.install_dir), [self.third_identity]
         )
         # And the last one out still takes them.
         self.uninstall(repo=self.third_repo)
@@ -2115,7 +2119,7 @@ class LinkDependencyTests(InstallerFixture):
                     sorted(self.entries()), [self.identity], "the record forgot it"
                 )
                 self.assertEqual(
-                    installer.link_dependants(self.install_dir),
+                    service.link_dependants(self.install_dir),
                     sorted([self.identity, self.other_identity]),
                 )
                 self.uninstall()
@@ -2151,9 +2155,9 @@ class LinkDependencyTests(InstallerFixture):
         elsewhere = self.root / "elsewhere"
         self.install(install_dir=elsewhere)
         self.assertEqual(
-            installer.link_dependants(self.install_dir), [self.other_identity]
+            service.link_dependants(self.install_dir), [self.other_identity]
         )
-        self.assertEqual(installer.link_dependants(elsewhere), [self.identity])
+        self.assertEqual(service.link_dependants(elsewhere), [self.identity])
         self.assert_links_present()
         for name in installer.LINKED_MODULES:
             self.assertTrue((elsewhere / name).is_symlink(), name)
@@ -2162,7 +2166,7 @@ class LinkDependencyTests(InstallerFixture):
         self.install()
         elsewhere = self.root / "elsewhere"
         self.install(install_dir=elsewhere)
-        self.assertEqual(installer.link_dependants(self.install_dir), [])
+        self.assertEqual(service.link_dependants(self.install_dir), [])
         self.assert_links_absent()
 
     # -- neither witness is trusted on its own ------------------------------
@@ -2173,13 +2177,13 @@ class LinkDependencyTests(InstallerFixture):
         # still names both, and a claim in either witness is a claim.
         self.install()
         self.install(repo=self.other_repo)
-        shutil.rmtree(installer.dependants_dir(self.install_dir))
+        shutil.rmtree(service.dependants_dir(self.install_dir))
         self.install()
         self.assertEqual(
-            installer.marker_dependants(self.install_dir), [self.identity]
+            service.marker_dependants(self.install_dir), [self.identity]
         )
         self.assertEqual(
-            sorted(installer.link_dependants(self.install_dir)),
+            sorted(service.link_dependants(self.install_dir)),
             sorted([self.identity, self.other_identity]),
         )
         self.uninstall()
@@ -2191,8 +2195,8 @@ class LinkDependencyTests(InstallerFixture):
     def test_an_absent_markers_directory_alone_keeps_the_links(self):
         self.install()
         self.install(repo=self.other_repo)
-        shutil.rmtree(installer.dependants_dir(self.install_dir))
-        self.assertIsNone(installer.marker_dependants(self.install_dir))
+        shutil.rmtree(service.dependants_dir(self.install_dir))
+        self.assertIsNone(service.marker_dependants(self.install_dir))
         self.uninstall()
         self.assert_links_present()
 
@@ -2200,9 +2204,9 @@ class LinkDependencyTests(InstallerFixture):
         # Stated rather than left implicit: there is no third place this is
         # written, so destroying both is the one case this cannot survive.
         self.install()
-        shutil.rmtree(installer.dependants_dir(self.install_dir))
+        shutil.rmtree(service.dependants_dir(self.install_dir))
         self.corrupt_record()
-        self.assertIsNone(installer.link_dependants(self.install_dir))
+        self.assertIsNone(service.link_dependants(self.install_dir))
         self.assertFalse(installer.may_remove_links(self.install_dir))
 
     def test_an_unsafe_marker_occupant_is_a_dependant_rather_than_a_skip(self):
@@ -2218,12 +2222,12 @@ class LinkDependencyTests(InstallerFixture):
                 # The record is gone too, so the marker is the only witness left
                 # and its reading is the whole of the answer.
                 self.corrupt_record()
-                marker = installer.dependant_marker(
+                marker = service.dependant_marker(
                     self.install_dir, self.other_identity
                 )
                 self.clear(marker)
                 make(marker)
-                self.assertIn(slug, installer.marker_dependants(self.install_dir))
+                self.assertIn(slug, service.marker_dependants(self.install_dir))
                 self.uninstall()
                 self.assert_links_present()
                 self.assertTrue(
@@ -2247,8 +2251,137 @@ class LinkDependencyTests(InstallerFixture):
     def unsafe_bytes(self, marker):
         marker.write_bytes(b"\xff\xfe")
 
+    def test_a_job_loaded_through_the_controller_alone_still_claims_it(self):
+        # The installer is not the only route that loads a job: the controller
+        # exposes the same operation, and a job loaded through it into somebody
+        # else's install directory has to be recorded as running from those
+        # links or the next uninstall takes them.
+        self.install()
+        job = service.job_for_identity(self.other_repo, self.other_identity)
+        service.install_job(job, self.install_dir)
+        self.assertIn(
+            self.other_identity, service.marker_dependants(self.install_dir)
+        )
+        # With the record gone, the marker is the only witness left -- which is
+        # exactly the state this claim has to survive.
+        self.corrupt_record()
+        self.uninstall()
+        self.assert_links_present()
+        self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
+
+    def test_the_controller_withdraws_the_claim_it_made(self):
+        self.install()
+        job = service.job_for_identity(self.other_repo, self.other_identity)
+        service.install_job(job, self.install_dir)
+        service.uninstall_job(job, self.install_dir)
+        self.assertEqual(
+            service.marker_dependants(self.install_dir), [self.identity]
+        )
+        self.uninstall()
+        self.assert_links_absent()
+
+    def test_a_marker_naming_another_repository_is_read_as_its_file_name(self):
+        # Trusting the contents alone would be worse than ignoring them: an
+        # uninstall discounts its own claim by slug, so a marker holding a
+        # second repository's identity would be discounted with it and the
+        # directory would look empty.
+        self.install()
+        self.install(repo=self.other_repo)
+        self.corrupt_record()
+        service.dependant_marker(self.install_dir, self.other_identity).write_text(
+            self.identity + "\n", encoding="utf-8"
+        )
+        self.assertIn(
+            service.repository_slug(self.other_identity),
+            service.marker_dependants(self.install_dir),
+        )
+        self.uninstall()
+        self.assert_links_present()
+        self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
+
+    def test_a_symlinked_markers_directory_is_refused_by_name(self):
+        # `mkdir(exist_ok=True)` and an ordinary write both follow a link, so a
+        # link standing where this directory belongs would redirect every marker
+        # into somebody else's tree.
+        victim = self.root / "victim"
+        victim.mkdir()
+        self.install_dir.mkdir(parents=True)
+        service.dependants_dir(self.install_dir).symlink_to(victim)
+        with self.assertRaises(
+            (installer.InstallError, service.ServiceError)
+        ) as raised:
+            self.install()
+        self.assertIn(
+            str(service.dependants_dir(self.install_dir)), str(raised.exception)
+        )
+        self.assertEqual(list(victim.iterdir()), [])
+        self.assertTrue(service.dependants_dir(self.install_dir).is_symlink())
+
+    def test_a_symlinked_marker_is_taken_back_rather_than_written_through(self):
+        self.install()
+        victim = self.root / "victim.txt"
+        victim.write_text("mine\n", encoding="utf-8")
+        marker = service.dependant_marker(self.install_dir, self.identity)
+        marker.unlink()
+        marker.symlink_to(victim)
+        self.install()
+        self.assertEqual(victim.read_text(encoding="utf-8"), "mine\n")
+        self.assertFalse(marker.is_symlink())
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), self.identity)
+
+    def test_a_marker_is_private_to_this_account(self):
+        self.install()
+        marker = service.dependant_marker(self.install_dir, self.identity)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+
 
 class LinkDependencySystemdTests(SystemdShapeMixin, LinkDependencyTests):
+    pass
+
+
+class StartCommandTests(InstallerFixture):
+    """What a finished install tells the operator to run next."""
+
+    def install_at(self, repo, install_dir):
+        return installer.install(
+            repo, install_dir, asset_root=repo, config_path=None, dry_run=False
+        )
+
+    def test_the_start_command_survives_spaces_and_names_the_identity(self):
+        # This installation's own default path contains a space on macOS --
+        # `Library/Application Support` -- and a checkout may contain one
+        # anywhere, so a command pasted into a shell has to be quoted.
+        repo = self.checkout("spaced repo", "git@github.com:acme/spaced.git")
+        install_dir = self.root / "installed dir"
+        result = self.install_at(repo, install_dir)
+
+        argv = shlex.split(installer.start_command(result))
+        self.assertEqual(argv[0], "python3")
+        self.assertEqual(argv[1], str(install_dir / service.CONTROLLER_NAME))
+        self.assertEqual(argv[2], "start")
+        self.assertEqual(argv[argv.index("--path") + 1], str(repo))
+        # Bound to the identity this install recorded rather than left to be
+        # re-derived: the shared configuration's `remote_name` decides which
+        # repository a checkout resolves to, so a command without `--repo`
+        # would quietly act on a different job if that setting changed.
+        self.assertEqual(argv[argv.index("--repo") + 1], "acme/spaced")
+
+        # And it is a command the controller's own parser accepts.
+        parsed = service.parse_args(argv[2:])
+        self.assertEqual(parsed.operation, "start")
+        self.assertEqual(parsed.path, str(repo))
+        self.assertEqual(parsed.repo, "acme/spaced")
+
+    def test_the_printed_plan_carries_that_command(self):
+        result = self.install()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            installer.print_plan(result, uninstalling=False)
+        self.assertIn(installer.start_command(result), printed.getvalue())
+        self.assertNotIn("from Kanban", printed.getvalue())
+
+
+class StartCommandSystemdTests(SystemdShapeMixin, StartCommandTests):
     pass
 
 
