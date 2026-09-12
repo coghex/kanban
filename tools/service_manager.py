@@ -7,17 +7,22 @@ identity, clone exclusion, preflights, discovery records, incidents, startup
 stabilization, shutdown confirmation — and `tools/install_drainer.py` owns
 installation safety. `tools/approve_issues_service.py` and
 `tools/install_issue_approval.py` own the same two halves for the issue
-approval service. None of that is platform-specific, and none of it belongs
+approval service, and `tools/mission_runner_service.py` and
+`tools/install_mission_runner.py` for the mission runner. None of that is
+platform-specific, and none of it belongs
 to a service manager. What is one's lives here: the identifier a job is named
 and targeted by, the definition it is written from, and the commands that
 load, kick, stop, and remove it.
 
-Two services now share that boundary, so a backend is constructed for one
+Three services now share that boundary, so a backend is constructed for one
 `ServiceNamespace`: the prefix its identifiers are built from, the description
 its definitions carry, and whether it has a machine-wide singleton predating
-per-repository jobs. Only the drainer has one. The namespace is what keeps two
-services' jobs, and the definitions they are written from, from ever colliding
-without either service restating a single identifier of its own.
+per-repository jobs. Only the drainer has one. The namespace is what keeps
+three services' jobs, and the definitions they are written from, from ever
+colliding without any of them restating a single identifier of its own. A
+service is a namespace rather than a backend: the two backends below serve
+whichever namespace they are constructed for, and a third managed job adds no
+manager.
 
 So this module is the only one that constructs a `launchctl` or `systemctl`
 argument vector, reads either one's output, serializes or parses a plist or a
@@ -36,12 +41,12 @@ is managed by and refuses a host that has neither, rather than assuming one:
 the platform refusal belongs to the question "what manages services here?",
 not to any caller's own platform check.
 
-The command runner is injected rather than imported. Both callers already
-spawn through their own thin wrapper — `drain_prs_service.run_command` raises
+The command runner is injected rather than imported. Every caller already
+spawns through its own thin wrapper — `drain_prs_service.run_command` raises
 `ServiceError`, `install_drainer.run` raises `InstallError` — and passing that
 wrapper in is what keeps a failure crossing this boundary in the failure
-vocabulary its own caller reports, instead of a third exception type neither
-side handles. `ServiceManagerError` below is the one exception this module
+vocabulary its own caller reports, instead of a further exception type no
+caller handles. `ServiceManagerError` below is the one exception this module
 raises on its own account, for the two faults no injected runner can express:
 a host with no service manager at all, and a value that cannot be rendered
 into a definition.
@@ -78,7 +83,7 @@ class ServiceManagerError(RuntimeError):
 
     Commands cross back as the caller's own error type because the caller
     injected the runner that raises it. These two do not: no runner ran, so
-    there is no wrapper to raise through, and both callers translate this at
+    there is no wrapper to raise through, and every caller translates this at
     the seam where they resolve the backend.
     """
 
@@ -90,14 +95,16 @@ class NoServiceManagerError(ServiceManagerError):
 # they are named and targeted by. Nothing else may restate one:
 # `tools/drain_prs_service.py` and `tools/install_drainer.py` both derive
 # theirs through this module, as do `tools/approve_issues_service.py` and
-# `tools/install_issue_approval.py`, and `src/Kanban/Drainer.hs` derives none
+# `tools/install_issue_approval.py`, and `tools/mission_runner_service.py` and
+# `tools/install_mission_runner.py`, and `src/Kanban/Drainer.hs` derives none
 # at all — it reads an installed job's label and plist path out of the
 # per-repository discovery record the controller writes.
 #
 # There is one label, and one of every mutable runtime path, per canonical
 # GitHub repository *per service*: that partitioning is what lets several
 # repositories be drained independently on one account, and what lets the
-# approval service install a job beside a drainer's for the same repository.
+# approval service and the mission runner each install a job beside a
+# drainer's for the same repository.
 # LABEL_PREFIX on its own is the machine-wide singleton the drainer's
 # per-repository jobs replace; it survives only as the legacy job
 # `retire_legacy` unloads before a derived job for the same repository is
@@ -111,6 +118,12 @@ LEGACY_LABEL = LABEL_PREFIX
 # singleton to retire; the untracked personal daemon that predates the service
 # is a conflict the controller refuses beside, never a job this module manages.
 ISSUE_APPROVAL_LABEL_PREFIX = "com.coghex.issue-approval"
+# The mission runner's own prefix, distinct from both of the above by
+# construction and for the same reason. This service has never had a
+# machine-wide job either: `tools/mission_runner_service.py` shipped as a
+# wrapper invoked directly, so the namespace below has nothing to retire, and
+# a foreground run is a process nobody installed rather than a singleton.
+MISSION_RUNNER_LABEL_PREFIX = "com.coghex.mission-runner"
 LAUNCH_AGENTS_DIR = HOME / "Library" / "LaunchAgents"
 LEGACY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LEGACY_LABEL}.plist"
 # Long enough for every GitHub owner/name pair spelled with ordinary
@@ -202,8 +215,8 @@ class ServiceNamespace:
 
     A backend is constructed for exactly one of these, so every identifier it
     derives, every definition it writes, and every legacy question it answers
-    belong to that service alone. Nothing else about a backend varies: both
-    services are non-resident jobs started on demand, and a namespace that
+    belong to that service alone. Nothing else about a backend varies: every
+    service here is a non-resident job started on demand, and a namespace that
     could change that would be a second lifecycle rather than a second name.
 
     `legacy_prefix` is the machine-wide singleton this namespace's
@@ -229,6 +242,12 @@ ISSUE_APPROVAL_NAMESPACE = ServiceNamespace(
     name="issue-approval",
     prefix=ISSUE_APPROVAL_LABEL_PREFIX,
     description="Kanban issue approval",
+    legacy_prefix=None,
+)
+MISSION_RUNNER_NAMESPACE = ServiceNamespace(
+    name="mission-runner",
+    prefix=MISSION_RUNNER_LABEL_PREFIX,
+    description="Kanban mission runner",
     legacy_prefix=None,
 )
 

@@ -2080,12 +2080,22 @@ report did not name.
   Within it the three commands divide as the Commands bullet below sets out:
   `run` writes the status document and opens incidents, `status` only reads,
   and `ack` reads the incidents to find the open one it then rewrites.
-- **Installation:** none. This capability is invoked directly — the wrapper is
-  run in a terminal or under whatever supervisor the operator already has — and
-  has no service-manager namespace, no discovery record, no installed script
-  links, and no per-repository log directory. Making it a managed job is a
-  later slice's, and until then nothing here may be discovered the way §2.4's
-  and §2.8's jobs are.
+- **Installation:** `tools/install_mission_runner.py`, on §2.8's shape. It
+  loads one stopped job per canonical GitHub repository in a `mission-runner`
+  service-manager namespace of its own, installs the shared script links every
+  such job runs from, and records the installation in `config.json` in this
+  service's own resolved directory — the `mission-runner-discovery-record` rows
+  in §4, probed XDG-first for an occupied location exactly as §2.4's and
+  §2.8's records are, and never moved by `--install-dir` or
+  `KANBAN_MISSION_RUNNER_INSTALL_DIR`. It never starts the service. The
+  capability is still invoked directly as well: the wrapper runs in a terminal
+  or under whatever supervisor the operator already has, and a foreground run
+  and an installed job contend for the same per-identity run lock. What this
+  entry does not yet state is the authority and ownership of the installed
+  component, the operator's installing, operating, and recovering guide, and
+  the dependency and packaging inventory; those are a later slice's, and until
+  then nothing here may be *discovered from Kanban* the way §2.4's and §2.8's
+  jobs are — the record exists, and no in-app reader does.
 - **Invocation:** the controller never imports Haskell. Every pass is a child
   process running `kanban --mission-scheduler` — resolved from `PATH` unless
   `--kanban` names one, and refused by name when neither is usable — in the
@@ -2375,6 +2385,11 @@ mission-runner-runtime-dir | personal-path | /Library/Application Support/kanban
 mission-runner-runtime-dir-xdg | personal-path | /.local/share/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-lock-dir | personal-path | /Library/Application Support/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-lock-dir-xdg | personal-path | /.local/share/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-job-label | personal-path | com.coghex.mission-runner | tools/service_manager.py | kanban | supported | no
+mission-runner-discovery-record | personal-path | /Library/Application Support/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs;tools/mission_runner_service.py | kanban | supported | no
+mission-runner-discovery-record-xdg | personal-path | /.local/share/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs;tools/mission_runner_service.py | kanban | supported | no
+mission-runner-log-dir | personal-path | /Library/Logs/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-log-dir-xdg | personal-path | /.local/state/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 ```
 
 The six issue-review `personal-path` rows are three locations times two
@@ -2501,12 +2516,13 @@ locations remains future work, which is why no `-xdg` row exists to pair with
 them yet.
 
 `managed-job-path-entry` is not state at all: it is the one home-relative entry
-of the fixed `PATH` both managed services' job definitions carry, declared
-because a job's ability to find `gh`, `codex`, and `claude` depends on it, and
-found by the scan below in `tools/approve_issues_service.py`.
+of the fixed `PATH` every managed service's job definitions carry, declared
+because a job's ability to find `gh`, `codex`, `claude`, and `kanban` depends on
+it, and found by the scan below in `tools/approve_issues_service.py` and
+`tools/mission_runner_service.py`.
 `tools/drain_prs_service.py` builds the same entry for the drainer's own
 definitions and is not on that scan's surface, so this one row covers a location
-two modules write and one of them is policed for.
+three modules write and two of them are policed for.
 
 Four of the five — `issue-approval-install-dir`, `issue-approval-runtime-dir`,
 `issue-approval-lock-dir`, and `issue-approval-log-dir` — declare
@@ -2534,33 +2550,61 @@ their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms �
 there the literal carries the leading separator, so no reconciling comment is
 needed.
 
-The six `mission-runner` `personal-path` rows are three locations times two
+The ten `mission-runner` `personal-path` rows are five locations times two
 platform conventions, as the issue-review and drainer rows are and unlike the
 issue-approval ones: `tools/mission_runner_service.py` resolves its root
 through `kanban_config.is_macos()`, taking `~/Library/Application
 Support/kanban/mission-runner` on macOS and the XDG data root — `$XDG_DATA_HOME`
 when it names an absolute directory, and `~/.local/share/kanban/mission-runner`
 when it does not — everywhere else. That absolute-only rule is the drainer's
-rather than issue-review's, and for the drainer's stated reason: the unit that
-will eventually run this job and the paths that locate it have to read the
-environment identically. `mission-runner-service-root` is the service root and
-the parent of the other two; `mission-runner-runtime-dir` is the runtime root,
+rather than issue-review's, and for the drainer's stated reason: the systemd
+unit that runs this job and the paths that locate it have to read the
+environment identically. `mission-runner-service-root` is the service root, the
+parent of every other location under the data root, and the *default* install
+directory — `--install-dir` and `KANBAN_MISSION_RUNNER_INSTALL_DIR` place the
+shared script links elsewhere and move nothing else, which is why no install
+directory is spelled a second time;
+`mission-runner-discovery-record` is the record inside it, whose own path
+neither of those may move, because it is what lets a dashboard that never saw
+`--install-dir` find an installation made with it;
+`mission-runner-runtime-dir` is the runtime root,
 one directory per identity beneath it holding that identity's status document
-and incident directory; and `mission-runner-lock-dir` holds the per-identity run
-lock. No installation directory, discovery record, or log root appears among
-them, because this slice installs nothing: `kanban --mission-scheduler` is
-supervised by a wrapper invoked directly, and making it a managed job is a later
-slice's (§2.12).
+and incident directory; `mission-runner-lock-dir` holds the per-identity run,
+transition, and per-installation link locks; and `mission-runner-log-dir` is
+the log root an installed job's output is redirected into, one directory per
+identity, which follows `$XDG_STATE_HOME` on the same absolute-only terms and
+which no option moves. `mission-runner-job-label` is the eleventh row and is
+not a location at all: it is the identifier prefix
+`tools/service_manager.py` derives an installed job's identifier from, on the
+terms `drainer-launchagent-label` and `issue-approval-job-label` are described
+under above.
 
-Those six name `tools/mission_runner_service.py` alone, and that is the same
+All ten name `tools/mission_runner_service.py`, and that is the same
 statement the four issue-approval rows make: the module composes each location
 segment by segment, so a `files` entry can only be grounded in the module if the
-literals are written down there. Two of them are, by the scan below —
-`mission-runner-service-root` in both spellings, and the XDG runtime and lock
-trees the scan resolves the service root to — and the remaining `~/Library`
-runtime and lock spellings are written out in the docstring of the helper that
-builds each, because the scan follows exactly one of a helper's returns and the
-row still has to be grounded in the module that owns it.
+literals are written down there. Six of them are, by the scan below —
+`mission-runner-service-root` and `mission-runner-log-dir` in both spellings,
+and the XDG runtime and lock
+trees the scan resolves the service root to — and each of the remaining four
+spellings is written out in the docstring of the helper that
+builds it, because the scan follows exactly one of a helper's returns and the
+row still has to be grounded in the module that owns it. The two record rows
+name `src/Kanban/ManagedPaths.hs` as well, and that file is where each is
+spelled whole rather than composed, exactly as it is for the drainer's and the
+issue-review backend's record rows.
+
+The mission runner is also the one managed component whose Python locations are
+*not* spelled in `tools/kanban_config.py`. They are spelled in the controller
+that owns them, because that module resolves the account root from the passwd
+database rather than from `$HOME` — a location a caller's environment can move
+cannot serialize anything — and `tools/kanban_config.py`'s resolvers are
+`Path.home()`-anchored. One spelling per language is the property these rows
+protect; which module carries the Python one is the component's own answer, and
+`src/Kanban/ManagedPaths.hs` is the Haskell counterpart of all three.
+`test/Spec/ManagedPaths.hs` holds the two halves together for this component by
+running the tracked Python resolver over every combination of occupancy and
+environment and comparing its answer with the Haskell one, rather than by
+restating either.
 
 `kanban-cli` is the executable a pass *is*. Every other dependency in this table
 is something Kanban invokes; this one is Kanban, invoked by
@@ -2573,7 +2617,8 @@ never needs to resolve it.
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
 `tools/approve_issues_service.py`, `tools/install_issue_approval.py`,
-`tools/service_manager.py`, and `tools/mission_runner_service.py` as parsed
+`tools/service_manager.py`, `tools/mission_runner_service.py`, and
+`tools/install_mission_runner.py` as parsed
 modules — following a name to its binding
 and a helper to its return — and reconciles every chain that reaches a home root
 against the `personal-path` tokens here. It is the counterpart of the Haskell and

@@ -3619,6 +3619,39 @@ above are unchanged, and persistence the user switched off is not a failure.
   and no later observation repairs it once the documents stop changing. The
   refresh never disturbs the service's own status: the durable warning or error
   it reported is what still stands after it.
+- The unattended mission runner is the third managed service, installed the same
+  way and discovered on the same terms, with none of the dashboard lifecycle
+  above yet: `tools/install_mission_runner.py` loads one stopped job per
+  canonical GitHub repository in a `mission-runner` namespace of its own,
+  through `tools/mission_runner_service.py`'s own install, start, stop, and
+  uninstall operations rather than by spawning the copy it installs, and it
+  never starts the service. The script links are shared — one installed copy of
+  the controller, the configuration parser, and the service-manager backend
+  serves every repository — while the job, its runtime state, its logs, and its
+  `--config` selection are the repository's own, so installing a second
+  repository adds an entry beside the first and uninstalling one takes that
+  entry and that job alone. Kanban reads none of it yet; discovery, status and
+  incident decoding, and the start/stop seam are a later slice's.
+- That service's discovery record is `config.json` in its own resolved
+  directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
+  `$XDG_DATA_HOME/kanban/mission-runner` (`~/.local/share` when that variable is
+  unset, empty, or not absolute) on every other platform — probed XDG-first for
+  an occupied location so an installation made under either spelling is found
+  where it already is, with this platform's own convention written only when
+  neither is occupied. Occupied means anything at all at that path, a directory
+  or a link that cannot be followed included, and a record this installer cannot
+  safely write is refused by name rather than replaced or resolved to the other
+  location. `Kanban.ManagedPaths` answers that question for the dashboard in the
+  same order and under the same absolute-only rule, which is what keeps the two
+  halves of a host from disagreeing about which installation it has. The
+  per-repository log directories are under `~/Library/Logs/kanban/mission-runner`
+  on macOS and `$XDG_STATE_HOME/kanban/mission-runner` (`~/.local/state` on the
+  same terms) elsewhere. `--install-dir` and
+  `KANBAN_MISSION_RUNNER_INSTALL_DIR` move the script links and the install
+  directory beneath them, and move neither the record's own path — which is what
+  lets a dashboard that never saw the option find the installation — nor the
+  logs. There is nothing to migrate: this component had no installation before
+  this slice, so relocation is that override and only that.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review
   event/spinner tick, notice expiry, or explicit terminal repaint.
@@ -3661,9 +3694,11 @@ Suggested paths:
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
 ~/.local/state/kanban/missions/.deleted/<token>/
+~/Library/Application Support/kanban/mission-runner/config.json
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/status.json
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/incidents/<id>.json
 ~/Library/Application Support/kanban/mission-runner/locks/<owner>.<repo>.lock
+~/Library/Logs/kanban/mission-runner/<owner>.<repo>/service.{out,err}
 ```
 
 Defaults:
@@ -3749,11 +3784,16 @@ Defaults:
   one incident directory per canonical repository, under the account's own
   service root — `~/Library/Application Support/kanban/mission-runner` on
   macOS, `$XDG_DATA_HOME/kanban/mission-runner` when that names an absolute
-  directory, and `~/.local/share/kanban/mission-runner` otherwise. Each carries
+  directory, and `~/.local/share/kanban/mission-runner` otherwise, resolved to
+  whichever of the two spellings this host's installation already occupies.
+  Each carries
   its own schema and integer version and records the repository it describes,
   so a reader can reject one written for another repository or by another
   release. The per-identity run lock beside them is what makes a second
-  wrapper for one repository refuse rather than interleave. Nothing in Kanban
+  wrapper for one repository refuse rather than interleave, and the transition
+  and per-installation link locks beside that one are what keep an install, a
+  start, a stop, and an uninstall of one job from interleaving. Nothing in
+  Kanban
   reads any of it yet — discovery and decoding are a later slice's — so until
   then the wrapper itself is the whole of the traffic, across three commands:
   `run` writes the status document and opens an incident when a pass fails;
@@ -3765,6 +3805,24 @@ Defaults:
   more — it writes no status document and is powerless over the service, so
   acknowledging the incident a failed pass opened does not make the next pass
   succeed.
+- Beside those runtime documents the service keeps two durable records of its
+  *installation*. `config.json` in the service root is the discovery record —
+  one `repositories` table holding each installed repository's entry, naming the
+  backend that wrote it, that job's identifier, its definition's absolute path,
+  the installed checkout, the install directory, and the `--config` that
+  repository was installed with. It is the only durable trace of an
+  `--install-dir` installation, which is why neither that option nor
+  `KANBAN_MISSION_RUNNER_INSTALL_DIR` moves the record's own path; the entry is
+  a discriminated union on `backend` in the shape the other two services' are,
+  and a reinstall under the other service manager replaces that manager's keys
+  rather than leaving both sets side by side. The per-repository log directory
+  under the state root is the second: `service.out` and `service.err` are where
+  the service manager sends an installed job's output, so they are the durable
+  account of a run that failed before it could write a status document. A record
+  that is missing, unreadable, or stale is repaired by reinstalling rather than
+  leaving the component undiscoverable; a record path occupied by something that
+  is not a plain file is refused by name, before anything is written, rather
+  than replaced.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository
@@ -4359,8 +4417,11 @@ repository, notifies about each waiting episode at most once through a command
 the operator configured, and writes one machine-readable pass report;
 `tools/mission_runner_service.py` repeats those passes for one repository,
 publishes a versioned status document and opens an incident on a failed pass,
-and refuses a second wrapper for the same repository. Installing that wrapper
-as a managed job, decoding its runtime from the dashboard, capacity
+and refuses a second wrapper for the same repository. That wrapper is now a
+managed job as well: `tools/install_mission_runner.py` installs one stopped job
+per canonical GitHub repository in a `mission-runner` namespace of its own,
+writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
+Decoding its runtime from the dashboard, capacity
 arbitration, fair rotation, and descendant-tree termination are not
 implemented. Board frames are
 bounded as section 7 describes: each column is laid out once per change to what
