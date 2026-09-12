@@ -2077,9 +2077,11 @@ report did not name.
   its durable suppression record). There is no in-app surface yet: Kanban-side
   discovery, status decoding, and dashboard start/stop are a later slice's, so
   today nothing outside this controller touches the runtime documents at all.
-  Within it the three commands divide as the Commands bullet below sets out:
+  Within it the runtime commands divide as the Commands bullet below sets out:
   `run` writes the status document and opens incidents, `status` only reads,
-  and `ack` reads the incidents to find the open one it then rewrites.
+  and `ack` reads the incidents to find the open one it then rewrites. The four
+  lifecycle commands beside them act on the managed job rather than on that
+  runtime, and are the ones the installer calls.
 - **Installation:** `tools/install_mission_runner.py`, on §2.8's shape. It
   loads one stopped job per canonical GitHub repository in a `mission-runner`
   service-manager namespace of its own, installs the shared script links every
@@ -2151,21 +2153,46 @@ report did not name.
   nothing runnable makes none at all.
 - **Durable state:** a status document and an incident directory per canonical
   repository under the runtime root §4's `mission-runner-runtime-dir` rows
-  name, a per-identity run lock under `mission-runner-lock-dir`, and — inside
-  each mission's own record in the mission store — one notification suppression
-  record per attention identity. The suppression record is written before the
-  configured command is launched and is never retried afterwards, so delivery
-  is at most once per waiting episode and a crash between the record and the
-  launch loses that notification by design.
-- **Commands:** three. `run` is the supervisor; `status` reads and repairs
+  name; a per-identity run lock under `mission-runner-lock-dir`, beside the
+  per-identity transition lock and the per-installation link lock a managed
+  transition is performed under; and — inside each mission's own record in the
+  mission store — one notification suppression record per attention identity.
+  The suppression record is written before the configured command is launched
+  and is never retried afterwards, so delivery is at most once per waiting
+  episode and a crash between the record and the launch loses that notification
+  by design.
+
+  Installation adds four more. The discovery record §4's
+  `mission-runner-discovery-record` rows name holds one entry per installed
+  repository — the backend that wrote it, that job's identifier, its
+  definition's absolute path, the installed checkout, the install directory, and
+  the `--config` it was installed with. The service manager holds the definition
+  itself, in the directory its own §4 row names. `service.out` and `service.err`
+  under `mission-runner-log-dir` are where that manager sends an installed job's
+  output. And a `dependants` directory inside the install directory carries one
+  marker per installed identity, which is half of how an uninstall decides
+  whether the shared script links may go — the other half being the discovery
+  record, unioned with it rather than trusted instead of it, because each can be
+  destroyed or laundered in ways the other cannot.
+- **Commands:** seven, in two groups. Three are about a repository's runtime:
+  `run` is the supervisor; `status` reads and repairs
   nothing — no directory created, no document rewritten, no incident opened or
   resolved — because it is the diagnostic reached for when the runtime is
   already in a bad state, and a reader that repaired what it read would destroy
-  the evidence it was called to show. `ack` is the only one that changes
-  anything, and only bookkeeping: it marks one open incident resolved, writes
-  no status document, creates nothing, and refuses an identifier naming no open
-  incident. It is deliberately powerless over the service, so acknowledging the
-  incident a failed pass opened does not make the next pass succeed.
+  the evidence it was called to show; and `ack` changes only bookkeeping,
+  marking one open incident resolved, writing no status document, creating
+  nothing, and refusing an identifier naming no open incident. It is
+  deliberately powerless over the service, so acknowledging the incident a
+  failed pass opened does not make the next pass succeed.
+
+  The other four are about the managed job, and are what
+  `tools/install_mission_runner.py` calls rather than spawns: `install` loads a
+  stopped job and records it, `uninstall` unloads it and drops its entry,
+  `start` kicks it and confirms the run it launched really is the one that
+  published a status, and `stop` asks it to end and waits until the manager
+  agrees it has. None of them takes an install-directory option: the copy that
+  runs them is the installation they are about, and it reads its own location
+  from the environment that launched it.
 - **Notifications:** off by default, and when enabled the operator's own
   configured command is run through the bounded command-capture seam with two
   fixed values appended — the repository identity and `attention-required` —
@@ -3405,15 +3432,21 @@ brand's asset speaking a tool its declaration does not carry.
   `roles.drain_rereview.claude` cell alone and introduces no override of its
   own.
 - **A new tracked module under `tools/` does not reach a live install by
-  itself.** Both service installations link a fixed module set beside the
-  script they install, resolved when that install was made, so a module added
-  to either set requires rerunning its installer —
-  `python3 tools/install_drainer.py` for the PR drainer, and
+  itself.** Every service installation links a fixed module set beside the
+  script it installs, resolved when that install was made, so a module added
+  to one of those sets requires rerunning its installer —
+  `python3 tools/install_drainer.py` for the PR drainer,
   `python3 tools/install_issue_review.py` for the canonical issue-review
   backend (`tools/install_issue_approval.py` deliberately installs no backend
-  of its own; it resolves and verifies the one that installer made). Until
+  of its own; it resolves and verifies the one that installer made), and
+  `python3 tools/install_mission_runner.py` for the mission runner, per
+  repository. Until
   then the installed script fails at import against the module set it was
-  installed with. Issue #483's `tools/kanban_models.py` joined both sets.
+  installed with. Issue #483's `tools/kanban_models.py` joined the first two
+  sets; the mission runner's is the controller, `kanban_config.py` and
+  `service_manager.py`, and `tools/test_install_mission_runner.py` derives that
+  set from the controller's own module-scope imports rather than restating it,
+  so an import added there joins it without anybody remembering to say so.
 
 ## 6. Completeness check
 

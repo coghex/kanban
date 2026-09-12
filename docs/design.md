@@ -264,8 +264,12 @@ order would silently start work that was not asked for.
 `--mission-scheduler` advances this repository's runnable missions for one
 bounded pass and then exits. It is not a daemon: repeating passes and deciding
 how long to wait between them belong to the supervisor above it
-(`tools/mission_runner_service.py`), which is invoked directly and installs
-nothing.
+(`tools/mission_runner_service.py`), which runs either as a job installed per
+repository by `tools/install_mission_runner.py` or in the foreground, and which
+excludes the two from each other through one per-identity run lock. Kanban
+reads none of that yet: discovery, status decoding, and dashboard start/stop
+are a later slice's, so a job is installed and controlled from the command line
+(section 15).
 
 A pass admits at most two missions, and the ceiling is a compiled value with no
 configuration surface; fair rotation, a configurable capacity, and priority for
@@ -3826,7 +3830,8 @@ Defaults:
   start, a stop, and an uninstall of one job from interleaving. Nothing in
   Kanban
   reads any of it yet — discovery and decoding are a later slice's — so until
-  then the wrapper itself is the whole of the traffic, across three commands:
+  then the wrapper and its installer are the whole of the traffic. Three of its
+  commands are about this runtime:
   `run` writes the status document and opens an incident when a pass fails;
   `status` only reads, creating no directory, rewriting no document and
   resolving no incident, because it is the diagnostic reached for when the
@@ -3835,8 +3840,10 @@ Defaults:
   the open one it then rewrites as resolved. `ack` is bookkeeping and nothing
   more — it writes no status document and is powerless over the service, so
   acknowledging the incident a failed pass opened does not make the next pass
-  succeed.
-- Beside those runtime documents the service keeps two durable records of its
+  succeed. The four beside them — `install`, `uninstall`, `start` and `stop` —
+  act on the managed job rather than on this runtime, and are what the
+  installer calls rather than spawns.
+- Beside those runtime documents the service keeps durable records of its
   *installation*. `config.json` in the service root is the discovery record —
   one `repositories` table holding each installed repository's entry, naming the
   backend that wrote it, that job's identifier, its definition's absolute path,

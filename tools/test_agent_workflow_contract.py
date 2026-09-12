@@ -109,12 +109,15 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # back. What it contributes is pinned by
 # test_provider_adapter_owns_every_provider_process.
 #
-# Issue #444 moved both managed discovery records' locations out of
-# Drainer.hs and Review/Canonical.hs into Kanban.ManagedPaths, which is the
-# only module under src/ that spells either of them now. It is listed for
+# Issue #444 moved the drainer's and the issue-review backend's discovery
+# record locations out of Drainer.hs and Review/Canonical.hs into
+# Kanban.ManagedPaths, and issue #667 added the mission runner's beside them,
+# so that module is the only one under src/ that spells any of the three now.
+# It is listed for
 # the home-relative reconciliation below rather than for an executable it
 # invokes -- it invokes none -- and a rewrite that took it back off this
-# list would leave four `personal-path` tokens scanned in no file at all,
+# list would leave the six `personal-path` tokens of MANAGED_RECORD_TOKENS
+# scanned in no file at all,
 # which is what test_managed_record_locations_reach_the_home_path_scan
 # refuses.
 #

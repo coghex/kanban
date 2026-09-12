@@ -2046,7 +2046,9 @@ class LinkDependencyTests(InstallerFixture):
         self.install(repo=self.other_repo)
         marker = installer.dependant_marker(self.install_dir, self.other_identity)
         marker.write_bytes(b"\xff\xfe")
-        # Named by its file name rather than discounted.
+        # Named by its file name rather than discounted -- and counted once,
+        # not twice, beside the identity the record gives for the same
+        # repository.
         self.assertEqual(len(installer.link_dependants(self.install_dir)), 2)
         self.uninstall()
         self.assert_links_present()
@@ -2162,6 +2164,88 @@ class LinkDependencyTests(InstallerFixture):
         self.install(install_dir=elsewhere)
         self.assertEqual(installer.link_dependants(self.install_dir), [])
         self.assert_links_absent()
+
+    # -- neither witness is trusted on its own ------------------------------
+
+    def test_a_rebuilt_markers_directory_does_not_forget_a_sibling(self):
+        # The markers launder the same way the record does: delete the directory
+        # and the next install rebuilds it around that install alone. The record
+        # still names both, and a claim in either witness is a claim.
+        self.install()
+        self.install(repo=self.other_repo)
+        shutil.rmtree(installer.dependants_dir(self.install_dir))
+        self.install()
+        self.assertEqual(
+            installer.marker_dependants(self.install_dir), [self.identity]
+        )
+        self.assertEqual(
+            sorted(installer.link_dependants(self.install_dir)),
+            sorted([self.identity, self.other_identity]),
+        )
+        self.uninstall()
+        self.assert_links_present()
+        self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
+        self.uninstall(repo=self.other_repo)
+        self.assert_links_absent()
+
+    def test_an_absent_markers_directory_alone_keeps_the_links(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        shutil.rmtree(installer.dependants_dir(self.install_dir))
+        self.assertIsNone(installer.marker_dependants(self.install_dir))
+        self.uninstall()
+        self.assert_links_present()
+
+    def test_only_both_witnesses_gone_leaves_nothing_to_be_right_from(self):
+        # Stated rather than left implicit: there is no third place this is
+        # written, so destroying both is the one case this cannot survive.
+        self.install()
+        shutil.rmtree(installer.dependants_dir(self.install_dir))
+        self.corrupt_record()
+        self.assertIsNone(installer.link_dependants(self.install_dir))
+        self.assertFalse(installer.may_remove_links(self.install_dir))
+
+    def test_an_unsafe_marker_occupant_is_a_dependant_rather_than_a_skip(self):
+        # A directory, a dangling link, bytes that are not UTF-8: what such an
+        # occupant means is unknowable, and the only safe reading of "somebody
+        # put something here under a repository's slug" is that the repository
+        # is claiming this directory.
+        slug = service.repository_slug(self.other_identity)
+        for make in (self.unsafe_directory, self.unsafe_dangling_link, self.unsafe_bytes):
+            with self.subTest(occupant=make.__name__):
+                self.install()
+                self.install(repo=self.other_repo)
+                # The record is gone too, so the marker is the only witness left
+                # and its reading is the whole of the answer.
+                self.corrupt_record()
+                marker = installer.dependant_marker(
+                    self.install_dir, self.other_identity
+                )
+                self.clear(marker)
+                make(marker)
+                self.assertIn(slug, installer.marker_dependants(self.install_dir))
+                self.uninstall()
+                self.assert_links_present()
+                self.assertTrue(
+                    self.manager.is_loaded(self.label(self.other_identity))
+                )
+                self.clear(marker)
+                self.uninstall(repo=self.other_repo)
+
+    def clear(self, path):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            path.unlink()
+
+    def unsafe_directory(self, marker):
+        marker.mkdir(parents=True)
+
+    def unsafe_dangling_link(self, marker):
+        marker.symlink_to(self.root / "gone")
+
+    def unsafe_bytes(self, marker):
+        marker.write_bytes(b"\xff\xfe")
 
 
 class LinkDependencySystemdTests(SystemdShapeMixin, LinkDependencyTests):
