@@ -3641,7 +3641,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   directory but the one the record names, because refreshing the definition and
   the record entry somewhere else *moves* the installation — and only the
   installer releases the claim and the shared links the old directory is left
-  holding, so a start that moved a job would orphan them. Each installed job's definition also pins the
+  holding, so a start that moved a job would orphan them. An `install` or an
+  `uninstall` reached through the controller alone is refused on the same
+  terms and for the same reason; the installer is the exemption, because it is
+  the one caller that releases what it leaves, and it proves that release can
+  be completed before it commits the move rather than discovering afterwards
+  that the old directory cannot be cleared. Each installed job's definition also pins the
   XDG config base its installer resolved the repository identity through,
   because a job started from a cold manager re-resolves that identity and
   refuses to act when it disagrees with the one its own definition records. The script links are shared — one installed copy of

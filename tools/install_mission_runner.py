@@ -641,6 +641,22 @@ def install(
     # is the only reading of it no concurrent install can invalidate.
     snapshot = mission_runner_service.installed_install_dir(job.identity)
     moving = snapshot is not None and not same_directory(snapshot, install_dir)
+    if moving:
+        # Before anything is committed, and under the lock of the directory
+        # this repository is leaving: the release below happens *after* the
+        # move, so a withdrawal that cannot be performed would land a job in its
+        # new directory while the old one kept a claim and the links under it --
+        # and by then the record names only the new one, so nothing could find
+        # the old to clean it. `plan_released_links` does not reach this: it
+        # reads which repositories depend on that directory, which a marker that
+        # is a directory answers perfectly well, and only the withdrawal fails.
+        with installation_lock(Path(snapshot)):
+            try:
+                mission_runner_service.require_removable_dependant(
+                    Path(snapshot), job.identity
+                )
+            except mission_runner_service.ServiceError as exc:
+                raise InstallError(str(exc)) from exc
     plan = controller_operation("install_plan", job, install_dir)
     sources = link_sources(asset_root, install_dir)
     resolved_sources = {
@@ -681,6 +697,11 @@ def install(
         },
         "job": plan,
         "relocated_from": str(snapshot) if moving else None,
+        # Set only by a relocation whose release could not be completed: the
+        # directory this repository left is still holding a claim and the links
+        # under it, and this is the only thing that names it afterwards.
+        "retained_install_dir": None,
+        "retained_reason": None,
         "released_links": (
             plan_released_links(asset_root, Path(snapshot), job.identity)
             if moving
@@ -727,9 +748,26 @@ def install(
             # By here the record already names the new directory, and the marker
             # left behind is the last thing saying this repository still runs
             # from the old one.
-            document["released_links"] = release_links(
-                asset_root, Path(previous), job.identity
-            )
+            #
+            # Reported rather than raised if it cannot be done. The move has
+            # already happened, so a failure here is not a failed install: it is
+            # a completed one beside a directory that still needs clearing, and
+            # saying so is what lets somebody clear it. The check above makes
+            # this reachable only when that directory changed under us between
+            # then and now.
+            try:
+                document["released_links"] = release_links(
+                    asset_root, Path(previous), job.identity
+                )
+            except (InstallError, mission_runner_service.ServiceError) as exc:
+                document["released_links"] = {
+                    name: {"destination": str(destination), "result": "kept"}
+                    for name, (_source, destination) in link_sources(
+                        asset_root, Path(previous)
+                    ).items()
+                }
+                document["retained_install_dir"] = str(previous)
+                document["retained_reason"] = str(exc)
         else:
             document["released_links"] = {}
     return {**document, "installed": True, "dry_run": False}
@@ -946,6 +984,12 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
             "Shared links kept: this installation does not say nothing runs "
             "from them. Reinstall each repository that belongs here, then "
             "re-run."
+        )
+    if not uninstalling and result.get("retained_install_dir"):
+        print(
+            f"Left behind in {result['retained_install_dir']}: its links and "
+            "this repository's claim on them could not be taken back. "
+            + result["retained_reason"]
         )
     if dry_run:
         print("Dry run; nothing was changed.")

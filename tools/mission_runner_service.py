@@ -3520,6 +3520,10 @@ def uninstall_job(
     recorded one otherwise.
     """
     selected = install_dir or job_install_dir(job)
+    # Never a relocation, whoever asked: an uninstall that withdrew a claim from
+    # one directory while the job ran from another would report success and
+    # leave the second holding a marker and links nothing can find.
+    require_recorded_installation(job, selected, "removing it")
     with job_transition(job, selected):
         return _uninstall_locked(job, selected)
 
@@ -3568,27 +3572,31 @@ def _uninstall_write(
     }
 
 
-def require_recorded_installation(job: MissionRunnerJob, install_dir: Path) -> None:
-    """Refuse to start a job from an installation it is not recorded in.
+def require_recorded_installation(
+    job: MissionRunnerJob, install_dir: Path, action: str
+) -> None:
+    """Refuse to act on a job through an installation it is not recorded in.
 
-    A start refreshes the definition and the record entry, so starting against
-    a different directory than the recorded one *relocates* the installation —
-    and relocation is the installer's operation, not this one's: only it
-    releases the marker and the shared links the old directory is left holding.
-    A start that moved a job would orphan them with nothing left to find them
-    by.
+    Every operation here that writes a definition or a record entry does so at
+    the directory it is handed, so acting against a different one than the
+    record names *relocates* the installation — and relocation is the
+    installer's operation, not any of these: only it releases the marker and the
+    shared links the old directory is left holding. A job moved from here would
+    orphan them with nothing left to find them by.
 
     Reachable because `job_install_dir` gives `INSTALL_DIR_ENV` precedence over
     the record, which is right for a controller launched out of a custom
     installation and wrong as a way to move one. So a mismatch is named rather
-    than performed.
+    than performed. The dedicated installer is exempt because it does take back
+    what it leaves: it is the only caller that relocates on purpose, and it
+    passes the directory it has already reconciled.
     """
     recorded = installed_install_dir(job.identity)
     if recorded is None or same_checkout(recorded, str(install_dir)):
         return
     raise ServiceError(
         f"The mission runner for {job.identity} is installed in {recorded}, not "
-        f"{install_dir}, and starting it from another directory would move the "
+        f"{install_dir}, and {action} through another directory would move the "
         f"installation without taking back what it left behind. Unset "
         f"{INSTALL_DIR_ENV}, or run `python3 tools/install_mission_runner.py "
         f"--install-dir {install_dir}` to move it deliberately."
@@ -3615,7 +3623,7 @@ def start_service(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
 
 
 def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
-    require_recorded_installation(job, install_dir)
+    require_recorded_installation(job, install_dir, "starting it")
     snapshot = status_snapshot(job)
     conflict = another_checkout_running(job, snapshot)
     if conflict is not None:
@@ -3960,6 +3968,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments.operation == "install":
             selected = job_install_dir(job)
+            # The installer relocates on purpose and takes back what it leaves;
+            # this command cannot, so it is refused rather than moving a job
+            # that some ambient override happened to point elsewhere.
+            require_recorded_installation(job, selected, "installing it")
             value = (
                 install_plan(job, selected)
                 if arguments.dry_run

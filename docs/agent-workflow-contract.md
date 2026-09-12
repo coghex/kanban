@@ -2194,7 +2194,11 @@ report did not name.
   and only it takes back what the old directory is left holding — and `stop`
   asks it to end and waits until the manager agrees it has. None of them takes an install-directory option: the copy that
   runs them is the installation they are about, and it reads its own location
-  from the environment that launched it.
+  from the environment that launched it. Three of the four refuse a location
+  the discovery record does not name, because writing a definition or a record
+  entry somewhere else moves an installation and only the installer takes back
+  what the old directory is left holding; `stop` needs no such refusal, because
+  it writes neither.
 - **Notifications:** off by default, and when enabled the operator's own
   configured command is run through the bounded command-capture seam with two
   fixed values appended — the repository identity and `attention-required` —

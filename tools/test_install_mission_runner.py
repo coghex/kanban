@@ -2169,6 +2169,48 @@ class LinkDependencyTests(InstallerFixture):
         self.assertEqual(service.link_dependants(self.install_dir), [])
         self.assert_links_absent()
 
+    def test_a_relocation_proves_the_old_release_before_committing(self):
+        # `plan_released_links` does not reach this: it reads which repositories
+        # depend on the old directory, which a marker that is a directory
+        # answers perfectly well -- only the withdrawal fails, and by then the
+        # record names the new directory alone and nothing can find the old one
+        # to clean it.
+        self.install()
+        marker = service.dependant_marker(self.install_dir, self.identity)
+        marker.unlink()
+        marker.mkdir()
+
+        elsewhere = self.root / "elsewhere"
+        with self.assertRaises(
+            (installer.InstallError, service.ServiceError)
+        ) as raised:
+            self.install(install_dir=elsewhere)
+        self.assertIn(str(marker), str(raised.exception))
+        # Nothing moved: the record, the links and the job are where they were.
+        self.assertEqual(
+            service.installed_install_dir(self.identity), str(self.install_dir)
+        )
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+            self.assertFalse(os.path.lexists(elsewhere / name), name)
+
+    def test_the_relocation_dry_run_refuses_it_too(self):
+        self.install()
+        marker = service.dependant_marker(self.install_dir, self.identity)
+        marker.unlink()
+        marker.mkdir()
+        with self.assertRaises((installer.InstallError, service.ServiceError)):
+            self.install(install_dir=self.root / "elsewhere", dry_run=True)
+
+    def test_a_relocation_with_a_clear_old_directory_still_moves(self):
+        # The positive control the refusal above needs.
+        self.install()
+        elsewhere = self.root / "elsewhere"
+        result = self.install(install_dir=elsewhere)
+        self.assertIsNone(result["retained_install_dir"])
+        self.assertEqual(service.marker_dependants(self.install_dir), [])
+        self.assertEqual(service.marker_dependants(elsewhere), [self.identity])
+
     # -- neither witness is trusted on its own ------------------------------
 
     def test_a_rebuilt_markers_directory_does_not_forget_a_sibling(self):
@@ -2483,6 +2525,93 @@ class StartCommandTests(InstallerFixture):
 
 
 class StartCommandSystemdTests(SystemdShapeMixin, StartCommandTests):
+    pass
+
+
+class ControllerRouteTests(InstallerFixture):
+    """A controller command pointed somewhere the record does not name.
+
+    `job_install_dir` gives `KANBAN_MISSION_RUNNER_INSTALL_DIR` precedence over
+    the record, which is right for a controller launched out of a custom
+    installation and wrong as a way to move one: only the dedicated installer
+    takes back the claim and the links the old directory is left holding.
+    """
+
+    def elsewhere(self):
+        other = self.root / "elsewhere"
+        other.mkdir(exist_ok=True)
+        return other
+
+    def assert_installation_intact(self):
+        self.assertEqual(
+            service.installed_install_dir(self.identity), str(self.install_dir)
+        )
+        self.assertEqual(
+            service.marker_dependants(self.install_dir), [self.identity]
+        )
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+        self.assertTrue(self.manager.is_loaded(self.label()))
+
+    def test_an_uninstall_through_a_conflicting_override_is_refused(self):
+        self.install()
+        other = self.elsewhere()
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: str(other)}):
+            job = service.resolve_job(self.repo)
+            self.assertEqual(service.job_install_dir(job), other)
+            with self.assertRaises(service.ServiceError) as raised:
+                service.uninstall_job(job)
+        message = str(raised.exception)
+        self.assertIn(str(self.install_dir), message)
+        self.assertIn(str(other), message)
+        self.assert_installation_intact()
+        self.assertIsNone(service.marker_dependants(other))
+
+    def test_an_install_through_a_conflicting_override_is_refused(self):
+        self.install()
+        other = self.elsewhere()
+        environment = {
+            **os.environ,
+            "FIXTURE_SERVICE_MANAGER": str(self.manager.root),
+            "FIXTURE_TOOLS": str(TOOLS_DIR),
+            "FIXTURE_SHAPE": self.shape,
+            service.INSTALL_DIR_ENV: str(other),
+        }
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(self.install_dir),
+                str(self.account),
+                "controller",
+                "install",
+                "--path",
+                str(self.repo),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=environment,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn(str(self.install_dir), proc.stderr)
+        self.assertIn(str(other), proc.stderr)
+        self.assert_installation_intact()
+
+    def test_the_installer_may_still_relocate_on_purpose(self):
+        # The exemption this refusal depends on: the one caller that does take
+        # back what it leaves goes on being able to.
+        self.install()
+        other = self.elsewhere()
+        result = self.install(install_dir=other)
+        self.assertEqual(result["relocated_from"], str(self.install_dir))
+        self.assertEqual(service.installed_install_dir(self.identity), str(other))
+        self.assertEqual(service.marker_dependants(self.install_dir), [])
+        self.assertEqual(service.marker_dependants(other), [self.identity])
+
+
+class ControllerRouteSystemdTests(SystemdShapeMixin, ControllerRouteTests):
     pass
 
 
