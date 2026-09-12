@@ -3646,7 +3646,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   terms and for the same reason; the installer is the exemption, because it is
   the one caller that releases what it leaves, and it proves that release can
   be completed before it commits the move rather than discovering afterwards
-  that the old directory cannot be cleared. Each installed job's definition also pins the
+  that the old directory cannot be cleared. What it cannot prove in advance is
+  the filesystem's answer, or what somebody has put at a managed path since —
+  so a release that ends with anything still standing reports the directory it
+  could not clear and what is in it, rather than a bare success. Withdrawing
+  the claim is what makes that directory unfindable, and the report is the only
+  thing that names it afterwards. Each installed job's definition also pins the
   XDG config base its installer resolved the repository identity through,
   because a job started from a cold manager re-resolves that identity and
   refuses to act when it disagrees with the one its own definition records. The script links are shared — one installed copy of

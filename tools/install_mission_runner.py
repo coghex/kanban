@@ -386,6 +386,30 @@ def remove_symlink(destination: Path, name: str) -> str:
     return plan
 
 
+def link_retention_reason(destination: Path) -> str:
+    """Why `remove_symlink` left this one where it is.
+
+    Read alongside a `kept` result so the two never disagree, and only asked
+    once the dependants have said nothing runs from this directory: a link kept
+    because a sibling still needs it is not unaccountable, it is in use, and
+    describing it this way would be wrong.
+    """
+    if not os.path.lexists(destination):
+        return f"{destination} is not there"
+    if not destination.is_symlink():
+        return f"{destination} is not a symlink"
+    target = os.readlink(destination)
+    if not os.path.exists(resolved_link_target(destination, Path(target))):
+        return (
+            f"{destination} is a symlink to {target}, which does not exist, so "
+            "nothing shows whether it is one of Kanban's own"
+        )
+    return (
+        f"{destination} is a symlink to {target}, which does not resolve to one "
+        "of Kanban's own tracked modules"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Install and uninstall
 # ---------------------------------------------------------------------------
@@ -557,6 +581,9 @@ def release_links(
             # left behind is the last thing saying it still runs from here.
             mission_runner_service.forget_dependant(install_dir, identity)
             if not may_remove_links(install_dir):
+                # In use rather than left behind: a sibling's own claim is what
+                # kept them, and that sibling's uninstall will find this
+                # directory and take them. Nothing to report.
                 return results, None
             for name, (_source, destination) in link_sources(
                 assets, install_dir
@@ -564,6 +591,24 @@ def release_links(
                 results[name]["result"] = remove_symlink(destination, name)
     except (InstallError, mission_runner_service.ServiceError, OSError) as exc:
         return results, str(exc)
+    # Nothing raised, and nothing is left that needs this directory -- so a link
+    # still standing is one `remove_symlink` declined, which it does for
+    # anything it cannot show is Kanban's own. That refusal is right and this
+    # report is its other half: the claim that made this directory findable has
+    # just been withdrawn, so without a name here nothing would ever look at it
+    # again.
+    unaccounted = [
+        link_retention_reason(Path(entry["destination"]))
+        for entry in results.values()
+        if entry["result"] == "kept"
+    ]
+    if unaccounted:
+        return results, (
+            "its links could not all be taken back: "
+            + "; ".join(unaccounted)
+            + ". They are left untouched; remove them yourself once you know "
+            "what they are."
+        )
     return results, None
 
 

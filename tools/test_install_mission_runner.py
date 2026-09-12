@@ -2249,6 +2249,78 @@ class LinkDependencyTests(InstallerFixture):
                 else:
                     self.assertTrue(os.path.lexists(destination))
 
+    def test_a_release_that_cannot_account_for_a_link_names_the_directory(self):
+        # `remove_symlink` refuses to delete what it cannot show is Kanban's
+        # own, which is right -- and leaves the old directory holding something
+        # that nothing will look at again, because the claim that made it
+        # findable has just been withdrawn. Reported per occupant, because the
+        # repair depends on what each one turns out to be.
+        foreign = self.root / "not-kanbans.py"
+        foreign.write_text("# somebody else's\n", encoding="utf-8")
+        cases = {
+            "foreign": lambda destination: destination.symlink_to(foreign),
+            "dangling": lambda destination: destination.symlink_to(
+                self.root / "gone.py"
+            ),
+            "ordinary file": lambda destination: destination.write_text(
+                "mine\n", encoding="utf-8"
+            ),
+        }
+        for label, occupy in cases.items():
+            with self.subTest(occupant=label):
+                self.install()
+                name = installer.LINKED_MODULES[0]
+                destination = self.install_dir / name
+                destination.unlink()
+                occupy(destination)
+
+                elsewhere = self.root / f"elsewhere-{label.replace(' ', '-')}"
+                result = self.install(install_dir=elsewhere)
+
+                # A completed relocation that names what it could not clear.
+                self.assertTrue(result["installed"])
+                self.assertEqual(
+                    result["retained_install_dir"], str(self.install_dir)
+                )
+                self.assertIn(str(destination), result["retained_reason"])
+                self.assertEqual(result["released_links"][name]["result"], "kept")
+                self.assertTrue(os.path.lexists(destination))
+                # And the rest went, so this is the occupant's own problem
+                # rather than the whole release failing.
+                for other in installer.LINKED_MODULES[1:]:
+                    self.assertEqual(
+                        result["released_links"][other]["result"], "removed"
+                    )
+
+                destination.unlink()
+                self.uninstall(install_dir=elsewhere)
+
+    def test_links_kept_for_a_sibling_are_not_reported_as_left_behind(self):
+        # The other reason a link says `kept`, and the one that is not a
+        # problem: a sibling's own claim kept them, and that sibling's uninstall
+        # will find this directory and take them.
+        self.install()
+        self.install(repo=self.other_repo)
+        result = self.install(install_dir=self.root / "elsewhere")
+        self.assertEqual(
+            {link["result"] for link in result["released_links"].values()},
+            {"kept"},
+        )
+        self.assertIsNone(result["retained_install_dir"])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            installer.print_plan(result, uninstalling=False)
+        self.assertNotIn("Left behind", printed.getvalue())
+
+    def test_a_release_with_nothing_in_the_way_reports_nothing_left(self):
+        self.install()
+        result = self.install(install_dir=self.root / "elsewhere")
+        self.assertEqual(
+            {link["result"] for link in result["released_links"].values()},
+            {"removed"},
+        )
+        self.assertIsNone(result["retained_install_dir"])
+
     def test_the_retained_directory_is_named_in_the_printed_plan(self):
         self.install()
         elsewhere = self.root / "elsewhere"
