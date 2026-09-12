@@ -2058,8 +2058,10 @@ report did not name.
   made of), and `src/Kanban/Mission/Notify.hs` (the attention notification and
   its durable suppression record). There is no in-app surface yet: Kanban-side
   discovery, status decoding, and dashboard start/stop are a later slice's, so
-  today the runtime documents have exactly one writer and no reader but
-  `status`.
+  today nothing outside this controller touches the runtime documents at all.
+  Within it the three commands divide as the Commands bullet below sets out:
+  `run` writes the status document and opens incidents, `status` only reads,
+  and `ack` reads the incidents to find the open one it then rewrites.
 - **Installation:** none. This capability is invoked directly — the wrapper is
   run in a terminal or under whatever supervisor the operator already has — and
   has no service-manager namespace, no discovery record, no installed script
