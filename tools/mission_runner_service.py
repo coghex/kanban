@@ -250,6 +250,12 @@ START_TIMEOUT_SECONDS = 15.0
 STOP_TIMEOUT_SECONDS = 30.0
 START_POLL_SECONDS = 0.25
 STOP_POLL_SECONDS = 0.25
+# How many consecutive polls must show both of a start's signals before it is
+# reported as started. Two rather than one because a single reading of each can
+# still straddle the transition `_start_locked` describes: a manager that has
+# not yet noticed the process it kicked has already exited, observed in the same
+# instant as a live status document somebody else wrote.
+START_STABLE_OBSERVATIONS = 2
 
 # ---------------------------------------------------------------------------
 # The runtime documents this controller owns
@@ -495,6 +501,40 @@ def default_install_dir() -> Path:
     return installed_service_root()
 
 
+def install_dir_override() -> Path | None:
+    """The install directory `INSTALL_DIR_ENV` names, or None when it names
+    none — refusing a value that is not absolute once `~` is expanded.
+
+    Absolute-only, and *refused* rather than resolved or quietly ignored. Two
+    processes read this variable with two different working directories: the
+    operator's shell when the installer runs, and the repository checkout when
+    a service manager launches the job. So a relative value names two different
+    directories, and resolving it here would only pick whichever one this
+    reader happened to have — the install would report success while the
+    definition, the record, and the links named three places. Falling back to
+    the default instead would install somewhere the operator did not choose,
+    which is worse than refusing; and the same reasoning is why
+    `_xdg_service_root` takes an absolute `$XDG_DATA_HOME` and nothing else.
+
+    The one place this variable is read, so the controller's own install
+    directory and the installer's default destination cannot disagree about
+    whether it was set or about whether it was usable.
+    """
+    override = os.environ.get(INSTALL_DIR_ENV)
+    if not override or not override.strip():
+        return None
+    selected = Path(override).expanduser()
+    if not selected.is_absolute():
+        raise ServiceError(
+            f"{INSTALL_DIR_ENV} names {override!r}, which is not an absolute "
+            "directory. It is read by this installer and by the job a service "
+            "manager launches, which have different working directories, so a "
+            "relative value names a different installation to each of them. "
+            "Give it an absolute path, or unset it and pass --install-dir."
+        )
+    return selected
+
+
 def selected_install_dir() -> Path:
     """The install directory this process was pointed at, or the default.
 
@@ -503,10 +543,8 @@ def selected_install_dir() -> Path:
     is a different and more specific question, answered by `job_install_dir`
     once an identity is known.
     """
-    override = os.environ.get(INSTALL_DIR_ENV)
-    if override and override.strip():
-        return Path(override).expanduser()
-    return default_install_dir()
+    override = install_dir_override()
+    return override if override is not None else default_install_dir()
 
 
 def controller_path(install_dir: Path) -> Path:
@@ -2512,9 +2550,9 @@ def job_install_dir(job: MissionRunnerJob) -> Path:
     moving it to the default. The default last, for a repository that has never
     been installed.
     """
-    override = os.environ.get(INSTALL_DIR_ENV)
-    if override and override.strip():
-        return Path(override).expanduser()
+    override = install_dir_override()
+    if override is not None:
+        return override
     recorded = installed_install_dir(job.identity)
     if recorded:
         return Path(recorded)
@@ -2768,6 +2806,26 @@ def require_no_live_run(job: MissionRunnerJob, action: str) -> None:
         )
 
 
+def require_absolute_install_dir(install_dir: Path) -> None:
+    """Refuse to plan a job around an install directory that is not absolute.
+
+    The last line of the defence `install_dir_override` opens: every caller
+    that reaches here resolves the directory through this module or through
+    `--install-dir`, both of which produce an absolute path, but the argument
+    itself is one anybody can pass. What it protects is the same thing — the
+    definition names the installed controller and the record is read by
+    processes with a working directory of their own, so a relative spelling
+    would name a different installation to each of them.
+    """
+    if not install_dir.is_absolute():
+        raise ServiceError(
+            f"Refusing to install into {install_dir}, which is not an absolute "
+            "directory: the service definition names the controller inside it, "
+            "and the job a service manager launches resolves that name from the "
+            "repository checkout rather than from here."
+        )
+
+
 def require_usable_record() -> None:
     """Refuse a transition whose discovery record cannot be written.
 
@@ -2835,6 +2893,7 @@ def install_plan(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
     """
     require_supported_host()
     backend = service_backend()
+    require_absolute_install_dir(install_dir)
     require_usable_record()
     require_installable(job)
     label = service_label(job)
@@ -3140,12 +3199,26 @@ def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
         path.name for path, _document in incident_documents(job, open_only=True)
     }
     service_backend().kick(label)
+    stable = 0
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(START_POLL_SECONDS)
         current = status_snapshot(job)
-        if current["state"] in LIVE_STATES:
-            return {"started": True, "label": label, **current}
+        # Both signals, never the document alone. `_install_locked` releases
+        # this identity's run lock before the kick, because the run being
+        # started needs that lock to establish itself — so a foreground run can
+        # take it in that window, publish a live status of its own, and leave
+        # the kicked process to lose the lock and exit at once. A start
+        # confirmed on the document would then report somebody else's
+        # foreground process as the job it started, and everything downstream —
+        # a stop, an uninstall, the dashboard — would be addressing a manager
+        # that holds nothing.
+        if current["state"] in LIVE_STATES and job_is_running(job):
+            stable += 1
+            if stable >= START_STABLE_OBSERVATIONS:
+                return {"started": True, "label": label, **current}
+        else:
+            stable = 0
         new_incidents = [
             document
             for path, document in incident_documents(job, open_only=True)
@@ -3159,7 +3232,31 @@ def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
                     or new_incidents[0].get("incident_id")
                 )
             )
-    raise ServiceError("Timed out waiting for the mission runner to start.")
+    raise ServiceError(startup_timeout_message(job, label))
+
+
+def startup_timeout_message(job: MissionRunnerJob, label: str) -> str:
+    """Why a start gave up, in the terms of whichever signal is missing.
+
+    "Timed out" alone leaves an operator with two very different situations to
+    tell apart by hand: a job the manager is holding that has not written a
+    status yet, and a job that is not there at all — which is what a kicked
+    process that lost this identity's run lock to a foreground run leaves
+    behind.
+    """
+    if not job_is_running(job):
+        return (
+            "Timed out waiting for the mission runner to start: the "
+            f"{service_backend().backend_name()} manager holds no live process "
+            f"for {label}. A foreground run of {job.identity} that took this "
+            "identity's run lock is the usual reason a started job exits at "
+            "once; check `status` and stop whatever is running."
+        )
+    return (
+        f"Timed out waiting for the mission runner to start: {label} is running "
+        "but has published no status document this reader can believe. Its "
+        f"service log under {job.log_dir} is where it said why."
+    )
 
 
 def stop_service(job: MissionRunnerJob) -> dict[str, Any]:

@@ -25,6 +25,7 @@ started from stays installed.
 
 import ast
 import contextlib
+import io
 import json
 import os
 import plistlib
@@ -649,6 +650,38 @@ class InstallerFixture(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc
 
+    def write_live_status(self, pid, *, state=None):
+        """A status document as a live run would have left it, for `pid`.
+
+        Written through the controller's own writer and then read back through
+        `status_snapshot`, so a case that depends on the document being
+        *believed* fails here rather than passing because the reader quietly
+        rejected it.
+        """
+        job = self.job()
+        job.runtime_dir.mkdir(parents=True, exist_ok=True)
+        service.atomic_write_json(
+            job.status_path,
+            {
+                "schema": service.STATUS_SCHEMA,
+                "version": service.STATUS_VERSION,
+                "state": state or service.STATE_RUNNING,
+                "repository": job.identity,
+                "repo": str(job.repo_path),
+                "runner_pid": pid,
+                "runner_identity": service.process_start_identity(pid),
+                "pass_pid": None,
+                "message": "Starting a mission scheduler pass.",
+                "last_pass": None,
+                "passes": 0,
+                "attention": [],
+                "started_at": "2026-09-12T00:00:00Z",
+                "updated_at": "2026-09-12T00:00:00Z",
+                "kanban": str(self.kanban),
+            },
+        )
+        self.assertIn(service.status_snapshot(job)["state"], service.LIVE_STATES)
+
     def detached_process(self, source):
         """A live process in a session of its own, and nobody's child here.
 
@@ -1073,6 +1106,57 @@ class LifecycleTests(InstallerFixture):
             self.assertTrue((self.install_dir / name).is_symlink())
 
 
+class StartConfirmationTests(InstallerFixture):
+    """A start is confirmed by the manager that holds the job, never by a
+    status document alone."""
+
+    def test_a_start_is_not_confirmed_by_a_run_the_manager_does_not_hold(self):
+        # The window `_install_locked` cannot close: it releases this identity's
+        # run lock before the kick, because the run being started needs that
+        # lock to establish itself. A foreground run can take it there, publish
+        # a live status of its own, and leave the kicked process to lose the
+        # lock and exit at once -- so a start confirmed on the document would
+        # report somebody else's process as the job it started, and every later
+        # stop, uninstall and dashboard reading would address a manager holding
+        # nothing.
+        self.install()
+        foreground = self.detached_process("import time; time.sleep(300)")
+
+        def kick_that_starts_nothing(_identifier):
+            # Exactly what that race leaves behind: a believable live status
+            # nobody's manager is holding.
+            self.write_live_status(foreground)
+
+        with mock.patch.object(self.manager, "kick", kick_that_starts_nothing):
+            with mock.patch.object(service, "START_TIMEOUT_SECONDS", 1.0):
+                with self.assertRaises(service.ServiceError) as raised:
+                    service.start_service(self.job(), self.install_dir)
+        message = str(raised.exception)
+        self.assertIn("holds no live process", message)
+        self.assertIn(self.label(), message)
+        # And the foreground run is untouched: a start that could not confirm
+        # itself has no business ending somebody else's process.
+        self.assertTrue(pid_alive(foreground))
+
+    def test_a_start_needs_both_signals_to_agree_more_than_once(self):
+        # One reading of each can straddle the transition above: a manager that
+        # has not yet noticed the process it kicked has gone, observed in the
+        # same instant as a live status somebody else wrote.
+        self.assertGreaterEqual(service.START_STABLE_OBSERVATIONS, 2)
+
+    def test_a_genuine_start_is_still_confirmed(self):
+        # The positive control the refusal above needs: the same two signals,
+        # both really the manager's, report started.
+        self.install()
+        result = service.start_service(self.job(), self.install_dir)
+        self.assertTrue(result["started"])
+        self.assertTrue(self.manager.is_running(self.label()))
+
+
+class StartConfirmationSystemdTests(SystemdShapeMixin, StartConfirmationTests):
+    pass
+
+
 class LifecycleSystemdTests(SystemdShapeMixin, LifecycleTests):
     pass
 
@@ -1425,6 +1509,98 @@ class RediscoveryTests(InstallerFixture):
 
 
 class RediscoverySystemdTests(SystemdShapeMixin, RediscoveryTests):
+    pass
+
+
+class InstallDirectoryOverrideTests(InstallerFixture):
+    """`KANBAN_MISSION_RUNNER_INSTALL_DIR` selects an installation for a
+    process that was told nothing else."""
+
+    def test_an_absolute_override_selects_that_installation(self):
+        elsewhere = self.root / "elsewhere"
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: str(elsewhere)}):
+            self.assertEqual(service.selected_install_dir(), elsewhere)
+            self.assertEqual(service.job_install_dir(self.job()), elsewhere)
+            self.assertEqual(
+                installer.selected_install_dir(self.repo, None), elsewhere
+            )
+
+    def test_a_home_relative_override_is_expanded_and_selected(self):
+        with mock.patch.dict(
+            os.environ, {service.INSTALL_DIR_ENV: "~/mission-runner"}
+        ):
+            self.assertEqual(
+                service.selected_install_dir(), Path.home() / "mission-runner"
+            )
+
+    def test_a_relative_override_is_refused_rather_than_resolved(self):
+        # Two processes read this variable with two different working
+        # directories -- the operator's shell and the checkout a service
+        # manager launches the job in -- so a relative value names a different
+        # installation to each of them. Resolving it here would pick this
+        # reader's, and the install would report success while the definition,
+        # the record and the links named three places.
+        for value in ("relative/dir", "./here", ".."):
+            with self.subTest(override=value):
+                with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: value}):
+                    with self.assertRaises(service.ServiceError) as raised:
+                        service.selected_install_dir()
+                    self.assertIn(service.INSTALL_DIR_ENV, str(raised.exception))
+                    self.assertIn(repr(value), str(raised.exception))
+
+    def test_an_environment_driven_install_and_start_use_that_directory(self):
+        elsewhere = self.root / "elsewhere"
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: str(elsewhere)}):
+            selected = installer.selected_install_dir(self.repo, None)
+            installer.install(
+                self.repo,
+                selected,
+                asset_root=self.repo,
+                config_path=None,
+                dry_run=False,
+            )
+            for name in installer.LINKED_MODULES:
+                self.assertTrue((elsewhere / name).is_symlink(), name)
+            self.assertEqual(
+                service.installed_install_dir(self.identity), str(elsewhere)
+            )
+            service.start_service(self.job(), service.job_install_dir(self.job()))
+        definition = json.loads(
+            self.manager.definition_path(self.label()).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            definition["program_arguments"][1],
+            str(elsewhere / service.CONTROLLER_NAME),
+        )
+        self.assertEqual(
+            definition["environment"][service.INSTALL_DIR_ENV], str(elsewhere)
+        )
+
+    def test_a_relative_override_refuses_an_install_before_anything_is_written(self):
+        # Through `main`, because that is the path an operator's environment
+        # actually reaches: the refusal has to be this installer's reported
+        # failure rather than a traceback, and it has to arrive before the
+        # first write.
+        errors = io.StringIO()
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: "relative/dir"}):
+            with contextlib.redirect_stderr(errors):
+                code = installer.main(["--repo", str(self.repo), "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn(service.INSTALL_DIR_ENV, errors.getvalue())
+        self.assertEqual(self.manager.call_names(), [])
+        self.assertEqual(self.entries(), {})
+
+    def test_a_relative_install_directory_is_refused_however_it_arrived(self):
+        # The argument itself is one anybody can pass, so the plan refuses it
+        # rather than trusting every caller to have resolved it.
+        with self.assertRaises(service.ServiceError) as raised:
+            service.install_plan(self.job(), Path("relative/dir"))
+        self.assertIn("not an absolute", str(raised.exception))
+
+
+class InstallDirectoryOverrideSystemdTests(
+    SystemdShapeMixin, InstallDirectoryOverrideTests
+):
     pass
 
 

@@ -2563,7 +2563,10 @@ environment identically. `mission-runner-service-root` is the service root, the
 parent of every other location under the data root, and the *default* install
 directory — `--install-dir` and `KANBAN_MISSION_RUNNER_INSTALL_DIR` place the
 shared script links elsewhere and move nothing else, which is why no install
-directory is spelled a second time;
+directory is spelled a second time, and the variable is refused unless it names
+an absolute directory, on the same reasoning as the XDG rule above: the
+installer and the job a service manager launches read it with different working
+directories;
 `mission-runner-discovery-record` is the record inside it, whose own path
 neither of those may move, because it is what lets a dashboard that never saw
 `--install-dir` find an installation made with it;

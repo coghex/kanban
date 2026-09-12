@@ -3625,7 +3625,12 @@ above are unchanged, and persistence the user switched off is not a failure.
   canonical GitHub repository in a `mission-runner` namespace of its own,
   through `tools/mission_runner_service.py`'s own install, start, stop, and
   uninstall operations rather than by spawning the copy it installs, and it
-  never starts the service. The script links are shared — one installed copy of
+  never starts the service. A start of one of those jobs is confirmed by the
+  service manager holding a live process for it as well as by the status
+  document that process publishes, because the run lock a start releases so the
+  run it is starting can take it is a lock a foreground run can take instead —
+  and a start confirmed on the document alone would report that foreground
+  process as the job it started. The script links are shared — one installed copy of
   the controller, the configuration parser, and the service-manager backend
   serves every repository — while the job, its runtime state, its logs, and its
   `--config` selection are the repository's own, so installing a second
@@ -3652,7 +3657,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   `KANBAN_MISSION_RUNNER_INSTALL_DIR` move the script links and the install
   directory beneath them, and move neither the record's own path — which is what
   lets a dashboard that never saw the option find the installation — nor the
-  logs. There is nothing to migrate: this component had no installation before
+  logs. The variable must name an absolute directory and is refused rather than
+  resolved when it does not: the installer reads it with the operator's working
+  directory and the job a service manager launches reads it with the checkout's,
+  so a relative value would name a different installation to each of them.
+  There is nothing to migrate: this component had no installation before
   this slice, so relocation is that override and only that.
 - Worker results enter the UI through a bounded `BChan`.
 - The UI redraws after a key event, resize, provider result, active review

@@ -2147,7 +2147,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_every_home_relative_path_segment_is_documented(self):
         # Two surfaces, one reconciliation. The Haskell modules spell a managed
-        # location as one literal and the four Python service modules compose
+        # location as one literal and the five Python service modules compose
         # one from path segments, so each gets its own extractor and both
         # answer to the same `personal-path` rows.
         personal_tokens = [
@@ -2510,9 +2510,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_unscanned_src_modules_would_contribute_nothing(self):
         # Requirement 6. The surface comment above claims the list is
         # exhaustive for src/ over the shapes these extractors read, and names
-        # four modules that call one of the enumerated functions and are out
+        # the modules that call one of the enumerated functions and are out
         # anyway. That claim is only worth making if it is held to the tree:
-        # each of the four has to go on recovering nothing, so a refactor that
+        # every one of them has to go on recovering nothing, so a refactor that
         # gave one of them a literal spawn or a home-relative location fails
         # here rather than passing unscanned.
         for relative_path in UNSCANNED_SRC_MODULES:
