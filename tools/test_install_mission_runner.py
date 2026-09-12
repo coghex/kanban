@@ -650,7 +650,7 @@ class InstallerFixture(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc
 
-    def write_live_status(self, pid, *, state=None):
+    def write_live_status(self, pid, *, state=None, startup_nonce=None):
         """A status document as a live run would have left it, for `pid`.
 
         Written through the controller's own writer and then read back through
@@ -670,6 +670,7 @@ class InstallerFixture(unittest.TestCase):
                 "repo": str(job.repo_path),
                 "runner_pid": pid,
                 "runner_identity": service.process_start_identity(pid),
+                "startup_nonce": startup_nonce,
                 "pass_pid": None,
                 "message": "Starting a mission scheduler pass.",
                 "last_pass": None,
@@ -1138,11 +1139,76 @@ class StartConfirmationTests(InstallerFixture):
         # itself has no business ending somebody else's process.
         self.assertTrue(pid_alive(foreground))
 
-    def test_a_start_needs_both_signals_to_agree_more_than_once(self):
-        # One reading of each can straddle the transition above: a manager that
-        # has not yet noticed the process it kicked has gone, observed in the
-        # same instant as a live status somebody else wrote.
-        self.assertGreaterEqual(service.START_STABLE_OBSERVATIONS, 2)
+    def held_but_foreign(self, *, startup_nonce=None):
+        """A kick that leaves the manager holding a live process for the whole
+        startup window beside a live status document some *other* run wrote.
+
+        The shape two independent observations cannot tell from a real start:
+        "the manager is running it" and "a live status exists" are both true
+        throughout, and for as long as the process the manager holds happens to
+        live. Only the token the definition carried separates them.
+        """
+        foreground = self.detached_process("import time; time.sleep(300)")
+        held = self.detached_process("import time; time.sleep(300)")
+
+        def kick(identifier):
+            self.manager.record_started_pid(identifier, held)
+            self.write_live_status(foreground, startup_nonce=startup_nonce)
+
+        return foreground, kick
+
+    def assert_start_refuses(self, kick, *, expected):
+        with mock.patch.object(self.manager, "kick", kick):
+            with mock.patch.object(service, "START_TIMEOUT_SECONDS", 1.5):
+                with self.assertRaises(service.ServiceError) as raised:
+                    service.start_service(self.job(), self.install_dir)
+        self.assertIn(expected, str(raised.exception))
+
+    def test_a_start_is_not_confirmed_by_a_status_its_own_run_did_not_write(self):
+        self.install()
+        foreground, kick = self.held_but_foreign()
+        self.assert_start_refuses(kick, expected="written by a different run")
+        # Refused without touching it: a start that could not confirm itself
+        # has no business ending somebody else's run.
+        self.assertTrue(pid_alive(foreground))
+
+    def test_an_earlier_starts_token_does_not_confirm_this_one(self):
+        # A token that is merely stale is as foreign as none at all: the run it
+        # names is not the run this start launched.
+        self.install()
+        _foreground, kick = self.held_but_foreign(startup_nonce="an-earlier-start")
+        self.assert_start_refuses(kick, expected="written by a different run")
+
+    def test_only_a_start_writes_a_token_into_the_definition(self):
+        self.install()
+        self.assertNotIn(service.STARTUP_NONCE_ENV, self.definition_environment())
+        service.start_service(self.job(), self.install_dir)
+        self.assertIn(service.STARTUP_NONCE_ENV, self.definition_environment())
+
+    def test_two_starts_never_reuse_a_token(self):
+        self.install()
+        service.start_service(self.job(), self.install_dir)
+        first = self.definition_environment()[service.STARTUP_NONCE_ENV]
+        service.stop_service(self.job())
+        service.start_service(self.job(), self.install_dir)
+        second = self.definition_environment()[service.STARTUP_NONCE_ENV]
+        self.assertNotEqual(first, second)
+
+    def test_the_started_run_publishes_the_token_it_was_launched_with(self):
+        self.install()
+        service.start_service(self.job(), self.install_dir)
+        self.assertEqual(
+            service.published_startup_nonce(self.job()),
+            self.definition_environment()[service.STARTUP_NONCE_ENV],
+        )
+
+    def definition_environment(self, label=None):
+        definition = json.loads(
+            self.manager.definition_path(label or self.label()).read_text(
+                encoding="utf-8"
+            )
+        )
+        return definition["environment"]
 
     def test_a_genuine_start_is_still_confirmed(self):
         # The positive control the refusal above needs: the same two signals,
@@ -1906,6 +1972,172 @@ class RecordRepairTests(InstallerFixture):
 
 
 class RecordRepairSystemdTests(SystemdShapeMixin, RecordRepairTests):
+    pass
+
+
+class UndecodableRecordTests(InstallerFixture):
+    """A record nobody can decode may name every installed job on this
+    account, so nothing shared is taken away on the strength of it."""
+
+    other_identity = "acme/gadgets"
+
+    def setUp(self):
+        super().setUp()
+        self.other_repo = self.checkout("gadgets", "git@github.com:acme/gadgets.git")
+
+    def corrupt_record(self, content=b"\xff\xfe not json at all"):
+        service.discovery_record_path().write_bytes(content)
+
+    def test_the_readability_probe_tells_absent_from_undecodable(self):
+        record = service.discovery_record_path()
+        self.assertTrue(service.installed_repository_records_readable())
+        self.install()
+        self.assertTrue(service.installed_repository_records_readable())
+        for content in (
+            b"\xff\xfe not json at all",
+            b"[]",
+            b'"a string"',
+            b'{"repositories": "not a table"}',
+        ):
+            with self.subTest(content=content):
+                record.write_bytes(content)
+                self.assertFalse(service.installed_repository_records_readable())
+        record.write_text('{"repositories": {}}', encoding="utf-8")
+        self.assertTrue(service.installed_repository_records_readable())
+
+    def test_an_undecodable_record_keeps_the_links_a_sibling_runs_from(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        self.corrupt_record()
+
+        result = self.uninstall()
+        self.assertTrue(result["uninstalled"])
+        self.assertFalse(result["record_readable"])
+        # Empty for the same reason the record is unreadable, which is exactly
+        # why it may not be read as "nothing depends on these".
+        self.assertEqual(result["dependent_repositories"], [])
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+            self.assertTrue((self.install_dir / name).resolve().is_file(), name)
+        # The sibling's job is still loaded, and still has a controller to run.
+        self.assertTrue(self.manager.is_loaded(self.label(self.other_identity)))
+
+    def test_the_dry_run_reports_that_retention_too(self):
+        self.install()
+        self.install(repo=self.other_repo)
+        self.corrupt_record()
+        planned = self.uninstall(dry_run=True)
+        self.assertFalse(planned["record_readable"])
+        self.assertEqual(
+            {name: link["result"] for name, link in planned["links"].items()},
+            {name: "kept" for name in installer.LINKED_MODULES},
+        )
+
+    def test_a_readable_record_with_no_dependants_still_lets_them_go(self):
+        # The positive control the retention above needs: "nothing depends on
+        # these" has to keep meaning what it says.
+        self.install()
+        result = self.uninstall()
+        self.assertTrue(result["record_readable"])
+        for name in installer.LINKED_MODULES:
+            self.assertFalse(os.path.lexists(self.install_dir / name), name)
+
+    def test_a_relocation_releases_nothing_it_cannot_account_for(self):
+        # The same question on the other transition. A reinstall elsewhere takes
+        # back the links it left behind, and an unreadable record may say
+        # somebody still needs them -- and also loses the one thing that says
+        # where this repository was, so there is no directory to release and
+        # nothing is taken away.
+        self.install()
+        self.install(repo=self.other_repo)
+        self.corrupt_record()
+        self.install(install_dir=self.root / "elsewhere")
+        for name in installer.LINKED_MODULES:
+            self.assertTrue((self.install_dir / name).is_symlink(), name)
+
+
+class UndecodableRecordSystemdTests(SystemdShapeMixin, UndecodableRecordTests):
+    pass
+
+
+class SharedConfigurationContextTests(InstallerFixture):
+    """The identity a job re-resolves at launch is the one its installer
+    recorded, whatever environment the manager starts it with."""
+
+    upstream_identity = "acme/upstream"
+
+    def setUp(self):
+        super().setUp()
+        self.config_root = self.root / "xdg-config"
+        (self.config_root / "kanban").mkdir(parents=True)
+        (self.config_root / "kanban" / "config.toml").write_text(
+            'remote_name = "upstream"\n', encoding="utf-8"
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repo),
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:acme/upstream.git",
+            ],
+            check=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": str(self.git_config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        )
+        patched = mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(self.config_root)}
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def upstream_label(self):
+        return self.manager.service_identifier(
+            service.repository_slug(self.upstream_identity)
+        )
+
+    def test_the_install_records_the_identity_the_shared_config_selects(self):
+        self.install()
+        self.assertEqual(sorted(self.entries()), [self.upstream_identity])
+
+    def test_the_definition_pins_the_configuration_root(self):
+        self.install()
+        definition = json.loads(
+            self.manager.definition_path(self.upstream_label()).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            definition["environment"][service.CONFIG_ROOT_VARIABLE],
+            str(self.config_root.resolve()),
+        )
+
+    def test_a_job_started_from_a_cold_manager_resolves_that_same_identity(self):
+        # The whole point. The fake manager runs the definition's argument
+        # vector with the definition's environment and nothing else, exactly as
+        # a real one does -- so a job whose configuration context did not
+        # travel would re-resolve `origin`, refuse the `--repo` its own
+        # definition records, and never start.
+        self.install()
+        job = service.resolve_job(self.repo)
+        self.assertEqual(job.identity, self.upstream_identity)
+        result = service.start_service(job, self.install_dir)
+        self.assertTrue(result["started"])
+        self.assertIn(result["state"], service.LIVE_STATES)
+        self.assertEqual(
+            service.status_snapshot(job)["repository"], self.upstream_identity
+        )
+
+
+class SharedConfigurationContextSystemdTests(
+    SystemdShapeMixin, SharedConfigurationContextTests
+):
     pass
 
 

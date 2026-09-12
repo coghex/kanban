@@ -3625,12 +3625,18 @@ above are unchanged, and persistence the user switched off is not a failure.
   canonical GitHub repository in a `mission-runner` namespace of its own,
   through `tools/mission_runner_service.py`'s own install, start, stop, and
   uninstall operations rather than by spawning the copy it installs, and it
-  never starts the service. A start of one of those jobs is confirmed by the
-  service manager holding a live process for it as well as by the status
-  document that process publishes, because the run lock a start releases so the
-  run it is starting can take it is a lock a foreground run can take instead —
-  and a start confirmed on the document alone would report that foreground
-  process as the job it started. The script links are shared — one installed copy of
+  never starts the service. A start of one of those jobs writes a fresh token
+  into the definition it kicks and is confirmed only by a live status document
+  carrying that token, beside the service manager still holding a live process
+  for the job. The lock a start releases so the run it is starting can take it
+  is a lock a foreground run can take instead, and that run publishes a live
+  status of its own — so neither signal, nor both together, can say whose run
+  wrote the status a start is looking at. Only the document naming the run that
+  wrote it can, and a start confirmed without it would report a foreground
+  process as the job it started. Each installed job's definition also pins the
+  XDG config base its installer resolved the repository identity through,
+  because a job started from a cold manager re-resolves that identity and
+  refuses to act when it disagrees with the one its own definition records. The script links are shared — one installed copy of
   the controller, the configuration parser, and the service-manager backend
   serves every repository — while the job, its runtime state, its logs, and its
   `--config` selection are the repository's own, so installing a second
@@ -3833,7 +3839,12 @@ Defaults:
   that is missing, unreadable, or stale is repaired by reinstalling rather than
   leaving the component undiscoverable; a record path occupied by something that
   is not a plain file is refused by name, before anything is written, rather
-  than replaced.
+  than replaced. A record that cannot be decoded is also an *unknown* set of
+  installed jobs rather than an empty one, so nothing shared is taken away on
+  the strength of it: an uninstall performed against one removes that
+  repository's job and keeps the script links every other job would run from,
+  because keeping a link nothing needs is recoverable and removing one a live
+  job runs from is not.
 - The mission store under the state root is durable state rather than a cache,
   and the paragraphs below about caching do not reach it. It is under
   `$XDG_STATE_HOME` for the reason section 17 puts the PR drainer's per-repository

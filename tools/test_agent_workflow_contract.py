@@ -339,8 +339,10 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     },
     # The mission runner's service root and log root in both platform
     # spellings, the two trees it composes from that root through a nullary
-    # helper each, and the one home-relative entry of the fixed PATH an
-    # installed job runs with. Only one of a helper's returns is followed —
+    # helper each, the one home-relative entry of the fixed PATH an installed
+    # job runs with, and the conventional XDG config base its job definition
+    # pins so the child reads the configuration this installation resolved its
+    # identity through. Only one of a helper's returns is followed —
     # the extractor takes the first that resolves — so the `~/Library` runtime
     # and lock spellings are not recovered here and are grounded in the
     # module's docstrings instead, as docs/agent-workflow-contract.md §4
@@ -355,6 +357,7 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
         "/Library/Logs/kanban/mission-runner",
         "/.local/state/kanban/mission-runner",
         "/.local/bin",
+        "/.config",
     },
     "tools/install_mission_runner.py": set(),
 }

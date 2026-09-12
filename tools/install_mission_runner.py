@@ -432,6 +432,43 @@ def dependent_repositories(install_dir: Path, *, excluding: str | None = None) -
     return sorted(dependants)
 
 
+def may_remove_links(
+    install_dir: Path,
+    *,
+    excluding: str | None = None,
+    record_readable: bool | None = None,
+) -> bool:
+    """Whether this directory's shared links may be taken away.
+
+    Two questions, and the second is the one `dependent_repositories` alone
+    cannot answer. That function reads the discovery record, and
+    `installed_repository_records` reports an *unreadable* document as no
+    repositories -- the right answer for a reader asking whether one repository
+    is installed, and a dangerous one here, because a document nobody can decode
+    may name every job on this account. Removing on that reading would delete
+    the controller and the modules a sibling's loaded job runs from and leave
+    the manager holding a job nothing can satisfy.
+
+    So an undecodable record is treated as an unknown dependency set and the
+    links stay. Keeping a link nothing needs is recoverable by a later
+    uninstall; removing one a live job runs from is not.
+
+    `record_readable` is for the one caller that must not ask *now*: removing a
+    repository's entry rebuilds an undecodable document around that removal, so
+    a question asked afterwards always answers "readable, and nothing depends on
+    these" -- which is exactly the reading this function exists to refuse. That
+    caller reads it before the removal and hands the answer back in.
+    """
+    readable = (
+        mission_runner_service.installed_repository_records_readable()
+        if record_readable is None
+        else record_readable
+    )
+    if not readable:
+        return False
+    return not dependent_repositories(install_dir, excluding=excluding)
+
+
 def require_matching_controller(assets: Path) -> None:
     """Refuse to plan a job with one copy of the controller and install another.
 
@@ -487,7 +524,7 @@ def plan_released_links(
     relocation that has not happened yet: it is still recorded in the directory
     it is about to leave.
     """
-    if dependent_repositories(install_dir, excluding=identity):
+    if not may_remove_links(install_dir, excluding=identity):
         return {
             name: {"destination": str(destination), "result": "kept"}
             for name, (_source, destination) in link_sources(assets, install_dir).items()
@@ -518,7 +555,7 @@ def release_links(
         # names the directory this repository moved to, so it can only appear
         # among these dependants by having been reinstalled here since -- which
         # makes it a dependant like any other rather than the one to discount.
-        if dependent_repositories(install_dir):
+        if not may_remove_links(install_dir):
             return plan_released_links(assets, install_dir, identity)
         return {
             name: {
@@ -711,8 +748,9 @@ def uninstall(
     # happened: this repository is still recorded, and still running from these
     # links, until it is removed below.
     dependants = dependent_repositories(install_dir, excluding=job.identity)
+    record_readable = mission_runner_service.installed_repository_records_readable()
     sources = link_sources(asset_root, install_dir)
-    if dependants:
+    if not may_remove_links(install_dir, excluding=job.identity):
         link_plans = {name: "kept" for name in sources}
     else:
         link_plans = {
@@ -725,6 +763,10 @@ def uninstall(
         "install_dir": str(install_dir),
         "service_manager": backend.backend_name(),
         "dependent_repositories": dependants,
+        # Reported beside them because an empty dependant list means two
+        # different things: nothing else is installed here, or the record that
+        # would say so could not be decoded. Only the first lets the links go.
+        "record_readable": record_readable,
         "links": {
             name: {"destination": str(destination), "result": link_plans[name]}
             for name, (_source, destination) in sources.items()
@@ -743,6 +785,13 @@ def uninstall(
         # repository elsewhere since the plan, and removing links here would
         # then strand the ones its job actually runs from.
         require_recorded_installation(job, install_dir)
+        # Read before the removal, because the removal rewrites the document:
+        # `remove_repository_record` rebuilds an undecodable one around this
+        # entry's departure, so asking afterwards would report a readable record
+        # naming nobody -- and the links a sibling still runs from would go.
+        record_readable = (
+            mission_runner_service.installed_repository_records_readable()
+        )
         # The job first: the links are what it runs from, so removing them
         # while it was still loaded would leave a job the manager could start
         # and nothing could satisfy. Handed this directory explicitly so the
@@ -752,9 +801,9 @@ def uninstall(
         # repository's entry is gone by now, so it can only appear by having
         # been reinstalled -- which no longer happens, because a start takes
         # this same lock, and which would still be honoured if it did.
-        dependants = dependent_repositories(install_dir)
-        document["dependent_repositories"] = dependants
-        if not dependants:
+        document["dependent_repositories"] = dependent_repositories(install_dir)
+        document["record_readable"] = record_readable
+        if may_remove_links(install_dir, record_readable=record_readable):
             for name, (_source, destination) in sources.items():
                 document["links"][name]["result"] = remove_symlink(destination, name)
         else:
@@ -882,6 +931,12 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
         print(
             "Shared links kept for still-installed "
             + ", ".join(result["dependent_repositories"])
+        )
+    elif uninstalling and not result["record_readable"]:
+        print(
+            "Shared links kept: the discovery record could not be read, so "
+            "which jobs still run from them is unknown. Reinstall each "
+            "repository that should be installed here, then re-run."
         )
     if dry_run:
         print("Dry run; nothing was changed.")

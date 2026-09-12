@@ -2090,7 +2090,10 @@ report did not name.
   `KANBAN_MISSION_RUNNER_INSTALL_DIR`. It never starts the service. The
   capability is still invoked directly as well: the wrapper runs in a terminal
   or under whatever supervisor the operator already has, and a foreground run
-  and an installed job contend for the same per-identity run lock. What this
+  and an installed job contend for the same per-identity run lock — which is
+  why a `start` writes a fresh token into the definition it kicks and accepts
+  no status document that does not carry it, rather than reading a live status
+  as proof that the job it started is the run that published one. What this
   entry does not yet state is the authority and ownership of the installed
   component, the operator's installing, operating, and recovering guide, and
   the dependency and packaging inventory; those are a later slice's, and until
@@ -2103,6 +2106,12 @@ report did not name.
   identity and, when one was given, an absolute `--config`. The environment is
   inherited whole, because `$XDG_DATA_HOME` and `$XDG_STATE_HOME` are what
   decide which mission store a pass advances and which runtime describes it.
+  An installed job inherits nothing, so its definition carries those two when
+  they name absolute directories and pins `$XDG_CONFIG_HOME` to the resolved
+  base the installer read the shared configuration from — resolved rather than
+  forwarded, because that variable admits a relative value and otherwise falls
+  back to `$HOME`, neither of which the installer and the job read the same
+  way.
 - **The pass contract:** one JSON document on stdout and narration on stderr,
   carrying `kanban-mission-scheduler-pass` version 1, the repository identity,
   each admitted mission and its disposition, each outstanding attention
@@ -2519,7 +2528,13 @@ them yet.
 of the fixed `PATH` every managed service's job definitions carry, declared
 because a job's ability to find `gh`, `codex`, `claude`, and `kanban` depends on
 it, and found by the scan below in `tools/approve_issues_service.py` and
-`tools/mission_runner_service.py`.
+`tools/mission_runner_service.py`. That second module reaches
+`systemd-user-unit-dir`'s `~/.config` for a reason of its own and writes nothing
+there: a mission runner job's definition *pins* the XDG config base its
+installer resolved the repository identity through, because the child
+re-resolves an identity at launch and refuses to act when it disagrees with the
+`--repo` the definition records — so a job that read a different shared
+configuration would refuse itself and never start.
 `tools/drain_prs_service.py` builds the same entry for the drainer's own
 definitions and is not on that scan's surface, so this one row covers a location
 three modules write and two of them are policed for.

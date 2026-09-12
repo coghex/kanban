@@ -54,6 +54,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -240,6 +241,18 @@ RECORD_REPOSITORIES_KEY = "repositories"
 # `DRAINER_PATH_VARIABLES` exists for this reason and this component needs its
 # own because it resolves its roots here rather than there.
 PATH_VARIABLES = ("XDG_DATA_HOME", "XDG_STATE_HOME")
+# The variable that decides which *shared* Kanban configuration a process reads,
+# and therefore which remote it resolves its own repository identity through.
+# Carried into an installed job for a reason the two above do not cover: the
+# definition records the identity this installer resolved, and the child
+# re-resolves one at launch and refuses to act if the two differ -- so a job
+# whose configuration context did not travel would refuse its own `--repo` and
+# never start. See `shared_config_root`, which resolves it rather than merely
+# forwarding it.
+CONFIG_ROOT_VARIABLE = "XDG_CONFIG_HOME"
+# What a job started by this controller carries so the status document its run
+# publishes can be told from one anybody else wrote. See `_start_locked`.
+STARTUP_NONCE_ENV = "KANBAN_MISSION_RUNNER_STARTUP_NONCE"
 
 # How long a start waits for the job it kicked to announce itself, and a stop
 # for the run it asked to end. Both are the approval service's, and for its
@@ -250,12 +263,6 @@ START_TIMEOUT_SECONDS = 15.0
 STOP_TIMEOUT_SECONDS = 30.0
 START_POLL_SECONDS = 0.25
 STOP_POLL_SECONDS = 0.25
-# How many consecutive polls must show both of a start's signals before it is
-# reported as started. Two rather than one because a single reading of each can
-# still straddle the transition `_start_locked` describes: a manager that has
-# not yet noticed the process it kicked has already exited, observed in the same
-# instant as a live status document somebody else wrote.
-START_STABLE_OBSERVATIONS = 2
 
 # ---------------------------------------------------------------------------
 # The runtime documents this controller owns
@@ -555,6 +562,31 @@ def controller_path(install_dir: Path) -> Path:
     link is how a moved checkout is repaired without rewriting every job.
     """
     return install_dir / CONTROLLER_NAME
+
+
+def shared_config_root() -> str:
+    """The XDG config base directory the shared Kanban configuration this
+    process reads lives under, as an absolute path.
+
+    Resolved rather than forwarded, which is the opposite of what
+    `service_definition` does with `PATH_VARIABLES`, and deliberately.
+    `kanban_config.default_config_path` takes *any* non-empty
+    `$XDG_CONFIG_HOME` and otherwise `Path.home()`, so the file it names depends
+    on the reader's working directory and on `$HOME` -- neither of which an
+    installed job shares with the installer, whose `HOME` the definition
+    replaces with the account's own. Forwarding the variable unchanged would
+    leave the two reading different files for a relative value, and dropping it
+    would do the same whenever `$HOME` is not the passwd home. Resolving it here
+    pins the one file this installation actually read.
+
+    The absolute-only rule the data and state roots use is right for them
+    because both sides apply that same rule and therefore fall back together;
+    there is no such shared rule here to fall back to.
+    """
+    configured = os.environ.get(CONFIG_ROOT_VARIABLE)
+    if configured:
+        return str(Path(configured).expanduser().resolve())
+    return str((Path.home() / ".config").resolve())
 
 
 def log_root() -> Path:
@@ -1845,6 +1877,13 @@ class Controller:
         # will not answer, which a reader treats as unconfirmable rather than
         # as a match.
         self.runner_identity = process_start_identity(os.getpid())
+        # The startup token the definition this run was launched from carried,
+        # if it was launched from one at all. Read from the environment rather
+        # than passed in, because the only thing that can supply it is the
+        # service manager executing the definition a `start` wrote; a
+        # foreground run has none, which is exactly what makes the two
+        # distinguishable. Never written anywhere but the status document.
+        self.startup_nonce = os.environ.get(STARTUP_NONCE_ENV) or None
         self._child: subprocess.Popen[str] | None = None
         self._stop_requested = False
         self._signals = 0
@@ -1972,6 +2011,12 @@ class Controller:
                 "schema": STATUS_SCHEMA,
                 "version": STATUS_VERSION,
                 "state": state,
+                # The token the definition this run was launched from carried,
+                # or null for a foreground run launched from nothing. It is
+                # what lets the `start` that wrote that definition tell this
+                # run's status from one another process published in the same
+                # window; no reader of the service's state consults it.
+                "startup_nonce": self.startup_nonce,
                 "repository": self.job.identity,
                 "repo": str(self.job.repo_path),
                 # The ownership a reader needs to reject a stale observation: a
@@ -2511,6 +2556,29 @@ def installed_repository_records() -> dict[str, dict[str, Any]]:
     }
 
 
+def installed_repository_records_readable() -> bool:
+    """Whether the discovery document can be decoded at all.
+
+    `installed_repository_records` reports an unreadable or non-object document
+    as *no* repositories, which is the right answer for a reader asking "is this
+    repository installed?" and the wrong one for a writer asking "may these
+    shared links go?". A document nobody can decode may name every installed job
+    on this account, so a caller deciding a removal has to be able to tell the
+    two apart and keep what it cannot account for.
+
+    Absent counts as readable: nothing is installed, which is a complete answer
+    and the state a first install starts from.
+    """
+    path = discovery_record_path()
+    document = _read_json_document(path)
+    if document is None:
+        return not os.path.lexists(path)
+    if not isinstance(document, dict):
+        return False
+    records = document.get(RECORD_REPOSITORIES_KEY)
+    return records is None or isinstance(records, dict)
+
+
 def installed_repository_record(identity: str) -> dict[str, Any]:
     return installed_repository_records().get(identity, {})
 
@@ -2608,7 +2676,7 @@ def service_label(job: MissionRunnerJob) -> str:
 
 
 def service_definition(
-    job: MissionRunnerJob, install_dir: Path
+    job: MissionRunnerJob, install_dir: Path, *, startup_nonce: str | None = None
 ) -> service_manager.ServiceDefinition:
     """What the service manager must run for this job.
 
@@ -2658,6 +2726,17 @@ def service_definition(
             if os.path.isabs(os.environ.get(name, ""))
         }
     )
+    # And the configuration context the identity below was resolved through,
+    # for the reason `shared_config_root` gives: the child re-resolves an
+    # identity at launch and refuses to act when it disagrees with the `--repo`
+    # this definition records, so a job that read a different configuration
+    # would refuse itself and never start.
+    environment[CONFIG_ROOT_VARIABLE] = shared_config_root()
+    # Only ever set by a `start`, and different every time. It is what lets that
+    # start tell the status document its own run published from one anybody else
+    # wrote; an ordinary install writes a definition without it.
+    if startup_nonce:
+        environment[STARTUP_NONCE_ENV] = startup_nonce
     arguments = [
         python,
         str(controller_path(install_dir)),
@@ -2984,18 +3063,23 @@ def require_installed_controller(install_dir: Path) -> None:
         )
 
 
-def install_job(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
+def install_job(
+    job: MissionRunnerJob, install_dir: Path, *, startup_nonce: str | None = None
+) -> dict[str, Any]:
     """Load one stopped job for this repository, and record where it is.
 
     Nothing is started here and nothing starts at login: the definition the
     backend writes is non-resident by construction, so only an explicit `start`
-    ever produces a run.
+    ever produces a run -- which is also the only caller that supplies a
+    `startup_nonce`.
     """
     with job_transition(job, install_dir):
-        return _install_locked(job, install_dir)
+        return _install_locked(job, install_dir, startup_nonce=startup_nonce)
 
 
-def _install_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
+def _install_locked(
+    job: MissionRunnerJob, install_dir: Path, *, startup_nonce: str | None = None
+) -> dict[str, Any]:
     """`install_job`'s body, with this identity's transition lock already held.
 
     Separate so a start can refresh the definition inside the one lock it took
@@ -3004,11 +3088,15 @@ def _install_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
     """
     plan = install_plan(job, install_dir)
     with exclusive_of_runs(job, "installing this repository's job"):
-        return _install_write(job, install_dir, plan)
+        return _install_write(job, install_dir, plan, startup_nonce=startup_nonce)
 
 
 def _install_write(
-    job: MissionRunnerJob, install_dir: Path, plan: dict[str, Any]
+    job: MissionRunnerJob,
+    install_dir: Path,
+    plan: dict[str, Any],
+    *,
+    startup_nonce: str | None = None,
 ) -> dict[str, Any]:
     """The writes themselves, with every lock this install needs held."""
     require_installed_controller(install_dir)
@@ -3016,7 +3104,9 @@ def _install_write(
     ensure_dirs(job)
     job.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     label = plan["label"]
-    definition_path = backend.write_definition(service_definition(job, install_dir))
+    definition_path = backend.write_definition(
+        service_definition(job, install_dir, startup_nonce=startup_nonce)
+    )
     # Written from the definition on disk and before the manager is asked to
     # load it: the record describes where the job is, so it has to be true from
     # the moment the job exists. Every install path reaches here, including the
@@ -3193,32 +3283,35 @@ def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
         or run_lock_owner(job) is not None
     ):
         return {"started": False, "message": "Already running.", **snapshot}
-    installed = _install_locked(job, install_dir)
+    # The handshake. `_install_locked` releases this identity's run lock before
+    # the kick, because the run being started needs that lock to establish
+    # itself — so a foreground run can take it in that window, publish a live
+    # status of its own, and leave the kicked process to lose the lock and exit.
+    # Neither "a live status exists" nor "the manager holds something" nor both
+    # together can tell that apart: they are two independent observations, and
+    # the window is as wide as the kicked process happens to live for. Only the
+    # document saying which run wrote it can, so this start writes a fresh token
+    # into the definition it is about to kick and accepts no status without it.
+    nonce = secrets.token_hex(16)
+    installed = _install_locked(job, install_dir, startup_nonce=nonce)
     label = installed["label"]
     previous_incidents = {
         path.name for path, _document in incident_documents(job, open_only=True)
     }
     service_backend().kick(label)
-    stable = 0
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(START_POLL_SECONDS)
         current = status_snapshot(job)
-        # Both signals, never the document alone. `_install_locked` releases
-        # this identity's run lock before the kick, because the run being
-        # started needs that lock to establish itself — so a foreground run can
-        # take it in that window, publish a live status of its own, and leave
-        # the kicked process to lose the lock and exit at once. A start
-        # confirmed on the document would then report somebody else's
-        # foreground process as the job it started, and everything downstream —
-        # a stop, an uninstall, the dashboard — would be addressing a manager
-        # that holds nothing.
-        if current["state"] in LIVE_STATES and job_is_running(job):
-            stable += 1
-            if stable >= START_STABLE_OBSERVATIONS:
-                return {"started": True, "label": label, **current}
-        else:
-            stable = 0
+        # The manager as well as the document, because the token proves who
+        # wrote the status and not that the job is still there: a run that
+        # announced itself and then died would otherwise be reported as started.
+        if (
+            current["state"] in LIVE_STATES
+            and published_startup_nonce(job) == nonce
+            and job_is_running(job)
+        ):
+            return {"started": True, "label": label, **current}
         new_incidents = [
             document
             for path, document in incident_documents(job, open_only=True)
@@ -3232,17 +3325,31 @@ def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
                     or new_incidents[0].get("incident_id")
                 )
             )
-    raise ServiceError(startup_timeout_message(job, label))
+    raise ServiceError(startup_timeout_message(job, label, nonce))
 
 
-def startup_timeout_message(job: MissionRunnerJob, label: str) -> str:
+def published_startup_nonce(job: MissionRunnerJob) -> str | None:
+    """The startup token the status document at hand carries, or None.
+
+    Read straight off the document rather than through `status_snapshot`,
+    because it is this start's own handshake rather than anything a reader of
+    the service's state is owed.
+    """
+    stored = read_json(job.status_path) or {}
+    value = stored.get("startup_nonce")
+    return value if isinstance(value, str) and value else None
+
+
+def startup_timeout_message(
+    job: MissionRunnerJob, label: str, nonce: str
+) -> str:
     """Why a start gave up, in the terms of whichever signal is missing.
 
-    "Timed out" alone leaves an operator with two very different situations to
-    tell apart by hand: a job the manager is holding that has not written a
-    status yet, and a job that is not there at all — which is what a kicked
-    process that lost this identity's run lock to a foreground run leaves
-    behind.
+    "Timed out" alone leaves an operator three very different situations to tell
+    apart by hand, and they have three different repairs: a job that is not
+    there at all, a job that is there and has written nothing, and a job that is
+    there beside a live status some *other* run published — which is what a
+    foreground run holding this identity's run lock produces.
     """
     if not job_is_running(job):
         return (
@@ -3251,6 +3358,21 @@ def startup_timeout_message(job: MissionRunnerJob, label: str) -> str:
             f"for {label}. A foreground run of {job.identity} that took this "
             "identity's run lock is the usual reason a started job exits at "
             "once; check `status` and stop whatever is running."
+        )
+    if (
+        status_snapshot(job)["state"] in LIVE_STATES
+        and published_startup_nonce(job) != nonce
+    ):
+        # A live status that carries no token at all was written by a run
+        # nothing launched from a definition — a foreground one; a token that
+        # is merely different belongs to an earlier start's run. Both are the
+        # same situation for an operator, and the same repair.
+        return (
+            f"Timed out waiting for the mission runner to start: {label} is "
+            f"running, but the live status document for {job.identity} was "
+            "written by a different run — a foreground one holding this "
+            "identity's run lock, which is what makes the job just started exit "
+            "again. Stop it, then start the job."
         )
     return (
         f"Timed out waiting for the mission runner to start: {label} is running "
