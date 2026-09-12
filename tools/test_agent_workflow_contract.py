@@ -4854,22 +4854,50 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
             retire.group(1),
             f"{MISSION_NOTIFIER_MODULE}'s bracket release must sweep the command's group",
         )
-        # The acquisition both starts the command and records what a stop has
-        # to end, under a mask: bracket runs no release for an acquisition that
-        # threw, so an asynchronous exception between the two would leave a
-        # process nothing had been told about.
+        # The acquisition starts the command; `register` records what a stop
+        # has to end. Bracket runs no release for an acquisition that threw,
+        # so that span is covered twice: masked, so there is no delivery point
+        # in it, and guarded, so a delivery point an unrelated edit introduces
+        # still ends the process rather than stranding it.
+        #
+        # `mask_` rather than `mask`: a restore across the spawn would reopen
+        # exactly this window, and it buys nothing — the POSIX signal mask a
+        # child inherits across exec is a different thing from Haskell's
+        # asynchronous-exception mask, so holding the latter cannot make the
+        # notifier immune to the signal used to stop it.
         spawn = re.search(
-            r"^    spawn live directory = mask \$ \\restore -> do\n((?:      .*\n)+)",
+            r"^    spawn live directory = mask_ \$ do\n((?:      .*\n)+)",
             body,
             re.MULTILINE,
         )
         self.assertIsNotNone(
             spawn,
-            f"{MISSION_NOTIFIER_MODULE} must acquire under mask, or a cancellation "
+            f"{MISSION_NOTIFIER_MODULE} must acquire under mask_, or a cancellation "
             "between the spawn and the registration leaks the command",
         )
         self.assertIn("createProcess (spec directory)", spawn.group(1))
-        self.assertIn("writeIORef live (NotifierLive", spawn.group(1))
+        self.assertNotIn(
+            "restore",
+            spawn.group(1),
+            f"{MISSION_NOTIFIER_MODULE} must not restore across the spawn; that is "
+            "the window an unrecorded notifier escapes through",
+        )
+        self.assertIn(
+            "`onException` sweepUnrecorded processHandle",
+            spawn.group(1),
+            f"{MISSION_NOTIFIER_MODULE} must end a command it created but has not "
+            "yet recorded, since bracket's release will not run for it",
+        )
+        register = re.search(
+            r"^    register live outputHandle errorHandle processHandle = do\n((?:      .*\n)+)",
+            body,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            register,
+            f"{MISSION_NOTIFIER_MODULE} no longer declares the acquisition's registration",
+        )
+        self.assertIn("writeIORef live (NotifierLive", register.group(1))
         # Nothing sweeps inline. `sweepCommandGroup` belongs to `sweepRecorded`
         # alone, so there is one sweep on one path and no second spelling to
         # drift from it.

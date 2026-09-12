@@ -1516,6 +1516,45 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
       recorded <- awaitRecordedPid marker
       awaitGone recorded
 
+  -- The one span a bracket cannot cover: a release does not run for an
+  -- acquisition that threw, so a failure between the kernel creating the
+  -- notifier and this process recording it has to be handled where it
+  -- happens. Nothing outside the call can enter that window — it is a
+  -- 'createProcess' return followed by one write, under a mask — so what is
+  -- tested is the action that closes it, against the same stubborn command
+  -- and the same backgrounded descendant the ordinary sweep faces. The wiring
+  -- itself is held by `test_the_notifier_guards_its_command_for_the_whole_of_its_life`
+  -- in "tools/test_agent_workflow_contract.py", which refuses a spawn that
+  -- reaches registration without it.
+  it "ends an unrecorded command, and its descendants, from the handle alone" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "unrecorded.pid"
+          childMarker = scratch </> "unrecorded-child.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          ( unlines
+              [ "#!/bin/sh",
+                "trap '' TERM INT",
+                "sh -c \"trap '' TERM INT; echo \\$$ > " <> show childMarker <> "; sleep 120\" &",
+                "echo $$ > " <> show marker,
+                "sleep 120"
+              ]
+          )
+      (_, _, _, processHandle) <-
+        createProcess
+          (proc command [])
+            { std_in = NoStream,
+              std_out = CreatePipe,
+              std_err = CreatePipe,
+              create_group = True
+            }
+      notifier <- awaitRecordedPid marker
+      descendant <- awaitRecordedPid childMarker
+      sweepUnrecorded processHandle
+      awaitGone notifier
+      awaitGone descendant
+
   it "refuses an empty command rather than launching a shell" $ do
     attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros []
     attempt.missionNotificationAttemptState `shouldBe` MissionNotificationLaunchFailed

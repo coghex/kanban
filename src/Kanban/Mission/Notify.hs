@@ -44,13 +44,14 @@ module Kanban.Mission.Notify
     MissionNotificationAttempt (..),
     NotifierState (..),
     sweepRecorded,
+    sweepUnrecorded,
     attemptMissionNotification,
     runMissionNotificationCommand,
   )
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, bracket, mask, try)
+import Control.Exception (IOException, bracket, mask_, onException, try)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -319,6 +320,22 @@ sweepRecorded live = go (300 :: Int)
           | remaining <= 0 -> pure ()
           | otherwise -> threadDelay 10000 >> go (remaining - 1)
 
+-- | Ends a process this module started and never got as far as recording.
+--
+-- The counterpart to 'sweepRecorded', for the one span that has no record to
+-- read: a failure between 'System.Process.createProcess' returning and the
+-- registration that follows it. Everything it needs comes from the handle,
+-- because that is all there is at that point.
+--
+-- The group rather than the process, exactly as the ordinary sweep does: a
+-- notification command leads a group of its own, and a descendant it has
+-- already spawned is in that group and nothing else can reach it.
+sweepUnrecorded :: ProcessHandle -> IO ()
+sweepUnrecorded processHandle = do
+  managed <- unverifiedManagedProcess processHandle
+  rootPid <- getPid processHandle
+  sweepCommandGroup rootPid managed
+
 -- | Runs @body@ with an intentional stop performing @sweep@ first.
 --
 -- Installed for the life of one command and restored afterwards, rather than
@@ -438,39 +455,50 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
                 )
   where
     -- The bracket's acquisition: start the command and record what a stop has
-    -- to end, with nothing interruptible between the two.
+    -- to end.
     --
-    -- 'mask' rather than a plain sequence, because the gap is the whole
-    -- hazard. 'bracket' does not run its release for an acquisition that
-    -- threw, so an asynchronous exception landing after 'createProcess'
-    -- returned and before the registration would leave a process nothing had
-    -- been told about. Under the mask the only delivery point left is
-    -- 'createProcess' itself, which either made a process or did not.
+    -- This is the one span 'bracket' does not cover, because a release does
+    -- not run for an acquisition that threw — so an exception between the
+    -- kernel creating the notifier and this process recording it would leave
+    -- a process in a group of its own with nobody left to end it. It is
+    -- closed twice over.
     --
-    -- Restoring across that call is deliberate, and it is also why the mask
-    -- is not held over the spawn for its own sake: a mask held over the child
-    -- would survive its @exec@, and the notifier would come up immune to the
-    -- very signal used to stop it.
-    spawn live directory = mask $ \restore -> do
+    -- 'mask_' removes the delivery points. It masks /Haskell's/ asynchronous
+    -- exceptions and nothing else: the POSIX signal mask a child inherits
+    -- across @exec@ is a different thing entirely, so holding it over the
+    -- spawn does not make the notifier immune to the signal used to stop it,
+    -- and there is no reason to restore across that call.
+    --
+    -- 'onException' covers what a mask cannot promise. A masked region is
+    -- still interruptible at a blocking operation, and the argument that
+    -- there is no such operation between the spawn and the registration is
+    -- exactly the sort of argument that stops being true after an unrelated
+    -- edit. So the process is ended here if anything at all is raised before
+    -- it has been recorded, rather than relying on that argument holding.
+    spawn live directory = mask_ $ do
       -- Announced before the spawn, so a stop landing between the kernel
       -- creating the process and this one learning its identifier waits for
       -- that identifier rather than sweeping nothing.
       writeIORef live NotifierStarting
-      started <- try @IOException (restore (createProcess (spec directory)))
+      started <- try @IOException (createProcess (spec directory))
       case started of
         Left exception -> do
           writeIORef live NotifierIdle
           pure (Left exception)
-        Right (_, outputHandle, errorHandle, processHandle) -> do
-          -- Registered before anything that could block. The only work
-          -- between the spawn and this line is reading the handle's own
-          -- identifier, so the interval a stop could fall into no longer
-          -- contains an external command — which is what it did contain
-          -- while this went through 'managedProcess' and its @ps@ snapshot.
-          spawned <- unverifiedManagedProcess processHandle
-          rootPid <- getPid processHandle
-          writeIORef live (NotifierLive rootPid spawned)
-          pure (Right (outputHandle, errorHandle, processHandle))
+        Right (_, outputHandle, errorHandle, processHandle) ->
+          register live outputHandle errorHandle processHandle
+            `onException` sweepUnrecorded processHandle
+
+    -- Registered before anything that could block. The only work between the
+    -- spawn and this write is reading the handle's own identifier, so the
+    -- interval a stop could fall into no longer contains an external
+    -- command — which is what it did contain while this went through
+    -- 'managedProcess' and its @ps@ snapshot.
+    register live outputHandle errorHandle processHandle = do
+      spawned <- unverifiedManagedProcess processHandle
+      rootPid <- getPid processHandle
+      writeIORef live (NotifierLive rootPid spawned)
+      pure (Right (outputHandle, errorHandle, processHandle))
 
     -- The bracket's release, and the only sweep on any path. Emptied
     -- afterwards so a signal arriving between here and the handler's own
