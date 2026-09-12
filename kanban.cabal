@@ -342,6 +342,7 @@ test-suite kanban-test
     Spec.Support.Locale
     Spec.Support.MissionProbes
     Spec.Support.NotifyProbe
+    Spec.Support.SchedulerProbe
     Spec.Support.Preflight
     Spec.Support.Process
     Spec.Support.Render

@@ -47,6 +47,9 @@ module Kanban.Mission.Scheduler
     advanceMissions,
     liveMissionSchedulerSeams,
     runMissionSchedulerMode,
+    runMissionSchedulerCommand,
+    missionPassSetupRepository,
+    emitMissionPassReport,
   )
 where
 
@@ -63,9 +66,13 @@ import Kanban.Config
   ( MissionNotificationCommand (..),
     MissionNotificationConfig (..),
     MissionsConfig (..),
+    RawConfig (..),
     ResolvedConfig (..),
+    loadRawConfig,
     missionNotificationRefusal,
     repositoryIdentity,
+    resolveConfig,
+    resolveConfigPathOption,
   )
 import Kanban.Domain (Repository (..))
 import Kanban.Mission.Lease (missionLeaseHeld)
@@ -88,10 +95,14 @@ import Kanban.Mission.Pass
     MissionPassReport (..),
     MissionPassTermination (..),
     decodeMissionChildResult,
+    encodeMissionPassReport,
     missionDispositionIsFailure,
     missionPassExitCode,
+    missionPassNarration,
+    missionPassSetupFailure,
+    missionPassUnresolvedRepository,
   )
-import Kanban.Mission.Paths (MissionRead (..), MissionStore (..))
+import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), openMissionStore)
 import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
   ( MissionAttention (..),
@@ -102,6 +113,7 @@ import Kanban.Mission.Types
     missionLifecycleIsTerminal,
   )
 import Kanban.Paths (createPrivateDirectory)
+import Kanban.Repository (parseRepositoryName, resolveRepository)
 import System.Directory
   ( XdgDirectory (XdgCache),
     createDirectory,
@@ -109,10 +121,12 @@ import System.Directory
     removeDirectoryRecursive,
     removePathForcibly,
   )
+import qualified Data.ByteString.Lazy.Char8 as LazyChar8
+import qualified Data.Text.IO as TextIO
 import System.Environment (getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (ReadMode), hClose, openFile)
+import System.IO (IOMode (ReadMode), hClose, openFile, stderr)
 import System.IO.Error (isAlreadyExistsError)
 import System.Posix.Files (getSymbolicLinkStatus, setFileMode)
 import System.Posix.Process (getProcessID)
@@ -662,15 +676,11 @@ runMissionSchedulerMode options config repository store = do
     Left exception -> do
       now <- getCurrentTime
       pure
-        MissionPassReport
-          { missionPassRepository = repositoryIdentity repository.repositoryOwner repository.repositoryName,
-            missionPassStartedAt = now,
-            missionPassFinishedAt = now,
-            missionPassTermination = MissionPassFailed,
-            missionPassAdmitted = [],
-            missionPassAttention = [],
-            missionPassDetail = "this pass could not prepare its scratch directory: " <> Text.pack (show exception)
-          }
+        ( missionPassSetupFailure
+            (repositoryIdentity repository.repositoryOwner repository.repositoryName)
+            now
+            ("this pass could not prepare its scratch directory: " <> Text.pack (show exception))
+        )
     Right scratch -> do
       seams <- liveMissionSchedulerSeams options repository store scratch
       runMissionSchedulerPass seams config.resolvedMissions store repository
@@ -680,6 +690,98 @@ runMissionSchedulerMode options config repository store = do
   -- put a word about a cache directory into a document about missions.
   mapM_ (\scratch -> try @IOException (removeDirectoryRecursive scratch) :: IO (Either IOException ())) prepared
   pure (report, missionPassExitCode report.missionPassTermination)
+
+-- | @kanban --mission-scheduler@ from the parsed invocation down, setup
+-- included.
+--
+-- Requirement 7 and §5 give the supervisor above this process exactly one
+-- thing to read: one versioned document naming a termination, and an exit
+-- status derived from that termination and from nothing else. A failure
+-- before the pass starts is not an exception to that rule. A configuration
+-- that will not load, a checkout that resolves to no repository, and a
+-- mission store that will not open each end the pass before it admits
+-- anything — and a process that answered one of those on stderr and exited
+-- would hand the supervisor an unparseable pass, recorded as an incident
+-- naming nothing rather than as the failure it was actually told about.
+--
+-- So every one of them takes the same route out as a pass that ran: a report,
+-- narrated to stderr and written once to stdout by 'emitMissionPassReport',
+-- and an exit status 'missionPassExitCode' derives. This lives here rather
+-- than in @app\/Main.hs@ because that module is not built by the test suite,
+-- and the shape of a setup failure is precisely what the suite has to be able
+-- to see.
+--
+-- The @--config@ resolution is inside rather than above for the same reason:
+-- it consults the working directory, which can be gone, and an uncaught
+-- exception there is a pass with no document at all.
+runMissionSchedulerCommand :: Options -> IO (MissionPassReport, Int)
+runMissionSchedulerCommand parsedOptions = do
+  resolved <- try @IOException (resolveConfigPathOption parsedOptions.optionConfig)
+  case resolved of
+    Left exception ->
+      setupFailure ("the --config path could not be resolved: " <> Text.pack (show exception))
+    Right absoluteConfigPath -> do
+      let options = parsedOptions {optionConfig = absoluteConfigPath}
+      configResult <- loadRawConfig options.optionConfig
+      case configResult of
+        Left message -> setupFailure message
+        Right (rawConfig, warnings) -> do
+          mapM_ (\warning -> TextIO.hPutStrLn stderr ("kanban: warning: " <> warning)) warnings
+          repositoryResult <- resolveRepository rawConfig.rawRemoteName options.optionPath options.optionRepo
+          case repositoryResult of
+            Left message -> setupFailure message
+            Right repository -> do
+              let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
+                  resolvedConfig = resolveConfig ownerName rawConfig
+              opened <- openMissionStore repository
+              case opened of
+                -- Named from the repository this resolved to rather than from
+                -- the invocation, because by here the two can differ: an
+                -- invocation with no @--repo@ has just learned its identity
+                -- from the checkout's own remote.
+                Left detail -> do
+                  now <- getCurrentTime
+                  finish (missionPassSetupFailure ownerName now detail)
+                Right store -> runMissionSchedulerMode options resolvedConfig repository store
+  where
+    setupFailure detail = do
+      now <- getCurrentTime
+      finish (missionPassSetupFailure (missionPassSetupRepository parsedOptions.optionRepo) now detail)
+
+    finish report = pure (report, missionPassExitCode report.missionPassTermination)
+
+-- | The repository a failure before resolution names.
+--
+-- The invocation's own @--repo@, when it names one. That is the identity the
+-- caller asserted and the one it will compare this document against — the
+-- supervisor hands every pass the spelling it recorded — and it is also
+-- exactly what 'resolveRepository' would have produced had it got that far,
+-- since an explicit @--repo@ is parsed and used verbatim rather than
+-- reconciled against the checkout.
+--
+-- Absent, or present and not a repository name at all, leaves nothing to
+-- name. The second case matters more than it looks: a @--repo@ that will not
+-- parse is itself one of the reasons resolution fails, so \"whatever was
+-- typed\" would put a non-identity in the field that identifies the document.
+-- 'missionPassUnresolvedRepository' goes there instead, and a reader
+-- comparing it against the repository it asked about refuses.
+missionPassSetupRepository :: Maybe String -> Text
+missionPassSetupRepository requested = case requested of
+  Nothing -> missionPassUnresolvedRepository
+  Just spelling -> case parseRepositoryName (Text.pack spelling) of
+    Left _ -> missionPassUnresolvedRepository
+    Right (owner, name) -> repositoryIdentity owner name
+
+-- | Writes one pass report: every word of narration to stderr, exactly one
+-- JSON document to stdout.
+--
+-- The pairing is the point. Narration and document are emitted together, in
+-- that order, from one place, so there is no invocation that narrates without
+-- reporting and none that reports twice.
+emitMissionPassReport :: MissionPassReport -> IO ()
+emitMissionPassReport report = do
+  mapM_ (TextIO.hPutStrLn stderr) (missionPassNarration report)
+  LazyChar8.putStrLn (encodeMissionPassReport report)
 
 -- | A directory this pass's children leave their result documents in, which
 -- no other pass has ever used.

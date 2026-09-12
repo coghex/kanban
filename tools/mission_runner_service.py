@@ -116,6 +116,20 @@ PASS_TERMINATIONS = frozenset(PASS_EXIT_CODES)
 PASS_REFUSED = "refused"
 PASS_COMPLETED = "completed"
 PASS_FAILED = "failed"
+# What a report names as its repository when the pass failed before it could
+# establish one -- a configuration that would not load, or a checkout that
+# resolved to nothing. The mirror of
+# `Kanban.Mission.Pass.missionPassUnresolvedRepository`.
+#
+# This controller hands every pass a `--repo`, so it should never see one. It
+# is refused by name anyway, and ahead of the ordinary spelling comparison,
+# because the two failures are not the same failure: a pass that named another
+# repository read somebody else's store, while a pass that named this one
+# never got far enough to read anything, and an operator reading an incident
+# needs to be told which happened. The NUL is what makes the marker safe to
+# compare against a real identity: no GitHub owner or repository name can
+# carry one.
+PASS_UNRESOLVED_REPOSITORY = "\x00unresolved"
 PASS_DISPOSITIONS = frozenset(
     {"advanced", "settled", "blocked", "lease_refused", "refused", "failed"}
 )
@@ -1878,6 +1892,12 @@ class Controller:
         # Compared against the spelling the pass was handed, not this service's
         # folded partition key: the scheduler reports the repository it
         # resolved, and for a mixed-case remote those differ.
+        if document["repository"] == PASS_UNRESOLVED_REPOSITORY:
+            raise PassFailure(
+                "The mission scheduler could not establish which repository it was "
+                f"run for: {document['detail']}",
+                tail(command.stderr),
+            )
         if document["repository"] != self.job.spelling:
             raise PassFailure(
                 f"The mission scheduler report describes {document['repository']!r}, "

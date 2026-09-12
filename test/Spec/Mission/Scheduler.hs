@@ -25,6 +25,8 @@
 module Spec.Mission.Scheduler (spec) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, void)
 import qualified Data.ByteString.Char8 as ByteString
@@ -51,15 +53,18 @@ import Kanban.Mission
 import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.NotifyProbe (withStubbornNotifier)
+import Spec.Support.SchedulerProbe (SchedulerRun (..), runSchedulerCommand)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), hClose, hPutStrLn, openFile)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (nullSignal, signalProcess)
+import System.Exit (ExitCode (..))
 import System.Process
   ( CreateProcess (..),
     Pid,
     StdStream (CreatePipe, NoStream),
+    callProcess,
     createProcess,
     getPid,
     proc,
@@ -77,6 +82,7 @@ spec = describe "the repository mission scheduler" $ do
   attentionSpec
   notificationSpec
   configurationSpec
+  setupFailureSpec
 
 -- ---------------------------------------------------------------------------
 -- Admission
@@ -482,6 +488,173 @@ passContractSpec = describe "the pass report" $ do
       let narration = Text.unpack (Text.unlines (missionPassNarration report))
       ("\"schema\"" `isInfixOf` narration) `shouldBe` False
       ("mission scheduler pass for coghex/kanban" `isInfixOf` narration) `shouldBe` True
+
+-- ---------------------------------------------------------------------------
+-- A pass that ended before it began
+-- ---------------------------------------------------------------------------
+
+-- | Requirement 7 says a pass writes exactly one JSON document and exits with
+-- the status that document names. The interesting half of "exactly one" is
+-- the invocations that never get as far as a pass: a configuration that will
+-- not load, a checkout that resolves to no repository, a mission store that
+-- will not open. Each of those used to put a sentence on stderr and exit 1,
+-- which reaches the supervisor as a pass it cannot parse — an incident naming
+-- nothing, in place of the failure it was actually told about.
+--
+-- The in-process examples read the report; the ones that spawn read the two
+-- streams and the status, because "exactly one document on stdout" is a claim
+-- about a process and cannot be made from inside one.
+setupFailureSpec :: Spec
+setupFailureSpec = describe "a pass that ended before it began" $ do
+  describe "the repository such a report names" $ do
+    it "is the identity the invocation asserted" $
+      missionPassSetupRepository (Just "coghex/kanban") `shouldBe` "coghex/kanban"
+
+    -- Not "whatever was typed": a --repo that will not parse is itself one of
+    -- the reasons resolution fails, so echoing it would put a non-identity in
+    -- the field that identifies the document.
+    it "is unresolved when the invocation named nothing that parses" $ do
+      missionPassSetupRepository Nothing `shouldBe` missionPassUnresolvedRepository
+      missionPassSetupRepository (Just "") `shouldBe` missionPassUnresolvedRepository
+      missionPassSetupRepository (Just "kanban") `shouldBe` missionPassUnresolvedRepository
+      missionPassSetupRepository (Just "https://gitlab.com/coghex/kanban") `shouldBe` missionPassUnresolvedRepository
+
+    -- A NUL cannot appear in a GitHub owner or repository name, so a reader
+    -- comparing this against the repository it asked about refuses rather
+    -- than matches. Asserted rather than assumed, because the whole value of
+    -- the marker is that no real identity can collide with it.
+    it "spells the unresolved marker with something no identity can carry" $ do
+      ('\NUL' `elem` Text.unpack missionPassUnresolvedRepository) `shouldBe` True
+      Text.null (Text.strip missionPassUnresolvedRepository) `shouldBe` False
+
+  describe "the report a setup failure writes" $ do
+    it "fails the pass, names the invocation's repository, and observed nothing" $
+      withScratch $ \scratch -> do
+        writeFile (scratch </> "broken.toml") "this is not = = toml\n"
+        (report, status) <-
+          runMissionSchedulerCommand
+            testOptions
+              { optionMissionScheduler = True,
+                optionRepo = Just "coghex/kanban",
+                optionPath = scratch,
+                optionConfig = Just (scratch </> "broken.toml")
+              }
+        report.missionPassTermination `shouldBe` MissionPassFailed
+        report.missionPassRepository `shouldBe` "coghex/kanban"
+        report.missionPassAdmitted `shouldBe` []
+        report.missionPassAttention `shouldBe` []
+        Text.null report.missionPassDetail `shouldBe` False
+        status `shouldBe` 1
+
+    it "reports a checkout that resolves to no repository" $
+      withScratch $ \scratch -> do
+        -- A directory that is not a checkout, and no --repo to fall back on,
+        -- so resolution has nothing to answer from.
+        (report, status) <-
+          runMissionSchedulerCommand
+            testOptions {optionMissionScheduler = True, optionRepo = Nothing, optionPath = scratch}
+        report.missionPassTermination `shouldBe` MissionPassFailed
+        report.missionPassRepository `shouldBe` missionPassUnresolvedRepository
+        status `shouldBe` 1
+
+    -- The store case is the one where an identity /has/ been resolved, and
+    -- the report names that one rather than the invocation's, because by then
+    -- the two can differ: an invocation with no --repo has just learned its
+    -- identity from the checkout's own remote.
+    it "reports a mission store that will not open, under the resolved identity" $
+      withScratch $ \scratch -> do
+        let checkout = scratch </> "checkout"
+        createDirectoryIfMissing True checkout
+        callProcess "git" ["-C", checkout, "init", "--quiet"]
+        writeFile (scratch </> "state") "not a directory\n"
+        (report, status) <-
+          withEnvironmentValue "XDG_STATE_HOME" (scratch </> "state") $
+            runMissionSchedulerCommand
+              testOptions
+                { optionMissionScheduler = True,
+                  optionRepo = Just "coghex/kanban",
+                  optionPath = checkout
+                }
+        report.missionPassTermination `shouldBe` MissionPassFailed
+        report.missionPassRepository `shouldBe` "coghex/kanban"
+        report.missionPassAdmitted `shouldBe` []
+        status `shouldBe` 1
+
+  -- What a supervisor actually reads. Everything above is a value this
+  -- process holds; these run the mode in a process of their own and read what
+  -- came out of it.
+  describe "what such an invocation leaves on its streams" $ do
+    it "writes exactly one JSON document, narrates only to stderr, and exits 1" $
+      withScratch $ \scratch -> do
+        writeFile (scratch </> "broken.toml") "this is not = = toml\n"
+        run <-
+          runSchedulerCommand
+            [("PATH", "/usr/bin:/bin"), ("HOME", scratch)]
+            [ "--mission-scheduler",
+              "--repo",
+              "coghex/kanban",
+              "--path",
+              scratch,
+              "--config",
+              scratch </> "broken.toml"
+            ]
+        run.schedulerRunExit `shouldBe` ExitFailure 1
+        -- One document, and one line: a second line on stdout is how a
+        -- supervisor's parse starts failing, and an empty one is the failure
+        -- this whole block exists to close.
+        document <- soleJsonDocument run.schedulerRunStdout
+        lookupString "schema" document `shouldBe` Just "kanban-mission-scheduler-pass"
+        lookupString "termination" document `shouldBe` Just "failed"
+        lookupString "repository" document `shouldBe` Just "coghex/kanban"
+        ("\"schema\"" `isInfixOf` run.schedulerRunStderr) `shouldBe` False
+        ("mission scheduler pass for coghex/kanban" `isInfixOf` run.schedulerRunStderr) `shouldBe` True
+
+    it "writes one for a checkout that resolves to no repository" $
+      withScratch $ \scratch -> do
+        run <-
+          runSchedulerCommand
+            [("PATH", "/usr/bin:/bin"), ("HOME", scratch)]
+            ["--mission-scheduler", "--path", scratch]
+        run.schedulerRunExit `shouldBe` ExitFailure 1
+        document <- soleJsonDocument run.schedulerRunStdout
+        lookupString "termination" document `shouldBe` Just "failed"
+        lookupString "repository" document
+          `shouldBe` Just (Text.unpack missionPassUnresolvedRepository)
+
+    -- The control: a pass that really ran leaves the same shape, so the two
+    -- assertions above are about the document rather than about failure.
+    it "writes one for a pass that had nothing to do" $
+      withScratch $ \scratch -> do
+        let checkout = scratch </> "checkout"
+        createDirectoryIfMissing True checkout
+        callProcess "git" ["-C", checkout, "init", "--quiet"]
+        run <-
+          runSchedulerCommand
+            [ ("PATH", "/usr/bin:/bin"),
+              ("HOME", scratch),
+              ("XDG_STATE_HOME", scratch </> "state"),
+              ("XDG_CACHE_HOME", scratch </> "cache")
+            ]
+            ["--mission-scheduler", "--repo", "coghex/kanban", "--path", checkout]
+        run.schedulerRunExit `shouldBe` ExitSuccess
+        document <- soleJsonDocument run.schedulerRunStdout
+        lookupString "termination" document `shouldBe` Just "completed"
+        lookupString "repository" document `shouldBe` Just "coghex/kanban"
+
+-- | The one JSON document a pass is allowed to write, or a failure naming what
+-- was there instead.
+soleJsonDocument :: String -> IO (KeyMap.KeyMap Aeson.Value)
+soleJsonDocument output = case filter (not . null) (lines output) of
+  [line] -> case Aeson.eitherDecodeStrict' (ByteString.pack line) of
+    Right (Aeson.Object document) -> pure document
+    Right value -> fail ("the pass wrote JSON that is not an object: " <> show value)
+    Left message -> fail ("the pass wrote something that is not JSON (" <> message <> "): " <> line)
+  documents -> fail ("the pass wrote " <> show (length documents) <> " documents rather than one: " <> show documents)
+
+lookupString :: Aeson.Key -> KeyMap.KeyMap Aeson.Value -> Maybe String
+lookupString key document = case KeyMap.lookup key document of
+  Just (Aeson.String value) -> Just (Text.unpack value)
+  _ -> Nothing
 
 -- ---------------------------------------------------------------------------
 -- The child result document

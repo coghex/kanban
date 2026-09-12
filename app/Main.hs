@@ -9,15 +9,13 @@ import Kanban.Domain (Repository (..))
 import Kanban.GlyphTest (runGlyphTest)
 import Kanban.Mission
   ( MissionId (..),
-    encodeMissionPassReport,
+    emitMissionPassReport,
     missionChildResultOf,
-    missionPassNarration,
     missionRunReportLines,
     missionRunSucceeded,
     missionStartRefusalMessage,
-    openMissionStore,
     runMissionMode,
-    runMissionSchedulerMode,
+    runMissionSchedulerCommand,
     writeMissionChildResult,
   )
 import Kanban.Models (OperatingMode (..), loadModelRoster, loadedOperatingMode)
@@ -29,7 +27,6 @@ import Kanban.UI (runDashboard)
 import Kanban.Usage (UsageAcquisition (..), UsageMode (..), runUsageMode)
 import Kanban.Worker (runWorker)
 import Options.Applicative (execParser)
-import qualified Data.ByteString.Lazy.Char8 as LazyChar8
 import System.Exit (ExitCode (..), exitFailure, exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout)
 
@@ -236,34 +233,15 @@ main = do
     -- runnable missions. Exactly one JSON document goes to stdout and every
     -- word of narration goes to stderr, because the supervisor above this
     -- process parses the first and shows the second.
+    -- Setup included, which is why there is nothing here to read: a
+    -- configuration that will not load and a store that will not open leave
+    -- this mode through the same document every other pass leaves through,
+    -- and 'runMissionSchedulerCommand' is where the suite can see that
+    -- happen. This module is not built by @test-suite kanban-test@.
     MissionSchedulerMode -> do
-      absoluteConfigPath <- resolveConfigPathOption parsedOptions.optionConfig
-      let options = parsedOptions {optionConfig = absoluteConfigPath}
-      configResult <- loadRawConfig options.optionConfig
-      case configResult of
-        Left message -> do
-          hPutStrLn stderr ("kanban: " <> Text.unpack message)
-          exitFailure
-        Right (rawConfig, warnings) -> do
-          mapM_ (\warning -> hPutStrLn stderr ("kanban: warning: " <> Text.unpack warning)) warnings
-          repositoryResult <- resolveRepository rawConfig.rawRemoteName options.optionPath options.optionRepo
-          case repositoryResult of
-            Left message -> do
-              hPutStrLn stderr ("kanban: " <> Text.unpack message)
-              exitFailure
-            Right repository -> do
-              let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
-                  resolvedConfig = resolveConfig ownerName rawConfig
-              opened <- openMissionStore repository
-              case opened of
-                Left detail -> do
-                  hPutStrLn stderr ("kanban: " <> Text.unpack detail)
-                  exitFailure
-                Right store -> do
-                  (report, status) <- runMissionSchedulerMode options resolvedConfig repository store
-                  mapM_ (TextIO.hPutStrLn stderr) (missionPassNarration report)
-                  LazyChar8.putStrLn (encodeMissionPassReport report)
-                  exitWith (if status == 0 then ExitSuccess else ExitFailure status)
+      (report, status) <- runMissionSchedulerCommand parsedOptions
+      emitMissionPassReport report
+      exitWith (if status == 0 then ExitSuccess else ExitFailure status)
     DashboardMode -> do
       -- An explicit --config is resolved against kanban's own launch
       -- directory here, then threaded onward (canonical issue-review and

@@ -149,27 +149,36 @@ if __name__ == "__main__":
 '''
 
 
-def haskell_string_characters(literal):
-    """The characters a Haskell string literal denotes.
+def haskell_string_value(literal):
+    """The string a Haskell string literal denotes.
 
     Read rather than compared as written: `"/\\\\\\NUL"` in the source is the
     three characters `/`, `\\` and NUL, and a test that compared the escapes
     would be pinning how the literal is spelled rather than what it says.
     """
-    characters = set()
+    value = []
     index = 0
     while index < len(literal):
         if literal[index] != "\\":
-            characters.add(literal[index])
+            value.append(literal[index])
             index += 1
             continue
         if literal.startswith("\\NUL", index):
-            characters.add("\0")
+            value.append("\0")
             index += 4
         else:
-            characters.add(literal[index + 1])
+            value.append(literal[index + 1])
             index += 2
-    return characters
+    return "".join(value)
+
+
+def haskell_string_characters(literal):
+    """The set of characters a Haskell string literal denotes.
+
+    One decoder, so a literal read for its characters and one read for its
+    value cannot disagree about what an escape means.
+    """
+    return set(haskell_string_value(literal))
 
 
 def wait_until(predicate, *, timeout=25.0, message="condition"):
@@ -285,6 +294,35 @@ class MirroredPassContractTests(unittest.TestCase):
     def test_the_schema_and_version_match(self):
         self.assertEqual(service.PASS_SCHEMA, self.declared("missionPassSchema"))
         self.assertEqual(service.PASS_VERSION, self.declared_int("missionPassVersion"))
+
+    def test_the_unresolved_repository_marker_matches(self):
+        # Read as the characters it denotes rather than as the escape it is
+        # written with: the Haskell source spells the NUL `\NUL`, and a copy
+        # that compared those four characters would pass while the two sides
+        # meant different strings.
+        self.assertEqual(
+            service.PASS_UNRESOLVED_REPOSITORY,
+            haskell_string_value(self.declared("missionPassUnresolvedRepository")),
+        )
+        # The property the marker is for, asserted rather than assumed: a
+        # repository identity cannot carry a NUL, so nothing real collides
+        # with it.
+        self.assertIn("\0", service.PASS_UNRESOLVED_REPOSITORY)
+
+    def test_a_setup_failure_reports_a_failed_pass(self):
+        # The termination a pass that ended before it began carries, held
+        # against the constructor that builds it rather than against prose.
+        # `refused` would be read by this controller as a precondition saying
+        # no, which is a different thing from a pass that could not start.
+        body = re.search(
+            r"^missionPassSetupFailure repository now detail =\n((?:  .*\n)+)",
+            self.source,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(body, "missionPassSetupFailure is not declared")
+        self.assertIn("missionPassTermination = MissionPassFailed", body.group(1))
+        self.assertIn("missionPassAdmitted = []", body.group(1))
+        self.assertIn("missionPassAttention = []", body.group(1))
 
     def test_the_vocabularies_match(self):
         self.assertEqual(service.PASS_TERMINATIONS, self.tags("missionPassTerminationTag"))
@@ -1615,6 +1653,32 @@ class FailureTests(MissionRunnerFixture):
                 status, _stdout, _stderr = self.run_controller()
                 self.assertEqual(status, 1)
                 self.assert_incident(service.PASS_INCIDENT_KIND)
+
+    def test_a_pass_that_established_no_repository_says_so(self):
+        # A setup failure reaches this controller as a document like any
+        # other, and the whole point of the marker is that it does not read as
+        # somebody else's repository. Both refusals open an incident; what is
+        # asserted is that the operator is told which one happened, because
+        # "the scheduler read another repository's store" and "the scheduler
+        # never got far enough to read anything" call for different repairs.
+        self.write_plan(
+            {
+                "report": {
+                    "document": pass_document(
+                        repository=service.PASS_UNRESOLVED_REPOSITORY,
+                        termination="failed",
+                        detail="the configuration could not be read",
+                    ),
+                    "status": 1,
+                }
+            }
+        )
+        status, _stdout, _stderr = self.run_controller()
+        self.assertEqual(status, 1)
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        self.assertIn("could not establish which repository", incident["summary"])
+        self.assertIn("the configuration could not be read", incident["summary"])
+        self.assertNotIn("describes", incident["summary"])
 
     def test_acknowledging_leaves_the_status_document_alone(self):
         # `ack` is bookkeeping and nothing else: it resolves one incident and

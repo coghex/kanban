@@ -275,6 +275,9 @@ module Kanban.Mission
     advanceMissions,
     runMissionSchedulerPass,
     runMissionSchedulerMode,
+    runMissionSchedulerCommand,
+    missionPassSetupRepository,
+    emitMissionPassReport,
 
     -- * The pass and child-result contracts
     MissionChildResult (..),
@@ -304,6 +307,8 @@ module Kanban.Mission
     missionPassExitCode,
     missionPassSchema,
     missionPassVersion,
+    missionPassUnresolvedRepository,
+    missionPassSetupFailure,
     encodeMissionPassReport,
     missionPassNarration,
 
@@ -368,8 +373,11 @@ import Kanban.Mission.Runner
 import Kanban.Mission.Scheduler
   ( MissionSchedulerSeams (..),
     advanceMissions,
+    emitMissionPassReport,
     missionAdmissionCeiling,
     missionIsRunnable,
+    missionPassSetupRepository,
+    runMissionSchedulerCommand,
     runMissionSchedulerMode,
     runMissionSchedulerPass,
   )

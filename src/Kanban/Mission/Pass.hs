@@ -67,6 +67,8 @@ module Kanban.Mission.Pass
     missionPassExitCode,
     missionPassSchema,
     missionPassVersion,
+    missionPassUnresolvedRepository,
+    missionPassSetupFailure,
     encodeMissionPassReport,
     missionPassNarration,
   )
@@ -434,6 +436,46 @@ data MissionPassReport = MissionPassReport
     missionPassDetail :: Text
   }
   deriving stock (Eq, Show)
+
+-- | What a report names as its repository when the invocation established
+-- none.
+--
+-- A pass can fail before it knows which repository it was for: a
+-- configuration that will not load, or a checkout that resolves to no
+-- repository at all, ends it with nothing to put in that field. The field is
+-- not optional — requirement 7 gives the supervisor one document to read,
+-- and a reader that had to treat a missing repository as \"probably mine\"
+-- would be the fail-open reading §16 forbids — so this goes there instead.
+--
+-- It carries a @NUL@ for the same reason
+-- 'Kanban.Mission.Types.missionAttentionIdentityUnrecordedMarker' does: no
+-- GitHub owner or repository name can contain one, so a reader comparing this
+-- against the repository it asked about refuses rather than matches, and one
+-- printing it cannot be mistaken for having printed a real identity.
+missionPassUnresolvedRepository :: Text
+missionPassUnresolvedRepository = "\NULunresolved"
+
+-- | The report a pass writes when it ended before it could admit anything.
+--
+-- One spelling for the whole class, because the class is larger than it
+-- looks: the scratch directory, the configuration, the repository, and the
+-- mission store can each end a pass before it starts, and a shape assembled
+-- separately at each of them is a shape that drifts. Everything is empty
+-- because nothing was observed — which is exactly what the supervisor's
+-- consistency check expects of a failed pass — and the termination is
+-- 'MissionPassFailed' rather than 'MissionPassRefused': a refusal is a
+-- precondition answering no, and none of these answered anything.
+missionPassSetupFailure :: Text -> UTCTime -> Text -> MissionPassReport
+missionPassSetupFailure repository now detail =
+  MissionPassReport
+    { missionPassRepository = repository,
+      missionPassStartedAt = now,
+      missionPassFinishedAt = now,
+      missionPassTermination = MissionPassFailed,
+      missionPassAdmitted = [],
+      missionPassAttention = [],
+      missionPassDetail = detail
+    }
 
 encodeMissionPassReport :: MissionPassReport -> LazyByteString.ByteString
 encodeMissionPassReport report =

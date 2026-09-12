@@ -307,6 +307,22 @@ repository. A result is therefore bound to its launch rather than to the path
 it was left at, and a document an earlier pass — or this pass's own earlier
 attempt — left in that place is refused rather than adopted.
 
+That holds for an invocation that never reaches a pass. A configuration that
+will not load, a checkout that resolves to no repository, and a mission store
+that will not open each end the run before anything is admitted, and each leaves
+the same document: `failed`, exiting 1, nothing admitted and nothing observed,
+with the reason in its detail. Answering one of those on standard error alone
+would reach the supervisor as an unparseable pass — an incident naming nothing,
+in place of the failure it was told about. Such a report names the repository
+the invocation asserted through `--repo`, which is both the identity the
+supervisor compares it against and the one resolution would have produced, since
+an explicit `--repo` is used verbatim; once a repository has actually been
+resolved the report names that one instead, because an invocation without
+`--repo` learns its identity from the checkout's own remote. A failure before
+either names none at all, and a reserved spelling no repository name can carry
+says so, rather than leaving the field to be guessed at or echoing back
+something that is not an identity.
+
 A record that is *absent* — missing, or written under a schema version this
 release does not know — is passed over silently, exactly as section 16 says. A
 record that is there and will not decode, or that decodes and names another
