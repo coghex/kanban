@@ -3554,11 +3554,12 @@ runs) parses the manifest in §4 and:
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on
   real ones. That discovered surface is executable-only; the home-relative
-  paths a `tools/` module builds are reconciled only for the four named in
+  paths a `tools/` module builds are reconciled only for the five named in
   the next bullet;
 - fails if `tools/approve_issues_service.py`,
-  `tools/install_issue_approval.py`, `tools/service_manager.py`, or
-  `tools/mission_runner_service.py` — §2.8's and §2.12's owning sources —
+  `tools/install_issue_approval.py`, `tools/service_manager.py`,
+  `tools/mission_runner_service.py`, or `tools/install_mission_runner.py` —
+  §2.8's and §2.12's owning sources and the installers beside them —
   builds a home-relative path that has no matching
   `personal-path` manifest entry. These are Python, so they need an extractor
   of their own beside the Haskell one, and it resolves the parsed module rather
@@ -3572,9 +3573,10 @@ runs) parses the manifest in §4 and:
   `$HOME/`-prefixed literal, joining the result into the same slash-prefixed
   shape the Haskell and markdown scans compare. Quote style and line wrapping
   are not distinctions the parsed tree makes. What it recovers from each of the
-  four is pinned, so a refactor that stops matching fails here rather than
-  passing with an empty discovered set — including the pin that the installer
-  builds none of its own — and fixture regressions prove that an undeclared
+  five is pinned, so a refactor that stops matching fails here rather than
+  passing with an empty discovered set — including the pin that each of the two
+  installers builds none of its own — and fixture regressions prove that an
+  undeclared
   segment is reported, that a tail hung off a binding or a helper is recovered
   whole, that a location beneath a declared root is not absorbed into that
   root's row, and that a module which cannot be parsed fails rather than

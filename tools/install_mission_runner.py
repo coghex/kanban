@@ -522,8 +522,9 @@ def plan_released_links(
 
 def release_links(
     assets: Path, install_dir: Path, identity: str
-) -> dict[str, dict[str, str]]:
-    """Take back the links of an installation this repository has left.
+) -> tuple[dict[str, dict[str, str]], str | None]:
+    """Take back the links of an installation this repository has left, and say
+    how far it got.
 
     A reinstall pointed at another directory moves the job's definition and its
     record entry there, and the directory it came from is then running nothing
@@ -534,31 +535,36 @@ def release_links(
     positively recognized as Kanban's own.
 
     Called with this identity's run lock already held for the whole install, so
-    there is no window here for a run to begin on the modules this removes --
-    and therefore no contention path that could leave the links standing while
-    reporting them gone.
+    there is no window here for a run to begin on the modules this removes.
+
+    Reports rather than raises, because by the time this runs the move has
+    already happened: the job, its definition and its record entry are in the
+    new directory, and a caller told "that failed" would believe none of it
+    landed. So every failure -- a refusal, and equally an ordinary
+    `PermissionError` from one `unlink` -- comes back as the results so far
+    beside the reason, and each link says what became of *it* rather than what
+    was planned for all of them. Partly done is a real outcome here and the one
+    an operator most needs spelled out.
     """
-    with installation_lock(install_dir):
-        # The claim first, and inside the lock: by here the record already names
-        # the directory this repository moved to, and the marker it left behind
-        # is the last thing saying it still runs from here.
-        mission_runner_service.forget_dependant(install_dir, identity)
-        if not may_remove_links(install_dir):
-            return {
-                name: {"destination": str(destination), "result": "kept"}
-                for name, (_source, destination) in link_sources(
-                    assets, install_dir
-                ).items()
-            }
-        return {
-            name: {
-                "destination": str(destination),
-                "result": remove_symlink(destination, name),
-            }
+    results = {
+        name: {"destination": str(destination), "result": "kept"}
+        for name, (_source, destination) in link_sources(assets, install_dir).items()
+    }
+    try:
+        with installation_lock(install_dir):
+            # The claim first, and inside the lock: by here the record already
+            # names the directory this repository moved to, and the marker it
+            # left behind is the last thing saying it still runs from here.
+            mission_runner_service.forget_dependant(install_dir, identity)
+            if not may_remove_links(install_dir):
+                return results, None
             for name, (_source, destination) in link_sources(
                 assets, install_dir
-            ).items()
-        }
+            ).items():
+                results[name]["result"] = remove_symlink(destination, name)
+    except (InstallError, mission_runner_service.ServiceError, OSError) as exc:
+        return results, str(exc)
+    return results, None
 
 
 def require_recorded_installation(
@@ -752,22 +758,16 @@ def install(
             # Reported rather than raised if it cannot be done. The move has
             # already happened, so a failure here is not a failed install: it is
             # a completed one beside a directory that still needs clearing, and
-            # saying so is what lets somebody clear it. The check above makes
-            # this reachable only when that directory changed under us between
-            # then and now.
-            try:
-                document["released_links"] = release_links(
-                    asset_root, Path(previous), job.identity
-                )
-            except (InstallError, mission_runner_service.ServiceError) as exc:
-                document["released_links"] = {
-                    name: {"destination": str(destination), "result": "kept"}
-                    for name, (_source, destination) in link_sources(
-                        asset_root, Path(previous)
-                    ).items()
-                }
+            # saying so is what lets somebody clear it. The check before the
+            # move makes a malformed claim unreachable; what is left is the
+            # filesystem saying no, which nothing can rule out in advance.
+            released, error = release_links(
+                asset_root, Path(previous), job.identity
+            )
+            document["released_links"] = released
+            if error is not None:
                 document["retained_install_dir"] = str(previous)
-                document["retained_reason"] = str(exc)
+                document["retained_reason"] = error
         else:
             document["released_links"] = {}
     return {**document, "installed": True, "dry_run": False}
@@ -786,7 +786,10 @@ def uninstall(
     backend = service_backend()
     job = repository_job(repo, None)
     require_recorded_installation(job, install_dir)
-    plan = controller_operation("uninstall_plan", job)
+    # Handed this run's directory rather than left to resolve one: with an
+    # ambient override naming somewhere else, a plan that resolved its own would
+    # refuse the very removal `--install-dir` asked for.
+    plan = controller_operation("uninstall_plan", job, install_dir)
     # Discounted here because the plan describes an uninstall that has not
     # happened: this repository is still recorded, and still running from these
     # links, until it is removed below.
@@ -987,10 +990,14 @@ def print_plan(result: dict[str, Any], *, uninstalling: bool) -> None:
         )
     if not uninstalling and result.get("retained_install_dir"):
         print(
-            f"Left behind in {result['retained_install_dir']}: its links and "
-            "this repository's claim on them could not be taken back. "
+            f"Left behind in {result['retained_install_dir']}: "
             + result["retained_reason"]
         )
+        for link in sorted(
+            result["released_links"].values(), key=lambda link: link["destination"]
+        ):
+            if link["result"] != "removed":
+                print(f"Still there: {link['destination']}")
     if dry_run:
         print("Dry run; nothing was changed.")
     elif not uninstalling:

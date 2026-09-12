@@ -2211,6 +2211,62 @@ class LinkDependencyTests(InstallerFixture):
         self.assertEqual(service.marker_dependants(self.install_dir), [])
         self.assertEqual(service.marker_dependants(elsewhere), [self.identity])
 
+    def test_a_release_that_the_filesystem_refuses_reports_what_it_did(self):
+        # An ordinary `PermissionError` from one `unlink`, which no preflight
+        # can rule out. The move has already happened by then, so reporting a
+        # failed install would tell an operator that none of it landed -- while
+        # leaving them no name for the directory that still needs clearing.
+        self.install()
+        elsewhere = self.root / "elsewhere"
+        refused = installer.LINKED_MODULES[1]
+        original = installer.remove_symlink
+
+        def sometimes_refused(destination, name):
+            if name == refused:
+                raise PermissionError(13, "Permission denied", str(destination))
+            return original(destination, name)
+
+        with mock.patch.object(installer, "remove_symlink", sometimes_refused):
+            result = self.install(install_dir=elsewhere)
+
+        # A completed relocation, said plainly.
+        self.assertTrue(result["installed"])
+        self.assertEqual(result["relocated_from"], str(self.install_dir))
+        self.assertEqual(service.installed_install_dir(self.identity), str(elsewhere))
+        self.assertEqual(result["retained_install_dir"], str(self.install_dir))
+        self.assertIn("Permission denied", result["retained_reason"])
+
+        # And each link says what became of *it*, not what was planned for all
+        # of them: the one that was refused is still there, and so is anything
+        # after it.
+        released = result["released_links"]
+        self.assertEqual(released[refused]["result"], "kept")
+        for name, link in released.items():
+            destination = Path(link["destination"])
+            with self.subTest(module=name, result=link["result"]):
+                if link["result"] == "removed":
+                    self.assertFalse(os.path.lexists(destination))
+                else:
+                    self.assertTrue(os.path.lexists(destination))
+
+    def test_the_retained_directory_is_named_in_the_printed_plan(self):
+        self.install()
+        elsewhere = self.root / "elsewhere"
+
+        def always_refused(destination, name):
+            raise PermissionError(13, "Permission denied", str(destination))
+
+        with mock.patch.object(installer, "remove_symlink", always_refused):
+            result = self.install(install_dir=elsewhere)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            installer.print_plan(result, uninstalling=False)
+        output = printed.getvalue()
+        self.assertIn(str(self.install_dir), output)
+        self.assertIn("Permission denied", output)
+        for name in installer.LINKED_MODULES:
+            self.assertIn(str(self.install_dir / name), output)
+
     # -- neither witness is trusted on its own ------------------------------
 
     def test_a_rebuilt_markers_directory_does_not_forget_a_sibling(self):
@@ -2593,6 +2649,53 @@ class ControllerRouteTests(InstallerFixture):
             text=True,
             timeout=90,
             env=environment,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn(str(self.install_dir), proc.stderr)
+        self.assertIn(str(other), proc.stderr)
+        self.assert_installation_intact()
+
+    def test_the_uninstall_dry_run_refuses_the_same_conflict(self):
+        # A plan that described a removal the command itself refuses is a plan
+        # of work that cannot happen.
+        self.install()
+        other = self.elsewhere()
+        with mock.patch.dict(os.environ, {service.INSTALL_DIR_ENV: str(other)}):
+            with self.assertRaises(service.ServiceError) as raised:
+                service.uninstall_plan(
+                    service.resolve_job(self.repo), service.job_install_dir(
+                        service.resolve_job(self.repo)
+                    )
+                )
+        self.assertIn(str(other), str(raised.exception))
+        self.assert_installation_intact()
+
+    def test_the_uninstall_dry_run_command_refuses_it_too(self):
+        self.install()
+        other = self.elsewhere()
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(self.install_dir),
+                str(self.account),
+                "controller",
+                "uninstall",
+                "--path",
+                str(self.repo),
+                "--dry-run",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env={
+                **os.environ,
+                "FIXTURE_SERVICE_MANAGER": str(self.manager.root),
+                "FIXTURE_TOOLS": str(TOOLS_DIR),
+                "FIXTURE_SHAPE": self.shape,
+                service.INSTALL_DIR_ENV: str(other),
+            },
         )
         self.assertEqual(proc.returncode, 1, proc.stdout)
         self.assertIn(str(self.install_dir), proc.stderr)

@@ -3479,11 +3479,13 @@ def uninstall_plan(
     """
     require_supported_host()
     backend = service_backend()
+    selected = install_dir if install_dir is not None else job_install_dir(job)
+    # Here rather than only in `uninstall_job`, so a dry run answers the same
+    # question the removal does: a plan describing work the command itself
+    # refuses is a plan of work that cannot happen.
+    require_recorded_installation(job, selected, "removing it")
     require_usable_record()
-    require_removable_dependant(
-        install_dir if install_dir is not None else job_install_dir(job),
-        job.identity,
-    )
+    require_removable_dependant(selected, job.identity)
     require_stopped_for_uninstall(job)
     label = service_label(job)
     return {
@@ -3980,8 +3982,11 @@ def main(argv: list[str] | None = None) -> int:
             print_value({**value, "dry_run": arguments.dry_run}, as_json=arguments.json)
             return 0
         if arguments.operation == "uninstall":
+            selected = job_install_dir(job)
             value = (
-                uninstall_plan(job) if arguments.dry_run else uninstall_job(job)
+                uninstall_plan(job, selected)
+                if arguments.dry_run
+                else uninstall_job(job, selected)
             )
             print_value({**value, "dry_run": arguments.dry_run}, as_json=arguments.json)
             return 0
