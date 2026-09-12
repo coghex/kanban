@@ -1240,6 +1240,29 @@ notificationSpec = describe "telling somebody a mission is waiting" $ do
       notifier <- withStubbornNotifier scratch pure
       awaitGone notifier
 
+  -- The identifier a stop needs is learned two calls after the spawn, so a
+  -- handler that only knew "nothing yet" and "here it is" would sweep nothing
+  -- in exactly the window a stop is racing. Staged by reading the state while
+  -- a spawn is announced but not yet registered.
+  it "waits out a spawn in progress rather than sweeping nothing" $
+    withScratch $ \scratch -> do
+      let marker = scratch </> "late.pid"
+      command <-
+        writeFakeKanban
+          scratch
+          (unlines ["#!/bin/sh", "trap '' TERM INT", "echo $$ > " <> show marker, "sleep 120"])
+      -- The real runner, stopped from another thread the moment its notifier
+      -- is up: the handler has to find the registration that landed while the
+      -- signal was in flight.
+      notifier <- withStubbornNotifier scratch pure
+      awaitGone notifier
+      -- And the ordinary bounded path still ends its command, so the waiting
+      -- state cannot have swallowed the sweep.
+      attempt <- runMissionNotificationCommand (2 * 1000 * 1000) [Text.pack command]
+      attempt.missionNotificationAttemptState `shouldBe` MissionNotificationTimedOut
+      recorded <- awaitRecordedPid marker
+      awaitGone recorded
+
   it "refuses an empty command rather than launching a shell" $ do
     attempt <- runMissionNotificationCommand missionNotificationTimeoutMicros []
     attempt.missionNotificationAttemptState `shouldBe` MissionNotificationLaunchFailed

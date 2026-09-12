@@ -47,6 +47,7 @@ module Kanban.Mission.Notify
   )
 where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, try)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (listToMaybe)
@@ -279,6 +280,43 @@ attemptMissionNotification runCommand store mission identity argv = do
         MissionNotificationRecordingFailed
         (Just ("the notification suppression record could not be written, so nothing was launched: " <> message))
 
+-- | Where one notification command has got to, as a stop handler needs to know
+-- it.
+--
+-- Three states rather than two, and the middle one is the point. A handler
+-- that only knew \"nothing yet\" and \"here it is\" would sweep nothing when a
+-- stop landed in the instant between the kernel creating the process and this
+-- one learning its identifier — and that is precisely the window a signal is
+-- most likely to find, because it is the window the operator's stop is racing.
+data NotifierState
+  = NotifierIdle
+  | -- | A spawn is under way. There is something to end, and its identifier is
+    -- moments from being known.
+    NotifierStarting
+  | NotifierLive (Maybe Pid) ManagedProcess
+
+-- | Ends whatever the command has become, waiting out a spawn in progress.
+--
+-- The wait is what closes the post-spawn window: registration follows
+-- 'createProcess' by two calls, so a handler that waits even briefly always
+-- finds it. It is bounded so that a spawn which somehow never completes cannot
+-- hold the stop open — and it costs nothing in the ordinary case, where the
+-- state is already 'NotifierIdle' or 'NotifierLive' on the first read.
+--
+-- This runs on the handler's own thread, so waiting here delays nothing the
+-- process is otherwise doing.
+sweepRecorded :: IORef NotifierState -> IO ()
+sweepRecorded live = go (300 :: Int)
+  where
+    go remaining = do
+      state <- readIORef live
+      case state of
+        NotifierIdle -> pure ()
+        NotifierLive rootPid managed -> sweepCommandGroup rootPid managed
+        NotifierStarting
+          | remaining <= 0 -> pure ()
+          | otherwise -> threadDelay 10000 >> go (remaining - 1)
+
 -- | Runs @body@ with an intentional stop performing @sweep@ first.
 --
 -- Installed for the life of one command and restored afterwards, rather than
@@ -360,11 +398,20 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
       -- signal would find the previous disposition in place and leave the
       -- command behind. Until the spawn there is nothing to end, so the
       -- handler reads an empty box and does nothing.
-      live <- newIORef Nothing
-      withStopSweep (readIORef live >>= mapM_ (uncurry sweepCommandGroup)) $ do
+      live <- newIORef NotifierIdle
+      withStopSweep (sweepRecorded live) $ do
+        -- Announced before the spawn, so a stop landing between the kernel
+        -- creating the process and this one learning its identifier waits for
+        -- that identifier rather than sweeping nothing. Blocking the signal
+        -- across the spawn instead would be worse than the hole: a mask held
+        -- over 'createProcess' is inherited through the child's @exec@, and
+        -- the notifier would come up immune to the very signal used to stop
+        -- it.
+        writeIORef live NotifierStarting
         started <- try @IOException (createProcess (spec directory))
         case started of
-          Left exception ->
+          Left exception -> do
+            writeIORef live NotifierIdle
             pure
               ( MissionNotificationAttempt
                   MissionNotificationLaunchFailed
@@ -377,7 +424,7 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
             -- is recorded and swept like any other rather than abandoned.
             (managed, _) <- managedProcess processHandle
             rootPid <- getPid processHandle
-            writeIORef live (Just (rootPid, managed))
+            writeIORef live (NotifierLive rootPid managed)
             sweepCommandGroup rootPid managed
             pure
               ( MissionNotificationAttempt
@@ -400,7 +447,7 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
           create_group = True
         }
 
-    observe :: IORef (Maybe (Maybe Pid, ManagedProcess)) -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
+    observe :: IORef NotifierState -> ProcessHandle -> Handle -> Handle -> IO MissionNotificationAttempt
     observe live processHandle outputHandle errorHandle = do
       -- Captured before anything can reap the leader: 'getPid' goes 'Nothing'
       -- the moment a clean exit reaps it below, so the identifier the sweep
@@ -409,7 +456,7 @@ runMissionNotificationCommand timeoutMicros (executable : arguments) = do
       rootPid <- getPid processHandle
       -- Recorded before the captures start, so every step from here on is
       -- covered by the handler installed above.
-      writeIORef live (Just (rootPid, managed))
+      writeIORef live (NotifierLive rootPid managed)
       outputCapture <- startCapture outputHandle
       errorCapture <- startCapture errorHandle
       let bounds = CommandBounds {commandDeadlineMicros = timeoutMicros, commandCaptureGraceMicros = captureGraceMicros}

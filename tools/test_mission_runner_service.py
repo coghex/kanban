@@ -1207,6 +1207,70 @@ class IdentityTests(MissionRunnerFixture):
         self.assertEqual(job.identity, self.identity)
         self.assertEqual(job.runtime_dir, service.runtime_root() / job.slug)
 
+    def test_a_mixed_case_remote_keeps_both_spellings(self):
+        # GitHub names are case-insensitive, so this service's own locking and
+        # runtime state fold the identity — two clones spelled differently are
+        # one repository. Kanban does not fold: a mission store path is built
+        # from the spelling segment by segment, and its records are compared by
+        # equality. Handing a pass the folded name would open a different store
+        # on a case-sensitive filesystem and have the real records refused as
+        # another repository's on a case-insensitive one.
+        mixed = self.root / "mixed"
+        mixed.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=mixed, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:Acme/Widgets.git"],
+            cwd=mixed,
+            check=True,
+        )
+        job = service.resolve_job(mixed)
+        self.assertEqual(job.identity, "acme/widgets")
+        self.assertEqual(job.spelling, "Acme/Widgets")
+        # The partitioned state follows the folded name, so two spellings of
+        # one repository still contend.
+        self.assertEqual(job.slug, service.repository_slug("acme/widgets"))
+        self.assertEqual(job.lock_path, self.job().lock_path)
+
+    def test_a_mixed_case_remote_launches_the_pass_with_kanbans_spelling(self):
+        mixed = self.root / "mixed-run"
+        mixed.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=mixed, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:Acme/Widgets.git"],
+            cwd=mixed,
+            check=True,
+        )
+        self.write_plan(
+            {"report": {"document": pass_document(repository="Acme/Widgets")}}
+        )
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                str(self.wrapper),
+                str(CONTROLLER.parent),
+                str(self.account),
+                "run",
+                "--path",
+                str(mixed),
+                "--kanban",
+                str(self.scheduler),
+                "--interval",
+                "0.05",
+                "--passes",
+                "1",
+            ],
+            env=self.environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.processes.append(child)
+        _stdout, stderr = child.communicate(timeout=40)
+        self.assertEqual(child.returncode, 0, stderr)
+        argv = self.recorded()[0]["argv"]
+        self.assertEqual(argv[argv.index("--repo") + 1], "Acme/Widgets")
+
     def test_a_checkout_with_no_github_remote_is_refused(self):
         other = self.root / "not-a-clone"
         other.mkdir()
@@ -1396,6 +1460,23 @@ class LifecycleTests(MissionRunnerFixture):
         self.assertEqual(snapshot["state"], service.STATE_STOPPED)
         self.assertEqual(snapshot["open_incidents"], [])
 
+    def test_a_stop_during_a_partial_report_records_no_failure(self):
+        # A report is written in one call, but the pipe need not carry it in
+        # one piece and its attention list is unbounded — so a stop can land
+        # after a nonempty prefix. Emptiness was the old test for "interrupted",
+        # which turned an operator's own stop into a failure incident.
+        document = pass_document(attention=[attention_entry()])
+        prefix = json.dumps(document)[: len(json.dumps(document)) // 2]
+        self.write_plan({"report": {"raw": prefix, "status": 0, "hold_seconds": 30}})
+        child = self.start_controller()
+        wait_until(lambda: self.recorded(), message="a pass to start")
+        os.killpg(child.pid, signal.SIGTERM)
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["open_incidents"], [])
+
     def test_stopping_leaves_no_mission_child_of_the_active_pass_running(self):
         # Requirement 11's containment, staged against a mission child that
         # ignores SIGTERM: what this proves is the controller's escalation
@@ -1451,6 +1532,26 @@ class FailureTests(MissionRunnerFixture):
         incident = self.assert_incident(service.PASS_INCIDENT_KIND)
         self.assertIn("1 failed", incident["summary"])
         self.assertIn("the scheduler said this", incident["detail"])
+
+    def test_a_whole_report_is_still_acted_on_however_the_run_ended(self):
+        # The other half of the interruption rule, and the reason that check
+        # sits after the parse rather than before it: work that really happened
+        # must not be reported as work that did not. A pass that failed and
+        # said so completely still opens its incident.
+        self.write_plan(
+            {
+                "report": {
+                    "document": pass_document(
+                        termination="failed", detail="the pass failed before the stop"
+                    ),
+                    "status": 1,
+                }
+            }
+        )
+        status, _stdout, _stderr = self.run_controller()
+        self.assertEqual(status, 1)
+        incident = self.assert_incident(service.PASS_INCIDENT_KIND)
+        self.assertIn("failed before the stop", incident["summary"])
 
     def test_a_refused_pass_opens_an_incident_rather_than_looking_quiet(self):
         self.write_plan(

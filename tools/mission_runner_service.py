@@ -436,6 +436,10 @@ class MissionRunnerJob:
 
     repo_path: Path
     identity: str
+    # What a pass is handed as `--repo`. The identity above partitions this
+    # service's own state and is folded for it; this is the repository as
+    # Kanban spells it, which is what its mission store is keyed on.
+    spelling: str
     slug: str
     runtime_dir: Path
     incident_dir: Path
@@ -445,13 +449,20 @@ class MissionRunnerJob:
 
 
 def job_for_identity(
-    repo_path: Path, identity: str, *, config_path: str | None = None
+    repo_path: Path,
+    identity: str,
+    *,
+    spelling: str | None = None,
+    config_path: str | None = None,
 ) -> MissionRunnerJob:
     slug = repository_slug(identity)
     runtime_dir = runtime_root() / slug
     return MissionRunnerJob(
         repo_path=repo_path,
         identity=identity,
+        # Defaults to the identity, which is right for every caller that knows
+        # only a canonical name -- `status` and `ack` never launch a pass.
+        spelling=spelling if spelling is not None else identity,
         slug=slug,
         runtime_dir=runtime_dir,
         incident_dir=runtime_dir / "incidents",
@@ -510,8 +521,36 @@ def configured_remote_name(config_path: str | None) -> str:
     return raw_config.remote_name
 
 
-def repository_identity(repo_path: Path, remote_name: str) -> str:
-    """The canonical GitHub repository this checkout is a clone of.
+@dataclass(frozen=True)
+class RepositoryNames:
+    """The two spellings of one repository, and what each is for.
+
+    They are not interchangeable, and using one where the other belongs is a
+    real defect rather than an aesthetic one.
+
+    `canonical` is case-folded, because GitHub owner and repository names are
+    case-insensitive: two clones spelled differently name one repository and
+    must contend for one run lock and share one runtime directory.
+
+    `spelling` is what the remote actually says, because Kanban keeps a
+    repository's case -- `Kanban.Mission.Paths.missionStoreKey` builds a
+    mission store path from it segment by segment, and
+    `Kanban.Mission.Types.missionRepositoryMatches` is plain equality. Handing
+    a pass the folded spelling for a remote such as `Acme/Widgets` would open a
+    *different* store on a case-sensitive filesystem, and on a case-insensitive
+    one would find the mixed-case records and refuse them as another
+    repository's.
+    """
+
+    canonical: str
+    spelling: str
+
+
+def repository_names(repo_path: Path, remote_name: str) -> RepositoryNames:
+    """Both spellings, from one read of the remote.
+
+    One read rather than two, so the pair cannot come from two different
+    answers if the remote is rewritten between them.
 
     Fails closed. A checkout whose remote does not name a repository on
     github.com has no mission runner identity, so it can neither run nor be
@@ -527,12 +566,18 @@ def repository_identity(repo_path: Path, remote_name: str) -> str:
             f"Could not read the {remote_name!r} remote of {repo_path}: {detail}"
         )
     try:
-        return normalize_identity(proc.stdout)
-    except ServiceError as exc:
+        spelling = kanban_config.parse_github_repository(proc.stdout)
+    except kanban_config.KanbanConfigError as exc:
         raise ServiceError(
             f"{repo_path} is not a checkout of a supported GitHub repository, so it "
             f"cannot run or report a mission runner service: {exc}"
         ) from exc
+    return RepositoryNames(canonical=spelling.lower(), spelling=spelling)
+
+
+def repository_identity(repo_path: Path, remote_name: str) -> str:
+    """The canonical GitHub repository this checkout is a clone of."""
+    return repository_names(repo_path, remote_name).canonical
 
 
 def discovery_remote_name() -> str:
@@ -548,8 +593,10 @@ def discovery_remote_name() -> str:
 
 
 def resolve_job(repo_path: Path, *, config_path: str | None = None) -> MissionRunnerJob:
-    identity = repository_identity(repo_path, discovery_remote_name())
-    return job_for_identity(repo_path, identity, config_path=config_path)
+    names = repository_names(repo_path, discovery_remote_name())
+    return job_for_identity(
+        repo_path, names.canonical, spelling=names.spelling, config_path=config_path
+    )
 
 
 def require_requested_identity(job: MissionRunnerJob, requested: str | None) -> None:
@@ -1645,8 +1692,11 @@ class Controller:
         argv = [
             str(self.kanban),
             SCHEDULER_FLAG,
+            # The repository as Kanban spells it, not this service's folded
+            # partition key: a mission store path is built from this value
+            # segment by segment and its records are compared by equality.
             "--repo",
-            self.job.identity,
+            self.job.spelling,
         ]
         if self.job.config_path:
             argv.extend(["--config", self.job.config_path])
@@ -1804,22 +1854,34 @@ class Controller:
         command = self.spawn()
         if command is None:
             return
-        if self._stop_requested and not command.stdout.strip():
-            # A pass this controller signalled decided nothing, so treating its
-            # exit or its truncated output as a failure would record an
-            # intentional stop as one. A pass that *completed* is never
-            # suppressed this way, because work that really happened must not
-            # be reported as work that did not.
-            self.log("A pass was interrupted by the stop; recording no result for it.")
-            return
         try:
             document = parse_pass_report(command.stdout, command.returncode)
         except PassFailure as failure:
+            # A pass this controller signalled decided nothing, so treating
+            # what it managed to write as a failure would record an intentional
+            # stop as one. Emptiness is not the test: a report is written in
+            # one `write`, but the pipe need not carry it in one piece, and its
+            # attention list is unbounded — so a stop can land after a nonempty
+            # prefix and leave exactly this, output that parses as nothing.
+            #
+            # A pass that *completed* is never suppressed, which is why this
+            # sits after the parse rather than before it: a whole, valid report
+            # is acted on however the run ended, because work that really
+            # happened must not be reported as work that did not.
+            if self._stop_requested:
+                self.log(
+                    "A pass was interrupted by the stop and left no readable result; "
+                    "recording no verdict for it."
+                )
+                return
             raise PassFailure(failure.summary, failure.detail or tail(command.stderr)) from failure
-        if document["repository"] != self.job.identity:
+        # Compared against the spelling the pass was handed, not this service's
+        # folded partition key: the scheduler reports the repository it
+        # resolved, and for a mixed-case remote those differ.
+        if document["repository"] != self.job.spelling:
             raise PassFailure(
                 f"The mission scheduler report describes {document['repository']!r}, "
-                f"not {self.job.identity!r}.",
+                f"not {self.job.spelling!r}.",
                 tail(command.stderr),
             )
         self._passes += 1
