@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 
 REVIEW_TIMEOUT_SECONDS = 7200
+MAX_INLINE_REVIEW_BYTES = 64 * 1024
 GATE_TEXT = "Issue has not been approved."
 VALID_ORIGIN_RE = re.compile(r"<!-- pr-origin:(claude|codex|grok|kimi|google) -->")
 REVIEW_MARKER_RE = re.compile(
@@ -1123,19 +1124,88 @@ def issue_gate_override_notice(context: dict[str, Any]) -> str:
     )
 
 
-def review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bool) -> str:
+def review_prompt(
+    context: dict[str, Any], reviewer: Reviewer, rereview: bool,
+    *, materials: dict[str, str] | None = None,
+) -> str:
     mode = "rereview" if rereview else "review"
-    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}.{issue_gate_override_notice(context)}
+    notice = issue_gate_override_notice(context) if materials is None else (
+        "\n\nISSUE-GATE OVERRIDE: read the complete operator reason and affected "
+        "issues in the metadata file before judging the linked specifications."
+        if context.get("issue_gate_override") else ""
+    )
+    payload = context if materials is None else {"review_materials": materials}
+    return f"""Independently {mode} the pull request represented below as {reviewer.display_name}.{notice}
 
-The current working directory is a read-only extraction of the exact PR head. Inspect relevant source and tests there. The JSON payload is authoritative for any linked approved issue specifications, the full patch, commits, prior reviews/comments, and CI. When linked_issues is empty, evaluate the PR directly from its title, body, patch, repository context, and tests. For a rereview, explicitly verify prior blocking concerns as well as finding regressions or new blockers.
+The current working directory is a read-only extraction of the exact PR head. Inspect relevant source and tests there. The review payload is authoritative for any linked approved issue specifications, the full patch, commits, prior reviews/comments, and CI. If it contains `review_materials`, first read its index and metadata files. The complete patch is in its patch file; use the index to read individual file sections in bounded chunks. Do not dump the whole patch or a large metadata field into one tool response. No files or comments were omitted. Review the complete change, including changes after large vendor/generated sections; the index is navigation, not a summary or a review verdict. When linked_issues is empty, evaluate the PR directly from its title, body, patch, repository context, and tests. For a rereview, explicitly verify prior blocking concerns as well as finding regressions or new blockers.
 
 Review only. Do not edit files, access GitHub, publish, label, commit, push, or merge. Evaluate correctness, regressions, missing required tests, scope, and satisfaction of the effective review contract. Use CHANGES_REQUESTED only for concrete human-action blockers; do not block on optional style preferences. Use APPROVE only when there are no blocking concerns.
 
 Return only the requested structured result. The summary must contain non-whitespace text and be no more than {MAX_REVIEW_SUMMARY_CHARS} characters. Include no more than {MAX_REVIEW_BLOCKING_CONCERNS} blockers. Each blocker must have an actionable repository-relative path, line (or an empty string if no single line applies), and a non-blank explanation no more than {MAX_REVIEW_BLOCKER_BODY_CHARS} characters long.
 
 REVIEW_PAYLOAD:
-{json.dumps(context, indent=2, sort_keys=True)}
+{json.dumps(payload, indent=2, sort_keys=True)}
 """
+
+
+def prepare_review_prompt(
+    context: dict[str, Any], reviewer: Reviewer, rereview: bool, source: Path,
+) -> str:
+    """Keep large nested-review inputs complete without overfilling one message.
+
+    Materials live inside this reviewer's private source tree so read-only tools
+    can reach them without extra filesystem grants. No reviewer is running yet;
+    only the root directory is briefly made writable to add a unique directory.
+    Its original mode is restored even when preparation fails. run_reviews owns
+    cleanup of the whole tree on every exit and keeps dual reviewers serial.
+    """
+    prompt = review_prompt(context, reviewer, rereview)
+    if len(prompt.encode("utf-8")) <= MAX_INLINE_REVIEW_BYTES:
+        return prompt
+    patch = context.get("diff", "")
+    if not isinstance(patch, str):
+        raise WorkflowError("review diff is not text")
+    metadata = {key: value for key, value in context.items() if key != "diff"}
+    metadata_bytes = json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8")
+    patch_bytes = patch.encode("utf-8")
+    sections: list[dict[str, Any]] = []
+    offset = 0
+    line_number = 0
+    for line_number, line in enumerate(io.BytesIO(patch_bytes), 1):
+        if line.startswith(b"diff --git "):
+            if sections:
+                sections[-1]["end_line"] = line_number - 1
+                sections[-1]["byte_length"] = offset - sections[-1]["byte_offset"]
+            sections.append({"header": line.decode("utf-8").rstrip("\r\n"),
+                             "start_line": line_number, "byte_offset": offset})
+        offset += len(line)
+    if sections:
+        sections[-1]["end_line"] = line_number
+        sections[-1]["byte_length"] = len(patch_bytes) - sections[-1]["byte_offset"]
+    index = {
+        "head": context.get("pull_request", {}).get("headRefOid"),
+        "metadata": {"file": "metadata.json", "bytes": len(metadata_bytes),
+                     "sha256": hashlib.sha256(metadata_bytes).hexdigest()},
+        "patch": {"file": "changes.patch", "bytes": len(patch_bytes),
+                  "sha256": hashlib.sha256(patch_bytes).hexdigest()},
+        "sections": sections,
+    }
+    original_mode = source.stat().st_mode
+    source.chmod(original_mode | 0o200)
+    try:
+        directory = Path(tempfile.mkdtemp(prefix=".kanban-review-", dir=source))
+        (directory / "metadata.json").write_bytes(metadata_bytes)
+        (directory / "changes.patch").write_bytes(patch_bytes)
+        (directory / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+        make_tree_read_only(directory)
+    finally:
+        source.chmod(original_mode)
+    relative = directory.relative_to(source)
+    return review_prompt(context, reviewer, rereview, materials={
+        "metadata": str(relative / "metadata.json"),
+        "patch": str(relative / "changes.patch"),
+        "index": str(relative / "index.json"),
+    })
 
 
 def self_review_prompt(context: dict[str, Any], reviewer: Reviewer, rereview: bool, number: int) -> str:
@@ -1322,12 +1392,12 @@ def run_reviews(
     # source trees on disk simultaneously, one of which an unrestricted
     # reviewer could enumerate and tamper with via its predictable prefix.
     # Serial execution means at most one reviewer's source ever exists.
-    prompts = {item.key: review_prompt(context, item, rereview) for item in reviewers}
     results: dict[str, dict[str, Any]] = {}
     for item in reviewers:
         source = extract()
         try:
-            results[item.key] = invoke_reviewer(item, prompts[item.key], source)
+            prompt = prepare_review_prompt(context, item, rereview, source)
+            results[item.key] = invoke_reviewer(item, prompt, source)
         except Exception as exc:
             raise WorkflowError(f"{item.display_name} review failed: {exc}") from exc
         finally:

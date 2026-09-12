@@ -860,27 +860,28 @@ ALIGNMENT_SENSITIVE_RENDERINGS = {
 }
 
 # Four lines, one of them the bare `        )` that failed the gate three
-# times in pull request #622. On this snapshot one copy leaves the superseded
-# rendering alone at publish_verdict, gate_status, and route_reviewers alike,
-# so the fixture lands two uniquely named copies, which is what reproduces the
-# reported blank-line movement rather than assuming one occurrence suffices.
+# times in pull request #622. Adding the shared large-review preparation code
+# changed the old diff algorithm's alignment: its previous two-probe fixture
+# no longer moved the rendering. On this snapshot 21 uniquely named copies
+# reproduce that failure. Keep the negative control live without changing the
+# reconciliation gate or its documented divergence allowance.
 CLOSING_PARENTHESIS_PROBES = "".join(
     f'def probe_{name}():\n    return (\n        "x"\n        )\n\n\n'
-    for name in ("one", "two")
+    for name in range(21)
 )
 
 # (description, anchor the edit lands before, edit, renderings it moves)
 SHARED_EDITS = (
     (
-        "two closing-parenthesis probes",
+        "21 closing-parenthesis probes",
         "def publish_verdict(",
         CLOSING_PARENTHESIS_PROBES,
         ("unified-diff hunks",),
     ),
     (
-        "one blank line",
+        "two blank lines",
         "def kanban_models():",
-        "\n",
+        "\n\n",
         ("autojunk=False grouped opcodes",),
     ),
 )
