@@ -843,28 +843,37 @@ RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 # both excused out of existence. Every entry is a phrase a tracked report
 # actually uses, and a mention spelled any other way flags for confirmation.
 MENTION_FORMS = (
-    # "continued below the completed #185 cursor"
+    # "continued below the completed #185 cursor". The clause goes on to say
+    # what the review did cover, so its following predicate is not asked about.
     (re.compile(r"\b(?:below|above|at|from|past)\s+the\s+completed\s*\Z", re.IGNORECASE),
-     re.compile(r"\A\s*cursors?\b", re.IGNORECASE), None),
-    # "interleaved between #446 and #411" -- an interval's two endpoints
+     re.compile(r"\A\s*cursors?\b", re.IGNORECASE), None, False),
+    # "interleaved between #446 and #411" -- an interval's two endpoints, and
+    # the clause that names them is about the commits between them.
     (re.compile(r"\binterleaved\s+between\s*\Z", re.IGNORECASE),
-     None, re.compile(r"\A#\d+\s+and\s+#\d+\Z")),
+     None, re.compile(r"\A#\d+\s+and\s+#\d+\Z"), False),
     # "the user's exclusive stop at #533"
     (re.compile(r"\bstop(?:ped|s)?\s+(?:at|before|above|below)\s*\Z", re.IGNORECASE),
-     None, None),
+     None, None, True),
     # "Master advanced through #466"
     (re.compile(r"\badvanced\s+(?:through|to|past|beyond)\s*\Z", re.IGNORECASE),
-     None, None),
+     None, None, True),
     # "the direct commits that landed after #456"
-    (re.compile(r"\blanded\s+(?:after|before)\s*\Z", re.IGNORECASE), None, None),
-    # "The previously reported #386 ... #361 batch"
+    (re.compile(r"\blanded\s+(?:after|before)\s*\Z", re.IGNORECASE), None, None, True),
+    # "The previously reported #386 ... #361 batch was explicitly skipped"
     (re.compile(r"\breported\s*\Z", re.IGNORECASE),
-     re.compile(r"\A\s*batch(?:es)?\b", re.IGNORECASE), None),
+     re.compile(
+         r"\A\s*batch(?:es)?\s+(?:was|were)\s+(?:\w+\s+){0,3}"
+         r"(?:skipped|excluded|omitted|ignored|untouched|left|not)\b",
+         re.IGNORECASE,
+     ), None, False),
     # "no pull request numbered #533 or lower"
     (re.compile(r"\bnumbered\s*\Z", re.IGNORECASE),
      re.compile(r"\A\s*or\s+(?:lower|higher|below|above|newer|older)\b", re.IGNORECASE),
-     None),
+     None, True),
 )
+
+# Where a clause ends, for the purpose of asking what it says about a run.
+CLAUSE_END_RE = re.compile(r"[.;:]")
 
 # There is deliberately no clause- or sentence-scoped "this was not reviewed"
 # excuse here. Three attempts at one each reached a pull request it should not
@@ -957,13 +966,27 @@ SCOPE_OBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The other things a project review reads. Applied to what follows the object
-# above, where it can only refuse a clause the grammar already accepted -- a
-# second restriction on top of a positive form rather than the decision
-# itself, which is what it used to be.
-OTHER_OBJECT_RE = re.compile(
-    r"\b(?:commit|commits|file|files|document|documents|documentation|"
-    r"report|reports|landing|landings|issue|issues|branch|branches)\b",
+# ... and what may follow that object, up to the colon. Closed too, because a
+# free suffix was the last place a clause could say the opposite of what its
+# opening said: "covered the two merged pull requests' metadata but failed to
+# review the pull requests themselves: #601 and #533" opens with an accepted
+# form and ends by withdrawing it.
+#
+# The vocabulary is every word the nineteen tracked reports put there -- the
+# ordering phrase, the frozen boundary, the stop the batch stayed above, the
+# batch a senior review followed -- and nothing else. A wording outside it
+# flags for one confirmation, which is the same bargain the rest of the
+# parser makes.
+SCOPE_SUFFIX_RE = re.compile(
+    r"\A(?:\s|[,;'’]|#\d+|\d{4}-\d{2}-\d{2}|\d+|"
+    r"\b(?:by|in|at|on|of|as|to|over|up|and|the|its|their|that|those|these|"
+    r"merge|merge-time|time|order|ordered|sorted|taken|"
+    r"newest|oldest|newest-first|oldest-first|first|last|"
+    r"frozen|selection|review|boundary|head|history|repository|"
+    r"remaining|above|below|between|before|after|inside|through|"
+    r"user|users|user’s|exclusive|stop|cursor|batch|landed|landing|"
+    r"covered|reviewed|merged|eligible|uncovered|unreviewed|previously)\b"
+    r"|user's)*\Z",
     re.IGNORECASE,
 )
 
@@ -1071,7 +1094,7 @@ def _enumeration_clauses(sentence: str) -> list:
         object_match = SCOPE_OBJECT_RE.match(segment[prefix.end():])
         if object_match is None:
             continue
-        if OTHER_OBJECT_RE.search(segment[prefix.end() + object_match.end():]):
+        if not SCOPE_SUFFIX_RE.match(segment[prefix.end() + object_match.end():]):
             continue
         if NUMBER_RE.search(sentence[position + 1:end]):
             clauses.append(position)
@@ -1163,7 +1186,7 @@ def _landmark_form(sentence: str, match) -> bool:
     before = sentence[: match.start()]
     after = sentence[match.end():]
     run = " ".join(match.group(0).split())
-    for lead, trail, shape in MENTION_FORMS:
+    for lead, trail, shape, closed in MENTION_FORMS:
         found = lead.search(before)
         if found is None:
             continue
@@ -1173,6 +1196,16 @@ def _landmark_form(sentence: str, match) -> bool:
             continue
         if SCOPE_TRIGGER_RE.search(" ".join(before[: found.start()].split()[-3:])):
             continue
+        # For the forms whose tracked wording says nothing further about the
+        # run, a reviewing verb later in the same clause is that clause
+        # claiming it after all -- "the exclusive stop at #10 was also
+        # reviewed". The two forms whose own clause goes on to discuss the
+        # review are exempt, and the reported-batch form closes its predicate
+        # in `trail` instead.
+        if closed:
+            end = CLAUSE_END_RE.search(after)
+            if SCOPE_TRIGGER_RE.search(after[: end.start()] if end else after):
+                continue
         return True
     return False
 

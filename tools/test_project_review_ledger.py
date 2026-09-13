@@ -1273,6 +1273,30 @@ class ReportScopeTests(LedgerTestCase):
             "cursor handed to a reviewing verb": (
                 f"{opening} It also reviewed the completed #601 cursor."
             ),
+            "suffix withdrawing the clause's own claim": (
+                "This review covered the two merged pull requests' metadata "
+                "but failed to review the pull requests themselves: #601 and "
+                "#533."
+            ),
+            "suffix excepting part of the claim": (
+                "This review covered the two merged pull requests except the "
+                "ones nobody entered: #601 and #533."
+            ),
+            "reported batch that was reviewed": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "also reviewed."
+            ),
+            "stop that was reviewed": (
+                f"{opening} The exclusive stop at #601 was also reviewed."
+            ),
+            "landing this review also covered": (
+                f"{opening} Master advanced through #601, which this review "
+                "also covered."
+            ),
+            "threshold that was reviewed": (
+                f"{opening} No pull request numbered #601 or lower was "
+                "entered, though #601 was reviewed."
+            ),
             "passive review behind a role word": (
                 f"{opening} The previously reported #601 and #533 were also reviewed."
             ),
@@ -1289,6 +1313,27 @@ class ReportScopeTests(LedgerTestCase):
                 )
                 self.assertEqual(scope["reviewed"], [], label)
                 self.assertIsNotNone(scope["flag"], label)
+
+    def test_the_tracked_scope_suffixes_are_the_ones_accepted(self):
+        # The suffix is a closed vocabulary too, because a free one was the
+        # last place a clause could withdraw what its opening said. These are
+        # the five shapes the nineteen tracked reports put after their object.
+        for suffix in (
+            "by merge time",
+            "in merge-time order",
+            "as of 2026-09-05, ordered by merge time",
+            "at the frozen selection boundary, in merge-time order",
+            "remaining above the user's exclusive stop at #533, in merge-time order",
+        ):
+            with self.subTest(suffix=suffix):
+                body = (
+                    "# Project Review Findings: PRs #612–#610\n\n"
+                    f"This review covered the two merged pull requests {suffix}: "
+                    "#612 and #610.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
 
     def test_every_landmark_form_the_tracked_reports_use_still_parses(self):
         # The other half of the pin above, and the control that keeps the
