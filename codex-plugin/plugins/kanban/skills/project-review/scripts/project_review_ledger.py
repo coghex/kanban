@@ -444,10 +444,12 @@ def load_document(root) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as error:
-        # `read_text` raises this both for a name nothing holds and for a
-        # symlink with nothing behind it. The second is a ledger someone put
-        # there and broke, and reading it as "never migrated" both loses the
-        # state and lets a migration write over the name.
+        # `read_text` raises this for a name nothing holds, for a symlink with
+        # nothing behind it, and for a name behind a broken directory. Only
+        # the first is absence; the others are a ledger someone put there and
+        # broke, and reading them as "never migrated" both loses the state and
+        # lets a migration write over the name.
+        require_reachable(root, path)
         if _name_is_taken(path):
             raise LedgerError(
                 f"{path} is a link with nothing behind it; a broken ledger is "
@@ -975,7 +977,15 @@ def create_document(root, document: dict) -> Path:
     """
     path = confined(root, document_path(root))
     parent = confined(root, path.parent)
-    parent.mkdir(parents=True, exist_ok=True)
+    require_reachable(root, path)
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise LedgerError(
+            f"{parent} could not be created ({error}); the ledger's own "
+            "directory is the one thing this helper makes, so failing to make "
+            "it is a refusal rather than a traceback."
+        ) from error
     confined(root, parent)
     handle, temporary = tempfile.mkstemp(dir=str(parent), prefix=".project-review-ledger-")
     try:
@@ -1496,6 +1506,7 @@ def migrate(root, repo: str, confirmations=None) -> dict:
     # An early refusal so a run that cannot succeed does no reading, and a
     # second one at the moment of creation so two runs that both got past
     # this one cannot both publish.
+    require_reachable(root, path)
     if _name_is_taken(path):
         raise LedgerError(
             f"{path} already exists, so a ledger is already established under "
@@ -1572,6 +1583,43 @@ def migrate(root, repo: str, confirmations=None) -> dict:
     result["document"] = str(written)
     result["state"] = document["repositories"][repo]
     return result
+
+
+def require_reachable(root, path) -> None:
+    """Every directory between `root` and `path` is one, or a refusal.
+
+    A dangling `docs/project_review` makes `read_text` raise the same
+    `FileNotFoundError` a missing ledger does, and `lstat` on the ledger
+    behind it raises it too -- so a broken ancestor read as a repository that
+    had never been migrated, and a migration past it died on `mkdir` with an
+    exception the CLI had no answer for. A component that exists and is not a
+    directory is a place this helper cannot put a ledger, and saying so is
+    not the same as saying there is no ledger.
+    """
+    anchor = Path(root).resolve(strict=False)
+    ancestors = []
+    current = Path(path).parent
+    while True:
+        ancestors.append(current)
+        if current.parent == current or current.resolve(strict=False) == anchor:
+            break
+        current = current.parent
+    for ancestor in reversed(ancestors):
+        try:
+            os.lstat(ancestor)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise LedgerError(
+                f"{ancestor} could not be looked up ({error}); a path this "
+                "helper cannot examine is not a clear one."
+            ) from error
+        if not os.path.isdir(ancestor):
+            raise LedgerError(
+                f"{ancestor} is not a directory; the ledger lives under it, "
+                "so a link with nothing behind it or a file in its place is "
+                "not an absent ledger but an unusable one."
+            )
 
 
 def _name_is_taken(path: Path) -> bool:

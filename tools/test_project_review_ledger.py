@@ -2287,6 +2287,32 @@ class FilesystemTests(LedgerTestCase):
             LEDGER.migrate(self.root, REPO, {"docs/project_review_12-11.md": [12, 11]})
         self.assertFalse(LEDGER.document_path(self.root).exists())
 
+    def test_a_broken_directory_above_the_ledger_is_not_an_absent_one(self):
+        # `read_text` raises the same FileNotFoundError for a ledger behind a
+        # broken directory as for one that was never written, and `lstat` on
+        # the ledger raises it too -- so a dangling `docs/project_review` read
+        # as a repository that had never been migrated, and a migration past
+        # it died on `mkdir` with an exception the CLI had no answer for.
+        for label, make in (
+            ("a dangling project_review",
+             lambda root: os.symlink(root / "docs" / "missing", root / "docs" / "project_review")),
+            ("a file where project_review goes",
+             lambda root: (root / "docs" / "project_review").write_text("x", encoding="utf-8")),
+            ("a dangling docs",
+             lambda root: os.symlink(root / "missing", root / "docs")),
+        ):
+            with self.subTest(shape=label):
+                directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
+                self.addCleanup(directory.cleanup)
+                root = Path(directory.name)
+                if label != "a dangling docs":
+                    (root / "docs").mkdir()
+                make(root)
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.load_document(root)
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.migrate(root, REPO)
+
     def test_a_dangling_symlink_is_not_an_absent_document(self):
         # `read_text` raises FileNotFoundError both for a name nothing holds
         # and for a link with nothing behind it. Reading the second as "never
