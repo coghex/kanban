@@ -339,13 +339,19 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
 )
 
-# Issue #548's project-review cursor mechanism, asserted for the same reason
-# and against the same failure: the workflow's resume contract is that helper,
-# so a release that shipped the command without it would install a sweep that
-# refuses to start. One copy per bundle, each beside the command that calls it.
-BUNDLED_CURSOR_MODULES = (
+# The project-review workflow's durable-state mechanisms, asserted for the same
+# reason and against the same failure: the workflow's resume contract is issue
+# #548's cursor, so a release that shipped the command without it would install
+# a sweep that refuses to start. Issue #680's ledger ships beside it under the
+# same rule looked at one release ahead -- nothing invokes it until LEDGER-6
+# switches the command over, and a release that dropped it would then install
+# that switched-over command with no state mechanism at all. Two copies each,
+# one per bundle, beside the command that will call them.
+BUNDLED_PROJECT_REVIEW_MODULES = (
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
+    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
 )
 
 # What each `tools/setup_workflows.py` component installs from. Keyed to that
@@ -882,13 +888,14 @@ class SourceDistributionTest(unittest.TestCase):
             "installs a command that fails closed in every repository.",
         )
 
-    def test_the_bundled_project_review_cursor_ships_with_both_bundles(self):
+    def test_the_bundled_project_review_state_modules_ship_with_both_bundles(self):
         self.assert_present(
-            BUNDLED_CURSOR_MODULES,
+            BUNDLED_PROJECT_REVIEW_MODULES,
             "Both provider bundles must carry the project-review cursor "
-            "helper their sweep resolves before its first read; a bundle that "
-            "ships the command without it installs a sweep that stops at its "
-            "own helper lookup in every repository.",
+            "helper their sweep resolves before its first read, and the "
+            "ledger helper that supersedes it; a bundle that ships the "
+            "command without one installs a sweep that stops at its own "
+            "helper lookup in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

@@ -402,6 +402,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
 ]
@@ -444,6 +445,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
+    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
 ]
 
@@ -653,15 +655,19 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
     },
 }
 
-# Issue #548's cursor helper, vendored into both bundles and covered the way
-# the trusted-comment helper and the document mechanism above are. Its
-# expectation is an empty set, and that is a pin rather than an omission: the
-# reconciliation is arithmetic over listings the workflow already took, so a
-# helper that started shelling out would be reaching a checkout its caller
-# never named -- and would owe a manifest row it does not have.
-PROJECT_REVIEW_CURSOR_SURFACE_FILES = {
+# Issue #548's cursor helper and issue #680's ledger helper, vendored into both
+# bundles and covered the way the trusted-comment helper and the document
+# mechanism above are. Every expectation is an empty set, and that is a pin
+# rather than an omission: the cursor's reconciliation is arithmetic over
+# listings the workflow already took and the ledger reads only documents under
+# the `--root` it was given, so a helper that started shelling out would be
+# reaching a checkout its caller never named -- and would owe a manifest row it
+# does not have.
+PROJECT_REVIEW_HELPER_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py": set(),
+    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": set(),
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py": set(),
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": set(),
 }
 
 # Issue #511's drainer control surface, pinned the same way and for the
@@ -2818,7 +2824,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
-    def test_the_vendored_project_review_cursor_is_scanned_and_declared(self):
+    def test_the_vendored_project_review_helpers_are_scanned_and_declared(self):
         # The counterpart of the two vendored-helper pins above. Each copy is a
         # member of its brand's surface list, so dropping one from a list fails
         # here rather than silently un-scanning a shipped asset; what the
@@ -2826,7 +2832,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # assertion about the module rather than about an extractor that
         # stopped matching.
         for relative_path, expected in sorted(
-            PROJECT_REVIEW_CURSOR_SURFACE_FILES.items()
+            PROJECT_REVIEW_HELPER_SURFACE_FILES.items()
         ):
             self.assertTrue(
                 relative_path in PLUGIN_SURFACE_FILES
@@ -2844,7 +2850,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             )
         # Non-vacuity for the empty sets above: the same extractor recovers
         # something from a module that does spawn, so "nothing found" is a
-        # property of these two files rather than of the scan.
+        # property of these four files rather than of the scan.
         self.assertEqual(
             discovered_commands_for_plugin_file(
                 "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
