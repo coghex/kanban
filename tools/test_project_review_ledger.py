@@ -1140,6 +1140,38 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertEqual(scope["reviewed"], [])
                 self.assertIsNotNone(scope["flag"])
 
+    def test_a_sentence_that_contradicts_itself_is_not_read(self):
+        # A scope sentence says how many pull requests it covered as well as
+        # which, and either half can be the stale one. Deciding between them
+        # is the operator's call, so a disagreement flags rather than trusting
+        # the list.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        for label, enumeration in (
+            ("more than it says", "#612, #610, and #602"),
+            ("fewer than it says", "#612"),
+            ("the same one twice", "#612 and #612"),
+        ):
+            with self.subTest(enumeration=label):
+                scope = self.paragraph(
+                    self.mutated(sentence, "#612 and #610", enumeration)
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("does not read", scope["flag"])
+        # ... and the agreeing sentence it was mutated from still parses.
+        scope = self.paragraph(sentence)
+        self.assertIsNone(scope["flag"], scope["flag"])
+        self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_a_count_word_is_read_as_the_number_the_reports_spell(self):
+        # The tracked reports spell their batch size in words, including the
+        # hyphenated compounds, and every one of them agrees with the list it
+        # introduces -- which is what makes the check above a check rather
+        # than a new way to flag eighteen working reports.
+        self.assertEqual(LEDGER.count_value("twelve"), 12)
+        self.assertEqual(LEDGER.count_value("twenty-nine"), 29)
+        self.assertEqual(LEDGER.count_value("29"), 29)
+        self.assertIsNone(LEDGER.count_value("several"))
+
     def test_a_parenthesis_anywhere_makes_its_sentence_unreadable(self):
         # A qualifier bracketed into an otherwise-matching sentence would
         # otherwise be blanked back into a match.

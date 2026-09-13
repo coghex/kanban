@@ -899,6 +899,33 @@ UNREADABLE_MARK = "\x00"
 
 HOLE_RE = re.compile(r"\{([A-Z]+)\}")
 
+# A scope sentence says how many pull requests it covered as well as which,
+# and the two have to agree. "covered the two newest merged pull requests ...:
+# #612, #610, and #602" contradicts itself, and prose that contradicts itself
+# is prose this helper cannot read -- a stale count is exactly as likely to
+# mean a stale list as a stale number, and choosing between them is the
+# operator's.
+COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30,
+}
+
+
+def count_value(text: str):
+    """`"twelve"` as 12, or None when the word is not one this helper knows."""
+    text = text.strip().lower()
+    if text.isdigit():
+        return int(text)
+    if "-" in text:
+        tens, _, unit = text.partition("-")
+        if tens in COUNT_WORDS and unit in COUNT_WORDS:
+            return COUNT_WORDS[tens] + COUNT_WORDS[unit]
+        return None
+    return COUNT_WORDS.get(text)
+
 HOLE_PATTERNS = {
     # The reviewed enumeration a scope template introduces.
     "ENUM": r"(?P<enum>#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*)",
@@ -992,12 +1019,21 @@ def compile_template(template: str):
     them: a template matches the sentence entire or not at all.
     """
     parts = []
+    captured = False
     for token in template.split():
         pieces = []
         index = 0
         for hole in HOLE_RE.finditer(token):
             pieces.append(re.escape(token[index:hole.start()]))
-            pieces.append(HOLE_PATTERNS[hole.group(1)])
+            pattern = HOLE_PATTERNS[hole.group(1)]
+            # The first `{COUNT}` is captured, so a scope sentence's claim
+            # about how many pull requests it covered can be checked against
+            # the list it then gives. Later ones are not: no scope template
+            # has a second, and a mention template's counts are about commits.
+            if hole.group(1) == "COUNT" and not captured:
+                pattern = f"(?P<count>{pattern})"
+                captured = True
+            pieces.append(pattern)
             index = hole.end()
         pieces.append(re.escape(token[index:]))
         parts.append("".join(pieces))
@@ -1069,6 +1105,33 @@ def _normalized(sentence: str) -> str:
     return re.sub(r"\s+([,;:.])", r"\1", collapsed).strip()
 
 
+def _self_contradiction(found, numbers: list):
+    """Why a matched scope sentence disagrees with itself, or None.
+
+    A sentence that names a pull request twice, or that says it covered a
+    different number of them than it goes on to list, is prose this helper
+    cannot read. Either half could be the stale one, and deciding which is
+    the operator's call rather than this parser's.
+    """
+    repeated = sorted({number for number in numbers if numbers.count(number) > 1})
+    if repeated:
+        return (
+            "an enumeration naming "
+            + ", ".join(f"#{number}" for number in repeated)
+            + " more than once"
+        )
+    declared = found.groupdict().get("count")
+    if declared is None:
+        return None
+    value = count_value(declared)
+    if value is None or value == len(numbers):
+        return None
+    return (
+        f"a sentence saying it covered {declared} pull requests and then "
+        f"listing {len(numbers)}"
+    )
+
+
 def report_scope(text: str, path: str) -> dict:
     """What one report says it reviewed, or why that could not be read.
 
@@ -1101,10 +1164,13 @@ def report_scope(text: str, path: str) -> dict:
             if found
         ]
         if matched:
-            enumerations.extend(
-                [int(number) for number in NUMBER_RE.findall(found.group("enum"))]
-                for found in matched
-            )
+            for found in matched:
+                numbers = [int(number) for number in NUMBER_RE.findall(found.group("enum"))]
+                contradiction = _self_contradiction(found, numbers)
+                if contradiction is not None:
+                    unreadable.append(contradiction)
+                else:
+                    enumerations.append(numbers)
             continue
         # Every sentence, not only the ones carrying a number: an unnumbered
         # one reverses a numbered one just as easily -- "That batch was
@@ -1119,7 +1185,7 @@ def report_scope(text: str, path: str) -> dict:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if unreadable:
         reason = (
-            "carries a sentence in a wording this helper does not read: "
+            "carries a sentence this helper does not read: "
             f"{unreadable[0]!r}"
         )
     elif not enumerations:
