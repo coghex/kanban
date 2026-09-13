@@ -299,6 +299,30 @@ def document_path(root) -> Path:
     return Path(root) / LEDGER_RELATIVE_PATH
 
 
+def confined(root, path) -> Path:
+    """`path`, proven to resolve inside `root`, or a refusal.
+
+    Joining a relative path to `--root` is a lexical operation and every read
+    and write below follows symlinks, so a `docs/project_review_12-11.md`
+    pointing outside the worktree was read and imported and a symlinked
+    ledger directory would have been written through. The reach this module
+    declares is "files under `--root`", and that is a statement about where
+    the bytes are rather than about how the path is spelled.
+    """
+    root_path = Path(root)
+    try:
+        anchor = root_path.resolve(strict=False)
+        resolved = Path(path).resolve(strict=False)
+    except OSError as error:
+        raise LedgerError(f"{path} could not be resolved ({error}).") from error
+    if anchor != resolved and anchor not in resolved.parents:
+        raise LedgerError(
+            f"{path} resolves to {resolved}, which is outside {anchor}; this "
+            "helper reads and writes only inside the root it was given."
+        )
+    return Path(path)
+
+
 def parse_document(text: str, source: str) -> dict:
     """The state a ledger document holds, or a refusal naming what stopped it."""
     # The marker is counted, not just the complete blocks behind it. A bad
@@ -375,14 +399,21 @@ def load_document(root) -> dict:
 
     The only absence that is not a refusal: a repository that has never been
     migrated has no ledger, and that is the state every first read starts in.
+    An unreadable one is not that state. `Path.exists()` answers false for a
+    ledger it merely could not look up -- under a directory with no search
+    permission, say -- so absence is taken from `FileNotFoundError` and every
+    other lookup failure is reported.
     """
-    path = document_path(root)
-    if not path.exists():
-        return empty_document()
+    path = confined(root, document_path(root))
     try:
         text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty_document()
     except OSError as error:
-        raise LedgerError(f"{path} could not be read ({error}).") from error
+        raise LedgerError(
+            f"{path} could not be read ({error}); an unreadable ledger is not "
+            "an absent one."
+        ) from error
     return parse_document(text, str(path))
 
 
@@ -832,25 +863,41 @@ def _render_notes(state: dict) -> list:
     return notes
 
 
-def write_document(root, document: dict) -> Path:
-    """Replace the document atomically, creating its directory if it is absent.
+def create_document(root, document: dict) -> Path:
+    """Create the document, or refuse because something already holds its name.
 
-    Atomic because the alternative to a complete write here is a truncated
-    ledger, and a truncated ledger stops every later invocation by design.
+    Written whole into a temporary file and then linked into place. `os.link`
+    fails when the name is taken, and it fails as one operation, so two
+    migrations racing each other cannot both believe they created the ledger
+    -- which a look-then-write could, and did: both passed `exists()`, both
+    reached the write, and the second replaced the first.
+
+    Whole-file-then-link for the reason the write was atomic before: the
+    alternative to a complete ledger is a truncated one, and a truncated
+    ledger stops every later invocation by design.
     """
-    path = document_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=".project-review-ledger-")
+    path = confined(root, document_path(root))
+    parent = confined(root, path.parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    confined(root, parent)
+    handle, temporary = tempfile.mkstemp(dir=str(parent), prefix=".project-review-ledger-")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(render_document(document))
-        os.replace(temporary, path)
-    except BaseException:
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise LedgerError(
+                f"{path} already exists, so a ledger is already established "
+                "under this root. A second migration would replace completed "
+                "reviews with legacy rows; edit the ledger through this helper "
+                "instead."
+            ) from error
+    finally:
         try:
             os.unlink(temporary)
         except OSError:
             pass
-        raise
     return path
 
 
@@ -977,8 +1024,38 @@ HOLE_PATTERNS = {
              r"eighteen|nineteen|twenty|thirty|\d+)",
     "DATE": r"\d{4}-\d{2}-\d{2}",
     # What a run of blanked code spans leaves behind: their separators.
-    "LIST": r"(?:[,\s]|\band\b)*",
+    "LIST": r"(?:[,\s]|\band\b)+",
 }
+
+# What a hole looks like at its edges, for deciding whether the gap beside it
+# needs whitespace. A template's tokens were joined by `\s*`, so "This
+# reviewcovered the two newest merged pull requests ...: #612 and #610" read
+# as the template it runs two words of together.
+HOLE_EDGES = {
+    "ENUM": ("#", "9"),
+    "EXCLUDED": ("#", "9"),
+    "NUM": ("#", "9"),
+    "NUMS": ("#", "9"),
+    "COUNT": ("a", "a"),
+    "DATE": ("9", "9"),
+    "LIST": (",", ","),
+}
+
+# `#` counts as a word character here: "completed#533" is no more a sentence
+# than "reviewcovered" is.
+WORD_EDGE_RE = re.compile(r"[A-Za-z0-9#]")
+
+
+def _edge(token: str, last: bool) -> str:
+    """The character a token presents to the gap beside it."""
+    match = HOLE_RE.search(token)
+    if last:
+        if match and match.end() == len(token):
+            return HOLE_EDGES[match.group(1)][1]
+        return token[-1]
+    if match and match.start() == 0:
+        return HOLE_EDGES[match.group(1)][0]
+    return token[0]
 
 # The sentences that introduce a batch. Exactly one of these must match a
 # paragraph, and its `{ENUM}` is the batch. Nine shapes over eighteen tracked
@@ -1076,7 +1153,21 @@ def compile_template(template: str):
             index = hole.end()
         pieces.append(re.escape(token[index:]))
         parts.append("".join(pieces))
-    return re.compile(r"\A" + r"\s*".join(parts) + r"\Z", re.IGNORECASE)
+    tokens = template.split()
+    joined = [parts[0]]
+    for index, part in enumerate(parts[1:], start=1):
+        # Whitespace between two word-ish edges, optional elsewhere: a report
+        # may wrap a line or space its punctuation differently, but it may not
+        # run two words together.
+        separator = (
+            r"\s+"
+            if WORD_EDGE_RE.match(_edge(tokens[index - 1], last=True))
+            and WORD_EDGE_RE.match(_edge(tokens[index], last=False))
+            else r"\s*"
+        )
+        joined.append(separator)
+        joined.append(part)
+    return re.compile(r"\A" + "".join(joined) + r"\Z", re.IGNORECASE)
 
 
 SCOPE_PATTERNS = tuple(compile_template(template) for template in SCOPE_TEMPLATES)
@@ -1287,15 +1378,18 @@ def migrate(root, repo: str, confirmations=None) -> dict:
         raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
     confirmations = dict(confirmations or {})
     cursor = cursor_module()
-    path = document_path(root)
-    if path.exists():
+    path = confined(root, document_path(root))
+    # An early refusal so a run that cannot succeed does no reading, and a
+    # second one at the moment of creation so two runs that both got past
+    # this one cannot both publish.
+    if _name_is_taken(path):
         raise LedgerError(
             f"{path} already exists, so a ledger is already established under "
             "this root. A second migration would replace completed reviews "
             "with legacy rows; edit the ledger through this helper instead."
         )
     cursor_relative = cursor.DOCUMENT_RELATIVE_PATH
-    cursor_path = Path(root) / cursor_relative
+    cursor_path = confined(root, Path(root) / cursor_relative)
     source = _cursor_source(cursor, cursor_path)
     try:
         state = cursor.state_for(cursor.load_document(root), repo)
@@ -1368,10 +1462,29 @@ def migrate(root, repo: str, confirmations=None) -> dict:
     document["repositories"][repo] = _validated_repository(
         migrated, f"the ledger migrated for {repo}"
     )
-    written = write_document(root, document)
+    written = create_document(root, document)
     result["document"] = str(written)
     result["state"] = document["repositories"][repo]
     return result
+
+
+def _name_is_taken(path: Path) -> bool:
+    """Whether anything holds this name, a broken symlink included.
+
+    `lstat` rather than `exists`, which answers false both for a name nothing
+    holds and for one it could not look up, and false for a dangling symlink
+    that would still defeat the creation below.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise LedgerError(
+            f"{path} could not be looked up ({error}); a name this helper "
+            "cannot examine is not a free one."
+        ) from error
+    return True
 
 
 def _cursor_source(cursor, cursor_path: Path) -> str:
@@ -1383,12 +1496,15 @@ def _cursor_source(cursor, cursor_path: Path) -> str:
     coverage -- but naming all three makes the migration's provenance say what
     it actually read.
     """
-    if not cursor_path.exists():
-        return "absent"
     try:
         text = cursor_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "absent"
     except OSError as error:
-        raise LedgerError(f"{cursor_path} could not be read ({error}).") from error
+        raise LedgerError(
+            f"{cursor_path} could not be read ({error}); an unreadable record "
+            "is not an absent one."
+        ) from error
     if cursor.PAYLOAD_RE.search(text):
         return "cursor-v2"
     if cursor.LEGACY_PAYLOAD_RE.search(text):
@@ -1409,6 +1525,16 @@ def _report_scopes(cursor, root, confirmations: dict):
     """
     reports = []
     flags = []
+    directory = confined(root, Path(root) / "docs")
+    try:
+        os.listdir(directory)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise LedgerError(
+            f"{directory} could not be listed ({error}); a directory this "
+            "helper cannot enumerate is not one with no reports in it."
+        ) from error
     for entry in cursor.report_coverage(root)["reports"]:
         record = {
             "path": entry["path"],
@@ -1424,11 +1550,14 @@ def _report_scopes(cursor, root, confirmations: dict):
             record["confirmed"] = True
             reports.append(record)
             continue
-        report_path = Path(root) / entry["path"]
+        report_path = confined(root, Path(root) / entry["path"])
         try:
             text = report_path.read_text(encoding="utf-8")
         except OSError as error:
-            raise LedgerError(f"{report_path} could not be read ({error}).") from error
+            raise LedgerError(
+                f"{report_path} could not be read ({error}); every report is "
+                "inspected, so one that cannot be stops the migration."
+            ) from error
         scope = report_scope(text, entry["path"])
         if scope["flag"]:
             flags.append(

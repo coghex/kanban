@@ -55,7 +55,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import threading
 import subprocess
 import sys
 import tempfile
@@ -1314,6 +1316,22 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertIsNone(scope["flag"], scope["flag"])
                 self.assertEqual(scope["reviewed"], [612, 610])
 
+    def test_two_words_run_together_are_not_a_sentence(self):
+        # Tokens were joined by `\s*`, so "This reviewcovered the two newest
+        # merged pull requests ...: #612 and #610" matched the template it
+        # runs two words of together. Wrapping and punctuation spacing stay
+        # free; a word boundary does not.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        scope = self.paragraph(
+            self.mutated(sentence, "This review covered", "This reviewcovered")
+        )
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIsNotNone(scope["flag"])
+        # ... while a report that wrapped the same sentence differently reads.
+        self.assertEqual(
+            self.paragraph(sentence.replace(" ", "\n", 3))["reviewed"], [612, 610]
+        )
+
     def test_a_count_word_is_read_as_the_number_the_reports_spell(self):
         # The tracked reports spell their batch size in words, including the
         # hyphenated compounds, and every one of them agrees with the list it
@@ -1901,6 +1919,108 @@ class CommandLineTests(LedgerTestCase):
 
 # --------------------------------------------------------------------------
 # Packaging
+
+
+class FilesystemTests(LedgerTestCase):
+    """Where this module reads and writes, and what it does when it cannot."""
+
+    def test_a_report_resolving_outside_the_root_is_refused(self):
+        # Joining a relative path to `--root` is lexical, and every read below
+        # follows symlinks, so a report pointing out of the worktree was read
+        # and its pull requests imported.
+        outside = tempfile.TemporaryDirectory(prefix="project-review-outside-")
+        self.addCleanup(outside.cleanup)
+        target = Path(outside.name) / "project_review_12-11.md"
+        target.write_text(
+            "# Project Review Findings: PRs #12–#11\n\n"
+            "This review covered the two newest merged pull requests at the "
+            "frozen selection boundary, in merge-time order: #12 and #11.\n",
+            encoding="utf-8",
+        )
+        os.symlink(target, self.root / "docs" / "project_review_12-11.md")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.migrate(self.root, REPO)
+        self.assertIn("outside", str(raised.exception))
+        self.assertFalse(LEDGER.document_path(self.root).exists())
+
+    def test_a_ledger_resolving_outside_the_root_is_refused(self):
+        outside = tempfile.TemporaryDirectory(prefix="project-review-outside-")
+        self.addCleanup(outside.cleanup)
+        (self.root / "docs" / "project_review").symlink_to(outside.name)
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.load_document(self.root)
+        self.assertIn("outside", str(raised.exception))
+
+    def test_two_migrations_racing_cannot_both_create_the_ledger(self):
+        # A look-then-write let both pass `exists()`, both reach the write,
+        # and the second replace the first. Creation is one operation now.
+        record_cursor(self.root, reviewed=[602])
+        outcomes = []
+        barrier = threading.Barrier(2)
+
+        def migrate(repo):
+            barrier.wait()
+            try:
+                outcomes.append((repo, LEDGER.migrate(self.root, repo)["status"]))
+            except LEDGER.LedgerError:
+                outcomes.append((repo, "refused"))
+
+        threads = [
+            threading.Thread(target=migrate, args=(repo,))
+            for repo in (REPO, OTHER_REPO)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        statuses = sorted(status for _, status in outcomes)
+        self.assertEqual(statuses, ["migrated", "refused"])
+        written = LEDGER.load_document(self.root)["repositories"]
+        self.assertEqual(len(written), 1)
+        # ... and the one that won is the one in the document.
+        winner = next(repo for repo, status in outcomes if status == "migrated")
+        self.assertEqual(list(written), [winner])
+
+    def test_an_unreadable_ledger_is_not_an_absent_one(self):
+        # `Path.exists()` answers false both for a name nothing holds and for
+        # one it could not look up, so a ledger under a directory with no
+        # search permission read as a repository that had never been migrated.
+        record_cursor(self.root, reviewed=[602])
+        LEDGER.migrate(self.root, REPO)
+        directory = self.root / "docs" / "project_review"
+        mode = directory.stat().st_mode
+        os.chmod(directory, 0o000)
+        self.addCleanup(os.chmod, directory, mode)
+        if os.access(directory / "ledger.md", os.R_OK):
+            self.skipTest("this user can read through a mode-000 directory")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.load_document(self.root)
+        self.assertIn("not an absent one", str(raised.exception))
+
+    def test_an_unlistable_docs_directory_is_not_an_empty_one(self):
+        # ... and the same for report discovery, which walks a glob whose
+        # errors are silent: a migration over an unreadable `docs/` reported
+        # no reports and wrote an empty ledger.
+        write_report(self.root, "project_review_432-412.md", ABOVE_INTERVAL_REPORT)
+        directory = self.root / "docs"
+        mode = directory.stat().st_mode
+        os.chmod(directory, 0o300)
+        self.addCleanup(os.chmod, directory, mode)
+        if os.access(directory, os.R_OK):
+            self.skipTest("this user can list a mode-300 directory")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.migrate(self.root, REPO)
+        self.assertIn("could not be listed", str(raised.exception))
+
+    def test_a_dangling_ledger_symlink_is_not_a_free_name(self):
+        # `exists()` answers false for a symlink with nothing behind it, and a
+        # migration that believed the name free would then fail to create it.
+        directory = self.root / "docs" / "project_review"
+        directory.mkdir(parents=True)
+        (directory / "ledger.md").symlink_to(self.root / "docs" / "nothing.md")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.migrate(self.root, REPO)
+        self.assertIn("already exists", str(raised.exception))
 
 
 class BundledLedgerHelperTests(unittest.TestCase):
