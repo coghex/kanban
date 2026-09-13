@@ -273,8 +273,8 @@ This review covered the next two merged pull requests by merge time: #520 and
 
 AMBIGUOUS_TWO_ENUMERATIONS = """# Project Review Findings: PRs #612–#601
 
-This review covered the following merged pull requests: #612 and #610. It also
-reviewed these merged pull requests: #602 and #601.
+This review covered the first two merged pull requests: #612 and #610. This
+review also covered the next two merged pull requests: #602 and #601.
 """
 
 # Two reviewed enumerations inside one sentence. Reading only the last colon
@@ -282,8 +282,8 @@ reviewed these merged pull requests: #602 and #601.
 # which is the one outcome requirement 5 forbids outright.
 AMBIGUOUS_ONE_SENTENCE = """# Project Review Findings: PRs #612–#520
 
-This review covered the first two merged pull requests: #612 and #610; it also
-reviewed the next two merged pull requests: #533 and #520.
+This review covered the first two merged pull requests: #612 and #610; this
+review also covered the next two merged pull requests: #533 and #520.
 """
 
 AMBIGUOUS_NO_ENUMERATION = """# Project Review Findings: PRs #444–#442
@@ -1021,9 +1021,9 @@ class ReportScopeTests(LedgerTestCase):
         body = (
             "# Project Review Findings: PRs #612–#517\n\n"
             "This review covered the next two merged pull requests by merge "
-            "time: #571 and #570. It covered the first two merged pull "
-            "requests: #612 and #610; it also reviewed the next two merged "
-            "pull requests: #533 and #520.\n"
+            "time: #571 and #570. This review covered the first two merged "
+            "pull requests: #612 and #610; this review also covered the next "
+            "two merged pull requests: #533 and #520.\n"
         )
         scope = self.scope(body, "docs/project_review_612-517.md")
         self.assertEqual(scope["reviewed"], [])
@@ -1227,12 +1227,13 @@ class ReportScopeTests(LedgerTestCase):
         wordings = {
             "two colon clauses": (
                 "This review covered the first two merged pull requests: #612 "
-                "and #610; it also reviewed the next two merged pull "
+                "and #610; this review also covered the next two merged pull "
                 "requests: #533 and #520."
             ),
             "colonless list beside a parsed one": (
                 "This review covered the merged pull requests #612 and #610; "
-                "it also reviewed these merged pull requests: #533 and #520."
+                "this review also covered these merged pull requests: #533 "
+                "and #520."
             ),
             "bare singleton": f"{opening} It also reviewed #601.",
             "noun-prefixed singleton": f"{opening} It also reviewed PR #601.",
@@ -1257,6 +1258,20 @@ class ReportScopeTests(LedgerTestCase):
             "verb taking metadata": (
                 "This review covered metadata associated with pending merged "
                 "pull requests: #601 and #533."
+            ),
+            "counterfactual clause": (
+                "If this review had covered the two merged pull requests, "
+                "they would have been: #601 and #533."
+            ),
+            "conditional clause": (
+                "Had this review covered the two merged pull requests, the "
+                "batch would be: #601 and #533."
+            ),
+            "landmark handed to a reviewing verb": (
+                f"{opening} It also reviewed the reported #601 and #533 batch."
+            ),
+            "cursor handed to a reviewing verb": (
+                f"{opening} It also reviewed the completed #601 cursor."
             ),
             "passive review behind a role word": (
                 f"{opening} The previously reported #601 and #533 were also reviewed."

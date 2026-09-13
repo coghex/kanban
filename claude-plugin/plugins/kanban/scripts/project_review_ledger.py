@@ -844,10 +844,10 @@ RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 # actually uses, and a mention spelled any other way flags for confirmation.
 MENTION_FORMS = (
     # "continued below the completed #185 cursor"
-    (re.compile(r"\bcompleted\s*\Z", re.IGNORECASE),
+    (re.compile(r"\b(?:below|above|at|from|past)\s+the\s+completed\s*\Z", re.IGNORECASE),
      re.compile(r"\A\s*cursors?\b", re.IGNORECASE), None),
     # "interleaved between #446 and #411" -- an interval's two endpoints
-    (re.compile(r"\bbetween\s*\Z", re.IGNORECASE),
+    (re.compile(r"\binterleaved\s+between\s*\Z", re.IGNORECASE),
      None, re.compile(r"\A#\d+\s+and\s+#\d+\Z")),
     # "the user's exclusive stop at #533"
     (re.compile(r"\bstop(?:ped|s)?\s+(?:at|before|above|below)\s*\Z", re.IGNORECASE),
@@ -924,9 +924,27 @@ SCOPE_NEGATION_RE = re.compile(
 # read, and an unread clause flags its report for one confirmation.
 PR_NOUN_RE = re.compile(r"\b(?:PRs?|pull\s+requests?)\b", re.IGNORECASE)
 
+# The clause is matched whole, from its first word. A substring match read
+# "If this review had covered the two merged pull requests, they would have
+# been: #10 and #9" as a claim, because the claim's words were all present --
+# in a counterfactual. So the subject and the verb are anchored at the start
+# of the clause, and only what follows the object is free text.
+SCOPE_CLAUSE_RE = re.compile(
+    r"\A\s*(?:"
+    r"(?:this|the)\s+(?:bounded\s+|senior\s+|initial\s+|follow-up\s+)?review\s+"
+    r"(?:continued\s+below\s+the\s+completed\s+#\d+\s+cursors?\s+and\s+)?"
+    r"(?:(?:also|then|further|additionally|subsequently|separately)\s+)?"
+    r"(?:covered|covers|reviewed|reviews)\s+"
+    r"|"
+    r"(?:a|an)\s+(?:senior\s+|bounded\s+)?review\s+of\s+"
+    r")",
+    re.IGNORECASE,
+)
+
+# What that verb takes: a run of quantifier and qualifier words and a
+# pull-request noun, anchored so it begins where the verb ends.
 SCOPE_OBJECT_RE = re.compile(
-    r"\b(?:covered|covers|covering|reviewed|reviewing|reviews|review\s+of)\s+"
-    r"(?:(?:the|a|an|all|both|each|every|any|these|those|its|our|their|"
+    r"\A(?:(?:the|a|an|all|both|each|every|any|these|those|its|our|their|"
     r"next|first|last|latest|newest|oldest|earliest|remaining|further|"
     r"additional|more|other|same|following|preceding|"
     r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
@@ -1047,10 +1065,13 @@ def _enumeration_clauses(sentence: str) -> list:
         # clause is not that: "covered direct commits and noted pending pull
         # requests" and "covered metadata associated with pending merged pull
         # requests" both carry one, and neither claims the list.
-        object_match = SCOPE_OBJECT_RE.search(segment)
+        prefix = SCOPE_CLAUSE_RE.match(segment)
+        if prefix is None:
+            continue
+        object_match = SCOPE_OBJECT_RE.match(segment[prefix.end():])
         if object_match is None:
             continue
-        if OTHER_OBJECT_RE.search(segment[object_match.end():]):
+        if OTHER_OBJECT_RE.search(segment[prefix.end() + object_match.end():]):
             continue
         if NUMBER_RE.search(sentence[position + 1:end]):
             clauses.append(position)
@@ -1127,16 +1148,30 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
 
 
 def _landmark_form(sentence: str, match) -> bool:
-    """Whether this run matches one of `MENTION_FORMS` whole."""
+    """Whether this run matches one of `MENTION_FORMS` whole.
+
+    A form that matched was once enough on its own, and "It also reviewed the
+    reported #10 and #9 batch" satisfied one while the prose plainly said the
+    batch was reviewed. So a reviewing verb standing directly in front of the
+    form cancels it: a landmark phrase is what a sentence says a number *is*,
+    and a phrase handed straight to a reviewing verb is that verb's object
+    instead. The tracked reports put several words between the two -- "also
+    reviewed the direct first-parent documentation commits ... interleaved
+    between #219 and #196" -- so the cancellation reaches three words and no
+    further.
+    """
     before = sentence[: match.start()]
     after = sentence[match.end():]
     run = " ".join(match.group(0).split())
     for lead, trail, shape in MENTION_FORMS:
-        if not lead.search(before):
+        found = lead.search(before)
+        if found is None:
             continue
         if trail is not None and not trail.match(after):
             continue
         if shape is not None and not shape.match(run):
+            continue
+        if SCOPE_TRIGGER_RE.search(" ".join(before[: found.start()].split()[-3:])):
             continue
         return True
     return False
