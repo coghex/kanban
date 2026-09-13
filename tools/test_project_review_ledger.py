@@ -346,6 +346,10 @@ def completed_row(status="clean", report=None):
 # invented wording would test the refusal rather than the reading.
 TEMPLATE_FILLERS = {
     "ENUM": "#612 and #610",
+    # Deliberately disjoint from the enumeration: a template that puts a pull
+    # request outside the batch and a filler that also enumerates it would be
+    # a contradiction, and every instantiated template would flag.
+    "EXCLUDED": "#533 and #520",
     "NUM": "#533",
     "NUMS": "#533 and #520",
     "COUNT": "two",
@@ -1219,6 +1223,67 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertIn("does not read", scope["flag"])
         # ... and the agreeing sentence it was mutated from still parses.
         scope = self.paragraph(sentence)
+        self.assertIsNone(scope["flag"], scope["flag"])
+        self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_a_pull_request_cannot_be_both_enumerated_and_excluded(self):
+        # A template says which numbers its sentence puts outside the batch --
+        # the cursor it resumed below, the stop it did not cross, a landing it
+        # excluded, a batch someone else reported, the bound it stayed above.
+        # A paragraph that also enumerates one of them contradicts itself.
+        batch = "#550 and #533"
+        for label, body in {
+            "its own stop": (
+                "This bounded review covered every eligible merged pull "
+                "request remaining above the user's exclusive stop at #533, "
+                f"in merge-time order: {batch}."
+            ),
+            "its own cursor": (
+                "This review continued below the completed #533 cursor and "
+                f"covered the next two merged pull requests by merge time: {batch}."
+            ),
+            "a bound in a later sentence": (
+                "This bounded review covered every eligible merged pull "
+                "request remaining above the user's exclusive stop at #520, "
+                f"in merge-time order: {batch}. The bound therefore produced "
+                "two pull requests rather than the requested twelve; no pull "
+                "request numbered #533 or lower was entered."
+            ),
+            "a landing in a later sentence": (
+                "This review covered the two newest merged pull requests at "
+                "the frozen selection boundary, in merge-time order: #612 and "
+                "#610. Master advanced through #610 while verification was "
+                "running; that newer landing was excluded rather than moving "
+                "the boundary, and the finding below was rechecked at current."
+            ),
+            "a reported batch in a later sentence": (
+                "This review continued below the completed #533 cursor and "
+                "covered the next two genuinely unreviewed merged pull "
+                "requests in merge-time order: #520 and #517. The previously "
+                "reported #520 and #545 batch was explicitly skipped rather "
+                "than reviewed again."
+            ),
+        }.items():
+            with self.subTest(contradiction=label):
+                scope = self.scope(
+                    f"# Project Review Findings: PRs #612–#517\n\n{body}\n",
+                    "docs/project_review_612-517.md",
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("outside the batch", scope["flag"])
+
+    def test_an_interval_endpoint_may_be_in_the_batch(self):
+        # The control, and the property nine tracked reports depend on: an
+        # interval's endpoints and the landing a commit came after are context
+        # rather than exclusion, and the oldest reviewed pull request is
+        # routinely one end of the span its direct commits sit in.
+        scope = self.paragraph(
+            "This review continued below the completed #533 cursor and "
+            "covered the next two merged pull requests by merge time: #612 "
+            "and #610.",
+            "There were no direct first-parent commits interleaved between "
+            "#533 and #610.",
+        )
         self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [612, 610])
 

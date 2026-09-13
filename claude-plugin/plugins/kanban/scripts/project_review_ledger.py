@@ -959,7 +959,16 @@ LIST_SEPARATOR = r"(?:\s*[,;]\s*(?:and\s+|&\s*)?|\s+and\s+|\s*&\s*)"
 HOLE_PATTERNS = {
     # The reviewed enumeration a scope template introduces.
     "ENUM": rf"(?P<enum>#\d+(?:{LIST_SEPARATOR}#\d+)*)",
-    # A pull request named as something other than reviewed work.
+    # A pull request the sentence puts *outside* the batch: the cursor it
+    # resumed below, the stop it did not cross, a landing it excluded, a batch
+    # someone else reported, the bound it stayed above. Captured, because a
+    # paragraph that both excludes a pull request and enumerates it
+    # contradicts itself and is not one this helper can read.
+    "EXCLUDED": rf"(?P<excluded>#\d+(?:{LIST_SEPARATOR}#\d+)*)",
+    # A pull request named for context rather than exclusion -- an interval's
+    # endpoints, the landing a commit came after. These legitimately overlap
+    # the batch: nine tracked reports name their oldest reviewed pull request
+    # as one end of the span their direct commits sit in.
     "NUM": r"#\d+",
     "NUMS": rf"#\d+(?:{LIST_SEPARATOR}#\d+)*",
     "COUNT": r"(?:(?:twenty|thirty)-(?:one|two|three|four|five|six|seven|"
@@ -976,11 +985,11 @@ HOLE_PATTERNS = {
 # reports; the nineteenth annotates every pull request in its enumeration, so
 # it flags and takes one `--confirm`.
 SCOPE_TEMPLATES = (
-    "This bounded review covered every eligible merged pull request remaining above the user's exclusive stop at {NUMS}, in merge-time order: {ENUM}.",
-    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} genuinely unreviewed merged pull requests in merge-time order: {ENUM}.',
-    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} merged pull requests by merge time: {ENUM}.',
-    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} merged pull requests in merge-time order: {ENUM}.',
-    'This review continued below the completed {NUMS} cursor and covered {COUNT} previously unreviewed merged pull requests at the frozen selection boundary, newest-first by merge time: {ENUM}.',
+    "This bounded review covered every eligible merged pull request remaining above the user's exclusive stop at {EXCLUDED}, in merge-time order: {ENUM}.",
+    'This review continued below the completed {EXCLUDED} cursor and covered the next {COUNT} genuinely unreviewed merged pull requests in merge-time order: {ENUM}.',
+    'This review continued below the completed {EXCLUDED} cursor and covered the next {COUNT} merged pull requests by merge time: {ENUM}.',
+    'This review continued below the completed {EXCLUDED} cursor and covered the next {COUNT} merged pull requests in merge-time order: {ENUM}.',
+    'This review continued below the completed {EXCLUDED} cursor and covered {COUNT} previously unreviewed merged pull requests at the frozen selection boundary, newest-first by merge time: {ENUM}.',
     'This review covered the {COUNT} newest merged pull requests as of {DATE}, ordered by merge time: {ENUM}.',
     'This review covered the {COUNT} newest merged pull requests at the frozen review boundary on {DATE}, ordered by merge time: {ENUM}.',
     'This review covered the {COUNT} newest merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.',
@@ -998,11 +1007,11 @@ MENTION_TEMPLATES = (
     'It also reviewed the direct first-parent documentation commit interleaved between {NUMS}.',
     'It also reviewed the direct first-parent documentation commits and that landed after {NUMS} inside that boundary.',
     'It also reviewed the direct first-parent documentation commits {LIST}, and interleaved between {NUMS}.',
-    'Master advanced through {NUMS} while the review was running; those newer landings were excluded rather than moving the boundary, and both findings below were rechecked at current.',
-    'Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and both findings below were rechecked at current.',
-    'Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and the finding below was rechecked at current.',
-    'The bound therefore produced {COUNT} pull requests rather than the requested {COUNT}; no pull request numbered {NUMS} or lower was entered.',
-    'The previously reported {NUMS} batch was explicitly skipped rather than reviewed again.',
+    'Master advanced through {EXCLUDED} while the review was running; those newer landings were excluded rather than moving the boundary, and both findings below were rechecked at current.',
+    'Master advanced through {EXCLUDED} while verification was running; that newer landing was excluded rather than moving the boundary, and both findings below were rechecked at current.',
+    'Master advanced through {EXCLUDED} while verification was running; that newer landing was excluded rather than moving the boundary, and the finding below was rechecked at current.',
+    'The bound therefore produced {COUNT} pull requests rather than the requested {COUNT}; no pull request numbered {EXCLUDED} or lower was entered.',
+    'The previously reported {EXCLUDED} batch was explicitly skipped rather than reviewed again.',
     'There were no direct first-parent commits interleaved between {NUMS}.',
 )
 
@@ -1135,6 +1144,14 @@ def _normalized(sentence: str) -> str:
     return re.sub(r"\s+([,;:.])", r"\1", collapsed).strip()
 
 
+def _excluded_numbers(found) -> set:
+    """The pull requests a matched template puts outside its batch."""
+    captured = found.groupdict().get("excluded")
+    if not captured:
+        return set()
+    return {int(number) for number in NUMBER_RE.findall(captured)}
+
+
 def _self_contradiction(found, numbers: list):
     """Why a matched scope sentence disagrees with itself, or None.
 
@@ -1184,6 +1201,7 @@ def report_scope(text: str, path: str) -> dict:
     candidates = sorted({int(number) for number in NUMBER_RE.findall(masked)})
     enumerations = []
     unreadable = []
+    excluded = set()
     for _, sentence in _sentence_spans(masked):
         normalized = _normalized(sentence)
         if not normalized:
@@ -1195,6 +1213,7 @@ def report_scope(text: str, path: str) -> dict:
         ]
         if matched:
             for found in matched:
+                excluded |= _excluded_numbers(found)
                 numbers = [int(number) for number in NUMBER_RE.findall(found.group("enum"))]
                 contradiction = _self_contradiction(found, numbers)
                 if contradiction is not None:
@@ -1206,17 +1225,31 @@ def report_scope(text: str, path: str) -> dict:
         # one reverses a numbered one just as easily -- "That batch was
         # nevertheless reviewed in this pass" -- and a sentence nobody read
         # cannot be said to have been accounted for.
-        if any(pattern.match(normalized) for pattern in MENTION_PATTERNS):
+        mention = next(
+            (found for found in (p.match(normalized) for p in MENTION_PATTERNS) if found),
+            None,
+        )
+        if mention is not None:
+            excluded |= _excluded_numbers(mention)
             continue
         if any(pattern.match(normalized) for pattern in PROSE_PATTERNS):
             continue
         unreadable.append(normalized)
-    if len(enumerations) == 1 and not unreadable:
+    contradicted = sorted(set(enumerations[0]) & excluded) if len(enumerations) == 1 else []
+    if len(enumerations) == 1 and not unreadable and not contradicted:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if unreadable:
         reason = (
             "carries a sentence this helper does not read: "
             f"{unreadable[0]!r}"
+        )
+    elif contradicted:
+        reason = (
+            "enumerates "
+            + ", ".join(f"#{number}" for number in contradicted)
+            + " as reviewed and elsewhere places "
+            + ("them" if len(contradicted) > 1 else "it")
+            + " outside the batch"
         )
     elif not enumerations:
         reason = "names no reviewed-pull-request enumeration"
