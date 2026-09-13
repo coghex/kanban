@@ -32,6 +32,13 @@ and three properties follow.
   migration assertion below pins the exact row set, and the numbers a
   paragraph names for other reasons -- a cursor, a stop, a skipped batch, a
   report filename -- are pinned as absent rather than left unmentioned.
+* **Both of the parser's allowlists are pinned closed.** `SCOPE_OBJECT_RE`
+  decides which clause introduces an enumeration and `MENTION_FORMS` which
+  number is a landmark rather than coverage, and each is asserted twice over:
+  every form the tracked reports use must still parse, and the wordings ten
+  review rounds produced -- each of which a denylist admitted and each of
+  which lost or invented a pull request -- must all flag. A set that quietly
+  grew back toward "accept anything" would fail the second half.
 
 The refusals get the same treatment. A ledger that cannot be parsed is the
 one state in which every later invocation must stop, so each malformed shape
@@ -275,8 +282,8 @@ reviewed these merged pull requests: #602 and #601.
 # which is the one outcome requirement 5 forbids outright.
 AMBIGUOUS_ONE_SENTENCE = """# Project Review Findings: PRs #612–#520
 
-This review covered one batch of merged pull requests: #612 and #610; it also
-reviewed another set of merged pull requests: #533 and #520.
+This review covered the first two merged pull requests: #612 and #610; it also
+reviewed the next two merged pull requests: #533 and #520.
 """
 
 AMBIGUOUS_NO_ENUMERATION = """# Project Review Findings: PRs #444–#442
@@ -1014,8 +1021,8 @@ class ReportScopeTests(LedgerTestCase):
         body = (
             "# Project Review Findings: PRs #612–#517\n\n"
             "This review covered the next two merged pull requests by merge "
-            "time: #571 and #570. It covered one further batch of merged pull "
-            "requests: #612 and #610; it also reviewed another set of merged "
+            "time: #571 and #570. It covered the first two merged pull "
+            "requests: #612 and #610; it also reviewed the next two merged "
             "pull requests: #533 and #520.\n"
         )
         scope = self.scope(body, "docs/project_review_612-517.md")
@@ -1207,6 +1214,90 @@ class ReportScopeTests(LedgerTestCase):
         scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
+
+    def test_every_wording_ten_review_rounds_produced_is_flagged(self):
+        # One entry per round, in order. Each was admitted by a denylist at
+        # the time and each lost or invented a pull request; together they are
+        # what the two allowlists exist to refuse, so they are asserted as one
+        # set rather than one at a time.
+        opening = (
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #610."
+        )
+        wordings = {
+            "two colon clauses": (
+                "This review covered the first two merged pull requests: #612 "
+                "and #610; it also reviewed the next two merged pull "
+                "requests: #533 and #520."
+            ),
+            "colonless list beside a parsed one": (
+                "This review covered the merged pull requests #612 and #610; "
+                "it also reviewed these merged pull requests: #533 and #520."
+            ),
+            "bare singleton": f"{opening} It also reviewed #601.",
+            "noun-prefixed singleton": f"{opening} It also reviewed PR #601.",
+            "mixed positive and negative clause": (
+                f"{opening} It did not review #571, but it also reviewed "
+                "these: #601 and #533."
+            ),
+            "parenthesised sentence": f"{opening} (It also reviewed #601.)",
+            "backticked pull request": f"{opening} It also reviewed `#601`.",
+            "and-joined predicates": f"{opening} It also reviewed #601 and skipped #533.",
+            "preposition span": f"{opening} It also reviewed PRs from #601 through #533.",
+            "negative claim introducing a list": (
+                "No pull requests were reviewed; the candidates were: #601 and #533."
+            ),
+            "role word behind a pull-request noun": (
+                f"{opening} It also reviewed the previously reported PR #601."
+            ),
+            "verb taking another object": (
+                "This review covered direct commits and noted pending merged "
+                "pull requests: #601 and #533."
+            ),
+            "verb taking metadata": (
+                "This review covered metadata associated with pending merged "
+                "pull requests: #601 and #533."
+            ),
+            "passive review behind a role word": (
+                f"{opening} The previously reported #601 and #533 were also reviewed."
+            ),
+            "active review behind a role word": (
+                f"{opening} The previously reported #601 and #533 received a "
+                "fresh review."
+            ),
+        }
+        for label, body in wordings.items():
+            with self.subTest(wording=label):
+                scope = self.scope(
+                    f"# Project Review Findings: PRs #612–#520\n\n{body}\n",
+                    "docs/project_review_612-520.md",
+                )
+                self.assertEqual(scope["reviewed"], [], label)
+                self.assertIsNotNone(scope["flag"], label)
+
+    def test_every_landmark_form_the_tracked_reports_use_still_parses(self):
+        # The other half of the pin above, and the control that keeps the
+        # allowlists from being narrowed into uselessness: every landmark
+        # phrase the tracked reports put beside a batch, each of which must
+        # leave the batch readable.
+        opening = (
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #610."
+        )
+        for form in (
+            "It continued below the completed #533 cursor.",
+            "It also reviewed the direct commits interleaved between #533 and #520.",
+            "It stopped above the user's exclusive stop at #533.",
+            "Master advanced through #533 while verification was running.",
+            "It also reviewed the direct commits that landed after #533.",
+            "The previously reported #533 and #520 batch was left alone.",
+            "No pull request numbered #533 or lower was entered.",
+        ):
+            with self.subTest(form=form):
+                body = f"# Project Review Findings: PRs #612–#610\n\n{opening} {form}\n"
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
 
     def test_a_scope_clause_must_say_the_list_is_pull_requests(self):
         # Every tracked report's scope clause reads "<verb> ... merged pull

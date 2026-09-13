@@ -40,16 +40,25 @@ would have lied about history:
   the stop included. A stop is the one PR the batch deliberately did *not*
   enter, so it is withheld here unless some other source establishes it, and
   the withholding is recorded in the document rather than left implicit.
-* **Ambiguity is flagged, never guessed, and the default is to flag.** A
-  report whose opening paragraph does not read as exactly one reviewed-PR
-  enumeration produces no row at all. The reading runs in both directions: one
-  pass finds the enumeration it can be sure of, and a second demands an
-  explanation for every pull request the first did not take. A number the
-  paragraph does not explain — as a cursor, a boundary, an interval endpoint,
-  a later landing, or work a clause says was *not* reviewed — flags the
-  report by name rather than being passed over. That direction is the whole
-  point: a wording nobody anticipated costs one confirmation, where the
-  opposite default costs a pull request that no one finds out was dropped.
+* **Two allowlists, and everything outside them flags.** A report whose
+  opening paragraph does not read as exactly one reviewed-PR enumeration
+  produces no row at all. The reading runs in both directions: one pass finds
+  the enumeration it can be sure of, and a second demands an explanation for
+  every pull request the first did not take. Each direction is decided by a
+  closed set of forms taken from the nineteen tracked reports —
+  `SCOPE_OBJECT_RE` for the clause that introduces an enumeration,
+  `MENTION_FORMS` for a number that is a landmark rather than coverage — and
+  a paragraph matching neither flags by name.
+
+  Closed sets rather than exclusions, because the exclusions were tried. Nine
+  review rounds each produced one wording the denylists did not cover, in both
+  directions: "It also reviewed PR #10" dropped a pull request, "covered
+  direct commits and noted pending pull requests: #10 and #9" invented a
+  review of two. A denylist's default is accept, so every wording nobody
+  anticipated is a silent wrong answer; an allowlist's is refuse, and a
+  refusal costs one confirmation. Adding a form is a reviewed edit with a
+  test beside it, which is the point of the sets being closed.
+
   The migration inspects every report, returns every flag, and writes nothing
   while one remains; a caller that knows what a paragraph meant supplies the
   enumeration through `--confirm` and the same migration then completes. The
@@ -825,38 +834,37 @@ PAREN_RE = re.compile(r"\([^()]*\)")
 # as a list would be.
 RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 
-# The landmark roles a report gives a pull request other than "this batch
-# reviewed it": a cursor it resumed below, a stop it did not cross, a boundary
-# it froze at, a landing that arrived while it ran, a batch someone else
-# reported, a numeric threshold. Every leftover number in the tracked reports
-# sits beside one of these words.
-#
-# Roles, not prepositions. `from`, `through` and `after` were on this list and
-# excused "It also reviewed PRs from #601 through #533", because a preposition
-# says where a number sits in a phrase and nothing about what the phrase
-# claims. A role word names what the number *is*, which is the question, and a
-# reviewing verb's plain object has no role word beside it.
-MENTION_ROLE_RE = re.compile(
-    r"\b(?:cursor|cursors|stop|stops|stopped|boundary|boundaries|frontier|"
-    r"landing|landings|landed|batch|batches|completed|reported|advanced|"
-    r"numbered)\b",
-    re.IGNORECASE,
+# The landmark forms, and the second of this parser's two allowlists. A
+# leftover number is excused only by matching one of these whole -- the text
+# required directly in front of the run, the text required directly behind it,
+# and the shape the run itself must take. A role word merely standing nearby
+# used to be enough, which is how "the previously reported #10 and #9 received
+# a fresh review" and "It also reviewed the previously reported PR #10" were
+# both excused out of existence. Every entry is a phrase a tracked report
+# actually uses, and a mention spelled any other way flags for confirmation.
+MENTION_FORMS = (
+    # "continued below the completed #185 cursor"
+    (re.compile(r"\bcompleted\s*\Z", re.IGNORECASE),
+     re.compile(r"\A\s*cursors?\b", re.IGNORECASE), None),
+    # "interleaved between #446 and #411" -- an interval's two endpoints
+    (re.compile(r"\bbetween\s*\Z", re.IGNORECASE),
+     None, re.compile(r"\A#\d+\s+and\s+#\d+\Z")),
+    # "the user's exclusive stop at #533"
+    (re.compile(r"\bstop(?:ped|s)?\s+(?:at|before|above|below)\s*\Z", re.IGNORECASE),
+     None, None),
+    # "Master advanced through #466"
+    (re.compile(r"\badvanced\s+(?:through|to|past|beyond)\s*\Z", re.IGNORECASE),
+     None, None),
+    # "the direct commits that landed after #456"
+    (re.compile(r"\blanded\s+(?:after|before)\s*\Z", re.IGNORECASE), None, None),
+    # "The previously reported #386 ... #361 batch"
+    (re.compile(r"\breported\s*\Z", re.IGNORECASE),
+     re.compile(r"\A\s*batch(?:es)?\b", re.IGNORECASE), None),
+    # "no pull request numbered #533 or lower"
+    (re.compile(r"\bnumbered\s*\Z", re.IGNORECASE),
+     re.compile(r"\A\s*or\s+(?:lower|higher|below|above|newer|older)\b", re.IGNORECASE),
+     None),
 )
-
-# How far in front of a run a role word counts, in words. In front only, and
-# two words only, because that is where every tracked report puts it -- "the
-# completed #185 cursor", "exclusive stop at #533", "advanced through #466",
-# "previously reported #386", "landed after #456", "request numbered #533" --
-# and because a window that also looked behind would excuse "It also reviewed
-# the #601 batch", where the role word belongs to the verb's object rather
-# than to the number.
-ROLE_WINDOW = 2
-
-# `interleaved between #446 and #411` -- an interval's two endpoints. The one
-# form with no role word of its own, and structural enough to recognize by
-# shape: `between` directly in front, and exactly two numbers joined by `and`.
-INTERVAL_LEAD_RE = re.compile(r"\bbetween\s*\Z", re.IGNORECASE)
-INTERVAL_RUN_RE = re.compile(r"\A#\d+\s+and\s+#\d+\Z")
 
 # There is deliberately no clause- or sentence-scoped "this was not reviewed"
 # excuse here. Three attempts at one each reached a pull request it should not
@@ -899,34 +907,45 @@ SCOPE_NEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A pull-request noun. Where one stands between a landmark role and the
-# number, the number is the noun's, not the role's: "the previously reported
-# PR #10" is a pull request this batch reviewed, however the role word in
-# front of it reads, while "request numbered #533" puts the role last and
-# means the threshold.
+# A pull-request noun, and the object a scope clause's reviewing verb takes.
+#
+# This is an allowlist, and that is the whole design. Nine review rounds were
+# spent widening a denylist -- "a verb, a pull-request noun, and none of these
+# other object nouns" -- and each round produced a wording it did not cover:
+# "covered direct commits and noted pending pull requests", then "covered
+# metadata associated with pending merged pull requests". A denylist's default
+# is accept, so every wording nobody anticipated is a silent wrong answer.
+#
+# So a scope clause has to say what all nineteen tracked reports say, in the
+# shape they say it: a reviewing verb, a run of quantifier and qualifier
+# words, and a pull-request noun. "covered the next twelve merged pull
+# requests", "covered every eligible merged pull request", "review of the
+# three merged pull requests". Anything else is a clause this helper does not
+# read, and an unread clause flags its report for one confirmation.
 PR_NOUN_RE = re.compile(r"\b(?:PRs?|pull\s+requests?)\b", re.IGNORECASE)
 
-# The other things a project review reads, and therefore the other things a
-# reviewing verb in a scope sentence can be about. One of these standing
-# between the verb and the colon means the verb took it rather than the pull
-# requests after the colon: "covered direct commits and noted pending pull
-# requests: #10 and #9" reviewed commits, and reading its list as coverage
-# would invent a review of two pull requests it called pending.
-OTHER_OBJECT_RE = re.compile(
-    r"\b(?:commit|commits|file|files|document|documents|documentation|"
-    r"report|reports|landing|landings|issue|issues|branch|branches)\b",
+SCOPE_OBJECT_RE = re.compile(
+    r"\b(?:covered|covers|covering|reviewed|reviewing|reviews|review\s+of)\s+"
+    r"(?:(?:the|a|an|all|both|each|every|any|these|those|its|our|their|"
+    r"next|first|last|latest|newest|oldest|earliest|remaining|further|"
+    r"additional|more|other|same|following|preceding|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"\d+|"
+    r"merged|landed|open|closed|new|previously|genuinely|truly|already|still|"
+    r"eligible|selectable|unreviewed|uncovered|reviewed|covered|outstanding|"
+    r"senior|bounded|interleaved)\s+)*"
+    r"(?:PRs?|pull\s+requests?)\b",
     re.IGNORECASE,
 )
 
-# "... #10 and #9 were also reviewed." A landmark role in front of a run says
-# where the numbers came from; a reviewing predicate right behind them says
-# what was done with them, and the second answers the question the first only
-# looks like it answers.
-PASSIVE_SCOPE_RE = re.compile(
-    r"\A\s*(?:were|was|are|is|have\s+been|has\s+been|had\s+been)\s+"
-    r"(?:(?:also|all|each|both|then|since|subsequently|separately|"
-    r"individually|duly|indeed|likewise)\s+)*"
-    r"(?:reviewed|covered)\b",
+# The other things a project review reads. Applied to what follows the object
+# above, where it can only refuse a clause the grammar already accepted -- a
+# second restriction on top of a positive form rather than the decision
+# itself, which is what it used to be.
+OTHER_OBJECT_RE = re.compile(
+    r"\b(?:commit|commits|file|files|document|documents|documentation|"
+    r"report|reports|landing|landings|issue|issues|branch|branches)\b",
     re.IGNORECASE,
 )
 
@@ -1021,20 +1040,17 @@ def _enumeration_clauses(sentence: str) -> list:
         # coverage. The negation search stays over the whole head, because
         # widening *that* only refuses more.
         segment = head.rsplit(";", 1)[-1]
-        trigger = SCOPE_TRIGGER_RE.search(segment)
-        if trigger is None:
-            continue
         if SCOPE_NEGATION_RE.search(head):
             continue
-        # The clause has to say the list is pull requests, and has to name
-        # nothing else for the verb to have taken instead. Every tracked
-        # report's scope clause reads "<verb> ... merged pull requests ...:",
-        # and the two ways a clause can carry a reviewing verb without
-        # claiming the list -- naming some other object for it, or naming no
-        # pull request at all -- are what these two refuse.
-        if not PR_NOUN_RE.search(segment):
+        # The clause has to spell a reviewing verb taking pull requests, in
+        # the shape the tracked reports spell it. A verb somewhere in the
+        # clause is not that: "covered direct commits and noted pending pull
+        # requests" and "covered metadata associated with pending merged pull
+        # requests" both carry one, and neither claims the list.
+        object_match = SCOPE_OBJECT_RE.search(segment)
+        if object_match is None:
             continue
-        if OTHER_OBJECT_RE.search(segment[trigger.end():]):
+        if OTHER_OBJECT_RE.search(segment[object_match.end():]):
             continue
         if NUMBER_RE.search(sentence[position + 1:end]):
             clauses.append(position)
@@ -1084,14 +1100,12 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
     explanation for each. A number with none is not quietly ignored -- it
     flags the report, and the flag names it, so the operator decides.
 
-    One thing explains a number: a landmark role in the two words in front of
-    it -- "the completed #185 cursor", "the previously reported #386 ...
-    batch", "advanced through #466", "landed after #456", "request numbered
-    #533" -- or the one structural form, an interval's two endpoints behind
-    `between`. A pull-request noun standing between the role and the number
-    cancels it: in "the previously reported PR #10" the number belongs to
-    `PR`, so the batch reviewed it whatever `reported` says about where it
-    came from.
+    One thing explains a number: it matches a landmark phrase in
+    `MENTION_FORMS` whole -- the words required in front of it, the words
+    required behind it, and the shape of the run itself. A role word merely
+    standing nearby is not enough and used to be, which is how "the previously
+    reported #10 and #9 received a fresh review" and "It also reviewed the
+    previously reported PR #10" were excused out of existence.
 
     Everything looser than that has been tried here and has reached a pull
     request it should not have: a negation somewhere in the sentence, then
@@ -1106,23 +1120,26 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
     for match in RUN_RE.finditer(sentence):
         if accepted_from is not None and match.start() >= accepted_from:
             continue
-        run = " ".join(match.group(0).split())
-        if INTERVAL_RUN_RE.match(run) and INTERVAL_LEAD_RE.search(sentence[: match.start()]):
+        if _landmark_form(sentence, match):
             continue
-        window = " ".join(sentence[: match.start()].split()[-ROLE_WINDOW:])
-        roles = list(MENTION_ROLE_RE.finditer(window))
-        # The nearest role word, with nothing between it and the number that
-        # would make the number a pull-request noun's rather than the role's,
-        # and nothing directly behind the number saying it was reviewed after
-        # all.
-        if (
-            roles
-            and not PR_NOUN_RE.search(window[roles[-1].end():])
-            and not PASSIVE_SCOPE_RE.match(sentence[match.end():])
-        ):
-            continue
-        unaccounted.append(run)
+        unaccounted.append(" ".join(match.group(0).split()))
     return unaccounted
+
+
+def _landmark_form(sentence: str, match) -> bool:
+    """Whether this run matches one of `MENTION_FORMS` whole."""
+    before = sentence[: match.start()]
+    after = sentence[match.end():]
+    run = " ".join(match.group(0).split())
+    for lead, trail, shape in MENTION_FORMS:
+        if not lead.search(before):
+            continue
+        if trail is not None and not trail.match(after):
+            continue
+        if shape is not None and not shape.match(run):
+            continue
+        return True
+    return False
 
 
 def report_scope(text: str, path: str) -> dict:
