@@ -10,13 +10,13 @@ command or home-relative path cannot land undocumented.
 
 Home-relative paths are reconciled over two surfaces with two extractors, since
 the same managed location is spelled differently in each. The Haskell modules
-build one as a single literal hung off `home`; the four Python service modules
-of docs/agent-workflow-contract.md §2.8 and §2.12 (issues #425 and #666)
+build one as a single literal hung off `home`; the five Python service modules
+of docs/agent-workflow-contract.md §2.8 and §2.12 (issues #425, #666 and #667)
 compose one from `pathlib`
 segments, often across a bound name or a nullary helper, so they are scanned
 separately for that shape — the way the bundled coordinator is scanned
 separately from the `.md` surfaces — by resolving the parsed module rather than
-by matching text. What the extractor recovers from each of the four is pinned,
+by matching text. What the extractor recovers from each of the five is pinned,
 and fixture regressions prove that an undeclared segment is reported, that a
 tail hung off a binding or a helper is recovered whole rather than only to its
 prefix, and that a module which cannot be parsed fails rather than reporting
@@ -109,12 +109,15 @@ CONTRACT_PATH = REPO_ROOT / "docs" / "agent-workflow-contract.md"
 # back. What it contributes is pinned by
 # test_provider_adapter_owns_every_provider_process.
 #
-# Issue #444 moved both managed discovery records' locations out of
-# Drainer.hs and Review/Canonical.hs into Kanban.ManagedPaths, which is the
-# only module under src/ that spells either of them now. It is listed for
+# Issue #444 moved the drainer's and the issue-review backend's discovery
+# record locations out of Drainer.hs and Review/Canonical.hs into
+# Kanban.ManagedPaths, and issue #667 added the mission runner's beside them,
+# so that module is the only one under src/ that spells any of the three now.
+# It is listed for
 # the home-relative reconciliation below rather than for an executable it
 # invokes -- it invokes none -- and a rewrite that took it back off this
-# list would leave four `personal-path` tokens scanned in no file at all,
+# list would leave the six `personal-path` tokens of MANAGED_RECORD_TOKENS
+# scanned in no file at all,
 # which is what test_managed_record_locations_reach_the_home_path_scan
 # refuses.
 #
@@ -171,9 +174,9 @@ UNSCANNED_SRC_MODULES = (
     "src/Kanban/PullRequestFlow.hs",
 )
 
-# The four locations Kanban.ManagedPaths spells, and the manifest rows they
+# The six locations Kanban.ManagedPaths spells, and the manifest rows they
 # are the tokens of. Stated here so the control below asserts the exact set
-# rather than merely a non-empty one: a scan that recovered three of them,
+# rather than merely a non-empty one: a scan that recovered five of them,
 # or that recovered them from some other file, would pass an "each is
 # documented" check while leaving one spelling reconciled against nothing.
 # --- The provider-adapter boundary (issue #522, MODEL-12) ------------------
@@ -252,8 +255,10 @@ MANAGED_RECORD_SURFACE_FILE = "src/Kanban/ManagedPaths.hs"
 MANAGED_RECORD_TOKENS = {
     "/Library/Application Support/kanban/issue-review/config.json",
     "/Library/Application Support/kanban/pr-drainer/config.json",
+    "/Library/Application Support/kanban/mission-runner/config.json",
     "/.local/share/kanban/issue-review/config.json",
     "/.local/share/kanban/pr-drainer/config.json",
+    "/.local/share/kanban/mission-runner/config.json",
 }
 
 # Every packaged markdown workflow whose `bash` fence resolves the canonical
@@ -296,16 +301,17 @@ PYTHON_SERVICE_SURFACE_FILES = [
     "tools/install_issue_approval.py",
     "tools/service_manager.py",
     "tools/mission_runner_service.py",
+    "tools/install_mission_runner.py",
 ]
 
-# What the Python extractor actually recovers from each of the four, pinned the
+# What the Python extractor actually recovers from each of the five, pinned the
 # way the plugin surfaces' command sets are: the completeness loop below
 # reports no undeclared segment for a module the extractor recovers nothing
-# from, for the same reason it reports none for a module it never opened. The
-# installer's empty set is a pin rather than an omission — it expands whatever
-# `--install-dir` or `--config` it is given and builds no managed location of
-# its own — so a future edit that made it construct one would have to declare
-# it here as well as in the manifest.
+# from, for the same reason it reports none for a module it never opened. Each
+# installer's empty set is a pin rather than an omission — both expand whatever
+# `--install-dir` or `--config` they are given and build no managed location of
+# their own — so a future edit that made one construct one would have to
+# declare it here as well as in the manifest.
 PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     "tools/approve_issues_service.py": {
         # The service root, and each tree the controller composes from it
@@ -334,18 +340,29 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
         "/.config",
         "/.config/systemd/user",
     },
-    # The mission runner's service root in both platform spellings, and the two
-    # trees it composes from that root through a nullary helper each. Only one
-    # of the root's three returns is followed — the extractor takes the first
-    # that resolves — so the `~/Library` runtime and lock spellings are not
-    # recovered here and are grounded in the module's docstrings instead, as
-    # docs/agent-workflow-contract.md §4 records.
+    # The mission runner's service root and log root in both platform
+    # spellings, the two trees it composes from that root through a nullary
+    # helper each, the one home-relative entry of the fixed PATH an installed
+    # job runs with, and the conventional XDG config base its job definition
+    # pins so the child reads the configuration this installation resolved its
+    # identity through. Only one of a helper's returns is followed —
+    # the extractor takes the first that resolves — so the `~/Library` runtime
+    # and lock spellings are not recovered here and are grounded in the
+    # module's docstrings instead, as docs/agent-workflow-contract.md §4
+    # records; the record path is composed from the install directory and a
+    # named constant, so it carries no literal for the extractor either and is
+    # grounded the same way.
     "tools/mission_runner_service.py": {
         "/Library/Application Support/kanban/mission-runner",
         "/.local/share/kanban/mission-runner",
         "/.local/share/kanban/mission-runner/runtime",
         "/.local/share/kanban/mission-runner/locks",
+        "/Library/Logs/kanban/mission-runner",
+        "/.local/state/kanban/mission-runner",
+        "/.local/bin",
+        "/.config",
     },
+    "tools/install_mission_runner.py": set(),
 }
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
@@ -2136,7 +2153,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_every_home_relative_path_segment_is_documented(self):
         # Two surfaces, one reconciliation. The Haskell modules spell a managed
-        # location as one literal and the four Python service modules compose
+        # location as one literal and the five Python service modules compose
         # one from path segments, so each gets its own extractor and both
         # answer to the same `personal-path` rows.
         personal_tokens = [
@@ -2158,7 +2175,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             )
 
     def test_python_service_home_path_discovery_is_not_vacuous(self):
-        # The four modules reach the loop above by being listed, and a loop
+        # The five modules reach the loop above by being listed, and a loop
         # over a module the extractor recovers nothing from reports no
         # undeclared segment for the same reason a loop over nothing does. Pin
         # what each one actually builds so a refactor that stops matching —
@@ -2340,7 +2357,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # the spellings that moved into Kanban.ManagedPaths, and an
         # extractor that recovers nothing from a file passes every loop it
         # feeds. Both halves are pinned here -- that the file is scanned at
-        # all, and that the scan recovers exactly the four record locations
+        # all, and that the scan recovers exactly the six record locations
         # -- so a later rewrite that changes the idiom, or that drops the
         # file from SURFACE_FILES, fails here instead of quietly reducing
         # the home-relative check to a loop over an empty set. Removing
@@ -2350,14 +2367,14 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             MANAGED_RECORD_SURFACE_FILE,
             SURFACE_FILES,
-            f"{MANAGED_RECORD_SURFACE_FILE} carries both managed records' "
-            "locations and must be scanned for home-relative paths",
+            f"{MANAGED_RECORD_SURFACE_FILE} carries every managed record's "
+            "location and must be scanned for home-relative paths",
         )
         content = (REPO_ROOT / MANAGED_RECORD_SURFACE_FILE).read_text(encoding="utf-8")
         self.assertEqual(
             home_relative_segments(content),
             MANAGED_RECORD_TOKENS,
-            f"the home-relative extractor no longer recovers exactly the four "
+            f"the home-relative extractor no longer recovers exactly the six "
             f"managed record locations from {MANAGED_RECORD_SURFACE_FILE}",
         )
         personal_tokens = {
@@ -2499,9 +2516,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_unscanned_src_modules_would_contribute_nothing(self):
         # Requirement 6. The surface comment above claims the list is
         # exhaustive for src/ over the shapes these extractors read, and names
-        # four modules that call one of the enumerated functions and are out
+        # the modules that call one of the enumerated functions and are out
         # anyway. That claim is only worth making if it is held to the tree:
-        # each of the four has to go on recovering nothing, so a refactor that
+        # every one of them has to go on recovering nothing, so a refactor that
         # gave one of them a literal spawn or a home-relative location fails
         # here rather than passing unscanned.
         for relative_path in UNSCANNED_SRC_MODULES:

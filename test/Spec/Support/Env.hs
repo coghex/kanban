@@ -96,15 +96,16 @@ createTemporaryDirectory = do
 -- | The environment a managed discovery record's location is decided by:
 -- @$HOME@ redirected into a scratch directory and @$XDG_DATA_HOME@ cleared,
 -- so an ambient value on the host cannot occupy a candidate the fixture never
--- wrote. Both install-directory overrides are cleared with it — neither moves
--- either record, and a fixture that wants to assert that sets one on top of
+-- wrote. Every install-directory override is cleared with it — none of them
+-- moves any record, and a fixture that wants to assert that sets one on top of
 -- this rather than inheriting whatever the developer's shell holds.
 withManagedRecordHome :: FilePath -> IO result -> IO result
 withManagedRecordHome home action =
   withEnvironmentValue "HOME" home $
     withoutEnvironmentValue "XDG_DATA_HOME" $
       withoutEnvironmentValue "KANBAN_ISSUE_REVIEW_INSTALL_DIR" $
-        withoutEnvironmentValue "KANBAN_DRAINER_INSTALL_DIR" action
+        withoutEnvironmentValue "KANBAN_DRAINER_INSTALL_DIR" $
+          withoutEnvironmentValue "KANBAN_MISSION_RUNNER_INSTALL_DIR" action
 
 withEnvironmentValue :: String -> String -> IO result -> IO result
 withEnvironmentValue name value action =
