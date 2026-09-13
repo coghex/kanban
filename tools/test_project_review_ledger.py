@@ -455,16 +455,19 @@ class DocumentParsingTests(LedgerTestCase):
             )
         self.assertIn("2", str(raised.exception))
 
-    def test_a_second_fenced_payload_with_no_marker_is_refused(self):
+    def test_a_second_fenced_payload_is_refused_however_it_is_spelled(self):
         # Counting only the blocks behind a marker let a bare second fence
-        # through, which is the bad-merge case one step along from a second
-        # marker: accepted, ignored, and invisible.
+        # through, and then counting only lines equal to "```json" let every
+        # other spelling of one through: they are all the same block to a
+        # Markdown reader, and all were invisible here.
         rendered = LEDGER.render_document(self.parse(valid_payload()))
-        with self.assertRaises(LEDGER.LedgerError) as raised:
-            LEDGER.parse_document(
-                rendered + '\n```json\n{"version": 1}\n```\n', "fixture"
-            )
-        self.assertIn("2 fenced JSON blocks", str(raised.exception))
+        for opening in ("```json", "```JSON", "``` json", "````json", "~~~json", "```"):
+            with self.subTest(fence=opening):
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    LEDGER.parse_document(
+                        rendered + f'\n{opening}\n{{"version": 1}}\n```\n', "fixture"
+                    )
+                self.assertIn("fence lines", str(raised.exception))
 
     def test_a_number_too_long_for_python_to_convert_is_refused(self):
         # `int()` refuses a string of more than a few thousand digits, so a
@@ -755,18 +758,24 @@ class DocumentParsingTests(LedgerTestCase):
                 self.assertIn(expected, str(raised.exception))
 
     def test_a_marker_with_no_complete_payload_behind_it_is_refused(self):
-        # The second half of the duplicate-block refusal: a bad merge can
-        # leave a marker whose fence never closes, and counting only
-        # well-formed payloads would call that document fine while ignoring
-        # whichever state the broken half held.
+        # A bad merge can leave a marker whose fence never closes, and
+        # counting only well-formed payloads would call that document fine
+        # while ignoring whichever state the broken half held.
         good = ledger_text(valid_payload({"602": completed_row()}))
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(good + '\n```json\n{"version": 1}\n', "fixture")
+        self.assertIn("fence lines", str(raised.exception))
+        # ... and one that also carries a second marker refuses on that first.
         dangling = f"\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{\"version\": 1}}\n"
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.parse_document(good + dangling, "fixture")
-        self.assertIn("2", str(raised.exception))
+        self.assertIn("markers", str(raised.exception))
+        # ... and a document whose one fenced block is not the marker's own.
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.parse_document(
-                f"# Ledger\n\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{}}\n", "fixture"
+                f"# Ledger\n\n{LEDGER.LEDGER_MARKER}\n\nprose in between\n\n"
+                "```json\n{}\n```\n",
+                "fixture",
             )
         self.assertIn("no complete", str(raised.exception))
 
@@ -894,7 +903,7 @@ class DocumentParsingTests(LedgerTestCase):
                 payload["repositories"][REPO]["migration"] = migration
                 with self.assertRaises(LEDGER.LedgerError):
                     self.parse(payload)
-        # ... and the two shapes a migration does produce still parse.
+        # ... and the shapes a migration does produce still parse.
         for label, migration in {
             "a hand-authored stop, withheld": {
                 "source": "boundary-document", "boundary": boundary,
@@ -1110,6 +1119,15 @@ class RenderingTests(LedgerTestCase):
                 ("takeover", None, None),
             ],
         )
+
+    def test_a_backslash_before_a_pipe_cannot_break_the_table(self):
+        # Escaping the pipe without escaping the backslash in front of it
+        # produces an even backslash run, which leaves the pipe a delimiter
+        # and shifts every column after it.
+        text, _ = self.rendered({"612": dict(completed_row(), evidence=["left\\|right"])})
+        row = next(line for line in text.splitlines() if line.startswith("| #612"))
+        self.assertIn("left\\\\\\|right", row)
+        self.assertEqual(row.replace("\\\\", "").replace("\\|", "").count("|"), 7)
 
     def test_a_pipe_in_evidence_cannot_break_the_table(self):
         text, _ = self.rendered({"612": dict(completed_row(), evidence=["a | b"])})
@@ -1420,6 +1438,20 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(
             self.paragraph(sentence.replace(" ", "\n", 3))["reviewed"], [612, 610]
         )
+
+    def test_a_pull_request_reference_is_canonical_and_positive(self):
+        # "#0001" is not how a tracker writes #1 and "#0" is not a pull
+        # request. One was silently normalized into coverage; the other was
+        # carried to a fatal refusal deep in the migration where a report flag
+        # belonged.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        for enumeration in ("#0001 and #11", "#0 and #11", "#012 and #11"):
+            with self.subTest(enumeration=enumeration):
+                scope = self.paragraph(
+                    self.mutated(sentence, "#612 and #610", enumeration)
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
 
     def test_a_pull_request_number_is_ascii_and_bounded(self):
         # `\d` matches "١", and `int("١٢")` is 12, so a report writing its

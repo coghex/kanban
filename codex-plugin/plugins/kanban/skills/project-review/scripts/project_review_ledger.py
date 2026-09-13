@@ -135,6 +135,12 @@ PAYLOAD_RE = re.compile(
     re.DOTALL,
 )
 
+# A fenced-code delimiter as Markdown defines one: three or more backticks or
+# tildes, indented no more than three spaces. Counted rather than matched for
+# its info string, because every spelling of a fence is a block a reader sees
+# and only one of them was a block this parser saw.
+FENCE_RE = re.compile(r"\A {0,3}(?:`{3,}|~{3,})")
+
 # Exactly four, and the closed set is the point: `clean` and `findings` are
 # completed reviews with evidence, `legacy` is coverage established by a
 # document rather than by a review this mechanism ran, and `never-reviewed` is
@@ -360,14 +366,15 @@ def parse_document(text: str, source: str) -> dict:
             "is expected, and a reader that took one of them would be choosing "
             "between two ledgers without saying so."
         )
-    # Counted over the document, not only behind the marker: a second fence
-    # with no marker in front of it was accepted and ignored, which is the
-    # bad-merge case one step further along than the duplicate marker.
-    fences = sum(1 for line in text.splitlines() if line.strip() == "```json")
-    if fences != 1:
+    # Counted over the document, not only behind the marker, and counted as
+    # fences rather than as one spelling of one: ```JSON, ``` json, four
+    # backticks and a tilde fence are all the same block to a Markdown reader
+    # and were all invisible to a line equal to "```json".
+    fences = sum(1 for line in text.splitlines() if FENCE_RE.match(line))
+    if fences != 2:
         raise LedgerError(
-            f"{source} carries {fences} fenced JSON blocks; a ledger holds "
-            "exactly one, and a reader that took one of several would be "
+            f"{source} carries {fences} fence lines; a ledger holds exactly "
+            "one fenced block, and a reader that took one of several would be "
             "choosing between them without saying so."
         )
     matches = list(PAYLOAD_RE.finditer(text))
@@ -904,7 +911,10 @@ def _render_report_link(report) -> str:
 
 
 def _cell(text: str) -> str:
-    return text.replace("|", "\\|")
+    # Backslashes first: escaping the pipe in "left\\|right" without them
+    # produces an even backslash run, which leaves the pipe a cell delimiter
+    # and shifts every column after it.
+    return text.replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _render_notes(state: dict) -> list:
@@ -1034,8 +1044,12 @@ PAREN_RE = re.compile(r"\([^()]*\)")
 # batch in Arabic-Indic digits was read as coverage of pull requests it never
 # spells. ASCII, and bounded, and refusing to stop early: a longer run of
 # digits is not a pull-request number with a tail, it is not one at all.
-NUMBER_TOKEN = rf"#[0-9]{{1,{DIGIT_LIMIT}}}(?![0-9])"
-NUMBER_RE = re.compile(rf"#([0-9]{{1,{DIGIT_LIMIT}}})(?![0-9])")
+# No leading zero and no zero: "#0001" is not how a tracker writes #1 and
+# "#0" is not a pull request at all. Both were read as numbers, one silently
+# normalized into coverage and the other carried to a fatal refusal deep in
+# the migration where a report flag belonged.
+NUMBER_TOKEN = rf"#[1-9][0-9]{{0,{DIGIT_LIMIT - 1}}}(?![0-9])"
+NUMBER_RE = re.compile(rf"#([1-9][0-9]{{0,{DIGIT_LIMIT - 1}}})(?![0-9])")
 
 # Sentence boundaries as report prose actually spells them. A period inside a
 # code span is already masked, so this does not split `origin/master@a1b2c3d`
@@ -1485,15 +1499,7 @@ def migrate(root, repo: str, confirmations=None) -> dict:
         )
     cursor_relative = cursor.DOCUMENT_RELATIVE_PATH
     cursor_path = confined(root, Path(root) / cursor_relative)
-    source = _cursor_source(cursor, cursor_path)
-    try:
-        state = cursor.state_for(cursor.load_document(root), repo)
-    except cursor.CursorError as error:
-        raise LedgerError(
-            f"the existing record at {cursor_path} could not be read ({error}); "
-            "the migration reads it through the cursor's own parser and will "
-            "not guess at a record it cannot parse."
-        ) from error
+    source, state = _read_cursor(cursor, cursor_path, repo)
 
     boundary = state["pr"]["endpoint"]
     reviewed = set(state["pr"]["reviewed"])
@@ -1582,14 +1588,19 @@ def _name_is_taken(path: Path) -> bool:
     return True
 
 
-def _cursor_source(cursor, cursor_path: Path) -> str:
-    """Which of the three record shapes `cursor_path` holds.
+def _read_cursor(cursor, cursor_path: Path, repo: str):
+    """`(source, state)` from one read of the record.
 
-    Classified with the cursor module's own markers so this never disagrees
-    with the parser that reads the file a moment later. Only the hand-authored
-    shape needs distinguishing on its own account -- its exclusive stop is not
-    coverage -- but naming all three makes the migration's provenance say what
-    it actually read.
+    One read, because there were two: the file was opened to classify its
+    shape and opened again to parse its state, and the cursor's own writer
+    publishes by atomic replacement. A replacement landing between them made
+    the provenance and the coverage describe different documents -- classified
+    as a v2 cursor, parsed as a hand-authored one, and its stop imported as
+    reviewed instead of withheld. The ledger is written once and cannot be
+    overwritten, so that error would have been permanent.
+
+    Classified with the cursor module's own markers, and parsed with its own
+    parser, so neither half is a second opinion about the same bytes.
     """
     try:
         text = cursor_path.read_text(encoding="utf-8")
@@ -1600,17 +1611,27 @@ def _cursor_source(cursor, cursor_path: Path) -> str:
                 "record is not an absent one, and migrating past it would "
                 "write a ledger this root can never correct."
             ) from error
-        return "absent"
+        return "absent", cursor.state_for(cursor.empty_document(), repo)
     except (OSError, UnicodeDecodeError) as error:
         raise LedgerError(
             f"{cursor_path} could not be read ({error}); an unreadable record "
             "is not an absent one."
         ) from error
     if cursor.PAYLOAD_RE.search(text):
-        return "cursor-v2"
-    if cursor.LEGACY_PAYLOAD_RE.search(text):
-        return "cursor-v1"
-    return "boundary-document"
+        source = "cursor-v2"
+    elif cursor.LEGACY_PAYLOAD_RE.search(text):
+        source = "cursor-v1"
+    else:
+        source = "boundary-document"
+    try:
+        document = cursor.parse_document(text, str(cursor_path))
+    except cursor.CursorError as error:
+        raise LedgerError(
+            f"the existing record at {cursor_path} could not be read ({error}); "
+            "the migration reads it through the cursor's own parser and will "
+            "not guess at a record it cannot parse."
+        ) from error
+    return source, cursor.state_for(document, repo)
 
 
 def _report_scopes(cursor, root, confirmations: dict):
