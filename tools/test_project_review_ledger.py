@@ -853,6 +853,9 @@ class DocumentParsingTests(LedgerTestCase):
             "a withheld number with no boundary": {
                 "source": "boundary-document", "boundary": None,
                 "withheld_boundary": 533},
+            "a hand-authored stop withheld from nothing": {
+                "source": "boundary-document", "boundary": boundary,
+                "withheld_boundary": None},
         }.items():
             with self.subTest(provenance=label):
                 payload = valid_payload()
@@ -866,6 +869,9 @@ class DocumentParsingTests(LedgerTestCase):
                 "withheld_boundary": 533},
             "a v2 cursor with its boundary": {
                 "source": "cursor-v2", "boundary": boundary, "withheld_boundary": None},
+            "a hand-authored record this repository is absent from": {
+                "source": "boundary-document", "boundary": None,
+                "withheld_boundary": None},
         }.items():
             with self.subTest(provenance=label):
                 payload = valid_payload()
@@ -1382,6 +1388,16 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(
             self.paragraph(sentence.replace(" ", "\n", 3))["reviewed"], [612, 610]
         )
+
+    def test_a_count_this_helper_cannot_read_is_not_a_missing_count(self):
+        # `\d` matches "٣" and `count_value` does not, so a template taking a
+        # Unicode digit produced a count nothing could read -- and an
+        # unreadable count was treated as no count, which let a sentence
+        # declaring three pull requests and listing two through.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        scope = self.paragraph(self.mutated(sentence, " two ", " \u0663 "))
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIsNotNone(scope["flag"])
 
     def test_a_count_word_is_read_as_the_number_the_reports_spell(self):
         # The tracked reports spell their batch size in words, including the
@@ -2105,6 +2121,29 @@ class FilesystemTests(LedgerTestCase):
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.migrate(self.root, REPO)
         self.assertIn("already exists", str(raised.exception))
+
+    def test_bytes_that_are_not_utf_8_are_refused_rather_than_raised(self):
+        # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so a
+        # document holding bytes that are not UTF-8 left a traceback where the
+        # refusal belongs -- and the CLI exited 1 instead of 2.
+        directory = self.root / "docs" / "project_review"
+        directory.mkdir(parents=True)
+        (directory / "ledger.md").write_bytes(b"\xff\xfe not utf-8")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.load_document(self.root)
+        self.assertIn("not an absent one", str(raised.exception))
+
+    def test_a_record_or_report_that_is_not_utf_8_stops_the_migration(self):
+        (self.root / "docs" / "project_review_boundaries.md").write_bytes(b"\xff\xfe")
+        with self.assertRaises(LEDGER.LedgerError):
+            LEDGER.migrate(self.root, REPO)
+        (self.root / "docs" / "project_review_boundaries.md").unlink()
+        (self.root / "docs" / "project_review_12-11.md").write_bytes(b"\xff\xfe")
+        # ... including on the path a confirmation takes, which reads the
+        # report before standing in for this helper's reading of it.
+        with self.assertRaises(LEDGER.LedgerError):
+            LEDGER.migrate(self.root, REPO, {"docs/project_review_12-11.md": [12, 11]})
+        self.assertFalse(LEDGER.document_path(self.root).exists())
 
     def test_a_dangling_symlink_is_not_an_absent_document(self):
         # `read_text` raises FileNotFoundError both for a name nothing holds

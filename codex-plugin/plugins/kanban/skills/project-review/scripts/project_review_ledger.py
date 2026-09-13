@@ -424,7 +424,9 @@ def load_document(root) -> dict:
                 "not an absent one."
             ) from error
         return empty_document()
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
+        # `UnicodeDecodeError` is a `ValueError`, so a ledger holding bytes
+        # that are not UTF-8 left a traceback where the refusal belongs.
         raise LedgerError(
             f"{path} could not be read ({error}); an unreadable ledger is not "
             "an absent one."
@@ -802,6 +804,13 @@ def _require_coherent_provenance(origin, boundary, withheld, source: str) -> Non
             "parser retires it on read."
         )
     if withheld is None:
+        if origin == "boundary-document" and boundary is not None:
+            raise LedgerError(
+                f"{source}: migration read a hand-authored record holding a "
+                f"stop at #{boundary['number']} and withheld nothing; that "
+                "record spells its stop as coverage, so a migration that read "
+                "one always has a stop to withhold."
+            )
         return
     if origin != "boundary-document":
         raise LedgerError(
@@ -1073,10 +1082,14 @@ HOLE_PATTERNS = {
     # as one end of the span their direct commits sit in.
     "NUM": r"#\d+",
     "NUMS": rf"#\d+(?:{LIST_SEPARATOR}#\d+)*",
+    # `\d` matches "٣" and `count_value` does not, so a template that took a
+    # Unicode digit produced a count nothing could read -- and an unreadable
+    # count was treated as no count, which is how a sentence declaring three
+    # pull requests and listing two got past the cardinality check.
     "COUNT": r"(?:(?:twenty|thirty)-(?:one|two|three|four|five|six|seven|"
              r"eight|nine)|one|two|three|four|five|six|seven|eight|nine|ten|"
              r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-             r"eighteen|nineteen|twenty|thirty|\d+)",
+             r"eighteen|nineteen|twenty|thirty|[0-9]+)",
     "DATE": r"\d{4}-\d{2}-\d{2}",
     # What a run of blanked code spans leaves behind: their separators.
     "LIST": r"(?:[,\s]|\band\b)+",
@@ -1317,7 +1330,11 @@ def _self_contradiction(found, numbers: list):
     if declared is None:
         return None
     value = count_value(declared)
-    if value is None or value == len(numbers):
+    if value is None:
+        # Belt and braces behind the ASCII template above: a count this helper
+        # cannot read is not a count it may ignore.
+        return f"a sentence saying it covered {declared!r} pull requests"
+    if value == len(numbers):
         return None
     return (
         f"a sentence saying it covered {declared} pull requests and then "
@@ -1561,7 +1578,7 @@ def _cursor_source(cursor, cursor_path: Path) -> str:
                 "write a ledger this root can never correct."
             ) from error
         return "absent"
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise LedgerError(
             f"{cursor_path} could not be read ({error}); an unreadable record "
             "is not an absent one."
@@ -1614,7 +1631,7 @@ def _report_scopes(cursor, root, confirmations: dict):
         report_path = confined(root, Path(root) / entry["path"])
         try:
             text = report_path.read_text(encoding="utf-8")
-        except OSError as error:
+        except (OSError, UnicodeDecodeError) as error:
             raise LedgerError(
                 f"{report_path} could not be read ({error}); every report is "
                 "inspected, so one that cannot be stops the migration."
