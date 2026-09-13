@@ -878,10 +878,78 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [442, 411])
 
-    def test_no_enumeration_is_flagged_with_every_candidate_number(self):
+    def test_a_colonless_enumeration_beside_a_parsed_one_is_flagged(self):
+        # Only the second list is introduced by a colon, so reading the colon
+        # alone would take #533 and #520 and drop #612 and #610 in silence.
+        body = (
+            "# Project Review Findings: PRs #612–#520\n\n"
+            "This review covered #612 and #610; it also reviewed these: #533 "
+            "and #520.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-520.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [520, 533, 610, 612])
+        self.assertIn("#612 and #610", scope["flag"])
+
+    def test_a_colonless_scope_sentence_beside_a_parsed_one_is_flagged(self):
+        # The same loss spread over two sentences: the second parses cleanly,
+        # and a check that only looked at the sentence it parsed would call
+        # the report readable while half its coverage went unread.
+        body = (
+            "# Project Review Findings: PRs #612–#520\n\n"
+            "This review covered #612 and #610. It also reviewed these: #533 "
+            "and #520.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-520.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#612 and #610", scope["flag"])
+
+    def test_a_single_number_beside_the_enumeration_is_a_mention_not_a_list(self):
+        # The non-vacuity control for the two above, and the property every
+        # tracked report depends on: one number before the colon is a cursor,
+        # a stop or a boundary, and flagging those would flag most of the
+        # tree. Two or more joined by list punctuation is a claim.
+        scope = self.scope(CURSOR_NAMING_REPORT)
+        self.assertIsNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [602, 601, 569])
+
+    def test_a_between_range_in_a_reviewing_sentence_is_not_a_second_list(self):
+        # Reproduced from docs/project_review_342-317.md: the direct-commit
+        # sentence says "reviewed" and names an interval's two endpoints. A
+        # run check without a range rule would flag seven tracked reports on
+        # that shape alone.
+        body = (
+            "# Project Review Findings: PRs #612–#601\n\n"
+            "This review continued below the completed #533 cursor and covered "
+            "the next two merged pull requests by merge time: #612 and #601. "
+            "It also reviewed all eight direct first-parent documentation "
+            "commits interleaved between #533 and #601: `2ddd1df`, `097eeed`, "
+            "and `d201b7c`.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-601.md")
+        self.assertIsNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [612, 601])
+
+    def test_an_unintroduced_enumeration_is_flagged_with_every_candidate_number(self):
+        # A list with no colon to introduce it: the numbers are plainly the
+        # batch, and just as plainly not something this helper resolved, so
+        # they are reported back rather than taken or dropped.
         scope = self.scope(AMBIGUOUS_NO_ENUMERATION, "docs/project_review_444-442.md")
         self.assertEqual(scope["reviewed"], [])
         self.assertEqual(scope["candidates"], [442, 444])
+        self.assertIn("#444 and #442", scope["flag"])
+
+    def test_a_paragraph_naming_no_pull_request_at_all_is_flagged(self):
+        # The other end of the same refusal: nothing to take and nothing left
+        # over, which is still not one readable enumeration.
+        body = (
+            "# Project Review Findings: PRs #612–#601\n\n"
+            "This review covered a batch of merged pull requests and wrote up "
+            "what it found.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-601.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [])
         self.assertIn("names no reviewed-pull-request enumeration", scope["flag"])
 
     def test_a_report_with_no_title_paragraph_is_flagged(self):

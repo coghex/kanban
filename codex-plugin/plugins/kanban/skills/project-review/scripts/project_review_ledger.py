@@ -714,11 +714,26 @@ def write_document(root, document: dict) -> Path:
 BACKTICK_RE = re.compile(r"`[^`]*`")
 
 # An annotation on an enumerated pull request -- `#463 (per-entry witnesses)`.
-# Removed before the shape check, because the annotation is prose and the
-# shape check is about the list. A pull request named only inside one is
+# Masked before anything else is read, because the annotation is prose and
+# everything below is about the list. A pull request named only inside one is
 # deliberately dropped: an annotation says what a reviewed PR was about, so a
 # number appearing only there is something that PR referred to.
 PAREN_RE = re.compile(r"\([^()]*\)")
+
+# A run of pull-request numbers joined by nothing but list punctuation: two or
+# more, because one number is a mention and a list is a claim. This is what an
+# enumeration looks like wherever it sits, colon or no colon, and it is how a
+# second enumeration is caught in a paragraph whose first one parsed cleanly.
+RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)+")
+
+# `interleaved between #446 and #411` -- a span's two endpoints, not a list of
+# two reviewed pull requests. Seven of the tracked reports spell their direct
+# first-parent interval that way inside a sentence that also says "reviewed",
+# so without this a run check would flag them all; with it, the shape that is
+# excluded is exactly "between" plus two numbers joined by "and", and a list
+# of two that means coverage still reads as one.
+RANGE_LEAD_RE = re.compile(r"\bbetween\s*\Z", re.IGNORECASE)
+RANGE_RUN_RE = re.compile(r"\A#\d+\s+and\s+#\d+\Z")
 
 NUMBER_RE = re.compile(r"#(\d+)")
 
@@ -787,6 +802,20 @@ def _masked(text: str) -> str:
     return BACKTICK_RE.sub(lambda match: " " * len(match.group(0)), text)
 
 
+def _unannotated(text: str) -> str:
+    """The same text with every parenthesised annotation blanked in place.
+
+    Blanked rather than removed so every offset below still lines up with the
+    paragraph it came from, which is what lets a run be placed relative to the
+    colon that introduced the accepted enumeration.
+    """
+    while True:
+        reduced = PAREN_RE.sub(lambda match: " " * len(match.group(0)), text)
+        if reduced == text:
+            return text
+        text = reduced
+
+
 def _enumeration_clauses(sentence: str) -> list:
     """Every colon in `sentence` that introduces pull-request numbers.
 
@@ -813,28 +842,55 @@ def _enumeration_clauses(sentence: str) -> list:
 
 
 def _sentence_enumeration(sentence: str):
-    """`(reviewed, ambiguous)` for one sentence.
+    """`(reviewed, ambiguous, accepted_from)` for one sentence.
 
     `ambiguous` is a sentence carrying more than one reviewed enumeration. It
     is not the same as reading nothing: a sentence this parser cannot resolve
     must flag its whole report even when some other sentence did resolve, or
     the report's coverage would be the part that happened to be readable.
+    `accepted_from` is the offset the accepted enumeration starts at, so the
+    run check below can tell the numbers this reading took from the ones it
+    left behind.
     """
     clauses = _enumeration_clauses(sentence)
     if not clauses:
-        return None, False
+        return None, False, None
     if len(clauses) > 1:
-        return None, True
-    tail = sentence[clauses[0] + 1:]
-    while True:
-        reduced = PAREN_RE.sub(" ", tail)
-        if reduced == tail:
-            break
-        tail = reduced
-    normalized = " ".join(tail.split()).rstrip(".").strip()
+        return None, True, None
+    start = clauses[0] + 1
+    normalized = " ".join(sentence[start:].split()).rstrip(".").strip()
     if not normalized or not ENUMERATION_RE.match(normalized):
-        return None, False
-    return [int(number) for number in NUMBER_RE.findall(normalized)], False
+        return None, False, None
+    return [int(number) for number in NUMBER_RE.findall(normalized)], False, start
+
+
+def _unaccounted_runs(sentence: str, accepted_from) -> list:
+    """Enumerations in `sentence` that the accepted reading did not take.
+
+    "This review covered #12 and #11; it also reviewed these: #10 and #9"
+    introduces only its second list with a colon, so a parser that read the
+    colon alone would take #10 and #9 and drop the other two without a word.
+    A list of pull-request numbers in a sentence that says it reviewed them,
+    sitting outside the enumeration this parser accepted, is exactly what
+    "cannot be read as one enumeration" means -- so it flags the report rather
+    than being discarded.
+
+    The two filters are what keep that from flagging the tracked reports: a
+    sentence with no reviewing verb is naming numbers for some other reason,
+    and one carrying a negation is saying what was *not* reviewed, which the
+    clause test already refuses to import.
+    """
+    if not SCOPE_TRIGGER_RE.search(sentence) or SCOPE_NEGATION_RE.search(sentence):
+        return []
+    runs = []
+    for match in RUN_RE.finditer(sentence):
+        if accepted_from is not None and match.start() >= accepted_from:
+            continue
+        run = " ".join(match.group(0).split())
+        if RANGE_RUN_RE.match(run) and RANGE_LEAD_RE.search(sentence[: match.start()]):
+            continue
+        runs.append(run)
+    return runs
 
 
 def report_scope(text: str, path: str) -> dict:
@@ -856,19 +912,30 @@ def report_scope(text: str, path: str) -> dict:
             ),
         }
     masked = _masked(paragraph)
+    # Candidates keep their annotations, because the operator answering a flag
+    # wants every number the paragraph mentions, not the subset this parser
+    # would have been willing to read.
     candidates = sorted({int(number) for number in NUMBER_RE.findall(masked)})
     enumerations = []
+    unaccounted = []
     ambiguous = False
-    for sentence in SENTENCE_SPLIT_RE.split(masked):
-        found, unclear = _sentence_enumeration(sentence)
+    for sentence in SENTENCE_SPLIT_RE.split(_unannotated(masked)):
+        found, unclear, accepted_from = _sentence_enumeration(sentence)
         if unclear:
             ambiguous = True
         elif found:
             enumerations.append(found)
-    if len(enumerations) == 1 and not ambiguous:
+        unaccounted.extend(_unaccounted_runs(sentence, accepted_from))
+    if len(enumerations) == 1 and not ambiguous and not unaccounted:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if ambiguous:
         reason = "carries more than one reviewed-pull-request enumeration in a single sentence"
+    elif unaccounted:
+        reason = (
+            "names the reviewed pull requests "
+            f"{'; '.join(unaccounted)} outside any enumeration this helper can "
+            "read as its scope"
+        )
     elif not enumerations:
         reason = "names no reviewed-pull-request enumeration"
     else:
