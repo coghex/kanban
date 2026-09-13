@@ -859,13 +859,21 @@ def write_document(root, document: dict) -> Path:
 # boundaries in code spans, and `docs/project_review_463-455.md` inside one is
 # a filename rather than two pull requests.
 #
-# Only the shape those actually take is masked: one token of a path, a ref, or
-# an abbreviated commit, with no space in it and no pull-request number. Prose
-# in backticks is kept, because blanking it would leave a gap a template
-# happily spans -- "..., in merge-time order `but none were reviewed`: #600,
-# ..." would have read as the template it interrupts.
+# Only the four things those spans actually hold are masked, spelled out
+# rather than approximated by "one token": an abbreviated commit, a ref at a
+# commit, a tracked document, an owner/name repository. A token-shaped rule
+# also masked `never` and `unreviewed`, and blanking a word leaves a gap a
+# template spans happily -- "This review `never` covered the two newest merged
+# pull requests ...: #601 and #533" read as the template it interrupts.
 BACKTICK_RE = re.compile(r"`[^`]*`")
-CODE_SPAN_RE = re.compile(r"\A`[\w./@:+-]+`\Z")
+CODE_SPAN_RE = re.compile(
+    r"\A`(?:"
+    r"[0-9a-f]{7,40}"                          # an abbreviated commit
+    r"|[\w.-]+(?:/[\w.-]+)*@[0-9a-f]{7,40}"    # a ref at a commit
+    r"|[\w.-]+(?:/[\w.-]+)*\.md"              # a tracked document
+    r"|[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"        # an owner/name repository
+    r")`\Z"
+)
 
 PAREN_RE = re.compile(r"\([^()]*\)")
 

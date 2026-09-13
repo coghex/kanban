@@ -33,11 +33,12 @@ and three properties follow.
   paragraph names for other reasons -- a cursor, a stop, a skipped batch, a
   report filename -- are pinned as absent rather than left unmentioned.
 * **The template sets are pinned closed from both sides.** `SCOPE_TEMPLATES`
-  says which sentences introduce a batch and `MENTION_TEMPLATES` which name a
-  pull request for some other reason, and each is asserted twice over: every
-  template the module ships must parse when filled in, and every wording the
-  sixteen review rounds produced -- each admitted by some earlier rule, each
-  of which lost or invented a pull request -- must flag. A set that grew back
+  says which sentences introduce a batch, `MENTION_TEMPLATES` which name a
+  pull request for some other reason, and `PROSE_TEMPLATES` which name none,
+  and each is asserted twice over: every template the module ships must parse
+  when filled in, and every wording this pull request's reviews have produced
+  -- each admitted by some earlier rule, each of which lost or invented a pull
+  request -- must flag. A set that grew back
   toward accepting anything fails the second half; one narrowed into
   uselessness fails the first. Report fixtures are tracked templates filled
   in for the same reason: a fixture in an invented wording would test the
@@ -990,6 +991,17 @@ class ReportScopeTests(LedgerTestCase):
                 return instantiate(template)
         raise AssertionError(f"no scope template contains {contains!r}")
 
+    def mutated(self, sentence, old, new):
+        """`sentence` with `old` replaced, refusing a replacement that did not.
+
+        A mutation that silently does not apply leaves the test asserting that
+        an unmodified scope sentence parses, which it does -- so the test
+        passes while checking nothing.
+        """
+        body = sentence.replace(old, new, 1)
+        self.assertNotEqual(body, sentence, f"{old!r} is not in the sentence")
+        return body
+
     def test_every_scope_template_is_read_and_returns_its_enumeration(self):
         # The set is the contract, so it is asserted as a set: every template
         # the module ships must parse, filled in. A template that stopped
@@ -1123,7 +1135,7 @@ class ReportScopeTests(LedgerTestCase):
         ):
             with self.subTest(annotation=annotation):
                 scope = self.paragraph(
-                    scope_sentence.replace("#612", f"#612 ({annotation})")
+                    self.mutated(scope_sentence, "#612", f"#612 ({annotation})")
                 )
                 self.assertEqual(scope["reviewed"], [])
                 self.assertIsNotNone(scope["flag"])
@@ -1132,35 +1144,53 @@ class ReportScopeTests(LedgerTestCase):
         # A qualifier bracketed into an otherwise-matching sentence would
         # otherwise be blanked back into a match.
         scope = self.paragraph(
-            self.scope_sentence().replace(
-                " order:", " order (but none were reviewed):"
+            self.mutated(
+                self.scope_sentence(), " order:", " order (but none were reviewed):"
             )
         )
         self.assertEqual(scope["reviewed"], [])
         self.assertIsNotNone(scope["flag"])
 
-    def test_only_a_path_or_a_commit_is_masked_out_of_a_code_span(self):
-        # Blanking prose in backticks leaves a gap a template spans happily,
-        # so only the shape the tracked reports' code spans take is masked.
-        scope = self.paragraph(
-            self.scope_sentence().replace(
-                " order:", " order `but none were reviewed`:"
-            )
-        )
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIsNotNone(scope["flag"])
-        # ... while a path, a ref and an abbreviated commit still mask, which
-        # is what lets the templates that name one parse at all.
-        for span in ("`docs/project_review_456-446.md`", "`origin/master@3215e3d`", "`097eeed`"):
-            with self.subTest(span=span):
+    def test_only_the_four_code_span_shapes_the_reports_use_are_masked(self):
+        # Blanking a word in backticks leaves a gap a template spans happily,
+        # so the four shapes the tracked reports' spans take are spelled out
+        # rather than approximated by "one token" -- which also masked `never`
+        # and `unreviewed`.
+        for span in (
+            "`097eeed`",
+            "`1544709bcfbf197c87e55ea69a7be8988bb90965`",
+            "`master@2e2003e`",
+            "`origin/master@3215e3d`",
+            "`docs/project_review_456-446.md`",
+            "`docs/design.md`",
+            "`coghex/kanban`",
+        ):
+            with self.subTest(masked=span):
                 self.assertIsNotNone(LEDGER.CODE_SPAN_RE.match(span))
-        self.assertIsNone(LEDGER.CODE_SPAN_RE.match("`but none were reviewed`"))
+        for span in ("`never`", "`unreviewed`", "`skipped`", "`but none were reviewed`"):
+            with self.subTest(kept=span):
+                self.assertIsNone(LEDGER.CODE_SPAN_RE.match(span))
+        # ... and a kept span leaves its sentence unread.
+        for old, new in (
+            ("This review covered", "This review `never` covered"),
+            (" order:", " order `but none were reviewed`:"),
+        ):
+            with self.subTest(mutation=new):
+                sentence = self.scope_sentence(
+                    ", in merge-time order:" if old == " order:" else "This review covered"
+                )
+                scope = self.paragraph(self.mutated(sentence, old, new))
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
 
     def test_every_wording_the_review_rounds_produced_is_flagged(self):
-        # One entry per wording sixteen review rounds produced. Each was
-        # admitted by some earlier rule and each lost or invented a pull
-        # request; together they are what the templates exist to refuse, so
-        # they are asserted as one set rather than one at a time.
+        # One entry per wording this pull request's reviews have produced.
+        # Each was admitted by some earlier rule and each lost or invented a
+        # pull request; together they are what the templates exist to refuse,
+        # so they are asserted as one set rather than one at a time. The set
+        # is not counted here, in prose or in a name: it grows whenever a
+        # review finds another, and a number beside it would be stale by the
+        # time the entry below it was written.
         opening = self.scope_sentence()
         wordings = {
             "two colon clauses in one sentence": (
