@@ -455,6 +455,24 @@ class DocumentParsingTests(LedgerTestCase):
             )
         self.assertIn("2", str(raised.exception))
 
+    def test_a_closing_fence_carrying_a_suffix_does_not_close_the_block(self):
+        # The first three backticks on a line closed the payload, so a
+        # rendered ledger whose final fence was edited to ```json or ```junk
+        # still parsed: two fence-looking lines to the counter, a payload that
+        # stopped short of the suffix to the parser, and no complete block at
+        # all to a Markdown reader.
+        rendered = LEDGER.render_document(self.parse(valid_payload()))
+        for suffix in ("```json", "```junk", "``` trailing"):
+            with self.subTest(closing=suffix):
+                body = rendered.rstrip("\n")
+                broken = body[: body.rindex("```")] + suffix + "\n"
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.parse_document(broken, "fixture")
+        # ... and the fence the renderer writes still closes it.
+        self.assertEqual(
+            LEDGER.parse_document(rendered, "round trip"), self.parse(valid_payload())
+        )
+
     def test_a_second_fenced_payload_is_refused_however_it_is_spelled(self):
         # Counting only the blocks behind a marker let a bare second fence
         # through, and then counting only lines equal to "```json" let every
@@ -2131,6 +2149,49 @@ class FilesystemTests(LedgerTestCase):
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.load_document(self.root)
         self.assertIn("outside", str(raised.exception))
+
+    def test_provenance_and_coverage_come_from_one_snapshot_of_the_cursor(self):
+        # The migration read the cursor twice -- once to classify its shape,
+        # once to parse its state -- and the cursor's writer publishes by
+        # atomic replacement. A replacement landing between the two made the
+        # two halves describe different documents, and the ledger is written
+        # once and cannot be corrected.
+        #
+        # Driven deterministically: the record is replaced by a hand-authored
+        # one the instant it is first read. Under a second read the state
+        # would come from that replacement -- #533 imported as reviewed off a
+        # `legacy-exclusive-boundary` endpoint while the provenance still said
+        # cursor-v2. Under one read the replacement cannot be seen at all.
+        record_cursor(self.root, reviewed=[602, 601], boundary=533)
+        cursor_path = CURSOR.document_path(self.root)
+        replacement = (
+            "# Project review boundaries\n\n"
+            "- `coghex/kanban` — stop before PR #533\n"
+        )
+        reads = []
+        original = Path.read_text
+
+        def read_once(self_path, *args, **kwargs):
+            content = original(self_path, *args, **kwargs)
+            if Path(self_path) == cursor_path:
+                reads.append(str(self_path))
+                cursor_path.write_text(replacement, encoding="utf-8")
+            return content
+
+        Path.read_text = read_once
+        try:
+            result = LEDGER.migrate(self.root, REPO)
+        finally:
+            Path.read_text = original
+
+        self.assertEqual(len(reads), 1, "the record is read once, not twice")
+        self.assertEqual(result["cursor"]["source"], "cursor-v2")
+        self.assertEqual(self.rows_of(result["state"]), {602, 601})
+        self.assertIsNone(result["state"]["migration"]["withheld_boundary"])
+        self.assertNotEqual(
+            result["state"]["migration"]["boundary"]["merged_at"],
+            "legacy-exclusive-boundary",
+        )
 
     def test_two_migrations_racing_cannot_both_create_the_ledger(self):
         # A look-then-write let both pass `exists()`, both reach the write,

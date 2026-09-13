@@ -130,8 +130,13 @@ SCHEMA_VERSION = 1
 # one's marker would read whichever document it was handed as its own.
 LEDGER_MARKER = "<!-- project-review:ledger:v1 -->"
 
+# The closing delimiter is a whole line. Without that, the first three
+# backticks on any line closed the block, so a rendered ledger whose final
+# fence was edited to ```json or ```junk still parsed -- two fence-looking
+# lines to the counter above, and a payload that stopped short of the suffix
+# here, while the Markdown had no complete block at all.
 PAYLOAD_RE = re.compile(
-    re.escape(LEDGER_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```",
+    re.escape(LEDGER_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```[ \t]*(?:\n|\Z)",
     re.DOTALL,
 )
 
