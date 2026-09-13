@@ -64,6 +64,13 @@ would have lied about history:
   turns up with a historical report it does not cover — a reviewed edit with
   a fixture beside it.
 
+  Every sentence is read, not only the ones carrying a number: an unnumbered
+  sentence reverses a numbered one just as easily — "That batch was
+  nevertheless reviewed in this pass" — and a sentence nobody read cannot be
+  said to have been accounted for. So the paragraph matches as a sequence,
+  against `SCOPE_TEMPLATES`, `MENTION_TEMPLATES` and `PROSE_TEMPLATES`
+  together, or it flags.
+
   Prose in brackets and prose in backticks are read the same way: not at all.
   A parenthesis makes its sentence unreadable, and only a path, a ref or an
   abbreviated commit is masked out of a code span. Eighteen of the nineteen
@@ -890,50 +897,84 @@ HOLE_PATTERNS = {
     # A pull request named as something other than reviewed work.
     "NUM": r"#\d+",
     "NUMS": r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*",
-    "COUNT": r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
-             r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
-             r"nineteen|twenty|twenty-one|twenty-two|twenty-three|"
-             r"twenty-nine|thirty|\d+)",
+    "COUNT": r"(?:(?:twenty|thirty)-(?:one|two|three|four|five|six|seven|"
+             r"eight|nine)|one|two|three|four|five|six|seven|eight|nine|ten|"
+             r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+             r"eighteen|nineteen|twenty|thirty|\d+)",
     "DATE": r"\d{4}-\d{2}-\d{2}",
     # What a run of blanked code spans leaves behind: their separators.
     "LIST": r"(?:[,\s]|\band\b)*",
 }
 
-# The sentences that introduce a batch. Exactly one of these must match, and
-# its `{ENUM}` is the batch.
+# The sentences that introduce a batch. Exactly one of these must match a
+# paragraph, and its `{ENUM}` is the batch. Nine shapes over eighteen tracked
+# reports; the nineteenth annotates every pull request in its enumeration, so
+# it flags and takes one `--confirm`.
 SCOPE_TEMPLATES = (
-    "This review continued below the completed {NUM} cursor and covered the next {COUNT} merged pull requests by merge time: {ENUM}.",
-    "This review continued below the completed {NUM} cursor and covered the next {COUNT} merged pull requests in merge-time order: {ENUM}.",
-    "This review continued below the completed {NUM} cursor and covered the next {COUNT} genuinely unreviewed merged pull requests in merge-time order: {ENUM}.",
-    "This review continued below the completed {NUM} cursor and covered {COUNT} previously unreviewed merged pull requests at the frozen selection boundary, newest-first by merge time: {ENUM}.",
-    "This review covered the {COUNT} newest merged pull requests as of {DATE}, ordered by merge time: {ENUM}.",
-    "This review covered the {COUNT} newest merged pull requests at the frozen review boundary on {DATE}, ordered by merge time: {ENUM}.",
-    "This review covered the {COUNT} newest merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.",
-    "This review covered the {COUNT} newest uncovered merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.",
-    "A senior review of the {COUNT} merged pull requests that landed after the batch covered, taken newest-first over: {ENUM}.",
-    "This bounded review covered every eligible merged pull request remaining above the user's exclusive stop at {NUM}, in merge-time order: {ENUM}.",
+    "This bounded review covered every eligible merged pull request remaining above the user's exclusive stop at {NUMS}, in merge-time order: {ENUM}.",
+    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} genuinely unreviewed merged pull requests in merge-time order: {ENUM}.',
+    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} merged pull requests by merge time: {ENUM}.',
+    'This review continued below the completed {NUMS} cursor and covered the next {COUNT} merged pull requests in merge-time order: {ENUM}.',
+    'This review continued below the completed {NUMS} cursor and covered {COUNT} previously unreviewed merged pull requests at the frozen selection boundary, newest-first by merge time: {ENUM}.',
+    'This review covered the {COUNT} newest merged pull requests as of {DATE}, ordered by merge time: {ENUM}.',
+    'This review covered the {COUNT} newest merged pull requests at the frozen review boundary on {DATE}, ordered by merge time: {ENUM}.',
+    'This review covered the {COUNT} newest merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.',
+    'This review covered the {COUNT} newest uncovered merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.',
 )
 
 # The sentences that name a pull request for some other reason: a cursor, an
 # interval's endpoints, a landing that arrived mid-review, a batch someone
-# else reported, a numeric bound. Matching one of these contributes nothing,
-# which is the point -- it says the numbers were accounted for rather than
-# overlooked.
+# else reported, a numeric bound. Matching one contributes nothing, which is
+# the point -- it says the numbers were accounted for rather than overlooked.
 MENTION_TEMPLATES = (
-    "There were no direct first-parent commits interleaved between {NUMS}.",
-    "It also reviewed the direct first-parent commits {LIST} interleaved between {NUMS}.",
-    "It also reviewed the direct first-parent documentation commit {LIST} interleaved between {NUMS}.",
-    "It also reviewed the direct first-parent documentation commits {LIST} interleaved between {NUMS}.",
-    "It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}: {LIST}.",
-    "It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}, from through: {LIST}.",
-    "It also reviewed the direct first-parent documentation commits and that landed after {NUMS} inside that boundary.",
-    "Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and the finding below was rechecked at current.",
-    "Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and both findings below were rechecked at current.",
-    "Master advanced through {NUMS} while the review was running; those newer landings were excluded rather than moving the boundary, and both findings below were rechecked at current.",
-    "The previously reported {NUMS} batch was explicitly skipped rather than reviewed again.",
-    "The bound therefore produced {COUNT} pull requests rather than the requested {COUNT}; no pull request numbered {NUMS} or lower was entered.",
+    'It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}, from through: {LIST}.',
+    'It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}: {LIST}.',
+    'It also reviewed the direct first-parent commits {LIST}, and interleaved between {NUMS}.',
+    'It also reviewed the direct first-parent documentation commit interleaved between {NUMS}.',
+    'It also reviewed the direct first-parent documentation commits and that landed after {NUMS} inside that boundary.',
+    'It also reviewed the direct first-parent documentation commits {LIST}, and interleaved between {NUMS}.',
+    'Master advanced through {NUMS} while the review was running; those newer landings were excluded rather than moving the boundary, and both findings below were rechecked at current.',
+    'Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and both findings below were rechecked at current.',
+    'Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and the finding below was rechecked at current.',
+    'The bound therefore produced {COUNT} pull requests rather than the requested {COUNT}; no pull request numbered {NUMS} or lower was entered.',
+    'The previously reported {NUMS} batch was explicitly skipped rather than reviewed again.',
+    'There were no direct first-parent commits interleaved between {NUMS}.',
 )
 
+# The sentences that name no pull request at all. They are here because
+# skipping them let one reverse a sentence that did: "The previously reported
+# #601 and #533 batch was explicitly skipped rather than reviewed again. That
+# batch was nevertheless reviewed in this pass." A paragraph is read as a
+# whole sequence or not at all, so a sentence outside these shapes flags its
+# report however few numbers it carries.
+PROSE_TEMPLATES = (
+    'Broader roadmap and repository-health observations belong to the accompanying project audit; this report preserves only confirmed current mistakes that still need {COUNT}-at-a-time disposition.',
+    'Direct first-parent landings newer than the frozen boundary were excluded rather than moving the batch while it was in progress.',
+    'Each pull request was checked against its linked issue, landed diff, commits, current implementation, callers, and current tests; each direct commit was checked individually against its patch and current document state.',
+    'For every pull request, the review read the linked issue contract, pull-request description, commits and landed diff, then traced affected behavior through the current descendants.',
+    'It also covered the {COUNT} direct first-parent documentation commits interleaved through that range: {LIST}.',
+    'It also reviewed the direct first-parent documentation commits {LIST}, and in that landing interval.',
+    'It also reviewed the {COUNT} direct first-parent commits interleaved through that span: {LIST}.',
+    'It also reviewed the {COUNT} direct first-parent documentation commits interleaved through that landing interval: {LIST}.',
+    'It also reviewed the {COUNT} direct first-parent documentation commits interleaved through that range: {LIST}.',
+    "Its implementation is; the intervening commits edit only, so they do not alter this batch's code or the finding below.",
+    "Its implementation is; the {COUNT} intervening commits edit only, so they do not alter this batch's code or the finding below.",
+    'Later descendants were read only to establish whether a mistake still exists.',
+    'Master advanced to the documentation landing while validation was running; that newer commit was excluded rather than moving the boundary, and the finding below was rechecked there unchanged.',
+    'Origin advanced by {COUNT} documentation-only landings to while validation was running; those newer commits were excluded rather than moving the boundary, and they do not touch the finding below.',
+    'Origin advanced once more to while validation was running, through another edit to that same report; the frozen boundary did not move.',
+    'The batch was frozen and verified at on {DATE}.',
+    'The batch was frozen at on {DATE}.',
+    'The batch was frozen at the repository history head on {DATE}; no unit or concern was excluded.',
+    'The discontinuities are deliberate: {LIST}, and already record the intervening pull requests as reviewed, so their coverage was not duplicated.',
+    "The first {COUNT} were rechecked because they also lay in the preceding PR batch's first-parent span; the last {COUNT} were reviewed individually for this batch.",
+    'The later direct documentation landing was excluded rather than moving the boundary; every finding below was rechecked against the current descendant at.',
+    'The later direct documentation landing was excluded rather than moving the boundary; the finding below was rechecked against the current descendant at.',
+    'The review also covered the {COUNT} direct first-parent documentation commits interleaved through the selected landing interval: {LIST}.',
+    'The review checked the linked issue contracts, landed changes, current descendants, local quality gates, and current tracker state.',
+    'This report preserves only confirmed current mistakes that still need {COUNT}-at-a-time disposition.',
+    'This report preserves the {COUNT} confirmed current mistakes that still need {COUNT}-at-a-time disposition.',
+)
 
 def compile_template(template: str):
     """One template as a whole-sentence pattern.
@@ -957,6 +998,7 @@ def compile_template(template: str):
 
 SCOPE_PATTERNS = tuple(compile_template(template) for template in SCOPE_TEMPLATES)
 MENTION_PATTERNS = tuple(compile_template(template) for template in MENTION_TEMPLATES)
+PROSE_PATTERNS = tuple(compile_template(template) for template in PROSE_TEMPLATES)
 
 
 def opening_paragraph(text: str):
@@ -1042,9 +1084,9 @@ def report_scope(text: str, path: str) -> dict:
     enumerations = []
     unreadable = []
     for _, sentence in _sentence_spans(masked):
-        if "#" not in sentence:
-            continue
         normalized = _normalized(sentence)
+        if not normalized:
+            continue
         matched = [
             found
             for found in (pattern.match(normalized) for pattern in SCOPE_PATTERNS)
@@ -1056,15 +1098,21 @@ def report_scope(text: str, path: str) -> dict:
                 for found in matched
             )
             continue
+        # Every sentence, not only the ones carrying a number: an unnumbered
+        # one reverses a numbered one just as easily -- "That batch was
+        # nevertheless reviewed in this pass" -- and a sentence nobody read
+        # cannot be said to have been accounted for.
         if any(pattern.match(normalized) for pattern in MENTION_PATTERNS):
+            continue
+        if any(pattern.match(normalized) for pattern in PROSE_PATTERNS):
             continue
         unreadable.append(normalized)
     if len(enumerations) == 1 and not unreadable:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if unreadable:
         reason = (
-            "carries a sentence naming pull requests in a wording this helper "
-            f"does not read: {unreadable[0]!r}"
+            "carries a sentence in a wording this helper does not read: "
+            f"{unreadable[0]!r}"
         )
     elif not enumerations:
         reason = "names no reviewed-pull-request enumeration"

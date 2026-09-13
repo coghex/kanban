@@ -979,6 +979,17 @@ class ReportScopeTests(LedgerTestCase):
         body = "# Project Review Findings: PRs #612–#610\n\n" + " ".join(sentences) + "\n"
         return LEDGER.report_scope(body, path)
 
+    def scope_sentence(self, contains=", in merge-time order:"):
+        """One tracked scope template, filled in, chosen by what it contains.
+
+        By shape rather than by index, so adding a template does not silently
+        move which one a mutation below is applied to.
+        """
+        for template in LEDGER.SCOPE_TEMPLATES:
+            if contains in template:
+                return instantiate(template)
+        raise AssertionError(f"no scope template contains {contains!r}")
+
     def test_every_scope_template_is_read_and_returns_its_enumeration(self):
         # The set is the contract, so it is asserted as a set: every template
         # the module ships must parse, filled in. A template that stopped
@@ -990,10 +1001,13 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertIsNone(scope["flag"], scope["flag"])
                 self.assertEqual(scope["reviewed"], [612, 610])
 
-    def test_every_mention_template_contributes_nothing(self):
-        # The other half: each mention template beside a batch leaves the
-        # batch readable and adds no coverage of its own.
-        for template in LEDGER.MENTION_TEMPLATES:
+    def test_every_mention_and_prose_template_contributes_nothing(self):
+        # The other half: each of the remaining templates beside a batch
+        # leaves the batch readable and adds no coverage of its own. The
+        # unnumbered ones are here because a paragraph is read as a whole
+        # sequence -- a sentence nobody read cannot be said to have been
+        # accounted for.
+        for template in LEDGER.MENTION_TEMPLATES + LEDGER.PROSE_TEMPLATES:
             with self.subTest(template=template[:56]):
                 scope = self.paragraph(
                     instantiate(LEDGER.SCOPE_TEMPLATES[0]), instantiate(template)
@@ -1062,14 +1076,20 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(scope["candidates"], [442, 444])
         self.assertIn("does not read", scope["flag"])
 
-    def test_a_paragraph_naming_no_pull_request_at_all_is_flagged(self):
+    def test_a_paragraph_of_readable_sentences_that_names_no_batch_is_flagged(self):
+        # Every sentence matches, and none of them introduces an enumeration.
+        scope = self.paragraph(instantiate(LEDGER.PROSE_TEMPLATES[0]))
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("names no reviewed-pull-request enumeration", scope["flag"])
+
+    def test_a_paragraph_in_an_unread_wording_is_flagged(self):
         scope = self.paragraph(
             "This review covered a batch of merged pull requests and wrote up "
             "what it found."
         )
         self.assertEqual(scope["reviewed"], [])
         self.assertEqual(scope["candidates"], [])
-        self.assertIn("names no reviewed-pull-request enumeration", scope["flag"])
+        self.assertIn("does not read", scope["flag"])
 
     def test_a_report_with_no_title_paragraph_is_flagged(self):
         scope = self.scope("Just a line with no heading and no paragraph under one.\n")
@@ -1086,7 +1106,7 @@ class ReportScopeTests(LedgerTestCase):
         # produced a list of spellings both times. An annotation is prose, and
         # prose is what this parser has stopped reading, so every one of these
         # flags -- including ones that say nothing about reviewing at all.
-        scope_sentence = instantiate(LEDGER.SCOPE_TEMPLATES[6])
+        scope_sentence = self.scope_sentence()
         for annotation in (
             "not reviewed",
             "unreviewed",
@@ -1112,7 +1132,7 @@ class ReportScopeTests(LedgerTestCase):
         # A qualifier bracketed into an otherwise-matching sentence would
         # otherwise be blanked back into a match.
         scope = self.paragraph(
-            instantiate(LEDGER.SCOPE_TEMPLATES[6]).replace(
+            self.scope_sentence().replace(
                 " order:", " order (but none were reviewed):"
             )
         )
@@ -1123,7 +1143,7 @@ class ReportScopeTests(LedgerTestCase):
         # Blanking prose in backticks leaves a gap a template spans happily,
         # so only the shape the tracked reports' code spans take is masked.
         scope = self.paragraph(
-            instantiate(LEDGER.SCOPE_TEMPLATES[6]).replace(
+            self.scope_sentence().replace(
                 " order:", " order `but none were reviewed`:"
             )
         )
@@ -1141,7 +1161,7 @@ class ReportScopeTests(LedgerTestCase):
         # admitted by some earlier rule and each lost or invented a pull
         # request; together they are what the templates exist to refuse, so
         # they are asserted as one set rather than one at a time.
-        opening = instantiate(LEDGER.SCOPE_TEMPLATES[6])
+        opening = self.scope_sentence()
         wordings = {
             "two colon clauses in one sentence": (
                 "This review covered the first two merged pull requests: #612 "
@@ -1227,6 +1247,14 @@ class ReportScopeTests(LedgerTestCase):
             "reviewing verb outside a lookback window": (
                 f"{opening} It also reviewed the merged pull requests "
                 "interleaved between #601 and #533."
+            ),
+            "unnumbered sentence reversing a numbered one": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "explicitly skipped rather than reviewed again. That batch was "
+                "nevertheless reviewed in this pass."
+            ),
+            "unnumbered claim of further coverage": (
+                f"{opening} Everything else was reviewed too."
             ),
         }
         for label, body in wordings.items():
