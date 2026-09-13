@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -209,54 +210,54 @@ HAND_AUTHORED_BARE_STOP = """# Project review boundaries
 - `coghex/kanban` — stop before PR #533
 """
 
-# Reproduced from docs/project_review_183-170.md's shape: a cursor named
-# before the enumeration, and a trailing sentence that names the same cursor
-# again.
+# Every report fixture below is a tracked template with its numbers, counts
+# and dates filled in. It has to be: a sentence naming a pull request is read
+# by matching one of those templates whole, so a fixture in some invented
+# wording would test the refusal rather than the reading.
+
+# docs/project_review_183-170.md's shape: a cursor named in the scope sentence,
+# and a finding section naming a pull request for its own reasons.
 CURSOR_NAMING_REPORT = """# Project Review Findings: PRs #602–#569
 
 This review continued below the completed #610 cursor and covered the next
 three merged pull requests by merge time: #602, #601, and #569. There were no
-direct first-parent commits interleaved between #610 and #569. The batch was
-frozen at `origin/master@36bc9f3` on 2026-09-01.
+direct first-parent commits interleaved between #610 and #569.
 
 ## Finding PRR-1
 
 Something about #612 that is not coverage of it.
 """
 
-# Reproduced from docs/project_review_561-545.md's shape: the user's exclusive
-# stop is named inside the scope sentence itself, before the colon.
+# docs/project_review_561-545.md's shape: the user's exclusive stop is named
+# inside the scope sentence itself, and again in the sentence after it.
 STOP_NAMING_REPORT = """# Project Review Findings: PRs #550–#545
 
 This bounded review covered every eligible merged pull request remaining above
 the user's exclusive stop at #533, in merge-time order: #550 and #545. The
-bound therefore produced two pull requests rather than the requested twelve;
-no pull request numbered #533 or lower was entered.
+bound therefore produced two pull requests rather than the requested twelve; no
+pull request numbered #533 or lower was entered.
 """
 
-# Reproduced from Synarchy's docs/project_review_432-412.md, whose enumeration
-# reaches above its own filename interval because number order and merge order
-# differ.
+# Synarchy's docs/project_review_432-412.md: the enumeration reaches above its
+# own filename interval because number order and merge order differ.
 ABOVE_INTERVAL_REPORT = """# Project Review Findings: PRs #432–#412
 
-This review covered the next five merged pull requests by merge time: #432,
-#442, #444, #431, and #412. It also reviewed the direct first-parent
-documentation commits `9cf80f7` and `f3cff80` interleaved through that range.
+This review continued below the completed #446 cursor and covered the next five
+merged pull requests by merge time: #432, #442, #444, #431, and #412.
 """
 
-# Reproduced from docs/project_review_463-455.md: every enumerated pull request
-# carries a parenthesised annotation, and one annotation names a file.
+# docs/project_review_463-455.md: every enumerated pull request carries a
+# parenthesised annotation, and one annotation names a file.
 ANNOTATED_REPORT = """# Project Review Findings: PRs #571–#570
 
 A senior review of the two merged pull requests that landed after the batch
 `docs/project_review_602-562.md` covered, taken newest-first over
 `coghex/kanban`: #571 (per-entry witnesses for `docs/design.md` §3 and §20),
-and #570 (the issue templates). Each was judged against the issue it claimed
-to satisfy.
+and #570 (the issue templates).
 """
 
-# Reproduced from docs/project_review_398-353.md: a reviewed enumeration
-# followed by a separately named batch that was explicitly skipped.
+# docs/project_review_398-353.md: a reviewed enumeration followed by a
+# separately named batch that was explicitly skipped.
 SKIPPED_BATCH_REPORT = """# Project Review Findings: PRs #520–#517
 
 This review continued below the completed #533 cursor and covered the next two
@@ -267,23 +268,16 @@ reviewed again.
 
 OVERLAPPING_REPORT = """# Project Review Findings: PRs #520–#500
 
-This review covered the next two merged pull requests by merge time: #520 and
-#500.
+This review continued below the completed #533 cursor and covered the next two
+merged pull requests by merge time: #520 and #500.
 """
 
 AMBIGUOUS_TWO_ENUMERATIONS = """# Project Review Findings: PRs #612–#601
 
-This review covered the first two merged pull requests: #612 and #610. This
-review also covered the next two merged pull requests: #602 and #601.
-"""
-
-# Two reviewed enumerations inside one sentence. Reading only the last colon
-# would take #533 and #520 as the batch and drop #612 and #610 without a word,
-# which is the one outcome requirement 5 forbids outright.
-AMBIGUOUS_ONE_SENTENCE = """# Project Review Findings: PRs #612–#520
-
-This review covered the first two merged pull requests: #612 and #610; this
-review also covered the next two merged pull requests: #533 and #520.
+This review covered the two newest merged pull requests at the frozen selection
+boundary, in merge-time order: #612 and #610. This review covered the two
+newest uncovered merged pull requests at the frozen selection boundary, in
+merge-time order: #602 and #601.
 """
 
 AMBIGUOUS_NO_ENUMERATION = """# Project Review Findings: PRs #444–#442
@@ -341,6 +335,25 @@ def completed_row(status="clean", report=None):
         "evidence": ["review:2026-09-05"],
         "history": [],
     }
+
+
+# Filling a template in is how a fixture is written here: a sentence naming a
+# pull request is read by matching a template whole, so a fixture in some
+# invented wording would test the refusal rather than the reading.
+TEMPLATE_FILLERS = {
+    "ENUM": "#612 and #610",
+    "NUM": "#533",
+    "NUMS": "#533 and #520",
+    "COUNT": "two",
+    "DATE": "2026-09-05",
+    "LIST": ", , and",
+}
+
+
+def instantiate(template: str) -> str:
+    return re.sub(
+        r"\{([A-Z]+)\}", lambda hole: TEMPLATE_FILLERS[hole.group(1)], template
+    )
 
 
 class LedgerTestCase(unittest.TestCase):
@@ -959,9 +972,35 @@ class ReportScopeTests(LedgerTestCase):
     def scope(self, body, path="docs/project_review_602-569.md"):
         return LEDGER.report_scope(body, path)
 
-    def test_a_cursor_named_before_the_enumeration_is_not_imported(self):
+    def paragraph(self, *sentences, path="docs/project_review_612-610.md"):
+        body = "# Project Review Findings: PRs #612–#610\n\n" + " ".join(sentences) + "\n"
+        return LEDGER.report_scope(body, path)
+
+    def test_every_scope_template_is_read_and_returns_its_enumeration(self):
+        # The set is the contract, so it is asserted as a set: every template
+        # the module ships must parse, filled in. A template that stopped
+        # matching its own shape would be a report this migration silently
+        # started flagging.
+        for template in LEDGER.SCOPE_TEMPLATES:
+            with self.subTest(template=template[:56]):
+                scope = self.paragraph(instantiate(template))
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_every_mention_template_contributes_nothing(self):
+        # The other half: each mention template beside a batch leaves the
+        # batch readable and adds no coverage of its own.
+        for template in LEDGER.MENTION_TEMPLATES:
+            with self.subTest(template=template[:56]):
+                scope = self.paragraph(
+                    instantiate(LEDGER.SCOPE_TEMPLATES[0]), instantiate(template)
+                )
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_a_cursor_named_in_the_scope_sentence_is_not_imported(self):
         scope = self.scope(CURSOR_NAMING_REPORT)
-        self.assertIsNone(scope["flag"])
+        self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [602, 601, 569])
         self.assertNotIn(610, scope["reviewed"])
 
@@ -972,303 +1011,129 @@ class ReportScopeTests(LedgerTestCase):
 
     def test_a_stop_named_inside_the_scope_sentence_is_not_imported(self):
         scope = self.scope(STOP_NAMING_REPORT)
-        self.assertIsNone(scope["flag"])
+        self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [550, 545])
         self.assertNotIn(533, scope["reviewed"])
 
     def test_an_enumeration_above_its_own_filename_interval_is_imported(self):
         scope = self.scope(ABOVE_INTERVAL_REPORT, "docs/project_review_432-412.md")
-        self.assertIsNone(scope["flag"])
+        self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [432, 442, 444, 431, 412])
 
     def test_an_annotated_enumeration_is_read_through_its_annotations(self):
         scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
-        self.assertIsNone(scope["flag"])
+        self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [571, 570])
 
     def test_a_separately_skipped_batch_is_not_imported(self):
         scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
-        self.assertIsNone(scope["flag"])
+        self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
         self.assertEqual({550, 545} & set(scope["reviewed"]), set())
 
-    def test_a_negated_scope_sentence_is_flagged_rather_than_imported(self):
-        scope = self.scope(NEGATED_SCOPE_REPORT, "docs/project_review_431-412.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIsNotNone(scope["flag"])
-
-    def test_two_enumerations_are_flagged_with_every_candidate_number(self):
+    def test_two_scope_sentences_are_flagged_with_every_candidate_number(self):
         scope = self.scope(AMBIGUOUS_TWO_ENUMERATIONS, "docs/project_review_612-601.md")
         self.assertEqual(scope["reviewed"], [])
         self.assertEqual(scope["candidates"], [601, 602, 610, 612])
         self.assertIn("2 reviewed-pull-request enumerations", scope["flag"])
         self.assertIn("--confirm", scope["flag"])
 
-    def test_two_enumerations_inside_one_sentence_are_flagged(self):
-        # A colon is where an enumeration begins, so a sentence with two of
-        # them carries two. Resolving it to the last one would import #533 and
-        # #520 as the whole batch and lose #612 and #610 silently.
-        scope = self.scope(AMBIGUOUS_ONE_SENTENCE, "docs/project_review_612-520.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertEqual(scope["candidates"], [520, 533, 610, 612])
-        self.assertIn("in a single sentence", scope["flag"])
-
-    def test_an_ambiguous_sentence_flags_its_report_even_beside_a_readable_one(self):
-        # The negative control for the case above: a sentence this parser
-        # cannot resolve is not made harmless by a sibling it can, because the
-        # coverage imported would then be whichever half happened to be
-        # readable rather than what the report says.
-        body = (
-            "# Project Review Findings: PRs #612–#517\n\n"
-            "This review covered the next two merged pull requests by merge "
-            "time: #571 and #570. This review covered the first two merged "
-            "pull requests: #612 and #610; this review also covered the next "
-            "two merged pull requests: #533 and #520.\n"
+    def test_an_unreadable_sentence_flags_even_beside_a_readable_one(self):
+        scope = self.paragraph(
+            instantiate(LEDGER.SCOPE_TEMPLATES[0]), "It also reviewed #601."
         )
-        scope = self.scope(body, "docs/project_review_612-517.md")
         self.assertEqual(scope["reviewed"], [])
-        self.assertIn("in a single sentence", scope["flag"])
-
-    def test_a_direct_commit_listing_after_a_scope_sentence_is_not_a_second_clause(self):
-        # The non-vacuity control for the two above, reproduced from
-        # docs/project_review_442-411.md: its second sentence introduces a SHA
-        # listing with its own colon, and a clause test that counted colons
-        # rather than the pull-request numbers after them would flag every
-        # real report in the tree.
-        body = (
-            "# Project Review Findings: PRs #442–#411\n\n"
-            "This review continued below the completed #533 cursor and covered "
-            "the next two merged pull requests by merge time: #442 and #411. "
-            "It also reviewed all three direct first-parent commits "
-            "interleaved between #533 and #411, from `b35c0e1` through "
-            "`5a61099`: `b35c0e1`, `90e28c5`, and `5a61099`.\n"
-        )
-        scope = self.scope(body, "docs/project_review_442-411.md")
-        self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [442, 411])
-
-    def test_a_colonless_enumeration_beside_a_parsed_one_is_flagged(self):
-        # Only the second list is introduced by a colon, so reading the colon
-        # alone would take #533 and #520 and drop #612 and #610 in silence.
-        body = (
-            "# Project Review Findings: PRs #612–#520\n\n"
-            "This review covered #612 and #610; it also reviewed these: #533 "
-            "and #520.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-520.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertEqual(scope["candidates"], [520, 533, 610, 612])
-        self.assertIn("#612 and #610", scope["flag"])
-
-    def test_a_colonless_scope_sentence_beside_a_parsed_one_is_flagged(self):
-        # The same loss spread over two sentences: the second parses cleanly,
-        # and a check that only looked at the sentence it parsed would call
-        # the report readable while half its coverage went unread.
-        body = (
-            "# Project Review Findings: PRs #612–#520\n\n"
-            "This review covered #612 and #610. It also reviewed these: #533 "
-            "and #520.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-520.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#612 and #610", scope["flag"])
-
-    def test_a_lone_reviewed_pull_request_left_over_is_flagged(self):
-        # A singleton loses a pull request just as quietly as a list does, so
-        # what separates coverage from a mention is not how many numbers there
-        # are but whether the sentence handed them to its reviewing verb.
-        body = (
-            "# Project Review Findings: PRs #612–#601\n\n"
-            "This review covered the first batch: #612 and #610. It also "
-            "reviewed #601.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-601.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertEqual(scope["candidates"], [601, 610, 612])
+        self.assertIn("does not read", scope["flag"])
         self.assertIn("#601", scope["flag"])
 
-    def test_a_single_number_handed_to_something_else_is_a_mention(self):
-        # The non-vacuity control for every leftover rule above, and the
-        # property eleven tracked reports depend on: a cursor, a stop, a
-        # boundary or a landing names one number inside the same sentence
-        # that enumerates the batch, and flagging those would flag most of
-        # the tree.
-        self.assertIsNone(self.scope(CURSOR_NAMING_REPORT)["flag"])
-        self.assertEqual(self.scope(CURSOR_NAMING_REPORT)["reviewed"], [602, 601, 569])
-        self.assertIsNone(self.scope(STOP_NAMING_REPORT)["flag"])
-        landing = (
-            "# Project Review Findings: PRs #612–#601\n\n"
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #601. It also reviewed the direct first-parent "
-            "documentation commits `7550744` and `173f1e0` that landed after "
-            "#533 inside that boundary.\n"
-        )
-        scope = self.scope(landing, "docs/project_review_612-601.md")
-        self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [612, 601])
-
-    def test_a_between_range_in_a_reviewing_sentence_is_not_a_second_list(self):
-        # Reproduced from docs/project_review_342-317.md: the direct-commit
-        # sentence says "reviewed" and names an interval's two endpoints. A
-        # run check without a range rule would flag seven tracked reports on
-        # that shape alone.
-        body = (
-            "# Project Review Findings: PRs #612–#601\n\n"
-            "This review continued below the completed #533 cursor and covered "
-            "the next two merged pull requests by merge time: #612 and #601. "
-            "It also reviewed all eight direct first-parent documentation "
-            "commits interleaved between #533 and #601: `2ddd1df`, `097eeed`, "
-            "and `d201b7c`.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-601.md")
-        self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [612, 601])
-
-    def test_a_reviewed_pull_request_behind_a_noun_prefix_is_flagged(self):
-        # "reviewed PR #10" and "reviewed pull request #10" put the number one
-        # or two words further from the verb, and a rule keyed to adjacency
-        # would have let both through. What accounts for a number is not how
-        # close a verb is but whether anything in the paragraph explains it as
-        # something other than reviewed work.
-        for phrase in ("PR #601", "pull request #601", "#601"):
-            with self.subTest(phrase=phrase):
-                body = (
-                    "# Project Review Findings: PRs #612–#601\n\n"
-                    "This review covered the first batch: #612 and #610. It "
-                    f"also reviewed {phrase}.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-601.md")
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIn("#601", scope["flag"])
-
-    def test_a_negative_clause_excuses_only_its_own_clause(self):
-        # A sentence can hold both halves of the question. Reading the
-        # negation across the whole sentence silenced the positive half with
-        # it, so #533 and #520 went unread and unreported; the negation is now
-        # the clause's, and the clause that says it reviewed them is not
-        # covered by it.
-        body = (
-            "# Project Review Findings: PRs #612–#520\n\n"
-            "This review covered the first batch: #612 and #610. It did not "
-            "review #601, but it also reviewed these: #533 and #520.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-520.md")
+    def test_an_unintroduced_enumeration_is_flagged_with_every_candidate_number(self):
+        scope = self.scope(AMBIGUOUS_NO_ENUMERATION, "docs/project_review_444-442.md")
         self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#533 and #520", scope["flag"])
-        # ... and the genuinely negated number is not reported as lost.
-        self.assertNotIn("#601 ", scope["flag"].split("candidate")[0])
+        self.assertEqual(scope["candidates"], [442, 444])
+        self.assertIn("does not read", scope["flag"])
 
-    def test_a_negation_does_not_reach_across_a_conjunction(self):
-        # Punctuation alone does not separate the two halves of "It did not
-        # review #8, but it did review #10": the conjunction is where the
-        # sense turns, so a negation read to the next full stop would excuse
-        # #10 along with #8 and lose it.
-        for joiner in (", but", " but", ", however,", " although"):
-            with self.subTest(joiner=joiner):
-                body = (
-                    "# Project Review Findings: PRs #612–#601\n\n"
-                    "This review covered the first batch: #612 and #610. It "
-                    f"did not review #533{joiner} it did review #601.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-601.md")
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIn("#601", scope["flag"])
+    def test_a_paragraph_naming_no_pull_request_at_all_is_flagged(self):
+        scope = self.paragraph(
+            "This review covered a batch of merged pull requests and wrote up "
+            "what it found."
+        )
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [])
+        self.assertIn("names no reviewed-pull-request enumeration", scope["flag"])
 
-    def test_an_annotation_saying_anything_about_reviewing_is_kept(self):
-        # Annotations are blanked before anything is read, so one that
-        # withdrew its own entry's coverage would have disappeared along with
-        # the withdrawal. A parenthesis naming a pull request, a reviewing
-        # verb, a negation or a pull-request noun is kept, where it breaks the
-        # enumeration shape and flags the report.
-        kept = (
-            "This review covered the two merged pull requests: #612 (not "
-            "reviewed) and #610.\n"
-        )
-        scope = self.scope(
-            f"# Project Review Findings: PRs #612–#610\n\n{kept}",
-            "docs/project_review_612-610.md",
-        )
+    def test_a_report_with_no_title_paragraph_is_flagged(self):
+        scope = self.scope("Just a line with no heading and no paragraph under one.\n")
+        self.assertIsNotNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [])
+
+    def test_a_negated_scope_sentence_is_flagged_rather_than_imported(self):
+        scope = self.scope(NEGATED_SCOPE_REPORT, "docs/project_review_431-412.md")
         self.assertEqual(scope["reviewed"], [])
         self.assertIsNotNone(scope["flag"])
-        # Any participle, not the spellings anyone thought to list: an
-        # exclusion naming `not reviewed` let `unreviewed` through, and review
-        # status is a participle whatever word it is spelled with.
-        for annotation in ("unreviewed", "skipped", "deferred", "pending"):
+
+    def test_an_annotation_saying_anything_about_reviewing_is_kept(self):
+        # Annotations inside an enumeration are dropped, so one that withdrew
+        # its own entry's coverage would have disappeared with the withdrawal.
+        # Any participle is kept, not the spellings anyone thought to list: an
+        # exclusion naming `not reviewed` once let `unreviewed` through.
+        scope_sentence = instantiate(LEDGER.SCOPE_TEMPLATES[6])
+        for annotation in (
+            "not reviewed",
+            "unreviewed",
+            "skipped",
+            "deferred",
+            "pending",
+            "no review",
+            "not in scope",
+            "`unreviewed`",
+        ):
             with self.subTest(annotation=annotation):
-                body = (
-                    "# Project Review Findings: PRs #612–#610\n\n"
-                    "This review covered the two merged pull requests: #612 "
-                    f"({annotation}) and #610.\n"
+                scope = self.paragraph(
+                    scope_sentence.replace("#612", f"#612 ({annotation})")
                 )
-                scope = self.scope(body, "docs/project_review_612-610.md")
                 self.assertEqual(scope["reviewed"], [])
                 self.assertIsNotNone(scope["flag"])
         # ... and the tracked reports' own annotations, which say what a
-        # reviewed pull request was about, still blank.
+        # reviewed pull request was about, still drop.
         scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
         self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [571, 570])
 
-    def test_a_parenthesis_holding_a_pull_request_is_not_an_annotation(self):
-        # Annotations are blanked before anything is read, so a whole
-        # parenthesised sentence would have taken its pull request out of
-        # sight rather than out of the enumeration.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the batch: #612 and #610. (It also reviewed "
-            "#601.)\n"
+    def test_a_parenthesis_outside_the_enumeration_is_never_dropped(self):
+        # A qualifier bracketed into an otherwise-matching sentence would
+        # otherwise be blanked back into a match.
+        scope = self.paragraph(
+            instantiate(LEDGER.SCOPE_TEMPLATES[6]).replace(
+                " order:", " order (but none were reviewed):"
+            )
         )
-        scope = self.scope(body, "docs/project_review_612-610.md")
         self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#601", scope["flag"])
-        # ... and one that carries no number is still an annotation, which is
-        # what lets the annotated enumeration above parse at all.
-        self.assertIsNone(self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")["flag"])
+        self.assertIsNotNone(scope["flag"])
 
-    def test_a_code_span_holding_a_pull_request_is_not_a_filename(self):
-        # Code spans are masked because report prose puts paths and SHAs in
-        # them, and `docs/project_review_463-455.md` is a filename rather than
-        # two pull requests. A span that spells a pull request the way a pull
-        # request is spelled is kept, or masking would hide it from the
-        # accounting pass instead of from the reading.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the batch: #612 and #610. It also reviewed "
-            "`#601`.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#601", scope["flag"])
-        self.assertIsNone(self.scope(CURSOR_NAMING_REPORT)["flag"])
+    def test_an_abbreviated_commit_ending_in_ed_is_not_a_participle(self):
+        # `097eeed` is seven hex characters and appears in a tracked report;
+        # reading it as a participle kept its code span and flagged the whole
+        # report. The rule is a letter outside the hex alphabet.
+        self.assertIsNone(LEDGER.PARTICIPLE_RE.search("`097eeed`"))
+        self.assertIsNone(LEDGER.PARTICIPLE_RE.search("`dabbed`"))
+        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("unreviewed"))
+        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("deferred"))
+        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("pending"))
 
-    def test_a_previously_reported_batch_is_excused_by_the_words_in_front_of_it(self):
-        # Reproduced from docs/project_review_398-353.md. This used to rest on
-        # a negation somewhere in the clause; it now rests on "the previously
-        # reported ..." standing in front of the run, which is the same rule
-        # every other mention is held to.
-        scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
-        self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [520, 517])
-
-    def test_every_wording_ten_review_rounds_produced_is_flagged(self):
-        # One entry per round, in order. Each was admitted by a denylist at
-        # the time and each lost or invented a pull request; together they are
-        # what the two allowlists exist to refuse, so they are asserted as one
-        # set rather than one at a time.
-        opening = (
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #610."
-        )
+    def test_every_wording_the_review_rounds_produced_is_flagged(self):
+        # One entry per wording sixteen review rounds produced. Each was
+        # admitted by some earlier rule and each lost or invented a pull
+        # request; together they are what the templates exist to refuse, so
+        # they are asserted as one set rather than one at a time.
+        opening = instantiate(LEDGER.SCOPE_TEMPLATES[6])
         wordings = {
-            "two colon clauses": (
+            "two colon clauses in one sentence": (
                 "This review covered the first two merged pull requests: #612 "
-                "and #610; this review also covered the next two merged pull "
-                "requests: #533 and #520."
+                "and #610; it also reviewed the next two: #533 and #520."
             ),
             "colonless list beside a parsed one": (
                 "This review covered the merged pull requests #612 and #610; "
-                "this review also covered these merged pull requests: #533 "
-                "and #520."
+                "it also reviewed these merged pull requests: #533 and #520."
             ),
             "bare singleton": f"{opening} It also reviewed #601.",
             "noun-prefixed singleton": f"{opening} It also reviewed PR #601.",
@@ -1294,6 +1159,13 @@ class ReportScopeTests(LedgerTestCase):
                 "This review covered metadata associated with pending merged "
                 "pull requests: #601 and #533."
             ),
+            "passive review behind a role word": (
+                f"{opening} The previously reported #601 and #533 were also reviewed."
+            ),
+            "active review behind a role word": (
+                f"{opening} The previously reported #601 and #533 received a "
+                "fresh review."
+            ),
             "counterfactual clause": (
                 "If this review had covered the two merged pull requests, "
                 "they would have been: #601 and #533."
@@ -1313,10 +1185,6 @@ class ReportScopeTests(LedgerTestCase):
                 "but failed to review the pull requests themselves: #601 and "
                 "#533."
             ),
-            "suffix excepting part of the claim": (
-                "This review covered the two merged pull requests except the "
-                "ones nobody entered: #601 and #533."
-            ),
             "reported batch that was reviewed": (
                 f"{opening} The previously reported #601 and #533 batch was "
                 "also reviewed."
@@ -1328,44 +1196,21 @@ class ReportScopeTests(LedgerTestCase):
                 f"{opening} Master advanced through #601, which this review "
                 "also covered."
             ),
-            "threshold that was reviewed": (
-                f"{opening} No pull request numbered #601 or lower was "
-                "entered, though #601 was reviewed."
-            ),
-            "annotation withdrawing its own entry": (
-                "This review covered the two merged pull requests: #601 (not "
-                "reviewed) and #533 (not reviewed)."
-            ),
-            "annotation marking an entry pending": (
-                "This review covered the two merged pull requests: #601 "
-                "(pending) and #533 (pending)."
-            ),
-            "non-coverage predicate reversed later": (
+            "non-coverage predicate reversed past a semicolon": (
                 f"{opening} The previously reported #601 and #533 batch was "
-                "skipped initially but reviewed in this pass."
+                "skipped; it was reviewed again here."
+            ),
+            "non-coverage predicate reversed in the next sentence": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "skipped. That batch was reviewed again here."
             ),
             "non-coverage predicate negated": (
                 f"{opening} The previously reported #601 and #533 batch was "
                 "not skipped."
             ),
-            "non-coverage predicate reversed past a semicolon": (
-                f"{opening} The previously reported #601 and #533 batch was "
-                "skipped; it was reviewed again here."
-            ),
-            "landmark reversed past a semicolon": (
-                f"{opening} The exclusive stop at #601 was not entered; it "
-                "was reviewed later."
-            ),
-            "participle annotation this parser did not name": (
-                "This review covered the two merged pull requests: #601 "
-                "(unreviewed) and #533 (skipped)."
-            ),
-            "passive review behind a role word": (
-                f"{opening} The previously reported #601 and #533 were also reviewed."
-            ),
-            "active review behind a role word": (
-                f"{opening} The previously reported #601 and #533 received a "
-                "fresh review."
+            "reviewing verb outside a lookback window": (
+                f"{opening} It also reviewed the merged pull requests "
+                "interleaved between #601 and #533."
             ),
         }
         for label, body in wordings.items():
@@ -1376,286 +1221,6 @@ class ReportScopeTests(LedgerTestCase):
                 )
                 self.assertEqual(scope["reviewed"], [], label)
                 self.assertIsNotNone(scope["flag"], label)
-
-    def test_the_tracked_scope_suffixes_are_the_ones_accepted(self):
-        # The suffix is a closed vocabulary too, because a free one was the
-        # last place a clause could withdraw what its opening said. These are
-        # the five shapes the nineteen tracked reports put after their object.
-        for suffix in (
-            "by merge time",
-            "in merge-time order",
-            "as of 2026-09-05, ordered by merge time",
-            "at the frozen selection boundary, in merge-time order",
-            "remaining above the user's exclusive stop at #533, in merge-time order",
-        ):
-            with self.subTest(suffix=suffix):
-                body = (
-                    "# Project Review Findings: PRs #612–#610\n\n"
-                    f"This review covered the two merged pull requests {suffix}: "
-                    "#612 and #610.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertIsNone(scope["flag"], scope["flag"])
-                self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_every_landmark_form_the_tracked_reports_use_still_parses(self):
-        # The other half of the pin above, and the control that keeps the
-        # allowlists from being narrowed into uselessness: every landmark
-        # phrase the tracked reports put beside a batch, each of which must
-        # leave the batch readable.
-        opening = (
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #610."
-        )
-        for form in (
-            "It continued below the completed #533 cursor.",
-            "It also reviewed the direct commits interleaved between #533 and #520.",
-            "It stopped above the user's exclusive stop at #533.",
-            "Master advanced through #533 while verification was running.",
-            "It also reviewed the direct commits that landed after #533.",
-            "The previously reported #533 and #520 batch was left alone.",
-            "No pull request numbered #533 or lower was entered.",
-        ):
-            with self.subTest(form=form):
-                body = f"# Project Review Findings: PRs #612–#610\n\n{opening} {form}\n"
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertIsNone(scope["flag"], scope["flag"])
-                self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_a_scope_clause_must_say_the_list_is_pull_requests(self):
-        # Every tracked report's scope clause reads "<verb> ... merged pull
-        # requests ...:", and the two ways a clause can carry a reviewing verb
-        # without claiming the list are refused: naming some other object for
-        # the verb, and naming no pull request at all. "covered direct commits
-        # and noted pending pull requests: #10 and #9" reviewed commits, and
-        # reading its list as coverage would invent a review of two pull
-        # requests it called pending.
-        for body in (
-            "This review covered direct commits and noted pending pull requests: "
-            "#601 and #533.",
-            "This review covered the documentation landings and the pull requests "
-            "behind them: #601 and #533.",
-            "This review covered the following: #601 and #533.",
-        ):
-            with self.subTest(paragraph=body):
-                scope = self.scope(
-                    f"# Project Review Findings: PRs #601–#533\n\n{body}\n",
-                    "docs/project_review_601-533.md",
-                )
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIsNotNone(scope["flag"])
-
-    def test_the_tracked_scope_clause_shape_is_what_the_parser_accepts(self):
-        # The non-vacuity control for the clause above: the shape all nineteen
-        # tracked reports use, in each of the wordings they use it in.
-        for clause in (
-            "This review continued below the completed #533 cursor and covered "
-            "the next two merged pull requests by merge time",
-            "This review covered the two newest merged pull requests at the "
-            "frozen selection boundary, in merge-time order",
-            "This review covered the two newest uncovered merged pull requests "
-            "as of 2026-09-05, ordered by merge time",
-            "This bounded review covered every eligible merged pull request "
-            "remaining above the user's exclusive stop at #533, in merge-time "
-            "order",
-            "A senior review of the two merged pull requests that landed after "
-            "the batch `docs/project_review_533-517.md` covered, taken "
-            "newest-first over `coghex/kanban`",
-        ):
-            with self.subTest(clause=clause[:48]):
-                body = f"# Project Review Findings: PRs #612–#610\n\n{clause}: #612 and #610.\n"
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertIsNone(scope["flag"], scope["flag"])
-                self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_a_reviewing_predicate_behind_a_run_cancels_its_role_word(self):
-        # A role word in front says where the numbers came from; a reviewing
-        # predicate right behind says what was done with them, and the second
-        # answers the question the first only looks like it answers.
-        for tail in (
-            "were also reviewed",
-            "were reviewed",
-            "have been reviewed",
-            "were subsequently covered",
-        ):
-            with self.subTest(tail=tail):
-                body = (
-                    "# Project Review Findings: PRs #612–#610\n\n"
-                    "This review covered the next two merged pull requests by "
-                    "merge time: #612 and #610. The previously reported #601 "
-                    f"and #533 {tail}.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIn("#601 and #533", scope["flag"])
-        # ... while the tracked wording, which puts a different verb behind the
-        # run, still reads as the mention it is.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #610. The previously reported #601 and #533 batch "
-            "was explicitly skipped rather than reviewed again.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertIsNone(scope["flag"], scope["flag"])
-        self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_a_negative_claim_does_not_introduce_a_reviewed_enumeration(self):
-        # "No pull requests were reviewed; the candidates were: #10 and #9"
-        # carries a reviewing verb in its first clause and the opposite claim
-        # in the second. The verb has to be in the clause that introduces the
-        # colon, or a paragraph that says nothing was reviewed would be read
-        # as legacy coverage -- inventing review history rather than losing
-        # it, which is the same defect pointing the other way.
-        for body in (
-            "No pull requests were reviewed; the candidates were: #601 and #533.",
-            "No pull requests were reviewed: #601 and #533.",
-            "Without entering the batch, the candidates reviewed were: #601 and #533.",
-        ):
-            with self.subTest(paragraph=body):
-                scope = self.scope(
-                    f"# Project Review Findings: PRs #601–#533\n\n{body}\n",
-                    "docs/project_review_601-533.md",
-                )
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIsNotNone(scope["flag"])
-
-    def test_a_pull_request_noun_cancels_the_role_word_in_front_of_it(self):
-        # A role word can sit inside a positive review claim: in "the
-        # previously reported PR #10" the number belongs to `PR`, so the batch
-        # reviewed it whatever `reported` says about where it came from.
-        for noun in ("PR", "PRs", "pull request", "pull requests"):
-            with self.subTest(noun=noun):
-                body = (
-                    "# Project Review Findings: PRs #612–#610\n\n"
-                    "This review covered the first batch: #612 and #610. It "
-                    f"also reviewed the previously reported {noun} #601.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIn("#601", scope["flag"])
-        # ... and a role word that comes last still excuses, which is how the
-        # tracked "no pull request numbered #533 or lower" reads.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #610. No pull request numbered #533 or lower was "
-            "entered.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_a_preposition_in_front_of_a_number_does_not_excuse_it(self):
-        # A preposition says where a number sits in a phrase and nothing about
-        # what the phrase claims, so `from`, `through` and `after` in front of
-        # one excused "It also reviewed PRs from #601 through #533" while it
-        # dropped both. Only a word that names what the number *is* excuses it.
-        for phrase in (
-            "PRs from #601 through #533",
-            "everything after #601",
-            "the pull requests from #601",
-        ):
-            with self.subTest(phrase=phrase):
-                body = (
-                    "# Project Review Findings: PRs #612–#610\n\n"
-                    "This review covered the first batch: #612 and #610. It "
-                    f"also reviewed {phrase}.\n"
-                )
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertEqual(scope["reviewed"], [])
-                self.assertIn("#601", scope["flag"])
-
-    def test_a_role_word_excuses_only_from_in_front_of_the_number(self):
-        # A window that also looked behind the number would excuse "It also
-        # reviewed the #601 batch", where the role word belongs to the verb's
-        # object rather than to the number.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the first batch: #612 and #610. It also "
-            "reviewed the #601 batch.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#601", scope["flag"])
-
-    def test_a_role_word_in_the_next_sentence_does_not_reach_back(self):
-        # The window is bounded to the run's own sentence, because the
-        # neighbouring one is a different claim.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the first batch: #612 and #610. It also "
-            "reviewed #601. The completed #533 cursor was respected.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#601", scope["flag"])
-
-    def test_every_landmark_role_the_tracked_reports_use_still_excuses(self):
-        # The non-vacuity control for all three narrowings at once: each of
-        # the six shapes a tracked report actually uses, beside a batch the
-        # helper must still read.
-        opening = (
-            "This review covered the next two merged pull requests by merge "
-            "time: #612 and #610."
-        )
-        for role in (
-            "It continued below the completed #533 cursor.",
-            "It stopped above the user's exclusive stop at #533.",
-            "Master advanced through #533 while verification was running.",
-            "The previously reported #533 batch was left alone.",
-            "It also reviewed the direct commits that landed after #533.",
-            "No pull request numbered #533 or lower was entered.",
-            "It also reviewed the direct commits interleaved between #533 and #520.",
-        ):
-            with self.subTest(role=role):
-                body = f"# Project Review Findings: PRs #612–#610\n\n{opening} {role}\n"
-                scope = self.scope(body, "docs/project_review_612-610.md")
-                self.assertIsNone(scope["flag"], scope["flag"])
-                self.assertEqual(scope["reviewed"], [612, 610])
-
-    def test_two_predicates_joined_by_and_cannot_excuse_each_other(self):
-        # `and` joins the items of an enumeration as well as two predicates,
-        # so it can never be a clause boundary -- which is why there is no
-        # clause-scoped negation left to reach across one. Both numbers are
-        # reported: flagging one the report did not review costs a
-        # confirmation, and reading past one it did costs the pull request.
-        body = (
-            "# Project Review Findings: PRs #612–#610\n\n"
-            "This review covered the first batch: #612 and #610. It also "
-            "reviewed #601 and skipped #533.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-610.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertIn("#601", scope["flag"])
-        self.assertIn("#533", scope["flag"])
-
-    def test_an_unintroduced_enumeration_is_flagged_with_every_candidate_number(self):
-        # A list with no colon to introduce it: the numbers are plainly the
-        # batch, and just as plainly not something this helper resolved, so
-        # they are reported back rather than taken or dropped.
-        scope = self.scope(AMBIGUOUS_NO_ENUMERATION, "docs/project_review_444-442.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertEqual(scope["candidates"], [442, 444])
-        self.assertIn("#444 and #442", scope["flag"])
-
-    def test_a_paragraph_naming_no_pull_request_at_all_is_flagged(self):
-        # The other end of the same refusal: nothing to take and nothing left
-        # over, which is still not one readable enumeration.
-        body = (
-            "# Project Review Findings: PRs #612–#601\n\n"
-            "This review covered a batch of merged pull requests and wrote up "
-            "what it found.\n"
-        )
-        scope = self.scope(body, "docs/project_review_612-601.md")
-        self.assertEqual(scope["reviewed"], [])
-        self.assertEqual(scope["candidates"], [])
-        self.assertIn("names no reviewed-pull-request enumeration", scope["flag"])
-
-    def test_a_report_with_no_title_paragraph_is_flagged(self):
-        scope = self.scope("Just a line with no heading and no paragraph under one.\n")
-        self.assertIsNotNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [])
 
 
 # --------------------------------------------------------------------------
@@ -1750,8 +1315,8 @@ class MigrationTests(LedgerTestCase):
             self.root,
             "project_review_533-517.md",
             "# Project Review Findings: PRs #533–#517\n\n"
-            "This review covered the next two merged pull requests by merge "
-            "time: #533 and #517.\n",
+            "This review covered the two newest merged pull requests at the "
+            "frozen selection boundary, in merge-time order: #533 and #517.\n",
         )
         result = self.migrate()
         self.assertEqual(self.rows_of(result["state"]), {533, 517})

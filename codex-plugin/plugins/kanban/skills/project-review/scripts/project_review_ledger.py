@@ -40,24 +40,29 @@ would have lied about history:
   the stop included. A stop is the one PR the batch deliberately did *not*
   enter, so it is withheld here unless some other source establishes it, and
   the withholding is recorded in the document rather than left implicit.
-* **Two allowlists, and everything outside them flags.** A report whose
-  opening paragraph does not read as exactly one reviewed-PR enumeration
-  produces no row at all. The reading runs in both directions: one pass finds
-  the enumeration it can be sure of, and a second demands an explanation for
-  every pull request the first did not take. Each direction is decided by a
-  closed set of forms taken from the nineteen tracked reports —
-  `SCOPE_OBJECT_RE` for the clause that introduces an enumeration,
-  `MENTION_FORMS` for a number that is a landmark rather than coverage — and
-  a paragraph matching neither flags by name.
+* **A sentence is read by matching a template whole, or it is not read.** A
+  report whose opening paragraph does not read as exactly one reviewed-PR
+  enumeration produces no row at all. Every sentence naming a pull request
+  must match one of the templates in `SCOPE_TEMPLATES` or
+  `MENTION_TEMPLATES` — the nineteen tracked reports' own sentences with
+  their numbers, counts, dates and code spans punched out — and a paragraph
+  carrying one that matches neither flags by name.
 
-  Closed sets rather than exclusions, because the exclusions were tried. Nine
-  review rounds each produced one wording the denylists did not cover, in both
-  directions: "It also reviewed PR #10" dropped a pull request, "covered
-  direct commits and noted pending pull requests: #10 and #9" invented a
-  review of two. A denylist's default is accept, so every wording nobody
-  anticipated is a silent wrong answer; an allowlist's is refuse, and a
-  refusal costs one confirmation. Adding a form is a reviewed edit with a
-  test beside it, which is the point of the sets being closed.
+  Templates rather than a grammar, because the grammar was tried. Fifteen
+  review rounds each produced a wording it did not cover, in both directions:
+  "It also reviewed PR #10" dropped a pull request, "covered direct commits
+  and noted pending pull requests: #10 and #9" invented a review of two,
+  "If this review had covered the two merged pull requests, they would have
+  been: #10 and #9" invented one from a counterfactual. Widening the rules
+  moved the boundary and never closed it, because anything that composes —
+  a verb here, an object there, free text after — composes into sentences
+  nobody enumerated. A template composes with nothing.
+
+  This is affordable only because the language is finite. These reports are
+  history: from LEDGER-6 the workflow writes into `docs/project_review/`,
+  where this migration never looks, so the set grows only when a consumer
+  turns up with a historical report it does not cover — a reviewed edit with
+  a fixture beside it.
 
   The migration inspects every report, returns every flag, and writes nothing
   while one remains; a caller that knows what a paragraph meant supplies the
@@ -811,208 +816,146 @@ def write_document(root, document: dict) -> Path:
 
 # --------------------------------------------------------------------------
 # Reading a report's own scope enumeration
+#
+# A whole sentence is matched against a literal template, or it is not read at
+# all. Nothing composes: there is no "verb somewhere, object somewhere, free
+# text after", because fifteen review rounds established that every free
+# relationship is one an English sentence walks through. Rounds 1 through 10
+# widened exclusions; rounds 11 through 15 replaced them with allowlists of
+# *parts* and the parts still composed into sentences nobody enumerated -- a
+# counterfactual "If this review had covered ...", a suffix withdrawing its
+# own clause, a reversal one sentence later.
+#
+# The templates below are the nineteen tracked reports' own sentences with
+# their numbers, counts, dates and blanked code spans punched out. That is the
+# whole accepted language. A sentence naming a pull request in any other
+# wording matches nothing and flags its report for one `--confirm`, which is
+# what requirement 5 asks for and what no amount of widening produced.
+#
+# This is affordable because the language is finite and closed. These reports
+# are history: `project-review` has written its last one in this shape, and
+# from LEDGER-6 on it writes into `docs/project_review/` where this migration
+# never looks. A template is added only when a consumer turns up with a
+# historical report this set does not cover, and that is a reviewed edit with
+# a fixture beside it.
 
-# A backticked span is masked rather than removed so every offset below still
-# lines up. It is masked at all because report prose puts paths, SHAs and
+# A backticked span is masked because report prose puts paths, SHAs and
 # boundaries in code spans, and `docs/project_review_463-455.md` inside one is
-# a filename, not two pull requests. A span that spells a pull request the way
-# a pull request is spelled is kept, because masking it would hide it from the
-# accounting pass rather than from the reading -- no opening paragraph in the
-# tracked reports has one, so nothing real is kept by this.
+# a filename rather than two pull requests. A span saying anything this parser
+# would otherwise have to read is kept, so a status in backticks -- "#612
+# (`unreviewed`)" -- cannot be blanked into an annotation that looks benign.
 BACKTICK_RE = re.compile(r"`[^`]*`")
 
-# An annotation on an enumerated pull request -- `#463 (per-entry witnesses)`.
-# Masked before anything else is read, because the annotation is prose and
-# everything below is about the list. A pull request named only inside one is
-# deliberately dropped: an annotation says what a reviewed PR was about, so a
-# number appearing only there is something that PR referred to.
 PAREN_RE = re.compile(r"\([^()]*\)")
 
-# A run of pull-request numbers joined by nothing but list punctuation. One
-# number is a run too: the count was never what separated a claim of coverage
-# from a mention, and a lone dropped pull request is lost exactly as quietly
-# as a list would be.
-RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
-
-# The landmark forms, and the second of this parser's two allowlists. A
-# leftover number is excused only by matching one of these whole -- the text
-# required directly in front of the run, the text required directly behind it,
-# and the shape the run itself must take. A role word merely standing nearby
-# used to be enough, which is how "the previously reported #10 and #9 received
-# a fresh review" and "It also reviewed the previously reported PR #10" were
-# both excused out of existence. Every entry is a phrase a tracked report
-# actually uses, and a mention spelled any other way flags for confirmation.
-MENTION_FORMS = (
-    # "continued below the completed #185 cursor". The clause goes on to say
-    # what the review did cover, so its following predicate is not asked about.
-    (re.compile(r"\b(?:below|above|at|from|past)\s+the\s+completed\s*\Z", re.IGNORECASE),
-     re.compile(r"\A\s*cursors?\b", re.IGNORECASE), None, False),
-    # "interleaved between #446 and #411" -- an interval's two endpoints, and
-    # the clause that names them is about the commits between them.
-    (re.compile(r"\binterleaved\s+between\s*\Z", re.IGNORECASE),
-     None, re.compile(r"\A#\d+\s+and\s+#\d+\Z"), False),
-    # "the user's exclusive stop at #533"
-    (re.compile(r"\bstop(?:ped|s)?\s+(?:at|before|above|below)\s*\Z", re.IGNORECASE),
-     None, None, True),
-    # "Master advanced through #466"
-    (re.compile(r"\badvanced\s+(?:through|to|past|beyond)\s*\Z", re.IGNORECASE),
-     None, None, True),
-    # "the direct commits that landed after #456"
-    (re.compile(r"\blanded\s+(?:after|before)\s*\Z", re.IGNORECASE), None, None, True),
-    # "The previously reported #386 ... #361 batch was explicitly skipped
-    # rather than reviewed again". Matched over the whole clause, not its
-    # opening: a prefix match accepted "batch was skipped initially but
-    # reviewed in this pass", whose second half reverses the first. The filler
-    # refuses a negation of its own, so "batch was not skipped" is not a
-    # non-coverage predicate either.
-    (re.compile(r"\breported\s*\Z", re.IGNORECASE),
-     re.compile(
-         r"\A\s*batch(?:es)?\s+(?:was|were)\s+"
-         r"(?:(?!not\b|never\b|only\b|nearly\b)\w+\s+){0,3}"
-         r"(?:skipped|excluded|omitted|ignored|untouched|left)\b"
-         r"(?:\s|[,.]|\b(?:rather|than|reviewed|covered|again|here|this|that|"
-         r"time|round|pass|instead|alone|entirely|altogether|previously|"
-         r"already|over|for|now)\b)*\Z",
-         re.IGNORECASE,
-     ), None, False),
-    # "no pull request numbered #533 or lower"
-    (re.compile(r"\bnumbered\s*\Z", re.IGNORECASE),
-     re.compile(r"\A\s*or\s+(?:lower|higher|below|above|newer|older)\b", re.IGNORECASE),
-     None, True),
-)
-
-
-# There is deliberately no clause- or sentence-scoped "this was not reviewed"
-# excuse here. Three attempts at one each reached a pull request it should not
-# have: a sentence-wide negation silenced the positive half of "It did not
-# review #8, but it also reviewed these: #10 and #9"; narrowing it to the
-# conjunct left "It also reviewed #10 and skipped #9", where `and` joins two
-# predicates and cannot be split on because it also joins a batch's items.
-# The excuse is now one rule -- the word immediately in front of the run --
-# because that is the only relationship a parser can establish without
-# understanding the sentence. A pull request a report says it did *not* review
-# therefore flags unless that word puts it somewhere else, which costs a
-# confirmation and never a dropped pull request.
-
 NUMBER_RE = re.compile(r"#(\d+)")
-
-# An annotation this parser may throw away: plain words, no pull-request
-# number, and no participle. `-ed` and `-ing` are where a report puts a pull
-# request's review status, so a parenthesis carrying one is kept and read
-# rather than erased.
-BENIGN_ANNOTATION_RE = re.compile(
-    r"\A\((?:[^()#]*?)\)\Z", re.DOTALL
-)
-PARTICIPLE_RE = re.compile(r"\b\w+(?:ed|ing)\b", re.IGNORECASE)
 
 # Sentence boundaries as report prose actually spells them. A period inside a
 # code span is already masked, so this does not split `origin/master@a1b2c3d`
 # or a filename.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+")
 
-# The verbs an opening paragraph uses to say what the batch actually entered.
-SCOPE_TRIGGER_RE = re.compile(
-    r"\b(?:covered|covers|covering|reviewed|reviewing|reviews|review of)\b",
+# What an annotation may say before this parser is willing to drop it. Only
+# the enumeration's own annotations are ever dropped -- "#463 (per-entry
+# witnesses ...)" is one report's way of saying what a reviewed pull request
+# was about -- and only when they say nothing about reviewing. A participle is
+# where review status lives, so "(not reviewed)", "(unreviewed)", "(pending)"
+# and "(skipped)" all survive, and a surviving annotation is text no template
+# contains.
+# A participle, and not an abbreviated commit that happens to end in one:
+# `097eeed` is seven hex characters, and `dabbed` would be six. The lookahead
+# requires a letter outside the hex alphabet, which every English participle
+# this matters for has and no SHA can.
+PARTICIPLE_RE = re.compile(
+    r"\b(?=[A-Za-z]*[g-zG-Z])[A-Za-z]{2,}(?:ed|ing)\b", re.IGNORECASE
+)
+ANNOTATION_KEEP_RE = re.compile(
+    r"#\d+|\b(?:PRs?|pull\s+requests?|covered|covers|covering|reviewed|"
+    r"reviewing|reviews|not|no|none|never|neither|nothing|without)\b",
     re.IGNORECASE,
 )
 
-# ... and the words that turn one of those into its opposite, anywhere before
-# the colon. "The previously reported batch was skipped rather than reviewed
-# again: #386, ..." carries a reviewing verb and a well-formed enumeration and
-# means precisely the opposite of coverage, and the negation that says so sits
-# before the verb rather than after it. Refusing the sentence does not import
-# the wrong thing and does not silently drop the right one either: a paragraph
-# left with no readable enumeration is flagged for confirmation. A cursor, a
-# boundary and a stop are not negations and are not listed here -- every real
-# report names those before its verb while still enumerating real coverage
-# after the colon, and the shape check below is what keeps them out.
-SCOPE_NEGATION_RE = re.compile(
-    r"\b(?:not|no|none|never|neither|nothing|without|rather than|instead of|"
-    r"skipped|skipping|excluded|excluding|omitted|omitting|pending|deferred|"
-    r"postponed|outstanding)\b",
-    re.IGNORECASE,
+# A parenthesis anywhere but inside the enumeration is replaced by a character
+# no template contains, so a qualifier bracketed into an otherwise-matching
+# sentence -- "..., in merge-time order (but none were actually reviewed):
+# #600, ..." -- cannot be blanked back into a match.
+UNREADABLE_MARK = "\x00"
+
+HOLE_RE = re.compile(r"\{([A-Z]+)\}")
+
+HOLE_PATTERNS = {
+    # The reviewed enumeration a scope template introduces.
+    "ENUM": r"(?P<enum>#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*)",
+    # A pull request named as something other than reviewed work.
+    "NUM": r"#\d+",
+    "NUMS": r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*",
+    "COUNT": r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+             r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+             r"nineteen|twenty|twenty-one|twenty-two|twenty-three|"
+             r"twenty-nine|thirty|\d+)",
+    "DATE": r"\d{4}-\d{2}-\d{2}",
+    # What a run of blanked code spans leaves behind: their separators.
+    "LIST": r"(?:[,\s]|\band\b)*",
+}
+
+# The sentences that introduce a batch. Exactly one of these must match, and
+# its `{ENUM}` is the batch.
+SCOPE_TEMPLATES = (
+    "This review continued below the completed {NUM} cursor and covered the next {COUNT} merged pull requests by merge time: {ENUM}.",
+    "This review continued below the completed {NUM} cursor and covered the next {COUNT} merged pull requests in merge-time order: {ENUM}.",
+    "This review continued below the completed {NUM} cursor and covered the next {COUNT} genuinely unreviewed merged pull requests in merge-time order: {ENUM}.",
+    "This review continued below the completed {NUM} cursor and covered {COUNT} previously unreviewed merged pull requests at the frozen selection boundary, newest-first by merge time: {ENUM}.",
+    "This review covered the {COUNT} newest merged pull requests as of {DATE}, ordered by merge time: {ENUM}.",
+    "This review covered the {COUNT} newest merged pull requests at the frozen review boundary on {DATE}, ordered by merge time: {ENUM}.",
+    "This review covered the {COUNT} newest merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.",
+    "This review covered the {COUNT} newest uncovered merged pull requests at the frozen selection boundary, in merge-time order: {ENUM}.",
+    "A senior review of the {COUNT} merged pull requests that landed after the batch covered, taken newest-first over: {ENUM}.",
+    "This bounded review covered every eligible merged pull request remaining above the user's exclusive stop at {NUM}, in merge-time order: {ENUM}.",
 )
 
-# A pull-request noun, and the object a scope clause's reviewing verb takes.
-#
-# This is an allowlist, and that is the whole design. Nine review rounds were
-# spent widening a denylist -- "a verb, a pull-request noun, and none of these
-# other object nouns" -- and each round produced a wording it did not cover:
-# "covered direct commits and noted pending pull requests", then "covered
-# metadata associated with pending merged pull requests". A denylist's default
-# is accept, so every wording nobody anticipated is a silent wrong answer.
-#
-# So a scope clause has to say what all nineteen tracked reports say, in the
-# shape they say it: a reviewing verb, a run of quantifier and qualifier
-# words, and a pull-request noun. "covered the next twelve merged pull
-# requests", "covered every eligible merged pull request", "review of the
-# three merged pull requests". Anything else is a clause this helper does not
-# read, and an unread clause flags its report for one confirmation.
-PR_NOUN_RE = re.compile(r"\b(?:PRs?|pull\s+requests?)\b", re.IGNORECASE)
-
-# The clause is matched whole, from its first word. A substring match read
-# "If this review had covered the two merged pull requests, they would have
-# been: #10 and #9" as a claim, because the claim's words were all present --
-# in a counterfactual. So the subject and the verb are anchored at the start
-# of the clause, and only what follows the object is free text.
-SCOPE_CLAUSE_RE = re.compile(
-    r"\A\s*(?:"
-    r"(?:this|the)\s+(?:bounded\s+|senior\s+|initial\s+|follow-up\s+)?review\s+"
-    r"(?:continued\s+below\s+the\s+completed\s+#\d+\s+cursors?\s+and\s+)?"
-    r"(?:(?:also|then|further|additionally|subsequently|separately)\s+)?"
-    r"(?:covered|covers|reviewed|reviews)\s+"
-    r"|"
-    r"(?:a|an)\s+(?:senior\s+|bounded\s+)?review\s+of\s+"
-    r")",
-    re.IGNORECASE,
+# The sentences that name a pull request for some other reason: a cursor, an
+# interval's endpoints, a landing that arrived mid-review, a batch someone
+# else reported, a numeric bound. Matching one of these contributes nothing,
+# which is the point -- it says the numbers were accounted for rather than
+# overlooked.
+MENTION_TEMPLATES = (
+    "There were no direct first-parent commits interleaved between {NUMS}.",
+    "It also reviewed the direct first-parent commits {LIST} interleaved between {NUMS}.",
+    "It also reviewed the direct first-parent documentation commit {LIST} interleaved between {NUMS}.",
+    "It also reviewed the direct first-parent documentation commits {LIST} interleaved between {NUMS}.",
+    "It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}: {LIST}.",
+    "It also reviewed all {COUNT} direct first-parent documentation commits interleaved between {NUMS}, from through: {LIST}.",
+    "It also reviewed the direct first-parent documentation commits and that landed after {NUMS} inside that boundary.",
+    "Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and the finding below was rechecked at current.",
+    "Master advanced through {NUMS} while verification was running; that newer landing was excluded rather than moving the boundary, and both findings below were rechecked at current.",
+    "Master advanced through {NUMS} while the review was running; those newer landings were excluded rather than moving the boundary, and both findings below were rechecked at current.",
+    "The previously reported {NUMS} batch was explicitly skipped rather than reviewed again.",
+    "The bound therefore produced {COUNT} pull requests rather than the requested {COUNT}; no pull request numbered {NUMS} or lower was entered.",
 )
 
-# What that verb takes: a run of quantifier and qualifier words and a
-# pull-request noun, anchored so it begins where the verb ends.
-SCOPE_OBJECT_RE = re.compile(
-    r"\A(?:(?:the|a|an|all|both|each|every|any|these|those|its|our|their|"
-    r"next|first|last|latest|newest|oldest|earliest|remaining|further|"
-    r"additional|more|other|same|following|preceding|"
-    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
-    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
-    r"\d+|"
-    r"merged|landed|open|closed|new|previously|genuinely|truly|already|still|"
-    r"eligible|selectable|unreviewed|uncovered|reviewed|covered|outstanding|"
-    r"senior|bounded|interleaved)\s+)*"
-    r"(?:PRs?|pull\s+requests?)\b",
-    re.IGNORECASE,
-)
 
-# ... and what may follow that object, up to the colon. Closed too, because a
-# free suffix was the last place a clause could say the opposite of what its
-# opening said: "covered the two merged pull requests' metadata but failed to
-# review the pull requests themselves: #601 and #533" opens with an accepted
-# form and ends by withdrawing it.
-#
-# The vocabulary is every word the nineteen tracked reports put there -- the
-# ordering phrase, the frozen boundary, the stop the batch stayed above, the
-# batch a senior review followed -- and nothing else. A wording outside it
-# flags for one confirmation, which is the same bargain the rest of the
-# parser makes.
-SCOPE_SUFFIX_RE = re.compile(
-    r"\A(?:\s|[,;'’]|#\d+|\d{4}-\d{2}-\d{2}|\d+|"
-    r"\b(?:by|in|at|on|of|as|to|over|up|and|the|its|their|that|those|these|"
-    r"merge|merge-time|time|order|ordered|sorted|taken|"
-    r"newest|oldest|newest-first|oldest-first|first|last|"
-    r"frozen|selection|review|boundary|head|history|repository|"
-    r"remaining|above|below|between|before|after|inside|through|"
-    r"user|users|user’s|exclusive|stop|cursor|batch|landed|landing|"
-    r"covered|reviewed|merged|eligible|uncovered|unreviewed|previously)\b"
-    r"|user's)*\Z",
-    re.IGNORECASE,
-)
+def compile_template(template: str):
+    """One template as a whole-sentence pattern.
 
-# What a reviewed-PR enumeration looks like once its annotations are gone:
-# pull-request numbers, separators, and nothing else. This is the whole of the
-# "exactly one reviewed-PR enumeration" test -- a colon introducing SHAs,
-# filenames, or prose is not one, so the sentence that lists a batch's direct
-# commits contributes nothing without needing a rule of its own.
-ENUMERATION_RE = re.compile(r"\A#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*\Z")
+    Tokens are joined by `\\s*` so a report's line wrapping and its spacing
+    around punctuation do not matter, and nothing else is permitted between
+    them: a template matches the sentence entire or not at all.
+    """
+    parts = []
+    for token in template.split():
+        pieces = []
+        index = 0
+        for hole in HOLE_RE.finditer(token):
+            pieces.append(re.escape(token[index:hole.start()]))
+            pieces.append(HOLE_PATTERNS[hole.group(1)])
+            index = hole.end()
+        pieces.append(re.escape(token[index:]))
+        parts.append("".join(pieces))
+    return re.compile(r"\A" + r"\s*".join(parts) + r"\Z", re.IGNORECASE)
+
+
+SCOPE_PATTERNS = tuple(compile_template(template) for template in SCOPE_TEMPLATES)
+MENTION_PATTERNS = tuple(compile_template(template) for template in MENTION_TEMPLATES)
 
 
 def opening_paragraph(text: str):
@@ -1044,115 +987,15 @@ def opening_paragraph(text: str):
 def _masked(text: str) -> str:
     def blank(match):
         span = match.group(0)
-        return span if NUMBER_RE.search(span) else " " * len(span)
-
-    return BACKTICK_RE.sub(blank, text)
-
-
-def _unannotated(text: str) -> str:
-    """The same text with every parenthesised annotation blanked in place.
-
-    Blanked rather than removed so every offset below still lines up with the
-    paragraph it came from, which is what lets a run be placed relative to the
-    colon that introduced the accepted enumeration.
-
-    A parenthesis is left alone whenever it says anything this parser would
-    otherwise have to read: a pull-request number, a reviewing verb, a
-    negation, or a pull-request noun. "(It also reviewed #10.)" is a whole
-    sentence in brackets and "#601 (not reviewed)" withdraws the coverage its
-    own enumeration claims, and blanking either would hide it rather than
-    answer it. Left in place, both break the enumeration shape and flag the
-    report.
-
-    What may be blanked is stated positively: an annotation of plain words,
-    none of them a participle. Review status lives in participles --
-    "(not reviewed)", "(unreviewed)", "(pending)", "(skipped)", "(deferred)"
-    -- so excluding them excludes the whole family rather than the spellings
-    anyone thought to list, which a word-by-word exclusion did not: it named
-    `not reviewed` and let `unreviewed` through. The tracked reports'
-    annotations say what a reviewed pull request was about -- "(the
-    pull-request template)", "(the issue templates)", "(per-entry witnesses
-    for `docs/design.md` §3 and §20)" -- and carry no participle at all, so
-    all three still blank.
-    """
-    def blank(match):
-        span = match.group(0)
-        if not BENIGN_ANNOTATION_RE.match(span) or PARTICIPLE_RE.search(span):
+        if (
+            NUMBER_RE.search(span)
+            or ANNOTATION_KEEP_RE.search(span)
+            or PARTICIPLE_RE.search(span)
+        ):
             return span
         return " " * len(span)
 
-    while True:
-        reduced = PAREN_RE.sub(blank, text)
-        if reduced == text:
-            return text
-        text = reduced
-
-
-def _enumeration_clauses(sentence: str) -> list:
-    """Every colon in `sentence` that introduces pull-request numbers.
-
-    A sentence introduces its enumeration with a colon, so the colons are
-    where the candidates are. Taking only the last one would read "covered one
-    batch: #12 and #11; it also reviewed another: #10 and #9" as coverage of
-    #10 and #9 alone and drop the other two silently -- the single outcome
-    this parser must never produce. Each colon is judged against the text
-    before it, which is what says whether the numbers after it were reviewed,
-    and against the segment up to the next colon, which is where they are.
-    """
-    positions = [index for index, character in enumerate(sentence) if character == ":"]
-    clauses = []
-    for order, position in enumerate(positions):
-        head = sentence[:position]
-        end = positions[order + 1] if order + 1 < len(positions) else len(sentence)
-        # The reviewing verb has to be in the clause that introduces the
-        # colon, not merely somewhere earlier in the sentence. "No pull
-        # requests were reviewed; the candidates were: #10 and #9" carries one
-        # in its first clause and claims the opposite in its second, and a
-        # search over the whole head would have read the candidates as
-        # coverage. The negation search stays over the whole head, because
-        # widening *that* only refuses more.
-        segment = head.rsplit(";", 1)[-1]
-        if SCOPE_NEGATION_RE.search(head):
-            continue
-        # The clause has to spell a reviewing verb taking pull requests, in
-        # the shape the tracked reports spell it. A verb somewhere in the
-        # clause is not that: "covered direct commits and noted pending pull
-        # requests" and "covered metadata associated with pending merged pull
-        # requests" both carry one, and neither claims the list.
-        prefix = SCOPE_CLAUSE_RE.match(segment)
-        if prefix is None:
-            continue
-        object_match = SCOPE_OBJECT_RE.match(segment[prefix.end():])
-        if object_match is None:
-            continue
-        if not SCOPE_SUFFIX_RE.match(segment[prefix.end() + object_match.end():]):
-            continue
-        if NUMBER_RE.search(sentence[position + 1:end]):
-            clauses.append(position)
-    return clauses
-
-
-def _sentence_enumeration(sentence: str):
-    """`(reviewed, ambiguous, accepted_from)` for one sentence.
-
-    `ambiguous` is a sentence carrying more than one reviewed enumeration. It
-    is not the same as reading nothing: a sentence this parser cannot resolve
-    must flag its whole report even when some other sentence did resolve, or
-    the report's coverage would be the part that happened to be readable.
-    `accepted_from` is the offset the accepted enumeration starts at, so the
-    mention check below can tell the numbers this reading took from the ones
-    it left behind.
-    """
-    clauses = _enumeration_clauses(sentence)
-    if not clauses:
-        return None, False, None
-    if len(clauses) > 1:
-        return None, True, None
-    start = clauses[0] + 1
-    normalized = " ".join(sentence[start:].split()).rstrip(".").strip()
-    if not normalized or not ENUMERATION_RE.match(normalized):
-        return None, False, None
-    return [int(number) for number in NUMBER_RE.findall(normalized)], False, start
+    return BACKTICK_RE.sub(blank, text)
 
 
 def _sentence_spans(text: str) -> list:
@@ -1166,82 +1009,33 @@ def _sentence_spans(text: str) -> list:
     return spans
 
 
-def _unaccounted_mentions(sentence: str, accepted_from) -> list:
-    """Every pull request the accepted reading neither took nor accounts for.
+def _normalized(sentence: str) -> str:
+    """One sentence in the form a template is written in.
 
-    This is the parser's whole safety property, and it runs the opposite way
-    round from the reading above. The reading looks for the one enumeration it
-    can be sure of; this looks at everything it did *not* take and demands an
-    explanation for each. A number with none is not quietly ignored -- it
-    flags the report, and the flag names it, so the operator decides.
-
-    One thing explains a number: it matches a landmark phrase in
-    `MENTION_FORMS` whole -- the words required in front of it, the words
-    required behind it, and the shape of the run itself. A role word merely
-    standing nearby is not enough and used to be, which is how "the previously
-    reported #10 and #9 received a fresh review" and "It also reviewed the
-    previously reported PR #10" were excused out of existence.
-
-    Everything looser than that has been tried here and has reached a pull
-    request it should not have: a negation somewhere in the sentence, then
-    somewhere in the conjunct, then a bare preposition in front of the number.
-    A preposition says where a number sits in a phrase and nothing about what
-    the phrase claims, which is why "It also reviewed PRs from #601 through
-    #533" walked past it. "It also reviewed #10", "It also reviewed PR #10",
-    "it also reviewed these: #10 and #9", and "It also reviewed #10 and
-    skipped #9" fail this too, which is the point.
+    Line wrapping collapses, a space before punctuation goes, and the
+    enumeration's own annotations are dropped when they say nothing about
+    reviewing. Every other parenthesis becomes a character no template
+    contains, so bracketing a qualifier into an otherwise-matching sentence
+    leaves it unmatched rather than blanked back into a match.
     """
-    unaccounted = []
-    for match in RUN_RE.finditer(sentence):
-        if accepted_from is not None and match.start() >= accepted_from:
-            continue
-        if _landmark_form(sentence, match):
-            continue
-        unaccounted.append(" ".join(match.group(0).split()))
-    return unaccounted
+    colon = sentence.find(":")
+    head = sentence if colon < 0 else sentence[:colon]
+    tail = "" if colon < 0 else sentence[colon:]
 
+    def drop(match):
+        span = match.group(0)
+        if ANNOTATION_KEEP_RE.search(span) or PARTICIPLE_RE.search(span):
+            return UNREADABLE_MARK
+        return " "
 
-def _landmark_form(sentence: str, match) -> bool:
-    """Whether this run matches one of `MENTION_FORMS` whole.
-
-    A form that matched was once enough on its own, and "It also reviewed the
-    reported #10 and #9 batch" satisfied one while the prose plainly said the
-    batch was reviewed. So a reviewing verb standing directly in front of the
-    form cancels it: a landmark phrase is what a sentence says a number *is*,
-    and a phrase handed straight to a reviewing verb is that verb's object
-    instead. The tracked reports put several words between the two -- "also
-    reviewed the direct first-parent documentation commits ... interleaved
-    between #219 and #196" -- so the cancellation reaches three words and no
-    further.
-    """
-    before = sentence[: match.start()]
-    after = sentence[match.end():]
-    run = " ".join(match.group(0).split())
-    for lead, trail, shape, closed in MENTION_FORMS:
-        found = lead.search(before)
-        if found is None:
-            continue
-        # Trails are read against the rest of the sentence, not the rest of
-        # the clause: "batch was skipped; it was reviewed again here" put its
-        # reversal one semicolon away, where a clause-bounded read never
-        # looked. A form whose pattern ends at `\Z` is therefore asking about
-        # the whole remainder rather than about how it starts.
-        if trail is not None and not trail.match(after):
-            continue
-        if shape is not None and not shape.match(run):
-            continue
-        if SCOPE_TRIGGER_RE.search(" ".join(before[: found.start()].split()[-3:])):
-            continue
-        # For the forms whose tracked wording says nothing further about the
-        # run, a reviewing verb later in the same clause is that clause
-        # claiming it after all -- "the exclusive stop at #10 was also
-        # reviewed". The two forms whose own clause goes on to discuss the
-        # review are exempt, and the reported-batch form closes its predicate
-        # in `trail` instead.
-        if closed and SCOPE_TRIGGER_RE.search(after):
-            continue
-        return True
-    return False
+    while True:
+        reduced = PAREN_RE.sub(drop, tail)
+        if reduced == tail:
+            break
+        tail = reduced
+    head = PAREN_RE.sub(UNREADABLE_MARK, head)
+    collapsed = " ".join((head + tail).split())
+    return re.sub(r"\s+([,;:.])", r"\1", collapsed).strip()
 
 
 def report_scope(text: str, path: str) -> dict:
@@ -1263,44 +1057,38 @@ def report_scope(text: str, path: str) -> dict:
             ),
         }
     masked = _masked(paragraph)
-    # Candidates keep their annotations, because the operator answering a flag
-    # wants every number the paragraph mentions, not the subset this parser
-    # would have been willing to read.
     candidates = sorted({int(number) for number in NUMBER_RE.findall(masked)})
-    readable = _unannotated(masked)
     enumerations = []
-    ambiguous = False
-    readings = []
-    for _, sentence in _sentence_spans(readable):
-        found, unclear, accepted_from = _sentence_enumeration(sentence)
-        if unclear:
-            ambiguous = True
-        elif found:
-            enumerations.append(found)
-        readings.append((sentence, accepted_from))
-    # A paragraph with no single accepted reading has taken nothing, so every
-    # number in it is left over and every one of them is reported.
-    unaccounted = [
-        run
-        for sentence, accepted_from in readings
-        for run in _unaccounted_mentions(
-            sentence, accepted_from if len(enumerations) == 1 else None
-        )
-    ]
-    if len(enumerations) == 1 and not ambiguous and not unaccounted:
+    unreadable = []
+    for _, sentence in _sentence_spans(masked):
+        if "#" not in sentence:
+            continue
+        normalized = _normalized(sentence)
+        matched = [
+            found
+            for found in (pattern.match(normalized) for pattern in SCOPE_PATTERNS)
+            if found
+        ]
+        if matched:
+            enumerations.extend(
+                [int(number) for number in NUMBER_RE.findall(found.group("enum"))]
+                for found in matched
+            )
+            continue
+        if any(pattern.match(normalized) for pattern in MENTION_PATTERNS):
+            continue
+        unreadable.append(normalized)
+    if len(enumerations) == 1 and not unreadable:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
-    if ambiguous:
-        reason = "carries more than one reviewed-pull-request enumeration in a single sentence"
-    elif len(enumerations) > 1:
-        reason = f"names {len(enumerations)} reviewed-pull-request enumerations"
-    elif unaccounted:
+    if unreadable:
         reason = (
-            f"names {'; '.join(unaccounted)} outside any enumeration this "
-            "helper can read as its scope, and outside any wording that would "
-            "explain them as something other than reviewed work"
+            "carries a sentence naming pull requests in a wording this helper "
+            f"does not read: {unreadable[0]!r}"
         )
-    else:
+    elif not enumerations:
         reason = "names no reviewed-pull-request enumeration"
+    else:
+        reason = f"names {len(enumerations)} reviewed-pull-request enumerations"
     return {
         "path": path,
         "reviewed": [],
