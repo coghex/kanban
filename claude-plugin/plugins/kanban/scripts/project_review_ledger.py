@@ -906,6 +906,30 @@ SCOPE_NEGATION_RE = re.compile(
 # means the threshold.
 PR_NOUN_RE = re.compile(r"\b(?:PRs?|pull\s+requests?)\b", re.IGNORECASE)
 
+# The other things a project review reads, and therefore the other things a
+# reviewing verb in a scope sentence can be about. One of these standing
+# between the verb and the colon means the verb took it rather than the pull
+# requests after the colon: "covered direct commits and noted pending pull
+# requests: #10 and #9" reviewed commits, and reading its list as coverage
+# would invent a review of two pull requests it called pending.
+OTHER_OBJECT_RE = re.compile(
+    r"\b(?:commit|commits|file|files|document|documents|documentation|"
+    r"report|reports|landing|landings|issue|issues|branch|branches)\b",
+    re.IGNORECASE,
+)
+
+# "... #10 and #9 were also reviewed." A landmark role in front of a run says
+# where the numbers came from; a reviewing predicate right behind them says
+# what was done with them, and the second answers the question the first only
+# looks like it answers.
+PASSIVE_SCOPE_RE = re.compile(
+    r"\A\s*(?:were|was|are|is|have\s+been|has\s+been|had\s+been)\s+"
+    r"(?:(?:also|all|each|both|then|since|subsequently|separately|"
+    r"individually|duly|indeed|likewise)\s+)*"
+    r"(?:reviewed|covered)\b",
+    re.IGNORECASE,
+)
+
 # What a reviewed-PR enumeration looks like once its annotations are gone:
 # pull-request numbers, separators, and nothing else. This is the whole of the
 # "exactly one reviewed-PR enumeration" test -- a colon introducing SHAs,
@@ -996,9 +1020,21 @@ def _enumeration_clauses(sentence: str) -> list:
         # search over the whole head would have read the candidates as
         # coverage. The negation search stays over the whole head, because
         # widening *that* only refuses more.
-        if not SCOPE_TRIGGER_RE.search(head.rsplit(";", 1)[-1]):
+        segment = head.rsplit(";", 1)[-1]
+        trigger = SCOPE_TRIGGER_RE.search(segment)
+        if trigger is None:
             continue
         if SCOPE_NEGATION_RE.search(head):
+            continue
+        # The clause has to say the list is pull requests, and has to name
+        # nothing else for the verb to have taken instead. Every tracked
+        # report's scope clause reads "<verb> ... merged pull requests ...:",
+        # and the two ways a clause can carry a reviewing verb without
+        # claiming the list -- naming some other object for it, or naming no
+        # pull request at all -- are what these two refuse.
+        if not PR_NOUN_RE.search(segment):
+            continue
+        if OTHER_OBJECT_RE.search(segment[trigger.end():]):
             continue
         if NUMBER_RE.search(sentence[position + 1:end]):
             clauses.append(position)
@@ -1075,9 +1111,15 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
             continue
         window = " ".join(sentence[: match.start()].split()[-ROLE_WINDOW:])
         roles = list(MENTION_ROLE_RE.finditer(window))
-        # The nearest role word, and nothing between it and the number that
-        # would make the number a pull-request noun's rather than the role's.
-        if roles and not PR_NOUN_RE.search(window[roles[-1].end():]):
+        # The nearest role word, with nothing between it and the number that
+        # would make the number a pull-request noun's rather than the role's,
+        # and nothing directly behind the number saying it was reviewed after
+        # all.
+        if (
+            roles
+            and not PR_NOUN_RE.search(window[roles[-1].end():])
+            and not PASSIVE_SCOPE_RE.match(sentence[match.end():])
+        ):
             continue
         unaccounted.append(run)
     return unaccounted

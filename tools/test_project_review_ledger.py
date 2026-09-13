@@ -267,7 +267,7 @@ This review covered the next two merged pull requests by merge time: #520 and
 AMBIGUOUS_TWO_ENUMERATIONS = """# Project Review Findings: PRs #612–#601
 
 This review covered the following merged pull requests: #612 and #610. It also
-reviewed these: #602 and #601.
+reviewed these merged pull requests: #602 and #601.
 """
 
 # Two reviewed enumerations inside one sentence. Reading only the last colon
@@ -275,8 +275,8 @@ reviewed these: #602 and #601.
 # which is the one outcome requirement 5 forbids outright.
 AMBIGUOUS_ONE_SENTENCE = """# Project Review Findings: PRs #612–#520
 
-This review covered one batch: #612 and #610; it also reviewed another: #533
-and #520.
+This review covered one batch of merged pull requests: #612 and #610; it also
+reviewed another set of merged pull requests: #533 and #520.
 """
 
 AMBIGUOUS_NO_ENUMERATION = """# Project Review Findings: PRs #444–#442
@@ -1014,8 +1014,9 @@ class ReportScopeTests(LedgerTestCase):
         body = (
             "# Project Review Findings: PRs #612–#517\n\n"
             "This review covered the next two merged pull requests by merge "
-            "time: #571 and #570. It covered one further batch: #612 and "
-            "#610; it also reviewed another: #533 and #520.\n"
+            "time: #571 and #570. It covered one further batch of merged pull "
+            "requests: #612 and #610; it also reviewed another set of merged "
+            "pull requests: #533 and #520.\n"
         )
         scope = self.scope(body, "docs/project_review_612-517.md")
         self.assertEqual(scope["reviewed"], [])
@@ -1206,6 +1207,84 @@ class ReportScopeTests(LedgerTestCase):
         scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
+
+    def test_a_scope_clause_must_say_the_list_is_pull_requests(self):
+        # Every tracked report's scope clause reads "<verb> ... merged pull
+        # requests ...:", and the two ways a clause can carry a reviewing verb
+        # without claiming the list are refused: naming some other object for
+        # the verb, and naming no pull request at all. "covered direct commits
+        # and noted pending pull requests: #10 and #9" reviewed commits, and
+        # reading its list as coverage would invent a review of two pull
+        # requests it called pending.
+        for body in (
+            "This review covered direct commits and noted pending pull requests: "
+            "#601 and #533.",
+            "This review covered the documentation landings and the pull requests "
+            "behind them: #601 and #533.",
+            "This review covered the following: #601 and #533.",
+        ):
+            with self.subTest(paragraph=body):
+                scope = self.scope(
+                    f"# Project Review Findings: PRs #601–#533\n\n{body}\n",
+                    "docs/project_review_601-533.md",
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
+
+    def test_the_tracked_scope_clause_shape_is_what_the_parser_accepts(self):
+        # The non-vacuity control for the clause above: the shape all nineteen
+        # tracked reports use, in each of the wordings they use it in.
+        for clause in (
+            "This review continued below the completed #533 cursor and covered "
+            "the next two merged pull requests by merge time",
+            "This review covered the two newest merged pull requests at the "
+            "frozen selection boundary, in merge-time order",
+            "This review covered the two newest uncovered merged pull requests "
+            "as of 2026-09-05, ordered by merge time",
+            "This bounded review covered every eligible merged pull request "
+            "remaining above the user's exclusive stop at #533, in merge-time "
+            "order",
+            "A senior review of the two merged pull requests that landed after "
+            "the batch `docs/project_review_533-517.md` covered, taken "
+            "newest-first over `coghex/kanban`",
+        ):
+            with self.subTest(clause=clause[:48]):
+                body = f"# Project Review Findings: PRs #612–#610\n\n{clause}: #612 and #610.\n"
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_a_reviewing_predicate_behind_a_run_cancels_its_role_word(self):
+        # A role word in front says where the numbers came from; a reviewing
+        # predicate right behind says what was done with them, and the second
+        # answers the question the first only looks like it answers.
+        for tail in (
+            "were also reviewed",
+            "were reviewed",
+            "have been reviewed",
+            "were subsequently covered",
+        ):
+            with self.subTest(tail=tail):
+                body = (
+                    "# Project Review Findings: PRs #612–#610\n\n"
+                    "This review covered the next two merged pull requests by "
+                    "merge time: #612 and #610. The previously reported #601 "
+                    f"and #533 {tail}.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("#601 and #533", scope["flag"])
+        # ... while the tracked wording, which puts a different verb behind the
+        # run, still reads as the mention it is.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #610. The previously reported #601 and #533 batch "
+            "was explicitly skipped rather than reviewed again.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertIsNone(scope["flag"], scope["flag"])
+        self.assertEqual(scope["reviewed"], [612, 610])
 
     def test_a_negative_claim_does_not_introduce_a_reviewed_enumeration(self):
         # "No pull requests were reviewed; the candidates were: #10 and #9"
