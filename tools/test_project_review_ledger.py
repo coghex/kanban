@@ -455,6 +455,34 @@ class DocumentParsingTests(LedgerTestCase):
             )
         self.assertIn("2", str(raised.exception))
 
+    def test_a_second_fenced_payload_with_no_marker_is_refused(self):
+        # Counting only the blocks behind a marker let a bare second fence
+        # through, which is the bad-merge case one step along from a second
+        # marker: accepted, ignored, and invisible.
+        rendered = LEDGER.render_document(self.parse(valid_payload()))
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(
+                rendered + '\n```json\n{"version": 1}\n```\n', "fixture"
+            )
+        self.assertIn("2 fenced JSON blocks", str(raised.exception))
+
+    def test_a_number_too_long_for_python_to_convert_is_refused(self):
+        # `int()` refuses a string of more than a few thousand digits, so a
+        # payload holding one left a traceback where the refusal belongs.
+        # Written as raw JSON: `json.dumps` refuses the same integer, which
+        # is the point -- the number only ever arrives as text.
+        oversized = (
+            '{"version": 1, "repositories": {"coghex/kanban": {"rows": {}, '
+            '"direct": {"endpoint": null, "reviewed": []}, '
+            '"excluded": {"prs": [' + "9" * 5000 + '], "commits": []}, '
+            '"migration": {"source": null, "boundary": null, '
+            '"withheld_boundary": null}}}}'
+        )
+        with self.assertRaises(LEDGER.LedgerError):
+            LEDGER.parse_document(ledger_text(oversized), "fixture")
+        with self.assertRaises(LEDGER.LedgerError):
+            LEDGER._confirmation("docs/project_review_12-11.md=#" + "1" * 5000)
+
     def test_a_second_payload_block_is_refused(self):
         # A bad merge or a hand-edit leaves two. Taking the first would
         # silently choose between two ledgers, and nothing afterwards could
@@ -537,6 +565,10 @@ class DocumentParsingTests(LedgerTestCase):
             ),
             "row key is an arabic-indic digit": (
                 {"\u0663": completed_row()},
+                "not a pull-request number",
+            ),
+            "row key longer than any number": (
+                {"9" * 5000: completed_row()},
                 "not a pull-request number",
             ),
             "row is not an object": ({"602": "clean"}, "not an object"),
@@ -1388,6 +1420,23 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(
             self.paragraph(sentence.replace(" ", "\n", 3))["reviewed"], [612, 610]
         )
+
+    def test_a_pull_request_number_is_ascii_and_bounded(self):
+        # `\d` matches "١", and `int("١٢")` is 12, so a report writing its
+        # batch in Arabic-Indic digits read as coverage of pull requests it
+        # never spells. A longer run than any tracker issues is not a number
+        # with a tail either; it is not one at all.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        for label, enumeration in (
+            ("arabic-indic digits", "#\u0661\u0662 and #\u0661\u0661"),
+            ("more digits than int() converts", "#" + "1" * 5000 + " and #11"),
+        ):
+            with self.subTest(enumeration=label):
+                scope = self.paragraph(
+                    self.mutated(sentence, "#612 and #610", enumeration)
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
 
     def test_a_count_this_helper_cannot_read_is_not_a_missing_count(self):
         # `\d` matches "٣" and `count_value` does not, so a template taking a

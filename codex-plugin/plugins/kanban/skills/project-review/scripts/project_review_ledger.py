@@ -153,7 +153,7 @@ COMPLETED_STATUSES = ("clean", "findings")
 # verification commit that names several.
 FULL_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 
-TIMESTAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+TIMESTAMP_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
 REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 
@@ -161,7 +161,13 @@ REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 # raises on the other -- so a row keyed by a superscript reached `int()` past
 # the check that was supposed to refuse it and left a traceback where the
 # refusal should have been. A pull-request number is ASCII decimal.
-DECIMAL_RE = re.compile(r"[0-9]+")
+#
+# Bounded, because `int()` refuses a string of more than a few thousand
+# digits and raises where the refusal belongs. Twelve digits is far past any
+# pull-request number a tracker will issue and far short of that limit, so
+# the bound is reached only by something that was never a number.
+DIGIT_LIMIT = 12
+DECIMAL_RE = re.compile(rf"[0-9]{{1,{DIGIT_LIMIT}}}")
 
 # A repository-relative POSIX path. Absolute paths and `..` segments are
 # refused because a rendered link resolves them against the reader's browser,
@@ -354,6 +360,16 @@ def parse_document(text: str, source: str) -> dict:
             "is expected, and a reader that took one of them would be choosing "
             "between two ledgers without saying so."
         )
+    # Counted over the document, not only behind the marker: a second fence
+    # with no marker in front of it was accepted and ignored, which is the
+    # bad-merge case one step further along than the duplicate marker.
+    fences = sum(1 for line in text.splitlines() if line.strip() == "```json")
+    if fences != 1:
+        raise LedgerError(
+            f"{source} carries {fences} fenced JSON blocks; a ledger holds "
+            "exactly one, and a reader that took one of several would be "
+            "choosing between them without saying so."
+        )
     matches = list(PAYLOAD_RE.finditer(text))
     if len(matches) != 1:
         raise LedgerError(
@@ -365,8 +381,6 @@ def parse_document(text: str, source: str) -> dict:
     match = matches[0]
     try:
         document = json.loads(match.group("payload"), object_pairs_hook=_no_duplicate_keys)
-    except json.JSONDecodeError as error:
-        raise LedgerError(f"{source} holds unreadable ledger JSON ({error}).") from error
     except _DuplicateKey as error:
         # `json.loads` keeps the last of a repeated key and says nothing, so a
         # payload naming one repository, row, or field twice would be read as
@@ -377,6 +391,10 @@ def parse_document(text: str, source: str) -> dict:
             "ledger that repeats a key states two values for it and a reader "
             "that took one would be choosing without saying so."
         ) from error
+    except ValueError as error:
+        # `JSONDecodeError` is one of these, and so is the refusal `int()`
+        # raises on a numeric literal of more than a few thousand digits.
+        raise LedgerError(f"{source} holds unreadable ledger JSON ({error}).") from error
     if not isinstance(document, dict):
         raise LedgerError(f"{source} holds a ledger payload that is not an object.")
     version = document.get("version")
@@ -1012,7 +1030,12 @@ CODE_SPAN_RE = re.compile(
 
 PAREN_RE = re.compile(r"\([^()]*\)")
 
-NUMBER_RE = re.compile(r"#(\d+)")
+# `\d` matches "١", and `int("#١٢"[1:])` is 12 -- so a report writing its
+# batch in Arabic-Indic digits was read as coverage of pull requests it never
+# spells. ASCII, and bounded, and refusing to stop early: a longer run of
+# digits is not a pull-request number with a tail, it is not one at all.
+NUMBER_TOKEN = rf"#[0-9]{{1,{DIGIT_LIMIT}}}(?![0-9])"
+NUMBER_RE = re.compile(rf"#([0-9]{{1,{DIGIT_LIMIT}}})(?![0-9])")
 
 # Sentence boundaries as report prose actually spells them. A period inside a
 # code span is already masked, so this does not split `origin/master@a1b2c3d`
@@ -1069,19 +1092,19 @@ LIST_SEPARATOR = r"(?:\s*[,;]\s*(?:and\s+|&\s*)?|\s+and\s+|\s*&\s*)"
 
 HOLE_PATTERNS = {
     # The reviewed enumeration a scope template introduces.
-    "ENUM": rf"(?P<enum>#\d+(?:{LIST_SEPARATOR}#\d+)*)",
+    "ENUM": rf"(?P<enum>{NUMBER_TOKEN}(?:{LIST_SEPARATOR}{NUMBER_TOKEN})*)",
     # A pull request the sentence puts *outside* the batch: the cursor it
     # resumed below, the stop it did not cross, a landing it excluded, a batch
     # someone else reported, the bound it stayed above. Captured, because a
     # paragraph that both excludes a pull request and enumerates it
     # contradicts itself and is not one this helper can read.
-    "EXCLUDED": rf"(?P<excluded>#\d+(?:{LIST_SEPARATOR}#\d+)*)",
+    "EXCLUDED": rf"(?P<excluded>{NUMBER_TOKEN}(?:{LIST_SEPARATOR}{NUMBER_TOKEN})*)",
     # A pull request named for context rather than exclusion -- an interval's
     # endpoints, the landing a commit came after. These legitimately overlap
     # the batch: nine tracked reports name their oldest reviewed pull request
     # as one end of the span their direct commits sit in.
-    "NUM": r"#\d+",
-    "NUMS": rf"#\d+(?:{LIST_SEPARATOR}#\d+)*",
+    "NUM": NUMBER_TOKEN,
+    "NUMS": rf"{NUMBER_TOKEN}(?:{LIST_SEPARATOR}{NUMBER_TOKEN})*",
     # `\d` matches "٣" and `count_value` does not, so a template that took a
     # Unicode digit produced a count nothing could read -- and an unreadable
     # count was treated as no count, which is how a sentence declaring three
@@ -1089,8 +1112,8 @@ HOLE_PATTERNS = {
     "COUNT": r"(?:(?:twenty|thirty)-(?:one|two|three|four|five|six|seven|"
              r"eight|nine)|one|two|three|four|five|six|seven|eight|nine|ten|"
              r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-             r"eighteen|nineteen|twenty|thirty|[0-9]+)",
-    "DATE": r"\d{4}-\d{2}-\d{2}",
+             rf"eighteen|nineteen|twenty|thirty|[0-9]{{1,{DIGIT_LIMIT}}}(?![0-9]))",
+    "DATE": r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
     # What a run of blanked code spans leaves behind: their separators.
     "LIST": r"(?:[,\s]|\band\b)+",
 }
