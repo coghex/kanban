@@ -40,8 +40,16 @@ would have lied about history:
   the stop included. A stop is the one PR the batch deliberately did *not*
   enter, so it is withheld here unless some other source establishes it, and
   the withholding is recorded in the document rather than left implicit.
-* **Ambiguity is flagged, never guessed.** A report whose opening paragraph
-  does not read as exactly one reviewed-PR enumeration produces no row at all.
+* **Ambiguity is flagged, never guessed, and the default is to flag.** A
+  report whose opening paragraph does not read as exactly one reviewed-PR
+  enumeration produces no row at all. The reading runs in both directions: one
+  pass finds the enumeration it can be sure of, and a second demands an
+  explanation for every pull request the first did not take. A number the
+  paragraph does not explain — as a cursor, a boundary, an interval endpoint,
+  a later landing, or work a clause says was *not* reviewed — flags the
+  report by name rather than being passed over. That direction is the whole
+  point: a wording nobody anticipated costs one confirmation, where the
+  opposite default costs a pull request that no one finds out was dropped.
   The migration inspects every report, returns every flag, and writes nothing
   while one remains; a caller that knows what a paragraph meant supplies the
   enumeration through `--confirm` and the same migration then completes. The
@@ -246,22 +254,30 @@ def document_path(root) -> Path:
 
 def parse_document(text: str, source: str) -> dict:
     """The state a ledger document holds, or a refusal naming what stopped it."""
-    matches = list(PAYLOAD_RE.finditer(text))
-    if not matches:
+    # The marker is counted, not just the complete blocks behind it. A bad
+    # merge leaves a second marker whose fence may be dangling, and a reader
+    # that only counted well-formed payloads would call that document fine
+    # while ignoring whichever state the broken half held.
+    markers = text.count(LEDGER_MARKER)
+    if markers == 0:
         raise LedgerError(
             f"{source} carries no {LEDGER_MARKER} block, so it is not a "
             "project-review ledger. Move it aside or repair it; an invocation "
             "will not treat an unreadable ledger as an absent one."
         )
-    if len(matches) > 1:
-        # One payload, or none. A second block is what a bad merge or a
-        # hand-edit leaves behind, and taking the first would quietly discard
-        # whichever of them is the current state -- with no way afterwards to
-        # tell that anything was discarded.
+    if markers > 1:
         raise LedgerError(
-            f"{source} carries {len(matches)} {LEDGER_MARKER} blocks; exactly "
-            "one is expected, and a reader that took one of them would be "
-            "choosing between two ledgers without saying so."
+            f"{source} carries {markers} {LEDGER_MARKER} markers; exactly one "
+            "is expected, and a reader that took one of them would be choosing "
+            "between two ledgers without saying so."
+        )
+    matches = list(PAYLOAD_RE.finditer(text))
+    if len(matches) != 1:
+        raise LedgerError(
+            f"{source} carries a {LEDGER_MARKER} marker that no complete "
+            "fenced JSON payload follows; the payload is the ledger, and a "
+            "marker without one is a truncated document rather than an empty "
+            "repository."
         )
     match = matches[0]
     try:
@@ -317,20 +333,47 @@ def state_for(document: dict, repo: str) -> dict:
 # Validation
 
 
+REPOSITORY_KEYS = ("rows", "direct", "excluded", "migration")
+DIRECT_KEYS = ("endpoint", "reviewed")
+EXCLUDED_KEYS = ("prs", "commits")
+MIGRATION_KEYS = ("source", "boundary", "withheld_boundary")
+
+
+def _require_keys(mapping, keys, source: str) -> None:
+    """Every declared field present, before any of them is defaulted.
+
+    Defaulting a missing field is how a truncated but still-parseable edit
+    erases rows, direct progress, exclusions, or a row's previous attempts
+    without a word. A strictly parsed document refuses what it cannot see
+    rather than supplying an empty stand-in for it.
+    """
+    missing = [key for key in keys if key not in mapping]
+    if missing:
+        raise LedgerError(
+            f"{source} declares no {', '.join(missing)}; a ledger states every "
+            f"one of {', '.join(keys)} rather than leaving any to a default."
+        )
+
+
 def _validated_repository(state, source: str) -> dict:
     if not isinstance(state, dict):
         raise LedgerError(f"{source} is not an object.")
+    _require_keys(state, REPOSITORY_KEYS, source)
     validated = empty_repository()
-    rows = state.get("rows", {})
+    rows = state["rows"]
     if not isinstance(rows, dict):
         raise LedgerError(f"{source}: rows is not an object.")
     for key, row in rows.items():
         number = _validated_row_key(key, source)
         validated["rows"][str(number)] = _validated_row(row, f"{source}: #{number}")
+    for key, expected in (("direct", DIRECT_KEYS), ("excluded", EXCLUDED_KEYS)):
+        if not isinstance(state[key], dict):
+            raise LedgerError(f"{source}: {key} is not an object.")
+        _require_keys(state[key], expected, f"{source}: {key}")
     carried = _validated_carryover(state, source)
     validated["direct"] = carried["direct"]
     validated["excluded"] = carried["excluded"]
-    validated["migration"] = _validated_migration(state.get("migration"), source)
+    validated["migration"] = _validated_migration(state["migration"], source)
     return validated
 
 
@@ -377,20 +420,21 @@ def _validated_row(row, source: str) -> dict:
             f"{source} carries unrecognized row field(s) {', '.join(unknown)}; "
             f"a ledger row holds exactly {', '.join(ROW_KEYS)}."
         )
-    status = row.get("status")
+    _require_keys(row, ROW_KEYS, source)
+    status = row["status"]
     if status not in ROW_STATUSES:
         raise LedgerError(
             f"{source} declares status {status!r}, which is not one of "
             f"{', '.join(ROW_STATUSES)}."
         )
     validated = empty_row(status)
-    validated["commit"] = _validated_optional_sha(row.get("commit"), f"{source}: commit")
+    validated["commit"] = _validated_optional_sha(row["commit"], f"{source}: commit")
     validated["completed_at"] = _validated_optional_timestamp(
-        row.get("completed_at"), f"{source}: completed_at"
+        row["completed_at"], f"{source}: completed_at"
     )
-    validated["report"] = _validated_optional_path(row.get("report"), f"{source}: report")
-    validated["evidence"] = _validated_evidence(row.get("evidence", []), f"{source}: evidence")
-    validated["history"] = _validated_history(row.get("history", []), f"{source}: history")
+    validated["report"] = _validated_optional_path(row["report"], f"{source}: report")
+    validated["evidence"] = _validated_evidence(row["evidence"], f"{source}: evidence")
+    validated["history"] = _validated_history(row["history"], f"{source}: history")
     _require_completion_pairing(status, validated, source)
     return validated
 
@@ -514,10 +558,11 @@ def _validated_history_entry(entry, source: str) -> dict:
             f"{source} carries unrecognized history field(s) {', '.join(unknown)}; "
             f"an entry holds exactly {', '.join(HISTORY_KEYS)}."
         )
-    kind = entry.get("kind")
+    _require_keys(entry, HISTORY_KEYS, source)
+    kind = entry["kind"]
     if not isinstance(kind, str) or not re.match(r"\A[a-z][a-z0-9-]*\Z", kind):
         raise LedgerError(f"{source} declares kind {kind!r}, which is not an entry kind.")
-    outcome = entry.get("outcome")
+    outcome = entry["outcome"]
     if outcome is not None and outcome not in COMPLETED_STATUSES:
         raise LedgerError(
             f"{source} declares outcome {outcome!r}, which is not one of "
@@ -526,11 +571,11 @@ def _validated_history_entry(entry, source: str) -> dict:
     validated = {
         "kind": kind,
         "outcome": outcome,
-        "commit": _validated_optional_sha(entry.get("commit"), f"{source}: commit"),
+        "commit": _validated_optional_sha(entry["commit"], f"{source}: commit"),
         "completed_at": _validated_optional_timestamp(
-            entry.get("completed_at"), f"{source}: completed_at"
+            entry["completed_at"], f"{source}: completed_at"
         ),
-        "report": _validated_optional_path(entry.get("report"), f"{source}: report"),
+        "report": _validated_optional_path(entry["report"], f"{source}: report"),
     }
     if outcome is not None and (validated["commit"] is None or validated["completed_at"] is None):
         raise LedgerError(
@@ -553,22 +598,21 @@ def _validated_history_entry(entry, source: str) -> dict:
 
 
 def _validated_migration(migration, source: str) -> dict:
-    if migration is None:
-        return empty_repository()["migration"]
     if not isinstance(migration, dict):
         raise LedgerError(f"{source}: migration is not an object.")
-    unknown = sorted(set(migration) - {"source", "boundary", "withheld_boundary"})
+    unknown = sorted(set(migration) - set(MIGRATION_KEYS))
     if unknown:
         raise LedgerError(
             f"{source}: migration carries unrecognized field(s) {', '.join(unknown)}."
         )
-    origin = migration.get("source")
+    _require_keys(migration, MIGRATION_KEYS, f"{source}: migration")
+    origin = migration["source"]
     if origin is not None and origin not in MIGRATION_SOURCES:
         raise LedgerError(
             f"{source}: migration.source is {origin!r}, which is not one of "
             f"{', '.join(MIGRATION_SOURCES)}."
         )
-    boundary = migration.get("boundary")
+    boundary = migration["boundary"]
     if boundary is not None:
         if not isinstance(boundary, dict):
             raise LedgerError(f"{source}: migration.boundary is not an object.")
@@ -583,7 +627,7 @@ def _validated_migration(migration, source: str) -> dict:
                 f"{source}: migration.boundary.merged_at is not a merge timestamp."
             )
         boundary = {"number": number, "merged_at": merged_at}
-    withheld = migration.get("withheld_boundary")
+    withheld = migration["withheld_boundary"]
     if withheld is not None:
         if not isinstance(withheld, int) or isinstance(withheld, bool) or withheld <= 0:
             raise LedgerError(
@@ -731,35 +775,35 @@ BACKTICK_RE = re.compile(r"`[^`]*`")
 # number appearing only there is something that PR referred to.
 PAREN_RE = re.compile(r"\([^()]*\)")
 
-# A run of pull-request numbers joined by nothing but list punctuation. This is
-# what an enumeration looks like wherever it sits, colon or no colon, and it is
-# how a second one is caught in a paragraph whose first parsed cleanly. One
-# number is a run too: "It also reviewed #10" loses a pull request just as
-# quietly as a list would, and the number of items is not what separates a
-# claim of coverage from a mention of a cursor.
+# A run of pull-request numbers joined by nothing but list punctuation. One
+# number is a run too: the count was never what separated a claim of coverage
+# from a mention, and a lone dropped pull request is lost exactly as quietly
+# as a list would be.
 RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 
-# A reviewing verb with its object right behind it -- "It also reviewed #10".
-# What makes a lone number coverage is that the sentence hands it straight to
-# the verb; the tracked reports' lone numbers are all handed to something else
-# ("below the completed #185 cursor", "the user's exclusive stop at #533",
-# "landed after #456 inside that boundary", "advanced through #466"), which is
-# why adjacency separates the two and a count cannot.
-DIRECT_SCOPE_RE = re.compile(
-    r"\b(?:covered|covers|covering|reviewed|reviewing|reviews)\s+"
-    r"(?:(?:also|only|just|again|further|additionally|separately|then|"
-    r"the|these|those|both|and|it|a|an)\s+)*",
+# The words that put a run in some role other than "this batch reviewed it",
+# immediately in front of it. Every lone number and every leftover list in the
+# tracked reports sits behind one of these -- "below the completed #185
+# cursor", "interleaved between #219 and #196", "the user's exclusive stop at
+# #533", "advanced through #466", "landed after #456 inside that boundary",
+# "no pull request numbered #533 or lower" -- because each hands the number to
+# a preposition or a participle rather than to a reviewing verb.
+#
+# This list is the whole of what excuses a number from the accepted
+# enumeration, and everything else flags. That direction matters more than the
+# list does: a wording nobody anticipated costs one confirmation, where the
+# opposite default costs a pull request that no one finds out was dropped.
+MENTION_LEAD_RE = re.compile(
+    r"\b(?:completed|between|from|through|after|before|since|until|at|"
+    r"numbered|below|above|beyond|under|over)\s*\Z",
     re.IGNORECASE,
 )
 
-# `interleaved between #446 and #411` -- a span's two endpoints, not a list of
-# two reviewed pull requests. Seven of the tracked reports spell their direct
-# first-parent interval that way inside a sentence that also says "reviewed",
-# so without this a run check would flag them all; with it, the shape that is
-# excluded is exactly "between" plus two numbers joined by "and", and a list
-# of two that means coverage still reads as one.
-RANGE_LEAD_RE = re.compile(r"\bbetween\s*\Z", re.IGNORECASE)
-RANGE_RUN_RE = re.compile(r"\A#\d+\s+and\s+#\d+\Z")
+# Clause boundaries. A clause rather than a sentence because a sentence can
+# hold both halves of the question: "It did not review #8, but it also
+# reviewed these: #10 and #9" says one thing about #8 and the opposite about
+# #10 and #9, and a negation read across the whole sentence would silence both.
+CLAUSE_SPLIT_RE = re.compile(r"[.;:]")
 
 NUMBER_RE = re.compile(r"#(\d+)")
 
@@ -875,8 +919,8 @@ def _sentence_enumeration(sentence: str):
     must flag its whole report even when some other sentence did resolve, or
     the report's coverage would be the part that happened to be readable.
     `accepted_from` is the offset the accepted enumeration starts at, so the
-    run check below can tell the numbers this reading took from the ones it
-    left behind.
+    mention check below can tell the numbers this reading took from the ones
+    it left behind.
     """
     clauses = _enumeration_clauses(sentence)
     if not clauses:
@@ -890,41 +934,54 @@ def _sentence_enumeration(sentence: str):
     return [int(number) for number in NUMBER_RE.findall(normalized)], False, start
 
 
-def _unaccounted_runs(sentence: str, accepted_from) -> list:
-    """Enumerations in `sentence` that the accepted reading did not take.
+def _sentence_spans(text: str) -> list:
+    """`(offset, sentence)` for each sentence, offsets into `text`."""
+    spans = []
+    start = 0
+    for match in SENTENCE_SPLIT_RE.finditer(text):
+        spans.append((start, text[start:match.start()]))
+        start = match.end()
+    spans.append((start, text[start:]))
+    return spans
 
-    "This review covered #12 and #11; it also reviewed these: #10 and #9"
-    introduces only its second list with a colon, so a parser that read the
-    colon alone would take #10 and #9 and drop the other two without a word.
-    A list of pull-request numbers in a sentence that says it reviewed them,
-    sitting outside the enumeration this parser accepted, is exactly what
-    "cannot be read as one enumeration" means -- so it flags the report rather
-    than being discarded.
 
-    The two filters are what keep that from flagging the tracked reports: a
-    sentence with no reviewing verb is naming numbers for some other reason,
-    and one carrying a negation is saying what was *not* reviewed, which the
-    clause test already refuses to import.
+def _clause_around(text: str, position: int) -> str:
+    start = 0
+    end = len(text)
+    for match in CLAUSE_SPLIT_RE.finditer(text):
+        if match.start() < position:
+            start = match.end()
+        else:
+            end = match.start()
+            break
+    return text[start:end]
+
+
+def _unaccounted_mentions(paragraph: str, accepted_span) -> list:
+    """Every pull request the accepted reading neither took nor accounts for.
+
+    This is the parser's whole safety property, and it runs the opposite way
+    round from the reading above. The reading looks for the one enumeration it
+    can be sure of; this looks at everything it did *not* take and demands an
+    explanation for each. A number with none is not quietly ignored -- it
+    flags the report, and the flag names it, so the operator decides.
+
+    Two things explain a number: the clause it sits in says the batch did not
+    review it, or the words immediately in front of it hand it to a role that
+    is not a reviewing verb's object. Both are deliberately narrow. "It also
+    reviewed #10", "It also reviewed PR #10", and "it also reviewed these:
+    #10 and #9" have neither, which is the point.
     """
-    if not SCOPE_TRIGGER_RE.search(sentence) or SCOPE_NEGATION_RE.search(sentence):
-        return []
-    attached = {match.end() for match in DIRECT_SCOPE_RE.finditer(sentence)}
-    runs = []
-    for match in RUN_RE.finditer(sentence):
-        if accepted_from is not None and match.start() >= accepted_from:
+    unaccounted = []
+    for match in RUN_RE.finditer(paragraph):
+        if accepted_span and accepted_span[0] <= match.start() < accepted_span[1]:
             continue
-        run = " ".join(match.group(0).split())
-        if RANGE_RUN_RE.match(run) and RANGE_LEAD_RE.search(sentence[: match.start()]):
+        if SCOPE_NEGATION_RE.search(_clause_around(paragraph, match.start())):
             continue
-        if NUMBER_RE.fullmatch(run) and match.start() not in attached:
-            # A lone number the sentence handed to something other than its
-            # reviewing verb: a cursor, a stop, a boundary, a landing. Eleven
-            # tracked reports name one of those inside the same sentence that
-            # enumerates their batch, so treating every singleton as coverage
-            # would flag most of the tree.
+        if MENTION_LEAD_RE.search(paragraph[: match.start()]):
             continue
-        runs.append(run)
-    return runs
+        unaccounted.append(" ".join(match.group(0).split()))
+    return unaccounted
 
 
 def report_scope(text: str, path: str) -> dict:
@@ -950,30 +1007,34 @@ def report_scope(text: str, path: str) -> dict:
     # wants every number the paragraph mentions, not the subset this parser
     # would have been willing to read.
     candidates = sorted({int(number) for number in NUMBER_RE.findall(masked)})
+    readable = _unannotated(masked)
     enumerations = []
-    unaccounted = []
     ambiguous = False
-    for sentence in SENTENCE_SPLIT_RE.split(_unannotated(masked)):
+    accepted_span = None
+    for offset, sentence in _sentence_spans(readable):
         found, unclear, accepted_from = _sentence_enumeration(sentence)
         if unclear:
             ambiguous = True
         elif found:
             enumerations.append(found)
-        unaccounted.extend(_unaccounted_runs(sentence, accepted_from))
+            accepted_span = (offset + accepted_from, offset + len(sentence))
+    if len(enumerations) != 1:
+        accepted_span = None
+    unaccounted = _unaccounted_mentions(readable, accepted_span)
     if len(enumerations) == 1 and not ambiguous and not unaccounted:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if ambiguous:
         reason = "carries more than one reviewed-pull-request enumeration in a single sentence"
+    elif len(enumerations) > 1:
+        reason = f"names {len(enumerations)} reviewed-pull-request enumerations"
     elif unaccounted:
         reason = (
-            "names the reviewed pull requests "
-            f"{'; '.join(unaccounted)} outside any enumeration this helper can "
-            "read as its scope"
+            f"names {'; '.join(unaccounted)} outside any enumeration this "
+            "helper can read as its scope, and outside any wording that would "
+            "explain them as something other than reviewed work"
         )
-    elif not enumerations:
-        reason = "names no reviewed-pull-request enumeration"
     else:
-        reason = f"names {len(enumerations)} reviewed-pull-request enumerations"
+        reason = "names no reviewed-pull-request enumeration"
     return {
         "path": path,
         "reviewed": [],

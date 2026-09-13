@@ -532,6 +532,13 @@ class DocumentParsingTests(LedgerTestCase):
                 {"602": dict(completed_row(), history=[{"outcome": None, "commit": None,
                                                         "completed_at": "2026-09-05T11:22:33Z",
                                                         "report": None}])},
+                "declares no kind",
+            ),
+            "history entry kind is not a slug": (
+                {"602": dict(completed_row(), history=[{"kind": 12, "outcome": None,
+                                                        "commit": None,
+                                                        "completed_at": "2026-09-05T11:22:33Z",
+                                                        "report": None}])},
                 "not an entry kind",
             ),
             "unknown history field": (
@@ -582,6 +589,71 @@ class DocumentParsingTests(LedgerTestCase):
                 with self.assertRaises(LEDGER.LedgerError) as raised:
                     self.parse(payload)
                 self.assertIn(expected, str(raised.exception))
+
+    def test_a_marker_with_no_complete_payload_behind_it_is_refused(self):
+        # The second half of the duplicate-block refusal: a bad merge can
+        # leave a marker whose fence never closes, and counting only
+        # well-formed payloads would call that document fine while ignoring
+        # whichever state the broken half held.
+        good = ledger_text(valid_payload({"602": completed_row()}))
+        dangling = f"\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{\"version\": 1}}\n"
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(good + dangling, "fixture")
+        self.assertIn("2", str(raised.exception))
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(
+                f"# Ledger\n\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{}}\n", "fixture"
+            )
+        self.assertIn("no complete", str(raised.exception))
+
+    def test_every_declared_field_must_be_present_rather_than_defaulted(self):
+        # A truncated but still-parseable edit is the failure this closes: a
+        # repository without `rows` would read as a repository with none, and
+        # a row without `history` as one whose previous attempts never
+        # happened. Both are silent, and both erase state the document exists
+        # to keep.
+        for field in ("rows", "direct", "excluded", "migration"):
+            with self.subTest(repository_field=field):
+                payload = valid_payload({"602": completed_row()})
+                del payload["repositories"][REPO][field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn(f"declares no {field}", str(raised.exception))
+        for field, parent, keys in (
+            ("endpoint", "direct", None),
+            ("reviewed", "direct", None),
+            ("prs", "excluded", None),
+            ("commits", "excluded", None),
+            ("source", "migration", None),
+            ("boundary", "migration", None),
+            ("withheld_boundary", "migration", None),
+        ):
+            with self.subTest(**{parent: field}):
+                payload = valid_payload({"602": completed_row()})
+                del payload["repositories"][REPO][parent][field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn(f"declares no {field}", str(raised.exception))
+        for field in LEDGER.ROW_KEYS:
+            with self.subTest(row_field=field):
+                row = completed_row()
+                del row[field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(valid_payload({"602": row}))
+                self.assertIn(f"declares no {field}", str(raised.exception))
+        for field in LEDGER.HISTORY_KEYS:
+            with self.subTest(history_field=field):
+                entry = {
+                    "kind": "review",
+                    "outcome": "clean",
+                    "commit": FULL_SHA,
+                    "completed_at": "2026-09-05T11:22:33Z",
+                    "report": None,
+                }
+                del entry[field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(valid_payload({"602": dict(completed_row(), history=[entry])}))
+                self.assertIn(f"declares no {field}", str(raised.exception))
 
     def test_direct_and_excluded_are_held_to_the_cursor_modules_own_validation(self):
         # Design D-16 carries these two structures across untouched, so the
@@ -965,6 +1037,48 @@ class ReportScopeTests(LedgerTestCase):
         scope = self.scope(body, "docs/project_review_612-601.md")
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [612, 601])
+
+    def test_a_reviewed_pull_request_behind_a_noun_prefix_is_flagged(self):
+        # "reviewed PR #10" and "reviewed pull request #10" put the number one
+        # or two words further from the verb, and a rule keyed to adjacency
+        # would have let both through. What accounts for a number is not how
+        # close a verb is but whether anything in the paragraph explains it as
+        # something other than reviewed work.
+        for phrase in ("PR #601", "pull request #601", "#601"):
+            with self.subTest(phrase=phrase):
+                body = (
+                    "# Project Review Findings: PRs #612–#601\n\n"
+                    "This review covered the first batch: #612 and #610. It "
+                    f"also reviewed {phrase}.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-601.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("#601", scope["flag"])
+
+    def test_a_negative_clause_excuses_only_its_own_clause(self):
+        # A sentence can hold both halves of the question. Reading the
+        # negation across the whole sentence silenced the positive half with
+        # it, so #533 and #520 went unread and unreported; the negation is now
+        # the clause's, and the clause that says it reviewed them is not
+        # covered by it.
+        body = (
+            "# Project Review Findings: PRs #612–#520\n\n"
+            "This review covered the first batch: #612 and #610. It did not "
+            "review #601, but it also reviewed these: #533 and #520.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-520.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#533 and #520", scope["flag"])
+        # ... and the genuinely negated number is not reported as lost.
+        self.assertNotIn("#601 ", scope["flag"].split("candidate")[0])
+
+    def test_a_negated_clause_still_excuses_a_skipped_batch(self):
+        # The non-vacuity control for the clause narrowing, reproduced from
+        # docs/project_review_398-353.md: a whole previously-reported batch
+        # named in one clause that says it was skipped rather than reviewed.
+        scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
+        self.assertIsNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [520, 517])
 
     def test_an_unintroduced_enumeration_is_flagged_with_every_candidate_number(self):
         # A list with no colon to introduce it: the numbers are plainly the
