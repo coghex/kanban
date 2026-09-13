@@ -305,7 +305,13 @@ def parse_document(text: str, source: str) -> dict:
     # merge leaves a second marker whose fence may be dangling, and a reader
     # that only counted well-formed payloads would call that document fine
     # while ignoring whichever state the broken half held.
-    markers = text.count(LEDGER_MARKER)
+    #
+    # Counted as whole lines, which is how `render_document` writes it. A
+    # count over the raw text also counted the marker where it is data rather
+    # than structure -- an evidence note may say anything, including this, and
+    # such a note renders into its table cell and its payload string and made
+    # the document refuse its own output.
+    markers = sum(1 for line in text.splitlines() if line.strip() == LEDGER_MARKER)
     if markers == 0:
         raise LedgerError(
             f"{source} carries no {LEDGER_MARKER} block, so it is not a "

@@ -414,6 +414,31 @@ class DocumentParsingTests(LedgerTestCase):
             LEDGER.parse_document(cursor_text, "the cursor document")
         self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
 
+    def test_a_marker_inside_the_documents_own_data_is_not_a_second_marker(self):
+        # An evidence note may say anything, including the marker. Such a note
+        # renders into its table cell and its payload string, and a count over
+        # the raw text made the document refuse its own output.
+        rows = {
+            "602": {
+                "status": "legacy",
+                "commit": None,
+                "completed_at": None,
+                "report": None,
+                "evidence": [LEDGER.LEDGER_MARKER],
+                "history": [],
+            }
+        }
+        document = self.parse(valid_payload(rows))
+        rendered = LEDGER.render_document(document)
+        self.assertEqual(rendered.count(LEDGER.LEDGER_MARKER), 3)
+        self.assertEqual(LEDGER.parse_document(rendered, "round trip"), document)
+        # ... while a marker on a line of its own is still a second marker.
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(
+                f"{rendered}\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{}}\n```\n", "fixture"
+            )
+        self.assertIn("2", str(raised.exception))
+
     def test_a_second_payload_block_is_refused(self):
         # A bad merge or a hand-edit leaves two. Taking the first would
         # silently choose between two ledgers, and nothing afterwards could
@@ -1216,13 +1241,18 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertIsNotNone(scope["flag"])
 
     def test_every_wording_the_review_rounds_produced_is_flagged(self):
-        # One entry per wording this pull request's reviews have produced.
-        # Each was admitted by some earlier rule and each lost or invented a
-        # pull request; together they are what the templates exist to refuse,
-        # so they are asserted as one set rather than one at a time. The set
-        # is not counted here, in prose or in a name: it grows whenever a
-        # review finds another, and a number beside it would be stale by the
-        # time the entry below it was written.
+        # The wordings this pull request's reviews produced that an earlier
+        # *reading* rule admitted: each matched some verb, object, role word
+        # or clause test and so lost or invented a pull request. Together they
+        # are what the templates exist to refuse, so they are asserted as one
+        # set rather than one at a time.
+        #
+        # A sentence that matches a template and then disagrees with itself is
+        # a different refusal and has its own test above, with the agreeing
+        # sentence beside it as a control. The set is not counted here, in
+        # prose or in a name: it grows whenever a review finds another wording,
+        # and a number beside it would be stale by the time the entry below it
+        # was written.
         opening = self.scope_sentence()
         wordings = {
             "two colon clauses in one sentence": (
