@@ -1207,6 +1207,52 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
 
+    def test_a_negative_claim_does_not_introduce_a_reviewed_enumeration(self):
+        # "No pull requests were reviewed; the candidates were: #10 and #9"
+        # carries a reviewing verb in its first clause and the opposite claim
+        # in the second. The verb has to be in the clause that introduces the
+        # colon, or a paragraph that says nothing was reviewed would be read
+        # as legacy coverage -- inventing review history rather than losing
+        # it, which is the same defect pointing the other way.
+        for body in (
+            "No pull requests were reviewed; the candidates were: #601 and #533.",
+            "No pull requests were reviewed: #601 and #533.",
+            "Without entering the batch, the candidates reviewed were: #601 and #533.",
+        ):
+            with self.subTest(paragraph=body):
+                scope = self.scope(
+                    f"# Project Review Findings: PRs #601–#533\n\n{body}\n",
+                    "docs/project_review_601-533.md",
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
+
+    def test_a_pull_request_noun_cancels_the_role_word_in_front_of_it(self):
+        # A role word can sit inside a positive review claim: in "the
+        # previously reported PR #10" the number belongs to `PR`, so the batch
+        # reviewed it whatever `reported` says about where it came from.
+        for noun in ("PR", "PRs", "pull request", "pull requests"):
+            with self.subTest(noun=noun):
+                body = (
+                    "# Project Review Findings: PRs #612–#610\n\n"
+                    "This review covered the first batch: #612 and #610. It "
+                    f"also reviewed the previously reported {noun} #601.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("#601", scope["flag"])
+        # ... and a role word that comes last still excuses, which is how the
+        # tracked "no pull request numbered #533 or lower" reads.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #610. No pull request numbered #533 or lower was "
+            "entered.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertIsNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [612, 610])
+
     def test_a_preposition_in_front_of_a_number_does_not_excuse_it(self):
         # A preposition says where a number sits in a phrase and nothing about
         # what the phrase claims, so `from`, `through` and `after` in front of

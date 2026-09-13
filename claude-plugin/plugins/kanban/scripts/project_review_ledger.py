@@ -894,10 +894,17 @@ SCOPE_TRIGGER_RE = re.compile(
 # report names those before its verb while still enumerating real coverage
 # after the colon, and the shape check below is what keeps them out.
 SCOPE_NEGATION_RE = re.compile(
-    r"\b(?:not|never|rather than|instead of|skipped|skipping|excluded|"
-    r"excluding|omitted|omitting)\b",
+    r"\b(?:not|no|none|never|neither|nothing|without|rather than|instead of|"
+    r"skipped|skipping|excluded|excluding|omitted|omitting)\b",
     re.IGNORECASE,
 )
+
+# A pull-request noun. Where one stands between a landmark role and the
+# number, the number is the noun's, not the role's: "the previously reported
+# PR #10" is a pull request this batch reviewed, however the role word in
+# front of it reads, while "request numbered #533" puts the role last and
+# means the threshold.
+PR_NOUN_RE = re.compile(r"\b(?:PRs?|pull\s+requests?)\b", re.IGNORECASE)
 
 # What a reviewed-PR enumeration looks like once its annotations are gone:
 # pull-request numbers, separators, and nothing else. This is the whole of the
@@ -982,7 +989,14 @@ def _enumeration_clauses(sentence: str) -> list:
     for order, position in enumerate(positions):
         head = sentence[:position]
         end = positions[order + 1] if order + 1 < len(positions) else len(sentence)
-        if not SCOPE_TRIGGER_RE.search(head):
+        # The reviewing verb has to be in the clause that introduces the
+        # colon, not merely somewhere earlier in the sentence. "No pull
+        # requests were reviewed; the candidates were: #10 and #9" carries one
+        # in its first clause and claims the opposite in its second, and a
+        # search over the whole head would have read the candidates as
+        # coverage. The negation search stays over the whole head, because
+        # widening *that* only refuses more.
+        if not SCOPE_TRIGGER_RE.search(head.rsplit(";", 1)[-1]):
             continue
         if SCOPE_NEGATION_RE.search(head):
             continue
@@ -1038,7 +1052,10 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
     it -- "the completed #185 cursor", "the previously reported #386 ...
     batch", "advanced through #466", "landed after #456", "request numbered
     #533" -- or the one structural form, an interval's two endpoints behind
-    `between`.
+    `between`. A pull-request noun standing between the role and the number
+    cancels it: in "the previously reported PR #10" the number belongs to
+    `PR`, so the batch reviewed it whatever `reported` says about where it
+    came from.
 
     Everything looser than that has been tried here and has reached a pull
     request it should not have: a negation somewhere in the sentence, then
@@ -1056,8 +1073,11 @@ def _unaccounted_mentions(sentence: str, accepted_from) -> list:
         run = " ".join(match.group(0).split())
         if INTERVAL_RUN_RE.match(run) and INTERVAL_LEAD_RE.search(sentence[: match.start()]):
             continue
-        window = sentence[: match.start()].split()[-ROLE_WINDOW:]
-        if MENTION_ROLE_RE.search(" ".join(window)):
+        window = " ".join(sentence[: match.start()].split()[-ROLE_WINDOW:])
+        roles = list(MENTION_ROLE_RE.finditer(window))
+        # The nearest role word, and nothing between it and the number that
+        # would make the number a pull-request noun's rather than the role's.
+        if roles and not PR_NOUN_RE.search(window[roles[-1].end():]):
             continue
         unaccounted.append(run)
     return unaccounted
