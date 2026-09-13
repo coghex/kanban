@@ -2022,6 +2022,34 @@ class FilesystemTests(LedgerTestCase):
             LEDGER.migrate(self.root, REPO)
         self.assertIn("already exists", str(raised.exception))
 
+    def test_a_dangling_symlink_is_not_an_absent_document(self):
+        # `read_text` raises FileNotFoundError both for a name nothing holds
+        # and for a link with nothing behind it. Reading the second as "never
+        # migrated" loses the state someone put there and broke.
+        directory = self.root / "docs" / "project_review"
+        directory.mkdir(parents=True)
+        (directory / "ledger.md").symlink_to(self.root / "docs" / "nothing.md")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.load_document(self.root)
+        self.assertIn("nothing behind it", str(raised.exception))
+
+    def test_a_dangling_cursor_symlink_stops_the_migration(self):
+        # The same read, one document over, and the worse outcome: classified
+        # as absent, the migration would have succeeded with an empty ledger
+        # and the no-overwrite rule would then refuse to correct it.
+        (self.root / "docs" / "project_review_boundaries.md").symlink_to(
+            self.root / "docs" / "nothing.md"
+        )
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.migrate(self.root, REPO)
+        self.assertIn("nothing behind it", str(raised.exception))
+        self.assertFalse(LEDGER.document_path(self.root).exists())
+
+    def test_a_root_that_genuinely_has_nothing_still_reads_and_migrates(self):
+        # The control for all four: absence is still absence.
+        self.assertEqual(LEDGER.load_document(self.root), LEDGER.empty_document())
+        self.assertEqual(LEDGER.migrate(self.root, REPO)["status"], "migrated")
+
 
 class BundledLedgerHelperTests(unittest.TestCase):
     """The module ships in both bundles and nothing invokes it yet."""

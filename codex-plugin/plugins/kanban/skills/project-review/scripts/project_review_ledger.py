@@ -407,7 +407,16 @@ def load_document(root) -> dict:
     path = confined(root, document_path(root))
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except FileNotFoundError as error:
+        # `read_text` raises this both for a name nothing holds and for a
+        # symlink with nothing behind it. The second is a ledger someone put
+        # there and broke, and reading it as "never migrated" both loses the
+        # state and lets a migration write over the name.
+        if _name_is_taken(path):
+            raise LedgerError(
+                f"{path} is a link with nothing behind it; a broken ledger is "
+                "not an absent one."
+            ) from error
         return empty_document()
     except OSError as error:
         raise LedgerError(
@@ -1498,7 +1507,13 @@ def _cursor_source(cursor, cursor_path: Path) -> str:
     """
     try:
         text = cursor_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except FileNotFoundError as error:
+        if _name_is_taken(cursor_path):
+            raise LedgerError(
+                f"{cursor_path} is a link with nothing behind it; a broken "
+                "record is not an absent one, and migrating past it would "
+                "write a ledger this root can never correct."
+            ) from error
         return "absent"
     except OSError as error:
         raise LedgerError(
