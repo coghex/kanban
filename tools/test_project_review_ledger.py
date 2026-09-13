@@ -469,7 +469,7 @@ class DocumentParsingTests(LedgerTestCase):
             "row is not an object": ({"602": "clean"}, "not an object"),
             "unknown row field": (
                 {"602": dict(completed_row(), verdict="ok")},
-                "unrecognized row field",
+                "unrecognized field(s) verdict",
             ),
             "status outside the four": (
                 {"602": dict(completed_row(), status="approved")},
@@ -550,6 +550,10 @@ class DocumentParsingTests(LedgerTestCase):
                 {"602": dict(completed_row(), evidence=["one", "one"])},
                 "twice",
             ),
+            "evidence carrying a newline": (
+                {"602": dict(completed_row(), evidence=["one\ntwo"])},
+                "control character",
+            ),
             "evidence that is not a list": (
                 {"602": dict(completed_row(), evidence="one")},
                 "not a list",
@@ -576,7 +580,7 @@ class DocumentParsingTests(LedgerTestCase):
                                                         "commit": None,
                                                         "completed_at": "2026-09-05T11:22:33Z",
                                                         "report": None, "note": "x"}])},
-                "unrecognized history field",
+                "unrecognized field(s) note",
             ),
             "history outcome outside the two": (
                 {"602": dict(completed_row(), history=[{"kind": "review", "outcome": "legacy",
@@ -635,6 +639,50 @@ class DocumentParsingTests(LedgerTestCase):
                 f"# Ledger\n\n{LEDGER.LEDGER_MARKER}\n\n```json\n{{}}\n", "fixture"
             )
         self.assertIn("no complete", str(raised.exception))
+
+    def test_no_level_of_the_document_accepts_a_field_it_cannot_read(self):
+        # The other half of the same silence: a field written by a newer
+        # helper, or misspelled by a hand-edit, would be dropped on the next
+        # write rather than refused. Checked at every level, because a strict
+        # schema that was strict about rows and lax about the object holding
+        # them is not strict.
+        document = valid_payload({"602": completed_row()})
+        document["extra"] = 1
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(document)
+        self.assertIn("unrecognized field(s) extra", str(raised.exception))
+        for path, field in (
+            ((), "rowz"),
+            (("direct",), "frontier"),
+            (("excluded",), "issues"),
+            (("migration",), "reason"),
+        ):
+            with self.subTest(level="/".join(path) or "repository", field=field):
+                payload = valid_payload({"602": completed_row()})
+                target = payload["repositories"][REPO]
+                for step in path:
+                    target = target[step]
+                target[field] = "x"
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn(f"unrecognized field(s) {field}", str(raised.exception))
+        payload = valid_payload()
+        payload["repositories"][REPO]["direct"]["endpoint"] = {
+            "sha": DIRECT_HISTORY[0],
+            "when": "yesterday",
+        }
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("unrecognized field(s) when", str(raised.exception))
+        payload = valid_payload()
+        payload["repositories"][REPO]["migration"]["boundary"] = {
+            "number": 533,
+            "merged_at": "2026-08-26T20:37:34Z",
+            "why": "x",
+        }
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("unrecognized field(s) why", str(raised.exception))
 
     def test_every_declared_field_must_be_present_rather_than_defaulted(self):
         # A truncated but still-parseable edit is the failure this closes: a
@@ -1150,13 +1198,30 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIn("#601", scope["flag"])
         self.assertIsNone(self.scope(CURSOR_NAMING_REPORT)["flag"])
 
-    def test_a_negated_clause_still_excuses_a_skipped_batch(self):
-        # The non-vacuity control for the clause narrowing, reproduced from
-        # docs/project_review_398-353.md: a whole previously-reported batch
-        # named in one clause that says it was skipped rather than reviewed.
+    def test_a_previously_reported_batch_is_excused_by_the_words_in_front_of_it(self):
+        # Reproduced from docs/project_review_398-353.md. This used to rest on
+        # a negation somewhere in the clause; it now rests on "the previously
+        # reported ..." standing in front of the run, which is the same rule
+        # every other mention is held to.
         scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
+
+    def test_two_predicates_joined_by_and_cannot_excuse_each_other(self):
+        # `and` joins the items of an enumeration as well as two predicates,
+        # so it can never be a clause boundary -- which is why there is no
+        # clause-scoped negation left to reach across one. Both numbers are
+        # reported: flagging one the report did not review costs a
+        # confirmation, and reading past one it did costs the pull request.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the first batch: #612 and #610. It also "
+            "reviewed #601 and skipped #533.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#601", scope["flag"])
+        self.assertIn("#533", scope["flag"])
 
     def test_an_unintroduced_enumeration_is_flagged_with_every_candidate_number(self):
         # A list with no colon to introduce it: the numbers are plainly the

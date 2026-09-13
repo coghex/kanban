@@ -325,6 +325,7 @@ def parse_document(text: str, source: str) -> dict:
     repositories = document.get("repositories")
     if not isinstance(repositories, dict):
         raise LedgerError(f"{source} declares no `repositories` object.")
+    _require_keys(document, DOCUMENT_KEYS, source)
     parsed = empty_document()
     for name, state in repositories.items():
         if not REPO_RE.match(str(name)):
@@ -369,19 +370,33 @@ EXCLUDED_KEYS = ("prs", "commits")
 MIGRATION_KEYS = ("source", "boundary", "withheld_boundary")
 
 
-def _require_keys(mapping, keys, source: str) -> None:
-    """Every declared field present, before any of them is defaulted.
+DOCUMENT_KEYS = ("version", "repositories")
+ENDPOINT_KEYS = ("sha",)
+BOUNDARY_KEYS = ("number", "merged_at")
 
-    Defaulting a missing field is how a truncated but still-parseable edit
-    erases rows, direct progress, exclusions, or a row's previous attempts
-    without a word. A strictly parsed document refuses what it cannot see
-    rather than supplying an empty stand-in for it.
+
+def _require_keys(mapping, keys, source: str) -> None:
+    """Every declared field present and nothing else, at every level.
+
+    Two silences, closed together because they are one decision. Defaulting a
+    missing field is how a truncated but still-parseable edit erases rows,
+    direct progress, exclusions, or a row's previous attempts; dropping an
+    unrecognized one is how a field written by a newer helper, or misspelled
+    by a hand-edit, disappears through a read-and-rewrite. A strictly parsed
+    document refuses both rather than normalizing either away.
     """
     missing = [key for key in keys if key not in mapping]
     if missing:
         raise LedgerError(
             f"{source} declares no {', '.join(missing)}; a ledger states every "
             f"one of {', '.join(keys)} rather than leaving any to a default."
+        )
+    unknown = sorted(set(mapping) - set(keys))
+    if unknown:
+        raise LedgerError(
+            f"{source} carries unrecognized field(s) {', '.join(unknown)}; it "
+            f"holds exactly {', '.join(keys)}, and a field this helper cannot "
+            "read is one it would drop on the next write."
         )
 
 
@@ -400,6 +415,11 @@ def _validated_repository(state, source: str) -> dict:
         if not isinstance(state[key], dict):
             raise LedgerError(f"{source}: {key} is not an object.")
         _require_keys(state[key], expected, f"{source}: {key}")
+    endpoint = state["direct"]["endpoint"]
+    if endpoint is not None:
+        if not isinstance(endpoint, dict):
+            raise LedgerError(f"{source}: direct.endpoint is not an object.")
+        _require_keys(endpoint, ENDPOINT_KEYS, f"{source}: direct.endpoint")
     carried = _validated_carryover(state, source)
     validated["direct"] = carried["direct"]
     validated["excluded"] = carried["excluded"]
@@ -444,12 +464,6 @@ def _validated_row_key(key, source: str) -> int:
 def _validated_row(row, source: str) -> dict:
     if not isinstance(row, dict):
         raise LedgerError(f"{source} is not an object.")
-    unknown = sorted(set(row) - set(ROW_KEYS))
-    if unknown:
-        raise LedgerError(
-            f"{source} carries unrecognized row field(s) {', '.join(unknown)}; "
-            f"a ledger row holds exactly {', '.join(ROW_KEYS)}."
-        )
     _require_keys(row, ROW_KEYS, source)
     status = row["status"]
     if status not in ROW_STATUSES:
@@ -557,6 +571,13 @@ def _validated_evidence(values, source: str) -> list:
     for value in values:
         if not isinstance(value, str) or not value.strip():
             raise LedgerError(f"{source} holds {value!r}, which is not an evidence note.")
+        # A newline or a control character would split the rendered row it
+        # sits in, and the table is what a human reads the ledger through.
+        if any(character < " " or character == "\x7f" for character in value):
+            raise LedgerError(
+                f"{source} holds {value!r}, which carries a control character; "
+                "an evidence note is one line of readable text."
+            )
         if value in evidence:
             raise LedgerError(f"{source} names {value!r} twice.")
         evidence.append(value)
@@ -582,12 +603,6 @@ def _validated_history_entry(entry, source: str) -> dict:
     """
     if not isinstance(entry, dict):
         raise LedgerError(f"{source} is not an object.")
-    unknown = sorted(set(entry) - set(HISTORY_KEYS))
-    if unknown:
-        raise LedgerError(
-            f"{source} carries unrecognized history field(s) {', '.join(unknown)}; "
-            f"an entry holds exactly {', '.join(HISTORY_KEYS)}."
-        )
     _require_keys(entry, HISTORY_KEYS, source)
     kind = entry["kind"]
     if not isinstance(kind, str) or not re.match(r"\A[a-z][a-z0-9-]*\Z", kind):
@@ -630,11 +645,6 @@ def _validated_history_entry(entry, source: str) -> dict:
 def _validated_migration(migration, source: str) -> dict:
     if not isinstance(migration, dict):
         raise LedgerError(f"{source}: migration is not an object.")
-    unknown = sorted(set(migration) - set(MIGRATION_KEYS))
-    if unknown:
-        raise LedgerError(
-            f"{source}: migration carries unrecognized field(s) {', '.join(unknown)}."
-        )
     _require_keys(migration, MIGRATION_KEYS, f"{source}: migration")
     origin = migration["source"]
     if origin is not None and origin not in MIGRATION_SOURCES:
@@ -646,8 +656,9 @@ def _validated_migration(migration, source: str) -> dict:
     if boundary is not None:
         if not isinstance(boundary, dict):
             raise LedgerError(f"{source}: migration.boundary is not an object.")
-        number = boundary.get("number")
-        merged_at = boundary.get("merged_at")
+        _require_keys(boundary, BOUNDARY_KEYS, f"{source}: migration.boundary")
+        number = boundary["number"]
+        merged_at = boundary["merged_at"]
         if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
             raise LedgerError(
                 f"{source}: migration.boundary.number is not a pull-request number."
@@ -827,22 +838,22 @@ RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 # list does: a wording nobody anticipated costs one confirmation, where the
 # opposite default costs a pull request that no one finds out was dropped.
 MENTION_LEAD_RE = re.compile(
-    r"\b(?:completed|between|from|through|after|before|since|until|at|"
-    r"numbered|below|above|beyond|under|over)\s*\Z",
+    r"\b(?:completed|reported|between|from|through|after|before|since|until|"
+    r"at|numbered|below|above|beyond|under|over)\s*\Z",
     re.IGNORECASE,
 )
 
-# Clause boundaries: punctuation, and the conjunctions that start a contrasting
-# or subordinate clause. A clause rather than a sentence because a sentence can
-# hold both halves of the question -- "It did not review #8, but it did review
-# #10" says one thing about #8 and the opposite about #10 -- and punctuation
-# alone does not separate them, because the conjunction is where the sense
-# turns. `and` and `or` are deliberately absent: they join the items of an
-# enumeration, and splitting on them would cut a batch in half.
-CLAUSE_SPLIT_RE = re.compile(
-    r"[.;:]|\b(?:but|however|whereas|although|though|yet|while)\b",
-    re.IGNORECASE,
-)
+# There is deliberately no clause- or sentence-scoped "this was not reviewed"
+# excuse here. Three attempts at one each reached a pull request it should not
+# have: a sentence-wide negation silenced the positive half of "It did not
+# review #8, but it also reviewed these: #10 and #9"; narrowing it to the
+# conjunct left "It also reviewed #10 and skipped #9", where `and` joins two
+# predicates and cannot be split on because it also joins a batch's items.
+# The excuse is now one rule -- the word immediately in front of the run --
+# because that is the only relationship a parser can establish without
+# understanding the sentence. A pull request a report says it did *not* review
+# therefore flags unless that word puts it somewhere else, which costs a
+# confirmation and never a dropped pull request.
 
 NUMBER_RE = re.compile(r"#(\d+)")
 
@@ -999,18 +1010,6 @@ def _sentence_spans(text: str) -> list:
     return spans
 
 
-def _clause_around(text: str, position: int) -> str:
-    start = 0
-    end = len(text)
-    for match in CLAUSE_SPLIT_RE.finditer(text):
-        if match.start() < position:
-            start = match.end()
-        else:
-            end = match.start()
-            break
-    return text[start:end]
-
-
 def _unaccounted_mentions(paragraph: str, accepted_span) -> list:
     """Every pull request the accepted reading neither took nor accounts for.
 
@@ -1020,17 +1019,21 @@ def _unaccounted_mentions(paragraph: str, accepted_span) -> list:
     explanation for each. A number with none is not quietly ignored -- it
     flags the report, and the flag names it, so the operator decides.
 
-    Two things explain a number: the clause it sits in says the batch did not
-    review it, or the words immediately in front of it hand it to a role that
-    is not a reviewing verb's object. Both are deliberately narrow. "It also
-    reviewed #10", "It also reviewed PR #10", and "it also reviewed these:
-    #10 and #9" have neither, which is the point.
+    One thing explains a number: the word immediately in front of it hands it
+    to a role that is not a reviewing verb's object -- "below the completed
+    #185 cursor", "interleaved between #219 and #196", "the previously
+    reported #386 ... batch", "advanced through #466". That is deliberately
+    the only rule, and deliberately positional: every looser relationship
+    tried here -- a negation somewhere in the sentence, then somewhere in the
+    conjunct -- reached a pull request it should not have, because which
+    predicate a word belongs to is not something this parser can decide.
+    "It also reviewed #10", "It also reviewed PR #10", "it also reviewed
+    these: #10 and #9", and "It also reviewed #10 and skipped #9" all fail
+    it, which is the point.
     """
     unaccounted = []
     for match in RUN_RE.finditer(paragraph):
         if accepted_span and accepted_span[0] <= match.start() < accepted_span[1]:
-            continue
-        if SCOPE_NEGATION_RE.search(_clause_around(paragraph, match.start())):
             continue
         if MENTION_LEAD_RE.search(paragraph[: match.start()]):
             continue
