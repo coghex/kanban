@@ -1943,6 +1943,33 @@ class FilesystemTests(LedgerTestCase):
         self.assertIn("outside", str(raised.exception))
         self.assertFalse(LEDGER.document_path(self.root).exists())
 
+    def test_a_confirmation_does_not_excuse_a_report_from_its_path_checks(self):
+        # The confirmation branch ran before the confinement check and the
+        # read, so a confirmed path that was a symlink out of the worktree, a
+        # link with nothing behind it, or a directory became a row's evidence
+        # -- evidence nobody can go and check, which is the one thing a legacy
+        # row is for.
+        outside = tempfile.TemporaryDirectory(prefix="project-review-outside-")
+        self.addCleanup(outside.cleanup)
+        elsewhere = Path(outside.name) / "elsewhere.md"
+        elsewhere.write_text("# Elsewhere\n\nprose\n", encoding="utf-8")
+        name = "project_review_12-11.md"
+        for label, make in (
+            ("a symlink out of the root", lambda target: os.symlink(elsewhere, target)),
+            ("a link with nothing behind it",
+             lambda target: os.symlink(self.root / "docs" / "nothing.md", target)),
+            ("a directory", lambda target: target.mkdir()),
+        ):
+            with self.subTest(report=label):
+                directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
+                self.addCleanup(directory.cleanup)
+                root = Path(directory.name)
+                (root / "docs").mkdir()
+                make(root / "docs" / name)
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.migrate(root, REPO, {f"docs/{name}": [12, 11]})
+                self.assertFalse(LEDGER.document_path(root).exists())
+
     def test_a_ledger_resolving_outside_the_root_is_refused(self):
         outside = tempfile.TemporaryDirectory(prefix="project-review-outside-")
         self.addCleanup(outside.cleanup)

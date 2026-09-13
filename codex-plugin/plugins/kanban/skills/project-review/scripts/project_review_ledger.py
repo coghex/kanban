@@ -1560,11 +1560,11 @@ def _report_scopes(cursor, root, confirmations: dict):
         if entry["kind"] != "pr":
             reports.append(record)
             continue
-        if entry["path"] in confirmations:
-            record["reviewed"] = sorted(set(confirmations.pop(entry["path"])), reverse=True)
-            record["confirmed"] = True
-            reports.append(record)
-            continue
+        # Confined and read before the confirmation branch, not after it. A
+        # confirmation used to skip both, so a report path that was a symlink
+        # out of the worktree, a link with nothing behind it, or a directory
+        # became a row's evidence -- evidence nobody can go and check, which
+        # is the one thing a legacy row is for.
         report_path = confined(root, Path(root) / entry["path"])
         try:
             text = report_path.read_text(encoding="utf-8")
@@ -1573,6 +1573,11 @@ def _report_scopes(cursor, root, confirmations: dict):
                 f"{report_path} could not be read ({error}); every report is "
                 "inspected, so one that cannot be stops the migration."
             ) from error
+        if entry["path"] in confirmations:
+            record["reviewed"] = sorted(set(confirmations.pop(entry["path"])), reverse=True)
+            record["confirmed"] = True
+            reports.append(record)
+            continue
         scope = report_scope(text, entry["path"])
         if scope["flag"]:
             flags.append(
