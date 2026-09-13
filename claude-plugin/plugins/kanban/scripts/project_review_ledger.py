@@ -64,6 +64,15 @@ would have lied about history:
   turns up with a historical report it does not cover — a reviewed edit with
   a fixture beside it.
 
+  Prose in brackets and prose in backticks are read the same way: not at all.
+  A parenthesis makes its sentence unreadable, and only a path, a ref or an
+  abbreviated commit is masked out of a code span. Eighteen of the nineteen
+  tracked reports parse; `docs/project_review_463-455.md` annotates every
+  pull request in its enumeration, so it flags and takes one `--confirm`.
+  That is the recovery path this migration was built around, and one
+  confirmation over nineteen reports is the whole price of never inventing a
+  review again.
+
   The migration inspects every report, returns every flag, and writes nothing
   while one remains; a caller that knows what a paragraph meant supplies the
   enumeration through `--confirm` and the same migration then completes. The
@@ -841,10 +850,15 @@ def write_document(root, document: dict) -> Path:
 
 # A backticked span is masked because report prose puts paths, SHAs and
 # boundaries in code spans, and `docs/project_review_463-455.md` inside one is
-# a filename rather than two pull requests. A span saying anything this parser
-# would otherwise have to read is kept, so a status in backticks -- "#612
-# (`unreviewed`)" -- cannot be blanked into an annotation that looks benign.
+# a filename rather than two pull requests.
+#
+# Only the shape those actually take is masked: one token of a path, a ref, or
+# an abbreviated commit, with no space in it and no pull-request number. Prose
+# in backticks is kept, because blanking it would leave a gap a template
+# happily spans -- "..., in merge-time order `but none were reviewed`: #600,
+# ..." would have read as the template it interrupts.
 BACKTICK_RE = re.compile(r"`[^`]*`")
+CODE_SPAN_RE = re.compile(r"\A`[\w./@:+-]+`\Z")
 
 PAREN_RE = re.compile(r"\([^()]*\)")
 
@@ -855,30 +869,17 @@ NUMBER_RE = re.compile(r"#(\d+)")
 # or a filename.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+")
 
-# What an annotation may say before this parser is willing to drop it. Only
-# the enumeration's own annotations are ever dropped -- "#463 (per-entry
-# witnesses ...)" is one report's way of saying what a reviewed pull request
-# was about -- and only when they say nothing about reviewing. A participle is
-# where review status lives, so "(not reviewed)", "(unreviewed)", "(pending)"
-# and "(skipped)" all survive, and a surviving annotation is text no template
-# contains.
-# A participle, and not an abbreviated commit that happens to end in one:
-# `097eeed` is seven hex characters, and `dabbed` would be six. The lookahead
-# requires a letter outside the hex alphabet, which every English participle
-# this matters for has and no SHA can.
-PARTICIPLE_RE = re.compile(
-    r"\b(?=[A-Za-z]*[g-zG-Z])[A-Za-z]{2,}(?:ed|ing)\b", re.IGNORECASE
-)
-ANNOTATION_KEEP_RE = re.compile(
-    r"#\d+|\b(?:PRs?|pull\s+requests?|covered|covers|covering|reviewed|"
-    r"reviewing|reviews|not|no|none|never|neither|nothing|without)\b",
-    re.IGNORECASE,
-)
-
-# A parenthesis anywhere but inside the enumeration is replaced by a character
-# no template contains, so a qualifier bracketed into an otherwise-matching
-# sentence -- "..., in merge-time order (but none were actually reviewed):
-# #600, ..." -- cannot be blanked back into a match.
+# A parenthesis is replaced by a character no template contains, and there is
+# no exception. Two rounds were spent deciding which annotations were safe to
+# drop -- "(not reviewed)" then "(unreviewed)" then "(out of scope)" -- and
+# each answer was a list of the spellings someone had thought of. An
+# annotation is prose, and prose is what this parser has stopped reading.
+#
+# `docs/project_review_463-455.md` pays for it: every pull request in its
+# enumeration carries one, so it flags and takes one `--confirm`. That is the
+# recovery path the migration was built around rather than a gap in it, and
+# one confirmation over nineteen reports is the whole cost of never inventing
+# a review again.
 UNREADABLE_MARK = "\x00"
 
 HOLE_RE = re.compile(r"\{([A-Z]+)\}")
@@ -987,11 +988,7 @@ def opening_paragraph(text: str):
 def _masked(text: str) -> str:
     def blank(match):
         span = match.group(0)
-        if (
-            NUMBER_RE.search(span)
-            or ANNOTATION_KEEP_RE.search(span)
-            or PARTICIPLE_RE.search(span)
-        ):
+        if NUMBER_RE.search(span) or not CODE_SPAN_RE.match(span):
             return span
         return " " * len(span)
 
@@ -1012,29 +1009,13 @@ def _sentence_spans(text: str) -> list:
 def _normalized(sentence: str) -> str:
     """One sentence in the form a template is written in.
 
-    Line wrapping collapses, a space before punctuation goes, and the
-    enumeration's own annotations are dropped when they say nothing about
-    reviewing. Every other parenthesis becomes a character no template
-    contains, so bracketing a qualifier into an otherwise-matching sentence
-    leaves it unmatched rather than blanked back into a match.
+    Line wrapping collapses and a space before punctuation goes -- a report's
+    wrapping is not something it means. A parenthesis becomes a character no
+    template contains, so a sentence carrying one is a sentence this parser
+    does not read.
     """
-    colon = sentence.find(":")
-    head = sentence if colon < 0 else sentence[:colon]
-    tail = "" if colon < 0 else sentence[colon:]
-
-    def drop(match):
-        span = match.group(0)
-        if ANNOTATION_KEEP_RE.search(span) or PARTICIPLE_RE.search(span):
-            return UNREADABLE_MARK
-        return " "
-
-    while True:
-        reduced = PAREN_RE.sub(drop, tail)
-        if reduced == tail:
-            break
-        tail = reduced
-    head = PAREN_RE.sub(UNREADABLE_MARK, head)
-    collapsed = " ".join((head + tail).split())
+    marked = PAREN_RE.sub(UNREADABLE_MARK, sentence)
+    collapsed = " ".join(marked.split())
     return re.sub(r"\s+([,;:.])", r"\1", collapsed).strip()
 
 

@@ -32,13 +32,16 @@ and three properties follow.
   migration assertion below pins the exact row set, and the numbers a
   paragraph names for other reasons -- a cursor, a stop, a skipped batch, a
   report filename -- are pinned as absent rather than left unmentioned.
-* **Both of the parser's allowlists are pinned closed.** `SCOPE_OBJECT_RE`
-  decides which clause introduces an enumeration and `MENTION_FORMS` which
-  number is a landmark rather than coverage, and each is asserted twice over:
-  every form the tracked reports use must still parse, and the wordings ten
-  review rounds produced -- each of which a denylist admitted and each of
-  which lost or invented a pull request -- must all flag. A set that quietly
-  grew back toward "accept anything" would fail the second half.
+* **The template sets are pinned closed from both sides.** `SCOPE_TEMPLATES`
+  says which sentences introduce a batch and `MENTION_TEMPLATES` which name a
+  pull request for some other reason, and each is asserted twice over: every
+  template the module ships must parse when filled in, and every wording the
+  sixteen review rounds produced -- each admitted by some earlier rule, each
+  of which lost or invented a pull request -- must flag. A set that grew back
+  toward accepting anything fails the second half; one narrowed into
+  uselessness fails the first. Report fixtures are tracked templates filled
+  in for the same reason: a fixture in an invented wording would test the
+  refusal rather than the reading.
 
 The refusals get the same treatment. A ledger that cannot be parsed is the
 one state in which every later invocation must stop, so each malformed shape
@@ -1020,10 +1023,17 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [432, 442, 444, 431, 412])
 
-    def test_an_annotated_enumeration_is_read_through_its_annotations(self):
+    def test_an_annotated_enumeration_is_flagged_rather_than_read(self):
+        # docs/project_review_463-455.md annotates every pull request in its
+        # enumeration. Two rounds were spent deciding which annotations were
+        # safe to drop -- "(not reviewed)", then "(unreviewed)", then "(out of
+        # scope)" -- and each answer was a list of the spellings someone had
+        # thought of. None is dropped now, so this report takes one
+        # `--confirm`, which is the recovery path rather than a gap in it.
         scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
-        self.assertIsNone(scope["flag"], scope["flag"])
-        self.assertEqual(scope["reviewed"], [571, 570])
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [570, 571])
+        self.assertIn("--confirm", scope["flag"])
 
     def test_a_separately_skipped_batch_is_not_imported(self):
         scope = self.scope(SKIPPED_BATCH_REPORT, "docs/project_review_520-517.md")
@@ -1071,11 +1081,11 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(scope["reviewed"], [])
         self.assertIsNotNone(scope["flag"])
 
-    def test_an_annotation_saying_anything_about_reviewing_is_kept(self):
-        # Annotations inside an enumeration are dropped, so one that withdrew
-        # its own entry's coverage would have disappeared with the withdrawal.
-        # Any participle is kept, not the spellings anyone thought to list: an
-        # exclusion naming `not reviewed` once let `unreviewed` through.
+    def test_no_annotation_is_dropped_whatever_it_says(self):
+        # Deciding which annotations were safe to drop cost two rounds and
+        # produced a list of spellings both times. An annotation is prose, and
+        # prose is what this parser has stopped reading, so every one of these
+        # flags -- including ones that say nothing about reviewing at all.
         scope_sentence = instantiate(LEDGER.SCOPE_TEMPLATES[6])
         for annotation in (
             "not reviewed",
@@ -1085,7 +1095,11 @@ class ReportScopeTests(LedgerTestCase):
             "pending",
             "no review",
             "not in scope",
+            "out of scope",
+            "`out of scope`",
             "`unreviewed`",
+            "the issue templates",
+            "anything at all",
         ):
             with self.subTest(annotation=annotation):
                 scope = self.paragraph(
@@ -1093,13 +1107,8 @@ class ReportScopeTests(LedgerTestCase):
                 )
                 self.assertEqual(scope["reviewed"], [])
                 self.assertIsNotNone(scope["flag"])
-        # ... and the tracked reports' own annotations, which say what a
-        # reviewed pull request was about, still drop.
-        scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
-        self.assertIsNone(scope["flag"], scope["flag"])
-        self.assertEqual(scope["reviewed"], [571, 570])
 
-    def test_a_parenthesis_outside_the_enumeration_is_never_dropped(self):
+    def test_a_parenthesis_anywhere_makes_its_sentence_unreadable(self):
         # A qualifier bracketed into an otherwise-matching sentence would
         # otherwise be blanked back into a match.
         scope = self.paragraph(
@@ -1110,15 +1119,22 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(scope["reviewed"], [])
         self.assertIsNotNone(scope["flag"])
 
-    def test_an_abbreviated_commit_ending_in_ed_is_not_a_participle(self):
-        # `097eeed` is seven hex characters and appears in a tracked report;
-        # reading it as a participle kept its code span and flagged the whole
-        # report. The rule is a letter outside the hex alphabet.
-        self.assertIsNone(LEDGER.PARTICIPLE_RE.search("`097eeed`"))
-        self.assertIsNone(LEDGER.PARTICIPLE_RE.search("`dabbed`"))
-        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("unreviewed"))
-        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("deferred"))
-        self.assertIsNotNone(LEDGER.PARTICIPLE_RE.search("pending"))
+    def test_only_a_path_or_a_commit_is_masked_out_of_a_code_span(self):
+        # Blanking prose in backticks leaves a gap a template spans happily,
+        # so only the shape the tracked reports' code spans take is masked.
+        scope = self.paragraph(
+            instantiate(LEDGER.SCOPE_TEMPLATES[6]).replace(
+                " order:", " order `but none were reviewed`:"
+            )
+        )
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIsNotNone(scope["flag"])
+        # ... while a path, a ref and an abbreviated commit still mask, which
+        # is what lets the templates that name one parse at all.
+        for span in ("`docs/project_review_456-446.md`", "`origin/master@3215e3d`", "`097eeed`"):
+            with self.subTest(span=span):
+                self.assertIsNotNone(LEDGER.CODE_SPAN_RE.match(span))
+        self.assertIsNone(LEDGER.CODE_SPAN_RE.match("`but none were reviewed`"))
 
     def test_every_wording_the_review_rounds_produced_is_flagged(self):
         # One entry per wording sixteen review rounds produced. Each was
@@ -1507,6 +1523,26 @@ class FlaggedMigrationTests(LedgerTestCase):
         # ... and only once. A third invocation refuses rather than rebuilding.
         with self.assertRaises(LEDGER.LedgerError):
             LEDGER.migrate(self.root, REPO, {flagged: [612, 610]})
+
+    def test_an_annotated_report_is_completed_by_confirming_it(self):
+        # The one tracked report this parser does not read is the one whose
+        # every enumerated pull request carries an annotation. Its recovery is
+        # the ordinary one, so it is asserted end to end rather than left as a
+        # property of the scope parser.
+        path = write_report(self.root, "project_review_571-570.md", ANNOTATED_REPORT)
+        flagged = LEDGER.migrate(self.root, REPO)
+        self.assertEqual(flagged["status"], "flagged")
+        self.assertEqual([flag["report"] for flag in flagged["flags"]], [path])
+        self.assertEqual(flagged["flags"][0]["candidates"], [570, 571])
+        self.assertFalse(LEDGER.document_path(self.root).exists())
+
+        result = LEDGER.migrate(self.root, REPO, {path: [571, 570]})
+        self.assertEqual(result["status"], "migrated")
+        self.assertEqual(self.rows_of(result["state"]), {571, 570})
+        self.assertEqual(
+            result["state"]["rows"]["571"]["evidence"],
+            [f"report:{path} (operator-confirmed)"],
+        )
 
     def test_a_confirmed_empty_enumeration_imports_nothing_from_that_report(self):
         flagged = write_report(
