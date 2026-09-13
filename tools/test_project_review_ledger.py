@@ -1174,6 +1174,28 @@ class ReportScopeTests(LedgerTestCase):
                 self.assertEqual(scope["reviewed"], [])
                 self.assertIn("#601", scope["flag"])
 
+    def test_an_annotation_saying_anything_about_reviewing_is_kept(self):
+        # Annotations are blanked before anything is read, so one that
+        # withdrew its own entry's coverage would have disappeared along with
+        # the withdrawal. A parenthesis naming a pull request, a reviewing
+        # verb, a negation or a pull-request noun is kept, where it breaks the
+        # enumeration shape and flags the report.
+        kept = (
+            "This review covered the two merged pull requests: #612 (not "
+            "reviewed) and #610.\n"
+        )
+        scope = self.scope(
+            f"# Project Review Findings: PRs #612–#610\n\n{kept}",
+            "docs/project_review_612-610.md",
+        )
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIsNotNone(scope["flag"])
+        # ... and the tracked reports' own annotations, which say what a
+        # reviewed pull request was about, still blank.
+        scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
+        self.assertIsNone(scope["flag"], scope["flag"])
+        self.assertEqual(scope["reviewed"], [571, 570])
+
     def test_a_parenthesis_holding_a_pull_request_is_not_an_annotation(self):
         # Annotations are blanked before anything is read, so a whole
         # parenthesised sentence would have taken its pull request out of
@@ -1296,6 +1318,22 @@ class ReportScopeTests(LedgerTestCase):
             "threshold that was reviewed": (
                 f"{opening} No pull request numbered #601 or lower was "
                 "entered, though #601 was reviewed."
+            ),
+            "annotation withdrawing its own entry": (
+                "This review covered the two merged pull requests: #601 (not "
+                "reviewed) and #533 (not reviewed)."
+            ),
+            "annotation marking an entry pending": (
+                "This review covered the two merged pull requests: #601 "
+                "(pending) and #533 (pending)."
+            ),
+            "non-coverage predicate reversed later": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "skipped initially but reviewed in this pass."
+            ),
+            "non-coverage predicate negated": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "not skipped."
             ),
             "passive review behind a role word": (
                 f"{opening} The previously reported #601 and #533 were also reviewed."

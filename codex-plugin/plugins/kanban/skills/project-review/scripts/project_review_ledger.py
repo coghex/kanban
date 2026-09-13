@@ -859,11 +859,20 @@ MENTION_FORMS = (
      None, None, True),
     # "the direct commits that landed after #456"
     (re.compile(r"\blanded\s+(?:after|before)\s*\Z", re.IGNORECASE), None, None, True),
-    # "The previously reported #386 ... #361 batch was explicitly skipped"
+    # "The previously reported #386 ... #361 batch was explicitly skipped
+    # rather than reviewed again". Matched over the whole clause, not its
+    # opening: a prefix match accepted "batch was skipped initially but
+    # reviewed in this pass", whose second half reverses the first. The filler
+    # refuses a negation of its own, so "batch was not skipped" is not a
+    # non-coverage predicate either.
     (re.compile(r"\breported\s*\Z", re.IGNORECASE),
      re.compile(
-         r"\A\s*batch(?:es)?\s+(?:was|were)\s+(?:\w+\s+){0,3}"
-         r"(?:skipped|excluded|omitted|ignored|untouched|left|not)\b",
+         r"\A\s*batch(?:es)?\s+(?:was|were)\s+"
+         r"(?:(?!not\b|never\b|only\b|nearly\b)\w+\s+){0,3}"
+         r"(?:skipped|excluded|omitted|ignored|untouched|left)\b"
+         r"(?:\s|,|\b(?:rather|than|reviewed|covered|again|here|this|that|"
+         r"time|round|pass|instead|alone|entirely|altogether|previously|"
+         r"already|over|for|now)\b)*\Z",
          re.IGNORECASE,
      ), None, False),
     # "no pull request numbered #533 or lower"
@@ -912,7 +921,8 @@ SCOPE_TRIGGER_RE = re.compile(
 # after the colon, and the shape check below is what keeps them out.
 SCOPE_NEGATION_RE = re.compile(
     r"\b(?:not|no|none|never|neither|nothing|without|rather than|instead of|"
-    r"skipped|skipping|excluded|excluding|omitted|omitting)\b",
+    r"skipped|skipping|excluded|excluding|omitted|omitting|pending|deferred|"
+    r"postponed|outstanding)\b",
     re.IGNORECASE,
 )
 
@@ -1039,16 +1049,29 @@ def _unannotated(text: str) -> str:
     paragraph it came from, which is what lets a run be placed relative to the
     colon that introduced the accepted enumeration.
 
-    A parenthesis holding a pull-request number is left alone, because it is
-    not an annotation this helper may throw away: "(It also reviewed #10.)" is
-    a whole sentence in brackets, and blanking it would hide the one number
-    the accounting pass exists to catch. No annotation in the tracked reports
-    carries a number, so nothing real is kept by this and anything new that
-    does is accounted for rather than erased.
+    A parenthesis is left alone whenever it says anything this parser would
+    otherwise have to read: a pull-request number, a reviewing verb, a
+    negation, or a pull-request noun. "(It also reviewed #10.)" is a whole
+    sentence in brackets and "#601 (not reviewed)" withdraws the coverage its
+    own enumeration claims, and blanking either would hide it rather than
+    answer it. Left in place, both break the enumeration shape and flag the
+    report.
+
+    The tracked reports' annotations say what a reviewed pull request was
+    about -- "(the pull-request template)", "(the issue templates)",
+    "(per-entry witnesses for `docs/design.md` §3 and §20)" -- and none of
+    them says anything about reviewing, so all three still blank.
     """
     def blank(match):
         span = match.group(0)
-        return span if NUMBER_RE.search(span) else " " * len(span)
+        if (
+            NUMBER_RE.search(span)
+            or SCOPE_TRIGGER_RE.search(span)
+            or SCOPE_NEGATION_RE.search(span)
+            or PR_NOUN_RE.search(span)
+        ):
+            return span
+        return " " * len(span)
 
     while True:
         reduced = PAREN_RE.sub(blank, text)
@@ -1185,12 +1208,17 @@ def _landmark_form(sentence: str, match) -> bool:
     """
     before = sentence[: match.start()]
     after = sentence[match.end():]
+    boundary = CLAUSE_END_RE.search(after)
+    clause_after = after[: boundary.start()] if boundary else after
     run = " ".join(match.group(0).split())
     for lead, trail, shape, closed in MENTION_FORMS:
         found = lead.search(before)
         if found is None:
             continue
-        if trail is not None and not trail.match(after):
+        # Trails are read against the run's own clause, so a form whose
+        # pattern ends at `\Z` is asking about the whole of it rather than
+        # about how it starts.
+        if trail is not None and not trail.match(clause_after):
             continue
         if shape is not None and not shape.match(run):
             continue
@@ -1202,10 +1230,8 @@ def _landmark_form(sentence: str, match) -> bool:
         # reviewed". The two forms whose own clause goes on to discuss the
         # review are exempt, and the reported-batch form closes its predicate
         # in `trail` instead.
-        if closed:
-            end = CLAUSE_END_RE.search(after)
-            if SCOPE_TRIGGER_RE.search(after[: end.start()] if end else after):
-                continue
+        if closed and SCOPE_TRIGGER_RE.search(clause_after):
+            continue
         return True
     return False
 
