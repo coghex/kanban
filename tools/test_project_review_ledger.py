@@ -414,6 +414,16 @@ class DocumentParsingTests(LedgerTestCase):
             LEDGER.parse_document(cursor_text, "the cursor document")
         self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
 
+    def test_a_line_separator_cannot_smuggle_a_marker_into_the_document(self):
+        # The previous round's fix counted marker lines; this one closes the
+        # other half, which is a value that can create a line. An explicit
+        # list of break characters missed U+2028, so the reader's own
+        # `str.splitlines` decides instead.
+        smuggled = "a" + chr(0x2028) + LEDGER.LEDGER_MARKER + chr(0x2028) + "b"
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(valid_payload({"602": dict(completed_row(), evidence=[smuggled])}))
+        self.assertIn("line break", str(raised.exception))
+
     def test_a_marker_inside_the_documents_own_data_is_not_a_second_marker(self):
         # An evidence note may say anything, including the marker. Such a note
         # renders into its table cell and its payload string, and a count over
@@ -601,7 +611,27 @@ class DocumentParsingTests(LedgerTestCase):
             ),
             "evidence carrying a newline": (
                 {"602": dict(completed_row(), evidence=["one\ntwo"])},
+                "line break",
+            ),
+            "evidence carrying a unicode line separator": (
+                {"602": dict(completed_row(), evidence=["one" + chr(0x2028) + "two"])},
+                "line break",
+            ),
+            "evidence carrying a unicode paragraph separator": (
+                {"602": dict(completed_row(), evidence=["one" + chr(0x2029) + "two"])},
+                "line break",
+            ),
+            "evidence carrying a next-line character": (
+                {"602": dict(completed_row(), evidence=["one" + chr(0x85) + "two"])},
+                "line break",
+            ),
+            "evidence carrying a tab": (
+                {"602": dict(completed_row(), evidence=["one\ttwo"])},
                 "control character",
+            ),
+            "boundary merge time carrying a line separator": (
+                None,
+                "line break",
             ),
             "evidence that is not a list": (
                 {"602": dict(completed_row(), evidence="one")},
@@ -667,8 +697,13 @@ class DocumentParsingTests(LedgerTestCase):
         for name, (rows, expected) in cases.items():
             with self.subTest(shape=name):
                 payload = valid_payload(rows if rows is not None else {})
-                if rows is None:
+                if rows is None and name == "migration source outside the four":
                     payload["repositories"][REPO]["migration"]["source"] = "guessed"
+                elif rows is None:
+                    payload["repositories"][REPO]["migration"]["boundary"] = {
+                        "number": 533,
+                        "merged_at": "2026-08-26" + chr(0x2028) + "T20:37:34Z",
+                    }
                 with self.assertRaises(LEDGER.LedgerError) as raised:
                     self.parse(payload)
                 self.assertIn(expected, str(raised.exception))
@@ -1186,6 +1221,33 @@ class ReportScopeTests(LedgerTestCase):
         scope = self.paragraph(sentence)
         self.assertIsNone(scope["flag"], scope["flag"])
         self.assertEqual(scope["reviewed"], [612, 610])
+
+    def test_an_enumeration_needs_a_delimiter_between_its_pull_requests(self):
+        # With the punctuation and the conjunction both optional, "#612#610"
+        # and "#612 #610" read as two-item lists, so malformed prose
+        # established coverage instead of asking for confirmation.
+        sentence = self.scope_sentence("This review covered the {COUNT} newest merged")
+        for label, enumeration in (
+            ("no delimiter at all", "#612#610"),
+            ("a space and nothing else", "#612 #610"),
+            ("a stray word between", "#612 then #610"),
+        ):
+            with self.subTest(enumeration=label):
+                scope = self.paragraph(
+                    self.mutated(sentence, "#612 and #610", enumeration)
+                )
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
+        # ... and the delimiters the tracked reports use still read.
+        for enumeration in ("#612 and #610", "#612, #610", "#612, and #610"):
+            with self.subTest(delimiter=enumeration):
+                scope = self.paragraph(
+                    self.mutated(sentence, "#612 and #610", enumeration)
+                    if enumeration != "#612 and #610"
+                    else sentence
+                )
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
 
     def test_a_count_word_is_read_as_the_number_the_reports_spell(self):
         # The tracked reports spell their batch size in words, including the

@@ -600,6 +600,29 @@ def _validated_optional_path(value, source: str):
     return value
 
 
+def _require_one_line(value: str, source: str) -> None:
+    """One line by the same definition the document is read back with.
+
+    `render_document` writes the marker on a line of its own and
+    `parse_document` counts lines to find it, so a value carrying a line break
+    would split its rendered row and could put a second marker line into a
+    document this helper wrote itself. An explicit list of break characters
+    missed U+2028; `str.splitlines` is what the reader uses, so it is what
+    decides here.
+    """
+    if value.splitlines() != [value]:
+        raise LedgerError(
+            f"{source} holds {value!r}, which carries a line break; the "
+            "document is read back a line at a time, so a value spanning two "
+            "of them is not one this helper can write."
+        )
+    if any(character < " " or character == "\x7f" for character in value):
+        raise LedgerError(
+            f"{source} holds {value!r}, which carries a control character; "
+            "an evidence note is one line of readable text."
+        )
+
+
 def _validated_evidence(values, source: str) -> list:
     if not isinstance(values, list):
         raise LedgerError(f"{source} is not a list.")
@@ -607,13 +630,7 @@ def _validated_evidence(values, source: str) -> list:
     for value in values:
         if not isinstance(value, str) or not value.strip():
             raise LedgerError(f"{source} holds {value!r}, which is not an evidence note.")
-        # A newline or a control character would split the rendered row it
-        # sits in, and the table is what a human reads the ledger through.
-        if any(character < " " or character == "\x7f" for character in value):
-            raise LedgerError(
-                f"{source} holds {value!r}, which carries a control character; "
-                "an evidence note is one line of readable text."
-            )
+        _require_one_line(value, source)
         if value in evidence:
             raise LedgerError(f"{source} names {value!r} twice.")
         evidence.append(value)
@@ -703,6 +720,7 @@ def _validated_migration(migration, source: str) -> dict:
             raise LedgerError(
                 f"{source}: migration.boundary.merged_at is not a merge timestamp."
             )
+        _require_one_line(merged_at, f"{source}: migration.boundary.merged_at")
         boundary = {"number": number, "merged_at": merged_at}
     withheld = migration["withheld_boundary"]
     if withheld is not None:
@@ -932,12 +950,18 @@ def count_value(text: str):
         return None
     return COUNT_WORDS.get(text)
 
+# What separates two pull requests in a list. Required, not optional: with
+# both the punctuation and the conjunction optional, "#612#610" and "#612
+# #610" read as two-item enumerations, and malformed prose then established
+# coverage instead of asking for confirmation.
+LIST_SEPARATOR = r"(?:\s*[,;]\s*(?:and\s+|&\s*)?|\s+and\s+|\s*&\s*)"
+
 HOLE_PATTERNS = {
     # The reviewed enumeration a scope template introduces.
-    "ENUM": r"(?P<enum>#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*)",
+    "ENUM": rf"(?P<enum>#\d+(?:{LIST_SEPARATOR}#\d+)*)",
     # A pull request named as something other than reviewed work.
     "NUM": r"#\d+",
-    "NUMS": r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*",
+    "NUMS": rf"#\d+(?:{LIST_SEPARATOR}#\d+)*",
     "COUNT": r"(?:(?:twenty|thirty)-(?:one|two|three|four|five|six|seven|"
              r"eight|nine)|one|two|three|four|five|six|seven|eight|nine|ten|"
              r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
