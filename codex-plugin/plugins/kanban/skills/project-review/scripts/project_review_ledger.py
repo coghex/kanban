@@ -157,6 +157,12 @@ TIMESTAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
 REPO_RE = re.compile(r"\A[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 
+# `str.isdigit()` is true of "²" and of "٣", and `int()` accepts one and
+# raises on the other -- so a row keyed by a superscript reached `int()` past
+# the check that was supposed to refuse it and left a traceback where the
+# refusal should have been. A pull-request number is ASCII decimal.
+DECIMAL_RE = re.compile(r"[0-9]+")
+
 # A repository-relative POSIX path. Absolute paths and `..` segments are
 # refused because a rendered link resolves them against the reader's browser,
 # not against this module.
@@ -530,7 +536,7 @@ def _validated_carryover(state, source: str) -> dict:
 
 def _validated_row_key(key, source: str) -> int:
     text = str(key)
-    if not text.isdigit() or text != str(int(text)) or int(text) <= 0:
+    if not DECIMAL_RE.fullmatch(text) or text != str(int(text)) or int(text) <= 0:
         raise LedgerError(
             f"{source} keys a row by {key!r}, which is not a pull-request number."
         )
@@ -768,7 +774,47 @@ def _validated_migration(migration, source: str) -> dict:
             raise LedgerError(
                 f"{source}: migration.withheld_boundary is not a pull-request number."
             )
+    _require_coherent_provenance(origin, boundary, withheld, source)
     return {"source": origin, "boundary": boundary, "withheld_boundary": withheld}
+
+
+def _require_coherent_provenance(origin, boundary, withheld, source: str) -> None:
+    """The combinations a migration can actually produce, and no others.
+
+    Each field was checked on its own, so a record could say it carried
+    nothing over and still hold the boundary it carried -- which the table
+    then rendered as "Nothing carried over from a previous record" while the
+    payload said otherwise. A provenance record that describes a migration
+    that never happened is worse than no record: it is one an operator would
+    read and believe.
+    """
+    if origin in (None, "absent"):
+        if boundary is not None or withheld is not None:
+            raise LedgerError(
+                f"{source}: migration says it read {origin!r} and still holds a "
+                "boundary; a record carried over from nothing carries nothing."
+            )
+        return
+    if origin == "cursor-v1" and boundary is not None:
+        raise LedgerError(
+            f"{source}: migration reads a v1 cursor and holds an exclusive "
+            "boundary; version 1's endpoint is coverage, and the cursor's own "
+            "parser retires it on read."
+        )
+    if withheld is None:
+        return
+    if origin != "boundary-document":
+        raise LedgerError(
+            f"{source}: migration withheld a boundary from a {origin!r} record; "
+            "only the hand-authored document spells its stop as coverage, so "
+            "only it has a stop to withhold."
+        )
+    if boundary is None or withheld != boundary["number"]:
+        raise LedgerError(
+            f"{source}: migration withheld #{withheld} while its boundary is "
+            f"{boundary and boundary['number']}; the withheld pull request is "
+            "the boundary, or it is a number from nowhere."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -997,7 +1043,7 @@ COUNT_WORDS = {
 def count_value(text: str):
     """`"twelve"` as 12, or None when the word is not one this helper knows."""
     text = text.strip().lower()
-    if text.isdigit():
+    if DECIMAL_RE.fullmatch(text):
         return int(text)
     if "-" in text:
         tens, _, unit = text.partition("-")
@@ -1625,7 +1671,7 @@ def _confirmation(raw: str) -> tuple:
     numbers = []
     for token in (item for item in re.split(r"[,\s]+", listed.strip()) if item):
         stripped = token.lstrip("#")
-        if not stripped.isdigit() or int(stripped) <= 0:
+        if not DECIMAL_RE.fullmatch(stripped) or int(stripped) <= 0:
             raise LedgerError(f"{token!r} is not a pull-request number.")
         numbers.append(int(stripped))
     return path, numbers

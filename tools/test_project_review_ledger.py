@@ -8,7 +8,7 @@ module under test ships in both bundles and nothing invokes it yet: design
 D-19 keeps the installed `project-review` command on the v2 cursor until
 LEDGER-6 switches it over, so until then these tests are the module's only
 caller. That makes them the whole of its contract rather than a sample of it,
-and three properties follow.
+and these properties follow.
 
 * **Fixtures are produced by the mechanism they stand in for.** Every v2
   cursor here is written by `project_review_cursor.py`'s own `record` and
@@ -531,6 +531,14 @@ class DocumentParsingTests(LedgerTestCase):
         cases = {
             "row key is not a number": ({"six-oh-two": completed_row()}, "not a pull-request number"),
             "row key has a leading zero": ({"0602": completed_row()}, "not a pull-request number"),
+            "row key is a superscript digit": (
+                {"\u00b2": completed_row()},
+                "not a pull-request number",
+            ),
+            "row key is an arabic-indic digit": (
+                {"\u0663": completed_row()},
+                "not a pull-request number",
+            ),
             "row is not an object": ({"602": "clean"}, "not an object"),
             "unknown row field": (
                 {"602": dict(completed_row(), verdict="ok")},
@@ -822,6 +830,49 @@ class DocumentParsingTests(LedgerTestCase):
                 with self.assertRaises(LEDGER.LedgerError) as raised:
                     self.parse(valid_payload({"602": dict(completed_row(), history=[entry])}))
                 self.assertIn(f"declares no {field}", str(raised.exception))
+
+    def test_a_provenance_record_must_describe_a_migration_that_could_happen(self):
+        # Each field was checked on its own, so a record could say it carried
+        # nothing over and still hold the boundary it carried -- which the
+        # table renders as "Nothing carried over from a previous record" while
+        # the payload says otherwise. A provenance record describing a
+        # migration that never happened is one an operator would believe.
+        boundary = {"number": 533, "merged_at": "legacy-exclusive-boundary"}
+        for label, migration in {
+            "nothing read, a boundary held": {
+                "source": None, "boundary": boundary, "withheld_boundary": None},
+            "no record read, a boundary held": {
+                "source": "absent", "boundary": boundary, "withheld_boundary": None},
+            "a v2 cursor withholding a stop": {
+                "source": "cursor-v2", "boundary": boundary, "withheld_boundary": 533},
+            "a v1 cursor holding a boundary": {
+                "source": "cursor-v1", "boundary": boundary, "withheld_boundary": None},
+            "a withheld number that is not the boundary": {
+                "source": "boundary-document", "boundary": boundary,
+                "withheld_boundary": 520},
+            "a withheld number with no boundary": {
+                "source": "boundary-document", "boundary": None,
+                "withheld_boundary": 533},
+        }.items():
+            with self.subTest(provenance=label):
+                payload = valid_payload()
+                payload["repositories"][REPO]["migration"] = migration
+                with self.assertRaises(LEDGER.LedgerError):
+                    self.parse(payload)
+        # ... and the two shapes a migration does produce still parse.
+        for label, migration in {
+            "a hand-authored stop, withheld": {
+                "source": "boundary-document", "boundary": boundary,
+                "withheld_boundary": 533},
+            "a v2 cursor with its boundary": {
+                "source": "cursor-v2", "boundary": boundary, "withheld_boundary": None},
+        }.items():
+            with self.subTest(provenance=label):
+                payload = valid_payload()
+                payload["repositories"][REPO]["migration"] = migration
+                self.assertEqual(
+                    LEDGER.state_for(self.parse(payload), REPO)["migration"], migration
+                )
 
     def test_direct_and_excluded_are_held_to_the_cursor_modules_own_validation(self):
         # Design D-16 carries these two structures across untouched, so the
@@ -1898,6 +1949,12 @@ class CommandLineTests(LedgerTestCase):
                     LEDGER.main(
                         ["migrate", "--root", str(self.root), "--repo", REPO, "--confirm", raw]
                     )
+
+    def test_a_confirmation_naming_a_non_ascii_digit_is_refused(self):
+        # `str.isdigit()` is true of "²" and `int()` raises on it, so the
+        # check that was meant to refuse this left a traceback instead.
+        with self.assertRaises(LEDGER.LedgerError):
+            LEDGER._confirmation("docs/project_review_12-11.md=#\u00b2")
 
     def test_the_same_report_cannot_be_confirmed_twice(self):
         with self.assertRaises(LEDGER.LedgerError) as raised:
