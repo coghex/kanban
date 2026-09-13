@@ -246,13 +246,24 @@ def document_path(root) -> Path:
 
 def parse_document(text: str, source: str) -> dict:
     """The state a ledger document holds, or a refusal naming what stopped it."""
-    match = PAYLOAD_RE.search(text)
-    if match is None:
+    matches = list(PAYLOAD_RE.finditer(text))
+    if not matches:
         raise LedgerError(
             f"{source} carries no {LEDGER_MARKER} block, so it is not a "
             "project-review ledger. Move it aside or repair it; an invocation "
             "will not treat an unreadable ledger as an absent one."
         )
+    if len(matches) > 1:
+        # One payload, or none. A second block is what a bad merge or a
+        # hand-edit leaves behind, and taking the first would quietly discard
+        # whichever of them is the current state -- with no way afterwards to
+        # tell that anything was discarded.
+        raise LedgerError(
+            f"{source} carries {len(matches)} {LEDGER_MARKER} blocks; exactly "
+            "one is expected, and a reader that took one of them would be "
+            "choosing between two ledgers without saying so."
+        )
+    match = matches[0]
     try:
         document = json.loads(match.group("payload"))
     except json.JSONDecodeError as error:
@@ -720,11 +731,26 @@ BACKTICK_RE = re.compile(r"`[^`]*`")
 # number appearing only there is something that PR referred to.
 PAREN_RE = re.compile(r"\([^()]*\)")
 
-# A run of pull-request numbers joined by nothing but list punctuation: two or
-# more, because one number is a mention and a list is a claim. This is what an
-# enumeration looks like wherever it sits, colon or no colon, and it is how a
-# second enumeration is caught in a paragraph whose first one parsed cleanly.
-RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)+")
+# A run of pull-request numbers joined by nothing but list punctuation. This is
+# what an enumeration looks like wherever it sits, colon or no colon, and it is
+# how a second one is caught in a paragraph whose first parsed cleanly. One
+# number is a run too: "It also reviewed #10" loses a pull request just as
+# quietly as a list would, and the number of items is not what separates a
+# claim of coverage from a mention of a cursor.
+RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
+
+# A reviewing verb with its object right behind it -- "It also reviewed #10".
+# What makes a lone number coverage is that the sentence hands it straight to
+# the verb; the tracked reports' lone numbers are all handed to something else
+# ("below the completed #185 cursor", "the user's exclusive stop at #533",
+# "landed after #456 inside that boundary", "advanced through #466"), which is
+# why adjacency separates the two and a count cannot.
+DIRECT_SCOPE_RE = re.compile(
+    r"\b(?:covered|covers|covering|reviewed|reviewing|reviews)\s+"
+    r"(?:(?:also|only|just|again|further|additionally|separately|then|"
+    r"the|these|those|both|and|it|a|an)\s+)*",
+    re.IGNORECASE,
+)
 
 # `interleaved between #446 and #411` -- a span's two endpoints, not a list of
 # two reviewed pull requests. Seven of the tracked reports spell their direct
@@ -882,12 +908,20 @@ def _unaccounted_runs(sentence: str, accepted_from) -> list:
     """
     if not SCOPE_TRIGGER_RE.search(sentence) or SCOPE_NEGATION_RE.search(sentence):
         return []
+    attached = {match.end() for match in DIRECT_SCOPE_RE.finditer(sentence)}
     runs = []
     for match in RUN_RE.finditer(sentence):
         if accepted_from is not None and match.start() >= accepted_from:
             continue
         run = " ".join(match.group(0).split())
         if RANGE_RUN_RE.match(run) and RANGE_LEAD_RE.search(sentence[: match.start()]):
+            continue
+        if NUMBER_RE.fullmatch(run) and match.start() not in attached:
+            # A lone number the sentence handed to something other than its
+            # reviewing verb: a cursor, a stop, a boundary, a landing. Eleven
+            # tracked reports name one of those inside the same sentence that
+            # enumerates their batch, so treating every singleton as coverage
+            # would flag most of the tree.
             continue
         runs.append(run)
     return runs

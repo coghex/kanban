@@ -390,6 +390,17 @@ class DocumentParsingTests(LedgerTestCase):
             LEDGER.parse_document(cursor_text, "the cursor document")
         self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
 
+    def test_a_second_payload_block_is_refused(self):
+        # A bad merge or a hand-edit leaves two. Taking the first would
+        # silently choose between two ledgers, and nothing afterwards could
+        # tell that a choice had been made.
+        first = ledger_text(valid_payload({"602": completed_row()}))
+        second = ledger_text(valid_payload({"601": completed_row()}))
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_document(first + second, "fixture")
+        self.assertIn("2", str(raised.exception))
+        self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
+
     def test_unreadable_json_is_refused(self):
         with self.assertRaises(LEDGER.LedgerError) as raised:
             self.parse("{not json at all")
@@ -904,14 +915,39 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(scope["reviewed"], [])
         self.assertIn("#612 and #610", scope["flag"])
 
-    def test_a_single_number_beside_the_enumeration_is_a_mention_not_a_list(self):
-        # The non-vacuity control for the two above, and the property every
-        # tracked report depends on: one number before the colon is a cursor,
-        # a stop or a boundary, and flagging those would flag most of the
-        # tree. Two or more joined by list punctuation is a claim.
-        scope = self.scope(CURSOR_NAMING_REPORT)
+    def test_a_lone_reviewed_pull_request_left_over_is_flagged(self):
+        # A singleton loses a pull request just as quietly as a list does, so
+        # what separates coverage from a mention is not how many numbers there
+        # are but whether the sentence handed them to its reviewing verb.
+        body = (
+            "# Project Review Findings: PRs #612–#601\n\n"
+            "This review covered the first batch: #612 and #610. It also "
+            "reviewed #601.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-601.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [601, 610, 612])
+        self.assertIn("#601", scope["flag"])
+
+    def test_a_single_number_handed_to_something_else_is_a_mention(self):
+        # The non-vacuity control for every leftover rule above, and the
+        # property eleven tracked reports depend on: a cursor, a stop, a
+        # boundary or a landing names one number inside the same sentence
+        # that enumerates the batch, and flagging those would flag most of
+        # the tree.
+        self.assertIsNone(self.scope(CURSOR_NAMING_REPORT)["flag"])
+        self.assertEqual(self.scope(CURSOR_NAMING_REPORT)["reviewed"], [602, 601, 569])
+        self.assertIsNone(self.scope(STOP_NAMING_REPORT)["flag"])
+        landing = (
+            "# Project Review Findings: PRs #612–#601\n\n"
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #601. It also reviewed the direct first-parent "
+            "documentation commits `7550744` and `173f1e0` that landed after "
+            "#533 inside that boundary.\n"
+        )
+        scope = self.scope(landing, "docs/project_review_612-601.md")
         self.assertIsNone(scope["flag"])
-        self.assertEqual(scope["reviewed"], [602, 601, 569])
+        self.assertEqual(scope["reviewed"], [612, 601])
 
     def test_a_between_range_in_a_reviewing_sentence_is_not_a_second_list(self):
         # Reproduced from docs/project_review_342-317.md: the direct-commit
