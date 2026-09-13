@@ -825,23 +825,38 @@ PAREN_RE = re.compile(r"\([^()]*\)")
 # as a list would be.
 RUN_RE = re.compile(r"#\d+(?:\s*[,;]?\s*(?:and|&)?\s*#\d+)*")
 
-# The words that put a run in some role other than "this batch reviewed it",
-# immediately in front of it. Every lone number and every leftover list in the
-# tracked reports sits behind one of these -- "below the completed #185
-# cursor", "interleaved between #219 and #196", "the user's exclusive stop at
-# #533", "advanced through #466", "landed after #456 inside that boundary",
-# "no pull request numbered #533 or lower" -- because each hands the number to
-# a preposition or a participle rather than to a reviewing verb.
+# The landmark roles a report gives a pull request other than "this batch
+# reviewed it": a cursor it resumed below, a stop it did not cross, a boundary
+# it froze at, a landing that arrived while it ran, a batch someone else
+# reported, a numeric threshold. Every leftover number in the tracked reports
+# sits beside one of these words.
 #
-# This list is the whole of what excuses a number from the accepted
-# enumeration, and everything else flags. That direction matters more than the
-# list does: a wording nobody anticipated costs one confirmation, where the
-# opposite default costs a pull request that no one finds out was dropped.
-MENTION_LEAD_RE = re.compile(
-    r"\b(?:completed|reported|between|from|through|after|before|since|until|"
-    r"at|numbered|below|above|beyond|under|over)\s*\Z",
+# Roles, not prepositions. `from`, `through` and `after` were on this list and
+# excused "It also reviewed PRs from #601 through #533", because a preposition
+# says where a number sits in a phrase and nothing about what the phrase
+# claims. A role word names what the number *is*, which is the question, and a
+# reviewing verb's plain object has no role word beside it.
+MENTION_ROLE_RE = re.compile(
+    r"\b(?:cursor|cursors|stop|stops|stopped|boundary|boundaries|frontier|"
+    r"landing|landings|landed|batch|batches|completed|reported|advanced|"
+    r"numbered)\b",
     re.IGNORECASE,
 )
+
+# How far in front of a run a role word counts, in words. In front only, and
+# two words only, because that is where every tracked report puts it -- "the
+# completed #185 cursor", "exclusive stop at #533", "advanced through #466",
+# "previously reported #386", "landed after #456", "request numbered #533" --
+# and because a window that also looked behind would excuse "It also reviewed
+# the #601 batch", where the role word belongs to the verb's object rather
+# than to the number.
+ROLE_WINDOW = 2
+
+# `interleaved between #446 and #411` -- an interval's two endpoints. The one
+# form with no role word of its own, and structural enough to recognize by
+# shape: `between` directly in front, and exactly two numbers joined by `and`.
+INTERVAL_LEAD_RE = re.compile(r"\bbetween\s*\Z", re.IGNORECASE)
+INTERVAL_RUN_RE = re.compile(r"\A#\d+\s+and\s+#\d+\Z")
 
 # There is deliberately no clause- or sentence-scoped "this was not reviewed"
 # excuse here. Three attempts at one each reached a pull request it should not
@@ -1010,7 +1025,7 @@ def _sentence_spans(text: str) -> list:
     return spans
 
 
-def _unaccounted_mentions(paragraph: str, accepted_span) -> list:
+def _unaccounted_mentions(sentence: str, accepted_from) -> list:
     """Every pull request the accepted reading neither took nor accounts for.
 
     This is the parser's whole safety property, and it runs the opposite way
@@ -1019,25 +1034,32 @@ def _unaccounted_mentions(paragraph: str, accepted_span) -> list:
     explanation for each. A number with none is not quietly ignored -- it
     flags the report, and the flag names it, so the operator decides.
 
-    One thing explains a number: the word immediately in front of it hands it
-    to a role that is not a reviewing verb's object -- "below the completed
-    #185 cursor", "interleaved between #219 and #196", "the previously
-    reported #386 ... batch", "advanced through #466". That is deliberately
-    the only rule, and deliberately positional: every looser relationship
-    tried here -- a negation somewhere in the sentence, then somewhere in the
-    conjunct -- reached a pull request it should not have, because which
-    predicate a word belongs to is not something this parser can decide.
-    "It also reviewed #10", "It also reviewed PR #10", "it also reviewed
-    these: #10 and #9", and "It also reviewed #10 and skipped #9" all fail
-    it, which is the point.
+    One thing explains a number: a landmark role in the two words in front of
+    it -- "the completed #185 cursor", "the previously reported #386 ...
+    batch", "advanced through #466", "landed after #456", "request numbered
+    #533" -- or the one structural form, an interval's two endpoints behind
+    `between`.
+
+    Everything looser than that has been tried here and has reached a pull
+    request it should not have: a negation somewhere in the sentence, then
+    somewhere in the conjunct, then a bare preposition in front of the number.
+    A preposition says where a number sits in a phrase and nothing about what
+    the phrase claims, which is why "It also reviewed PRs from #601 through
+    #533" walked past it. "It also reviewed #10", "It also reviewed PR #10",
+    "it also reviewed these: #10 and #9", and "It also reviewed #10 and
+    skipped #9" fail this too, which is the point.
     """
     unaccounted = []
-    for match in RUN_RE.finditer(paragraph):
-        if accepted_span and accepted_span[0] <= match.start() < accepted_span[1]:
+    for match in RUN_RE.finditer(sentence):
+        if accepted_from is not None and match.start() >= accepted_from:
             continue
-        if MENTION_LEAD_RE.search(paragraph[: match.start()]):
+        run = " ".join(match.group(0).split())
+        if INTERVAL_RUN_RE.match(run) and INTERVAL_LEAD_RE.search(sentence[: match.start()]):
             continue
-        unaccounted.append(" ".join(match.group(0).split()))
+        window = sentence[: match.start()].split()[-ROLE_WINDOW:]
+        if MENTION_ROLE_RE.search(" ".join(window)):
+            continue
+        unaccounted.append(run)
     return unaccounted
 
 
@@ -1067,17 +1089,23 @@ def report_scope(text: str, path: str) -> dict:
     readable = _unannotated(masked)
     enumerations = []
     ambiguous = False
-    accepted_span = None
-    for offset, sentence in _sentence_spans(readable):
+    readings = []
+    for _, sentence in _sentence_spans(readable):
         found, unclear, accepted_from = _sentence_enumeration(sentence)
         if unclear:
             ambiguous = True
         elif found:
             enumerations.append(found)
-            accepted_span = (offset + accepted_from, offset + len(sentence))
-    if len(enumerations) != 1:
-        accepted_span = None
-    unaccounted = _unaccounted_mentions(readable, accepted_span)
+        readings.append((sentence, accepted_from))
+    # A paragraph with no single accepted reading has taken nothing, so every
+    # number in it is left over and every one of them is reported.
+    unaccounted = [
+        run
+        for sentence, accepted_from in readings
+        for run in _unaccounted_mentions(
+            sentence, accepted_from if len(enumerations) == 1 else None
+        )
+    ]
     if len(enumerations) == 1 and not ambiguous and not unaccounted:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
     if ambiguous:

@@ -1207,6 +1207,74 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIsNone(scope["flag"])
         self.assertEqual(scope["reviewed"], [520, 517])
 
+    def test_a_preposition_in_front_of_a_number_does_not_excuse_it(self):
+        # A preposition says where a number sits in a phrase and nothing about
+        # what the phrase claims, so `from`, `through` and `after` in front of
+        # one excused "It also reviewed PRs from #601 through #533" while it
+        # dropped both. Only a word that names what the number *is* excuses it.
+        for phrase in (
+            "PRs from #601 through #533",
+            "everything after #601",
+            "the pull requests from #601",
+        ):
+            with self.subTest(phrase=phrase):
+                body = (
+                    "# Project Review Findings: PRs #612–#610\n\n"
+                    "This review covered the first batch: #612 and #610. It "
+                    f"also reviewed {phrase}.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("#601", scope["flag"])
+
+    def test_a_role_word_excuses_only_from_in_front_of_the_number(self):
+        # A window that also looked behind the number would excuse "It also
+        # reviewed the #601 batch", where the role word belongs to the verb's
+        # object rather than to the number.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the first batch: #612 and #610. It also "
+            "reviewed the #601 batch.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#601", scope["flag"])
+
+    def test_a_role_word_in_the_next_sentence_does_not_reach_back(self):
+        # The window is bounded to the run's own sentence, because the
+        # neighbouring one is a different claim.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the first batch: #612 and #610. It also "
+            "reviewed #601. The completed #533 cursor was respected.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#601", scope["flag"])
+
+    def test_every_landmark_role_the_tracked_reports_use_still_excuses(self):
+        # The non-vacuity control for all three narrowings at once: each of
+        # the six shapes a tracked report actually uses, beside a batch the
+        # helper must still read.
+        opening = (
+            "This review covered the next two merged pull requests by merge "
+            "time: #612 and #610."
+        )
+        for role in (
+            "It continued below the completed #533 cursor.",
+            "It stopped above the user's exclusive stop at #533.",
+            "Master advanced through #533 while verification was running.",
+            "The previously reported #533 batch was left alone.",
+            "It also reviewed the direct commits that landed after #533.",
+            "No pull request numbered #533 or lower was entered.",
+            "It also reviewed the direct commits interleaved between #533 and #520.",
+        ):
+            with self.subTest(role=role):
+                body = f"# Project Review Findings: PRs #612–#610\n\n{opening} {role}\n"
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertIsNone(scope["flag"], scope["flag"])
+                self.assertEqual(scope["reviewed"], [612, 610])
+
     def test_two_predicates_joined_by_and_cannot_excuse_each_other(self):
         # `and` joins the items of an enumeration as well as two predicates,
         # so it can never be a clause boundary -- which is why there is no
