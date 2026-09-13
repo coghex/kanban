@@ -870,7 +870,7 @@ MENTION_FORMS = (
          r"\A\s*batch(?:es)?\s+(?:was|were)\s+"
          r"(?:(?!not\b|never\b|only\b|nearly\b)\w+\s+){0,3}"
          r"(?:skipped|excluded|omitted|ignored|untouched|left)\b"
-         r"(?:\s|,|\b(?:rather|than|reviewed|covered|again|here|this|that|"
+         r"(?:\s|[,.]|\b(?:rather|than|reviewed|covered|again|here|this|that|"
          r"time|round|pass|instead|alone|entirely|altogether|previously|"
          r"already|over|for|now)\b)*\Z",
          re.IGNORECASE,
@@ -881,8 +881,6 @@ MENTION_FORMS = (
      None, True),
 )
 
-# Where a clause ends, for the purpose of asking what it says about a run.
-CLAUSE_END_RE = re.compile(r"[.;:]")
 
 # There is deliberately no clause- or sentence-scoped "this was not reviewed"
 # excuse here. Three attempts at one each reached a pull request it should not
@@ -897,6 +895,15 @@ CLAUSE_END_RE = re.compile(r"[.;:]")
 # confirmation and never a dropped pull request.
 
 NUMBER_RE = re.compile(r"#(\d+)")
+
+# An annotation this parser may throw away: plain words, no pull-request
+# number, and no participle. `-ed` and `-ing` are where a report puts a pull
+# request's review status, so a parenthesis carrying one is kept and read
+# rather than erased.
+BENIGN_ANNOTATION_RE = re.compile(
+    r"\A\((?:[^()#]*?)\)\Z", re.DOTALL
+)
+PARTICIPLE_RE = re.compile(r"\b\w+(?:ed|ing)\b", re.IGNORECASE)
 
 # Sentence boundaries as report prose actually spells them. A period inside a
 # code span is already masked, so this does not split `origin/master@a1b2c3d`
@@ -1057,19 +1064,20 @@ def _unannotated(text: str) -> str:
     answer it. Left in place, both break the enumeration shape and flag the
     report.
 
-    The tracked reports' annotations say what a reviewed pull request was
-    about -- "(the pull-request template)", "(the issue templates)",
-    "(per-entry witnesses for `docs/design.md` §3 and §20)" -- and none of
-    them says anything about reviewing, so all three still blank.
+    What may be blanked is stated positively: an annotation of plain words,
+    none of them a participle. Review status lives in participles --
+    "(not reviewed)", "(unreviewed)", "(pending)", "(skipped)", "(deferred)"
+    -- so excluding them excludes the whole family rather than the spellings
+    anyone thought to list, which a word-by-word exclusion did not: it named
+    `not reviewed` and let `unreviewed` through. The tracked reports'
+    annotations say what a reviewed pull request was about -- "(the
+    pull-request template)", "(the issue templates)", "(per-entry witnesses
+    for `docs/design.md` §3 and §20)" -- and carry no participle at all, so
+    all three still blank.
     """
     def blank(match):
         span = match.group(0)
-        if (
-            NUMBER_RE.search(span)
-            or SCOPE_TRIGGER_RE.search(span)
-            or SCOPE_NEGATION_RE.search(span)
-            or PR_NOUN_RE.search(span)
-        ):
+        if not BENIGN_ANNOTATION_RE.match(span) or PARTICIPLE_RE.search(span):
             return span
         return " " * len(span)
 
@@ -1208,17 +1216,17 @@ def _landmark_form(sentence: str, match) -> bool:
     """
     before = sentence[: match.start()]
     after = sentence[match.end():]
-    boundary = CLAUSE_END_RE.search(after)
-    clause_after = after[: boundary.start()] if boundary else after
     run = " ".join(match.group(0).split())
     for lead, trail, shape, closed in MENTION_FORMS:
         found = lead.search(before)
         if found is None:
             continue
-        # Trails are read against the run's own clause, so a form whose
-        # pattern ends at `\Z` is asking about the whole of it rather than
-        # about how it starts.
-        if trail is not None and not trail.match(clause_after):
+        # Trails are read against the rest of the sentence, not the rest of
+        # the clause: "batch was skipped; it was reviewed again here" put its
+        # reversal one semicolon away, where a clause-bounded read never
+        # looked. A form whose pattern ends at `\Z` is therefore asking about
+        # the whole remainder rather than about how it starts.
+        if trail is not None and not trail.match(after):
             continue
         if shape is not None and not shape.match(run):
             continue
@@ -1230,7 +1238,7 @@ def _landmark_form(sentence: str, match) -> bool:
         # reviewed". The two forms whose own clause goes on to discuss the
         # review are exempt, and the reported-batch form closes its predicate
         # in `trail` instead.
-        if closed and SCOPE_TRIGGER_RE.search(clause_after):
+        if closed and SCOPE_TRIGGER_RE.search(after):
             continue
         return True
     return False

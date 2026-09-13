@@ -1190,6 +1190,19 @@ class ReportScopeTests(LedgerTestCase):
         )
         self.assertEqual(scope["reviewed"], [])
         self.assertIsNotNone(scope["flag"])
+        # Any participle, not the spellings anyone thought to list: an
+        # exclusion naming `not reviewed` let `unreviewed` through, and review
+        # status is a participle whatever word it is spelled with.
+        for annotation in ("unreviewed", "skipped", "deferred", "pending"):
+            with self.subTest(annotation=annotation):
+                body = (
+                    "# Project Review Findings: PRs #612–#610\n\n"
+                    "This review covered the two merged pull requests: #612 "
+                    f"({annotation}) and #610.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-610.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIsNotNone(scope["flag"])
         # ... and the tracked reports' own annotations, which say what a
         # reviewed pull request was about, still blank.
         scope = self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")
@@ -1334,6 +1347,18 @@ class ReportScopeTests(LedgerTestCase):
             "non-coverage predicate negated": (
                 f"{opening} The previously reported #601 and #533 batch was "
                 "not skipped."
+            ),
+            "non-coverage predicate reversed past a semicolon": (
+                f"{opening} The previously reported #601 and #533 batch was "
+                "skipped; it was reviewed again here."
+            ),
+            "landmark reversed past a semicolon": (
+                f"{opening} The exclusive stop at #601 was not entered; it "
+                "was reviewed later."
+            ),
+            "participle annotation this parser did not name": (
+                "This review covered the two merged pull requests: #601 "
+                "(unreviewed) and #533 (skipped)."
             ),
             "passive review behind a role word": (
                 f"{opening} The previously reported #601 and #533 were also reviewed."
