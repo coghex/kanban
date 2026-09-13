@@ -413,6 +413,36 @@ class DocumentParsingTests(LedgerTestCase):
             self.parse(payload)
         self.assertIn("schema version", str(raised.exception))
 
+    def test_a_version_that_merely_equals_one_is_refused(self):
+        # `True == 1` and `1.0 == 1` in Python, so an equality test alone
+        # would read either as schema version 1 and normalize a malformed
+        # document into an accepted one.
+        for version in (True, 1.0, "1", None, [1]):
+            with self.subTest(version=version):
+                payload = valid_payload()
+                payload["version"] = version
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn("schema version", str(raised.exception))
+
+    def test_a_repeated_json_key_is_refused(self):
+        # `json.loads` keeps the last of a repeated key and says nothing, so a
+        # payload naming one repository, row, or field twice would be read as
+        # whichever copy came last -- the duplicate-block refusal above, one
+        # level further in.
+        payload = (
+            '{"version": 1, "repositories": {"coghex/kanban": {'
+            '"rows": {}, "rows": {"602": null}, '
+            '"direct": {"endpoint": null, "reviewed": []}, '
+            '"excluded": {"prs": [], "commits": []}, '
+            '"migration": {"source": null, "boundary": null, '
+            '"withheld_boundary": null}}}}'
+        )
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("more than once", str(raised.exception))
+        self.assertIn("rows", str(raised.exception))
+
     def test_a_payload_that_is_not_an_object_is_refused(self):
         with self.assertRaises(LEDGER.LedgerError) as raised:
             self.parse("[1, 2, 3]")
@@ -1071,6 +1101,54 @@ class ReportScopeTests(LedgerTestCase):
         self.assertIn("#533 and #520", scope["flag"])
         # ... and the genuinely negated number is not reported as lost.
         self.assertNotIn("#601 ", scope["flag"].split("candidate")[0])
+
+    def test_a_negation_does_not_reach_across_a_conjunction(self):
+        # Punctuation alone does not separate the two halves of "It did not
+        # review #8, but it did review #10": the conjunction is where the
+        # sense turns, so a negation read to the next full stop would excuse
+        # #10 along with #8 and lose it.
+        for joiner in (", but", " but", ", however,", " although"):
+            with self.subTest(joiner=joiner):
+                body = (
+                    "# Project Review Findings: PRs #612–#601\n\n"
+                    "This review covered the first batch: #612 and #610. It "
+                    f"did not review #533{joiner} it did review #601.\n"
+                )
+                scope = self.scope(body, "docs/project_review_612-601.md")
+                self.assertEqual(scope["reviewed"], [])
+                self.assertIn("#601", scope["flag"])
+
+    def test_a_parenthesis_holding_a_pull_request_is_not_an_annotation(self):
+        # Annotations are blanked before anything is read, so a whole
+        # parenthesised sentence would have taken its pull request out of
+        # sight rather than out of the enumeration.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the batch: #612 and #610. (It also reviewed "
+            "#601.)\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#601", scope["flag"])
+        # ... and one that carries no number is still an annotation, which is
+        # what lets the annotated enumeration above parse at all.
+        self.assertIsNone(self.scope(ANNOTATED_REPORT, "docs/project_review_571-570.md")["flag"])
+
+    def test_a_code_span_holding_a_pull_request_is_not_a_filename(self):
+        # Code spans are masked because report prose puts paths and SHAs in
+        # them, and `docs/project_review_463-455.md` is a filename rather than
+        # two pull requests. A span that spells a pull request the way a pull
+        # request is spelled is kept, or masking would hide it from the
+        # accounting pass instead of from the reading.
+        body = (
+            "# Project Review Findings: PRs #612–#610\n\n"
+            "This review covered the batch: #612 and #610. It also reviewed "
+            "`#601`.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-610.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("#601", scope["flag"])
+        self.assertIsNone(self.scope(CURSOR_NAMING_REPORT)["flag"])
 
     def test_a_negated_clause_still_excuses_a_skipped_batch(self):
         # The non-vacuity control for the clause narrowing, reproduced from

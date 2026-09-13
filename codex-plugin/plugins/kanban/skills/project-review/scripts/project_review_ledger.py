@@ -166,6 +166,23 @@ STATUS_LABELS = {
 }
 
 
+class _DuplicateKey(ValueError):
+    """A JSON object repeated a key, which the decoder would resolve silently."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.key = key
+
+
+def _no_duplicate_keys(pairs):
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _DuplicateKey(key)
+        seen[key] = value
+    return seen
+
+
 class LedgerError(RuntimeError):
     """The ledger, the evidence, or the request could not be trusted.
 
@@ -281,16 +298,29 @@ def parse_document(text: str, source: str) -> dict:
         )
     match = matches[0]
     try:
-        document = json.loads(match.group("payload"))
+        document = json.loads(match.group("payload"), object_pairs_hook=_no_duplicate_keys)
     except json.JSONDecodeError as error:
         raise LedgerError(f"{source} holds unreadable ledger JSON ({error}).") from error
+    except _DuplicateKey as error:
+        # `json.loads` keeps the last of a repeated key and says nothing, so a
+        # payload naming one repository, row, or field twice would be read as
+        # whichever copy happened to come last. That is the duplicate-block
+        # refusal above, one level further in.
+        raise LedgerError(
+            f"{source} names {error.key!r} more than once in one object; a "
+            "ledger that repeats a key states two values for it and a reader "
+            "that took one would be choosing without saying so."
+        ) from error
     if not isinstance(document, dict):
         raise LedgerError(f"{source} holds a ledger payload that is not an object.")
     version = document.get("version")
-    if version != SCHEMA_VERSION:
+    # `True == 1` and `1.0 == 1` in Python, so an equality test alone would
+    # read a boolean or a float as schema version 1 and normalize a malformed
+    # document into an accepted one.
+    if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
         raise LedgerError(
             f"{source} declares ledger schema version {version!r}; this helper "
-            f"expected version {SCHEMA_VERSION}."
+            f"expected the integer {SCHEMA_VERSION}."
         )
     repositories = document.get("repositories")
     if not isinstance(repositories, dict):
@@ -765,7 +795,10 @@ def write_document(root, document: dict) -> Path:
 # A backticked span is masked rather than removed so every offset below still
 # lines up. It is masked at all because report prose puts paths, SHAs and
 # boundaries in code spans, and `docs/project_review_463-455.md` inside one is
-# a filename, not two pull requests.
+# a filename, not two pull requests. A span that spells a pull request the way
+# a pull request is spelled is kept, because masking it would hide it from the
+# accounting pass rather than from the reading -- no opening paragraph in the
+# tracked reports has one, so nothing real is kept by this.
 BACKTICK_RE = re.compile(r"`[^`]*`")
 
 # An annotation on an enumerated pull request -- `#463 (per-entry witnesses)`.
@@ -799,11 +832,17 @@ MENTION_LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Clause boundaries. A clause rather than a sentence because a sentence can
-# hold both halves of the question: "It did not review #8, but it also
-# reviewed these: #10 and #9" says one thing about #8 and the opposite about
-# #10 and #9, and a negation read across the whole sentence would silence both.
-CLAUSE_SPLIT_RE = re.compile(r"[.;:]")
+# Clause boundaries: punctuation, and the conjunctions that start a contrasting
+# or subordinate clause. A clause rather than a sentence because a sentence can
+# hold both halves of the question -- "It did not review #8, but it did review
+# #10" says one thing about #8 and the opposite about #10 -- and punctuation
+# alone does not separate them, because the conjunction is where the sense
+# turns. `and` and `or` are deliberately absent: they join the items of an
+# enumeration, and splitting on them would cut a batch in half.
+CLAUSE_SPLIT_RE = re.compile(
+    r"[.;:]|\b(?:but|however|whereas|although|though|yet|while)\b",
+    re.IGNORECASE,
+)
 
 NUMBER_RE = re.compile(r"#(\d+)")
 
@@ -869,7 +908,11 @@ def opening_paragraph(text: str):
 
 
 def _masked(text: str) -> str:
-    return BACKTICK_RE.sub(lambda match: " " * len(match.group(0)), text)
+    def blank(match):
+        span = match.group(0)
+        return span if NUMBER_RE.search(span) else " " * len(span)
+
+    return BACKTICK_RE.sub(blank, text)
 
 
 def _unannotated(text: str) -> str:
@@ -878,9 +921,20 @@ def _unannotated(text: str) -> str:
     Blanked rather than removed so every offset below still lines up with the
     paragraph it came from, which is what lets a run be placed relative to the
     colon that introduced the accepted enumeration.
+
+    A parenthesis holding a pull-request number is left alone, because it is
+    not an annotation this helper may throw away: "(It also reviewed #10.)" is
+    a whole sentence in brackets, and blanking it would hide the one number
+    the accounting pass exists to catch. No annotation in the tracked reports
+    carries a number, so nothing real is kept by this and anything new that
+    does is accounted for rather than erased.
     """
+    def blank(match):
+        span = match.group(0)
+        return span if NUMBER_RE.search(span) else " " * len(span)
+
     while True:
-        reduced = PAREN_RE.sub(lambda match: " " * len(match.group(0)), text)
+        reduced = PAREN_RE.sub(blank, text)
         if reduced == text:
             return text
         text = reduced
