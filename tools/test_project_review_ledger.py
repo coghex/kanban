@@ -270,6 +270,15 @@ This review covered the following merged pull requests: #612 and #610. It also
 reviewed these: #602 and #601.
 """
 
+# Two reviewed enumerations inside one sentence. Reading only the last colon
+# would take #533 and #520 as the batch and drop #612 and #610 without a word,
+# which is the one outcome requirement 5 forbids outright.
+AMBIGUOUS_ONE_SENTENCE = """# Project Review Findings: PRs #612–#520
+
+This review covered one batch: #612 and #610; it also reviewed another: #533
+and #520.
+"""
+
 AMBIGUOUS_NO_ENUMERATION = """# Project Review Findings: PRs #444–#442
 
 A senior review of #444 and #442 taken newest-first over `coghex/kanban`,
@@ -534,6 +543,14 @@ class DocumentParsingTests(LedgerTestCase):
                                                         "completed_at": "2026-09-05T11:22:33Z",
                                                         "report": None}])},
                 "not self-contained",
+            ),
+            "findings history entry with no report": (
+                {"602": dict(completed_row(), history=[{"kind": "review",
+                                                        "outcome": "findings",
+                                                        "commit": OTHER_SHA,
+                                                        "completed_at": "2026-08-30T09:00:00Z",
+                                                        "report": None}])},
+                "links no report",
             ),
             "history entry with no time": (
                 {"602": dict(completed_row(), history=[{"kind": "takeover", "outcome": None,
@@ -818,6 +835,48 @@ class ReportScopeTests(LedgerTestCase):
         self.assertEqual(scope["candidates"], [601, 602, 610, 612])
         self.assertIn("2 reviewed-pull-request enumerations", scope["flag"])
         self.assertIn("--confirm", scope["flag"])
+
+    def test_two_enumerations_inside_one_sentence_are_flagged(self):
+        # A colon is where an enumeration begins, so a sentence with two of
+        # them carries two. Resolving it to the last one would import #533 and
+        # #520 as the whole batch and lose #612 and #610 silently.
+        scope = self.scope(AMBIGUOUS_ONE_SENTENCE, "docs/project_review_612-520.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertEqual(scope["candidates"], [520, 533, 610, 612])
+        self.assertIn("in a single sentence", scope["flag"])
+
+    def test_an_ambiguous_sentence_flags_its_report_even_beside_a_readable_one(self):
+        # The negative control for the case above: a sentence this parser
+        # cannot resolve is not made harmless by a sibling it can, because the
+        # coverage imported would then be whichever half happened to be
+        # readable rather than what the report says.
+        body = (
+            "# Project Review Findings: PRs #612–#517\n\n"
+            "This review covered the next two merged pull requests by merge "
+            "time: #571 and #570. It covered one further batch: #612 and "
+            "#610; it also reviewed another: #533 and #520.\n"
+        )
+        scope = self.scope(body, "docs/project_review_612-517.md")
+        self.assertEqual(scope["reviewed"], [])
+        self.assertIn("in a single sentence", scope["flag"])
+
+    def test_a_direct_commit_listing_after_a_scope_sentence_is_not_a_second_clause(self):
+        # The non-vacuity control for the two above, reproduced from
+        # docs/project_review_442-411.md: its second sentence introduces a SHA
+        # listing with its own colon, and a clause test that counted colons
+        # rather than the pull-request numbers after them would flag every
+        # real report in the tree.
+        body = (
+            "# Project Review Findings: PRs #442–#411\n\n"
+            "This review continued below the completed #533 cursor and covered "
+            "the next two merged pull requests by merge time: #442 and #411. "
+            "It also reviewed all three direct first-parent commits "
+            "interleaved between #533 and #411, from `b35c0e1` through "
+            "`5a61099`: `b35c0e1`, `90e28c5`, and `5a61099`.\n"
+        )
+        scope = self.scope(body, "docs/project_review_442-411.md")
+        self.assertIsNone(scope["flag"])
+        self.assertEqual(scope["reviewed"], [442, 411])
 
     def test_no_enumeration_is_flagged_with_every_candidate_number(self):
         scope = self.scope(AMBIGUOUS_NO_ENUMERATION, "docs/project_review_444-442.md")

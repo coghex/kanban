@@ -527,6 +527,12 @@ def _validated_history_entry(entry, source: str) -> dict:
             "verification commit and its completed-review time; an entry that "
             "needs the row beside it to be read is not self-contained."
         )
+    if outcome == "findings" and validated["report"] is None:
+        raise LedgerError(
+            f"{source} records a completed findings attempt that links no "
+            "report; the findings are the report, so an entry without one "
+            "cannot be read once a later clean review has taken the row."
+        )
     if outcome is None and validated["completed_at"] is None:
         raise LedgerError(
             f"{source} records a {kind} entry with no timestamp; an entry that "
@@ -781,16 +787,45 @@ def _masked(text: str) -> str:
     return BACKTICK_RE.sub(lambda match: " " * len(match.group(0)), text)
 
 
+def _enumeration_clauses(sentence: str) -> list:
+    """Every colon in `sentence` that introduces pull-request numbers.
+
+    A sentence introduces its enumeration with a colon, so the colons are
+    where the candidates are. Taking only the last one would read "covered one
+    batch: #12 and #11; it also reviewed another: #10 and #9" as coverage of
+    #10 and #9 alone and drop the other two silently -- the single outcome
+    this parser must never produce. Each colon is judged against the text
+    before it, which is what says whether the numbers after it were reviewed,
+    and against the segment up to the next colon, which is where they are.
+    """
+    positions = [index for index, character in enumerate(sentence) if character == ":"]
+    clauses = []
+    for order, position in enumerate(positions):
+        head = sentence[:position]
+        end = positions[order + 1] if order + 1 < len(positions) else len(sentence)
+        if not SCOPE_TRIGGER_RE.search(head):
+            continue
+        if SCOPE_NEGATION_RE.search(head):
+            continue
+        if NUMBER_RE.search(sentence[position + 1:end]):
+            clauses.append(position)
+    return clauses
+
+
 def _sentence_enumeration(sentence: str):
-    """The pull requests this sentence identifies as reviewed, or None."""
-    colon = sentence.rfind(":")
-    if colon < 0:
-        return None
-    head, tail = sentence[:colon], sentence[colon + 1:]
-    if not SCOPE_TRIGGER_RE.search(head):
-        return None
-    if SCOPE_NEGATION_RE.search(head):
-        return None
+    """`(reviewed, ambiguous)` for one sentence.
+
+    `ambiguous` is a sentence carrying more than one reviewed enumeration. It
+    is not the same as reading nothing: a sentence this parser cannot resolve
+    must flag its whole report even when some other sentence did resolve, or
+    the report's coverage would be the part that happened to be readable.
+    """
+    clauses = _enumeration_clauses(sentence)
+    if not clauses:
+        return None, False
+    if len(clauses) > 1:
+        return None, True
+    tail = sentence[clauses[0] + 1:]
     while True:
         reduced = PAREN_RE.sub(" ", tail)
         if reduced == tail:
@@ -798,8 +833,8 @@ def _sentence_enumeration(sentence: str):
         tail = reduced
     normalized = " ".join(tail.split()).rstrip(".").strip()
     if not normalized or not ENUMERATION_RE.match(normalized):
-        return None
-    return [int(number) for number in NUMBER_RE.findall(normalized)]
+        return None, False
+    return [int(number) for number in NUMBER_RE.findall(normalized)], False
 
 
 def report_scope(text: str, path: str) -> dict:
@@ -822,17 +857,19 @@ def report_scope(text: str, path: str) -> dict:
         }
     masked = _masked(paragraph)
     candidates = sorted({int(number) for number in NUMBER_RE.findall(masked)})
-    enumerations = [
-        found
-        for found in (
-            _sentence_enumeration(sentence)
-            for sentence in SENTENCE_SPLIT_RE.split(masked)
-        )
-        if found
-    ]
-    if len(enumerations) == 1:
+    enumerations = []
+    ambiguous = False
+    for sentence in SENTENCE_SPLIT_RE.split(masked):
+        found, unclear = _sentence_enumeration(sentence)
+        if unclear:
+            ambiguous = True
+        elif found:
+            enumerations.append(found)
+    if len(enumerations) == 1 and not ambiguous:
         return {"path": path, "reviewed": enumerations[0], "candidates": candidates, "flag": None}
-    if not enumerations:
+    if ambiguous:
+        reason = "carries more than one reviewed-pull-request enumeration in a single sentence"
+    elif not enumerations:
         reason = "names no reviewed-pull-request enumeration"
     else:
         reason = f"names {len(enumerations)} reviewed-pull-request enumerations"
