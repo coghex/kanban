@@ -3,7 +3,7 @@
 -- classified.
 module Spec.Agent.Protocol (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Exception (throwTo)
 import Control.Monad (void)
 import Data.Aeson (Value (..), object, (.=))
@@ -37,6 +37,7 @@ import Kanban.Review
     beginIssueReview,
     reviewConnectionsForTesting,
     reviewThreadOwnProcesses,
+    watchServerProcess,
     reviewThreadOwnProcesses,
     stopReviewClient,
     decodeCanonicalIssueReviewResult,
@@ -79,7 +80,7 @@ import Spec.Support.Env
     withManagedRecordHome,
     withTemporaryCacheRoot,
   )
-import Spec.Support.Expect (isRight, shouldMention, shouldNotMention)
+import Spec.Support.Expect (isRight, requireJust, shouldMention, shouldNotMention)
 import Spec.Support.Fixtures (baseIssue, fixtureReviewThread, testOptions)
 import Spec.Support.Process
   ( encodedValue,
@@ -113,10 +114,13 @@ import System.Directory (createDirectoryIfMissing)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose)
+import System.Posix.Process (getProcessStatus)
+import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process
   ( CreateProcess (..),
     StdStream (CreatePipe),
     createProcess,
+    getPid,
     proc,
     waitForProcess
   )
@@ -539,6 +543,52 @@ spec = do
                   "arguments" .= object ["operation" .= ("read" :: Text), "issue" .= issueNumber]
                 ]
             )
+
+    -- Issue #692. The watcher is one of two reapers of its connection's
+    -- child: shutdown reaches the same handle through
+    -- 'terminalConnectionCleanup', and so does the output reader's terminal
+    -- path. When the watcher is the one that finds no child left, everything
+    -- below its wait is what used to be lost with it -- the cleanup, the
+    -- removal from the pool, the turns waiting to be failed, and the signal
+    -- 'stopReviewClient' blocks on, which is a shutdown that never returns
+    -- rather than merely a missing exit status.
+    --
+    -- Forced rather than raced: the child is reaped directly before the
+    -- watcher runs, so the watcher's own wait is certain to be the one that
+    -- finds nothing. The connection is a real one, attached to a real client
+    -- through the pool's own reservation, and it starts no loops -- so the
+    -- two reader signals below stand in for readers that finish, which is
+    -- what makes "the watcher waits for both of them" observable.
+    it "ends a connection whose exit status another reaper took, instead of stranding its shutdown" $
+      withTwoConnectionReviewClient $ \fixture -> do
+        let client = fixture.twoConnectionClient
+            connection = fixture.secondConnection
+        pid <- getPid connection.connectionProcess >>= requireJust "the connection's provider reported no pid"
+        signalProcess sigKILL pid
+        -- Answered for this pid here, so the watcher's wait below is the one
+        -- that gets ECHILD. This is exactly the outcome two reapers race for.
+        void (getProcessStatus True False pid)
+        finished <- newIORef ([] :: [Text])
+        void (forkIO (threadDelay 150000 >> modifyIORef finished (<> ["output"]) >> putMVar connection.connectionOutputDone ()))
+        void (forkIO (threadDelay 300000 >> modifyIORef finished (<> ["error"]) >> putMVar connection.connectionErrorDone ()))
+        watched <- timeout 20000000 (watchServerProcess client connection)
+        watched `shouldBe` Just ()
+        -- Both readers, and in the order they finished: a watcher that ran
+        -- ahead of either would have recorded fewer.
+        readIORef finished `shouldReturn` ["output", "error"]
+        -- The connection is gone from the pool, and its sibling is untouched.
+        remaining <- reviewConnectionsForTesting client
+        map (.connectionId) remaining `shouldBe` [fixture.firstConnection.connectionId]
+        -- Reported once, and saying the status was unavailable rather than
+        -- standing a number in for it. This is the same text the
+        -- backend-finished log entry carries, since both render one value.
+        recorded <- readIORef fixture.twoConnectionEvents
+        let endings = [message | ReviewClientStopped message <- recorded] <> [message | ReviewConnectionStopped _ message <- recorded]
+        length endings `shouldBe` 1
+        endings `shouldSatisfy` all (Data.Text.isInfixOf "exit status was not available")
+        endings `shouldSatisfy` all (not . Data.Text.isInfixOf "exited with status")
+        -- The signal 'stopReviewClient' waits on, filled last of all.
+        timeout 3000000 (readMVar connection.connectionWatchDone) `shouldReturn` Just ()
 
     it "gives two connections' identically named threads separate identities" $
       withTwoConnectionReviewClient $ \fixture -> do

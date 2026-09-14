@@ -4,7 +4,7 @@
 module Spec.Agent.ManagedProcess.Lifecycle (examples) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (finally, throwIO)
+import Control.Exception (SomeException, finally, throwIO, try)
 import Control.Monad (void, when)
 import Data.Aeson (eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -27,6 +27,7 @@ import Kanban.Process
     interruptManagedProcess,
     killManagedProcess,
     killVerifiedGroupWith,
+    reapManagedHandle,
     liveProcesses,
     managedProcess,
     managedProcessGroup,
@@ -106,11 +107,12 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
-import System.Posix.Process (getProcessID)
+import System.Posix.Process (ProcessStatus (..), getProcessID, getProcessStatus)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     createProcess,
+    getPid,
     getProcessExitCode,
     proc,
     waitForProcess
@@ -149,6 +151,46 @@ examples = do
         groupLeaderProblem `shouldSatisfy` isJust
         killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    -- Issue #692. Two reapers of one handle is an ordinary arrangement here:
+    -- a review connection's watcher waits for the exit status while its
+    -- shutdown reaches the same child through this primitive. Only one wait
+    -- can be answered, and the operating system tells the loser the same
+    -- thing it tells a caller whose child never existed -- so the loser used
+    -- to raise, out of a reap whose whole purpose was to leave nothing
+    -- behind.
+    --
+    -- Forced rather than raced, so the case is exercised every run: reaping
+    -- the child directly answers waitpid for that pid, and the handle's own
+    -- wait is then the one that finds no child.
+    it "reports no exit status, rather than raising, when something else reaped the child first" $
+      withManagedShell "exit 7" $ \process -> do
+        managed <- managedProcessFor process
+        pid <- getPid process >>= requireJust "the managed shell reported no pid"
+        getProcessStatus True False pid `shouldReturn` Just (Exited (ExitFailure 7))
+        timeout 3000000 (reapManagedHandle process) `shouldReturn` Just Nothing
+        -- And the primitive every caller shares survives the same outcome,
+        -- which is the escape this issue was filed for.
+        timeout 3000000 (killManagedProcess managed) `shouldReturn` Just ()
+
+    -- The unforced half: both reapers run concurrently against one live
+    -- handle, and whichever of them loses, neither raises. Both outcomes are
+    -- captured rather than assumed, because a thread that died of the race is
+    -- otherwise indistinguishable from one that finished, and the whole
+    -- thing is bounded so a wait that never returns fails instead of hanging.
+    it "survives two reapers racing one live handle, whichever of them loses" $
+      withManagedShell "sleep 30" $ \process -> do
+        managed <- managedProcessFor process
+        waiting <- newEmptyMVar
+        terminating <- newEmptyMVar
+        void (forkIO (try @SomeException (reapManagedHandle process) >>= putMVar waiting))
+        void (forkIO (try @SomeException (killManagedProcess managed) >>= putMVar terminating))
+        outcomes <- timeout 20000000 ((,) <$> takeMVar waiting <*> takeMVar terminating)
+        case outcomes of
+          Nothing -> expectationFailure "the racing reapers did not both finish"
+          Just (Left failure, _) -> expectationFailure ("the waiting reaper raised: " <> show failure)
+          Just (_, Left failure) -> expectationFailure ("the terminating reaper raised: " <> show failure)
+          Just (Right _, Right ()) -> pure ()
 
     it "excludes a killed process from a snapshot even before its parent reaps it" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do

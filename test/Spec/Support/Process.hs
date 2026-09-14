@@ -108,6 +108,7 @@ import Kanban.Process
     ProcessIdentity (..),
     identityForPid,
     killManagedProcess,
+    reapManagedHandle,
     managedProcess,
     readProcessSnapshot
   )
@@ -295,9 +296,13 @@ withManagedShell command = bracket start stop
     start = do
       (_, _, _, process) <- createProcess (proc "sh" ["-c", command]) {create_group = True}
       pure process
+    -- Reaped through the primitive that tolerates a child something else
+    -- already took. A test may deliberately reap one out from under its
+    -- handle (issue #692), and a teardown that raised on finding no child
+    -- would fail the example that proved the production path survives it.
     stop process = do
       managedProcessFor process >>= killManagedProcess
-      void (timeout 3000000 (waitForProcess process))
+      void (timeout 3000000 (reapManagedHandle process))
 
 managedProcessFor :: ProcessHandle -> IO ManagedProcess
 managedProcessFor process = fst <$> managedProcess process
@@ -336,7 +341,7 @@ withNonLeaderShell command = bracket start stop
     stop process = do
       maybePid <- getPid process
       mapM_ (\pid -> void (try (signalProcess sigKILL pid) :: IO (Either IOException ()))) maybePid
-      void (timeout 3000000 (waitForProcess process))
+      void (timeout 3000000 (reapManagedHandle process))
 
 processIdentity :: Int -> Int -> Int -> Text -> ProcessIdentity
 processIdentity processId parentId groupId command =

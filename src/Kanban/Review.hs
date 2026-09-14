@@ -109,6 +109,7 @@ module Kanban.Review
     reviewConnectionProcesses,
     reviewThreadOwnProcesses,
     reviewConnectionsForTesting,
+    watchServerProcess,
     reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
@@ -173,7 +174,7 @@ import Kanban.Models
     assignmentFor,
     assignmentUnavailableMessage,
   )
-import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess, reapManagedHandle)
 import Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProviderAdapter (..),
@@ -339,7 +340,6 @@ import System.Process
     createPipe,
     createProcess,
     proc,
-    waitForProcess,
   )
 import System.Timeout (timeout)
 
@@ -1664,14 +1664,29 @@ takeConnectionTurns client connection =
     let (mine, rest) = Map.partitionWithKey (\threadId _ -> threadId.reviewThreadConnection == connection.connectionId) turns
      in pure (rest, Map.keys mine)
 
+-- | Wait out one connection's provider process, then end the connection.
+--
+-- The wait is 'reapManagedHandle' rather than a bare 'waitForProcess'
+-- because this is not the only reaper of this handle: the connection's
+-- shutdown reaches the same child through 'terminalConnectionCleanup', and
+-- so does the output reader's terminal path. A wait that raised because
+-- something else had already collected the child would take everything
+-- below it with it -- the cleanup, the connection's removal from the pool,
+-- the turns waiting to be failed, and the one signal 'stopReviewClient'
+-- blocks on -- turning a reaped child into a shutdown that never finishes.
+--
+-- What it costs is the exit status, and only in that case. A status another
+-- reaper took is one this connection cannot report, so it says so rather
+-- than standing a number in for it.
 watchServerProcess :: ReviewClient -> ReviewConnection -> IO ()
 watchServerProcess client connection = do
-  exitCode <- waitForProcess connection.connectionProcess
+  exitStatus <- reapManagedHandle connection.connectionProcess
+  let ending = renderConnectionEnd client exitStatus
   terminalConnectionCleanup client connection
   takeMVar connection.connectionOutputDone
   takeMVar connection.connectionErrorDone
   takeConnection client.reviewConnections connection.connectionId
-  mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode client exitCode)) client.reviewSessionLog
+  mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" ending) client.reviewSessionLog
   -- The transcript records the client's whole session rather than one
   -- process's share of it, so it is closed when the client is finished. A
   -- shared-process client is finished exactly here, when the connection every
@@ -1680,7 +1695,7 @@ watchServerProcess client connection = do
   -- transcript open for the reviews still to come, so 'stopReviewClient'
   -- closes that one.
   when (client.reviewBackend.backendProcessShape == SharedProcess) (closeReviewLog client.reviewSessionLog)
-  reportConnectionStopped client connection (renderExitCode client exitCode)
+  reportConnectionStopped client connection ending
   -- Last, and after both reader signals above: this is the one signal
   -- 'stopReviewClient' waits on, so it must not be filled while any of this
   -- connection's loops could still run.
@@ -2056,6 +2071,19 @@ decodeLine = Text.stripEnd . TextEncoding.decodeUtf8With lenientDecode . LazyByt
 renderExitCode :: ReviewClient -> ExitCode -> Text
 renderExitCode client ExitSuccess = backendSentence client <> " exited"
 renderExitCode client (ExitFailure code) = backendSentence client <> " exited with status " <> Text.pack (show code)
+
+-- | How a connection's end reads, including the end whose status nobody here
+-- can name.
+--
+-- A child this process never observed exiting has no status to report, and
+-- the one thing that must not happen is a number being chosen for it: a
+-- substituted success would read as a clean shutdown and a substituted
+-- failure as a crash, and the session log is the record an operator goes to
+-- precisely when they cannot tell which it was.
+renderConnectionEnd :: ReviewClient -> Maybe ExitCode -> Text
+renderConnectionEnd client (Just exitCode) = renderExitCode client exitCode
+renderConnectionEnd client Nothing =
+  backendSentence client <> " ended, and its exit status was not available: it had already been reaped."
 
 -- | The backend's label at the start of a sentence.
 backendSentence :: ReviewClient -> Text

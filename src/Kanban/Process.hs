@@ -17,6 +17,7 @@ module Kanban.Process
     interruptManagedProcess,
     interruptThenKillManagedProcess,
     killManagedProcess,
+    reapManagedHandle,
     killVerifiedGroup,
     killVerifiedGroupWith,
     liveProcesses,
@@ -34,7 +35,7 @@ module Kanban.Process
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, catchJust, try)
 import Control.Monad (void, when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.List (find)
@@ -393,23 +394,55 @@ interruptThenKillManagedProcess process = do
   threadDelay terminationGraceMicros
   killManagedProcess process
 
+-- | Reap a handle for its exit status, or report that there was no child
+-- left to reap.
+--
+-- Waiting is how a caller here says "leave nothing behind", and a child
+-- something else already reaped is that outcome rather than a failure of it.
+-- The operating system cannot tell the two apart after the fact: once a pid
+-- has been waited on, a second wait on it answers @ECHILD@, which reaches
+-- Haskell as a does-not-exist 'IOError' — the same answer whether this
+-- handle's child was collected a moment ago by another thread of this
+-- process or never existed at all. Both mean the same thing to a reaper, so
+-- both produce 'Nothing' instead of an exception.
+--
+-- Narrow on purpose. Only the does-not-exist outcome is absorbed: every
+-- other 'IOError' is a reap that genuinely failed and still propagates, and
+-- an asynchronous cancellation delivered to a thread parked in here is not
+-- an 'IOError' this predicate accepts, so a shutdown still interrupts a
+-- wait rather than being swallowed by it.
+reapManagedHandle :: ProcessHandle -> IO (Maybe ExitCode)
+reapManagedHandle processHandle =
+  catchJust
+    (\failure -> if isDoesNotExistError failure then Just () else Nothing)
+    (Just <$> waitForProcess processHandle)
+    (\() -> pure Nothing)
+
 -- | TERM, a grace period, then KILL — signalling the pgid captured at spawn
 -- time regardless of whether the leader's own handle has already been
 -- reaped, so a leader that exited (naturally or otherwise) before this ran
 -- never leaves a surviving group member unsignalled. This is deliberately
 -- unconditional: confirming the group is actually empty first would need a
 -- process-table census, which is out of scope for this best-effort
--- ownership mechanism (see issue #16). 'waitForProcess', not the
--- non-blocking 'getProcessExitCode', reaps the handle last: SIGKILL cannot
+-- ownership mechanism (see issue #16). The reap comes last, and through
+-- 'reapManagedHandle' rather than 'waitForProcess' directly: SIGKILL cannot
 -- be caught or deferred, so the leader (if it was ever actually still
 -- running) dies essentially immediately, and this blocks only long enough
 -- to guarantee it is actually reaped rather than possibly left a zombie.
+--
+-- The non-blocking 'getProcessExitCode' is still not what this wants, and
+-- neither is a bare wait. This primitive is shared: the review client
+-- reaches it from a connection's shutdown while that connection's own
+-- watcher may be waiting on the very same handle, and a short-lived
+-- command reaches it from several completion paths. Whichever of those
+-- collects the child first, the others asked for a reaped child and have
+-- one, so the status they do not get is not an error they should raise.
 killManagedProcess :: ManagedProcess -> IO ()
 killManagedProcess (LocalManagedProcess processHandle capturedPid) = do
   signalOwnedGroup sigTERM processHandle capturedPid
   threadDelay terminationGraceMicros
   signalOwnedGroup sigKILL processHandle capturedPid
-  void (waitForProcess processHandle)
+  void (reapManagedHandle processHandle)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros
