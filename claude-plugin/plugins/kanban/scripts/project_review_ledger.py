@@ -120,7 +120,7 @@ would be the obvious convenience and it would also be the one read this module
 makes at a path nothing checked.
 
 Everything the document itself cannot prove, it refuses. A ledger with no
-marker, unreadable JSON, an unexpected version, a status outside the four, an
+marker, unreadable JSON, a version it does not read, a status outside the four, an
 abbreviated verification SHA, a non-UTC timestamp, a dated legacy row, or a
 completed review missing its commit raises `LedgerError` naming what stopped
 it. A missing document is the one absence that is not an error, because that
@@ -128,6 +128,15 @@ is exactly what a repository that has never been migrated looks like. A
 migration over a ledger that already exists refuses too: the first one is the
 one that read the evidence, and a second would overwrite completed reviews
 with legacy rows.
+
+The versions it reads are a closed set too, and a wider one than the version
+it writes: a repository migrated by the previous release holds a schema
+version 1 ledger, whose rows predate the `title` and `merged_at` version 2
+adds, and refusing it would strand that repository's only record of its
+coverage behind the helper that is meant to carry it forward. So version 1 is
+read and upgraded on the way in -- by naming the fields that version
+introduced, never by defaulting whatever a row happens to be missing -- and
+every write publishes version 2.
 """
 
 from __future__ import annotations
@@ -149,11 +158,25 @@ from pathlib import Path
 LEDGER_RELATIVE_PATH = "docs/project_review/ledger.md"
 LEDGER_DIRECTORY = posixpath.dirname(LEDGER_RELATIVE_PATH)
 
-SCHEMA_VERSION = 1
+# Version 2 adds a row's `title` and `merged_at`, which the merged-pull-request
+# listing supplies (issue #681). Version 1 is still read, because a repository
+# migrated by the previous release has a ledger in that shape and a reader that
+# refused it would strand the only record of that repository's coverage behind
+# a helper that cannot open it. It is read and never written: a version 1
+# document parses into the current shape with both fields absent, and the next
+# write publishes it as version 2.
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = (1, 2)
 
 # Distinct from `<!-- project-review:cursor:v2 -->` on purpose: the two
 # documents coexist until LEDGER-6, and a parser that anchored on the other
 # one's marker would read whichever document it was handed as its own.
+#
+# Its `v1` names the container -- one marker line, one fenced JSON payload
+# after it -- and not the payload's schema, which the payload states itself in
+# `version`. The two are versioned separately on purpose: a schema change that
+# also moved the marker would make every older document unfindable by the
+# reader that is meant to upgrade it.
 LEDGER_MARKER = "<!-- project-review:ledger:v1 -->"
 
 # The closing delimiter is a whole line. Without that, the first three
@@ -455,13 +478,18 @@ def parse_document(text: str, source: str) -> dict:
     if not isinstance(document, dict):
         raise LedgerError(f"{source} holds a ledger payload that is not an object.")
     version = document.get("version")
-    # `True == 1` and `1.0 == 1` in Python, so an equality test alone would
+    # `True == 1` and `1.0 == 1` in Python, so a membership test alone would
     # read a boolean or a float as schema version 1 and normalize a malformed
     # document into an accepted one.
-    if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version not in READABLE_SCHEMA_VERSIONS
+    ):
         raise LedgerError(
             f"{source} declares ledger schema version {version!r}; this helper "
-            f"expected the integer {SCHEMA_VERSION}."
+            f"reads {' and '.join(str(known) for known in READABLE_SCHEMA_VERSIONS)} "
+            f"and writes {SCHEMA_VERSION}."
         )
     repositories = document.get("repositories")
     if not isinstance(repositories, dict):
@@ -471,8 +499,49 @@ def parse_document(text: str, source: str) -> dict:
     for name, state in repositories.items():
         if not REPO_RE.match(str(name)):
             raise LedgerError(f"{source} names {name!r}, which is not an owner/name.")
+        if version < SCHEMA_VERSION:
+            state = _upgraded_repository(state, version)
         parsed["repositories"][name] = _validated_repository(state, f"{source}: {name}")
     return parsed
+
+
+# What each schema version added to a row, so an older document is upgraded by
+# naming the version that introduced a field rather than by defaulting whatever
+# happens to be missing. Defaulting is what `_require_keys` refuses, and for
+# good reason: it is how a truncated edit erases rows. An upgrade keyed on the
+# declared version is the opposite -- the document says which shape it is in,
+# and only the fields that shape genuinely predates are supplied.
+ROW_FIELDS_ADDED_IN = {2: ("title", "merged_at")}
+
+
+def _upgraded_repository(state, version: int):
+    """One repository's entry read out of an older schema into the current one.
+
+    Only rows change between 1 and 2, and only by gaining two fields the older
+    writer could not have known about. Everything else is passed through
+    untouched so the validation below sees exactly what the document said.
+    """
+    if not isinstance(state, dict):
+        return state
+    rows = state.get("rows")
+    if not isinstance(rows, dict):
+        return state
+    added = [
+        field
+        for introduced, fields in sorted(ROW_FIELDS_ADDED_IN.items())
+        if introduced > version
+        for field in fields
+    ]
+    upgraded = dict(state)
+    upgraded["rows"] = {
+        key: (
+            dict({field: None for field in added if field not in row}, **row)
+            if isinstance(row, dict)
+            else row
+        )
+        for key, row in rows.items()
+    }
+    return upgraded
 
 
 def load_document(root) -> dict:
@@ -1950,12 +2019,20 @@ def parse_inventory(raw, source: str) -> dict:
 
     Complete is the whole of what this function decides, and it decides it
     from the pages rather than from the rows on them: a contiguous sequence
-    starting at page 1, every page holding no more than it asked for, nothing
-    after the first page that came back short, and a short page at the end.
-    The last rule is the one design D-11 turns on -- a page returned at its
-    own limit may be a page of a longer history, and nothing in the page
-    itself can tell the two apart -- so a listing that ends full is refused
-    asking for the next page rather than recorded as a universe.
+    starting at page 1, one page size across the whole walk, every page
+    holding no more than it asked for, nothing after the first page that came
+    back short, and a short page at the end. The last rule is the one design
+    D-11 turns on -- a page returned at its own limit may be a page of a
+    longer history, and nothing in the page itself can tell the two apart --
+    so a listing that ends full is refused asking for the next page rather
+    than recorded as a universe.
+
+    One page size, because a page number means nothing without one. A page
+    number is an offset expressed in page sizes, so "page 1 of 2, page 2 of
+    4" names rows 1-2 and then rows 5-8, and the two pull requests in between
+    are ones no page ever carried. Contiguous numbering said the walk was
+    whole and a short final page said it had ended, and both were true of a
+    listing with a hole in the middle of it.
 
     Every refusal here happens before anything is selected or written, so a
     listing this function does not accept leaves the ledger exactly as it was.
@@ -1982,6 +2059,7 @@ def parse_inventory(raw, source: str) -> dict:
     listed = []
     seen = {}
     short = None
+    size = None
     for index, page in enumerate(pages):
         position = index + 1
         where = f"{source}: page {position}"
@@ -2013,6 +2091,16 @@ def parse_inventory(raw, source: str) -> dict:
                 "size; the limit is the only thing that says whether the page "
                 "came back short, so a page without one proves nothing about "
                 "the history behind it."
+            )
+        if size is None:
+            size = limit
+        elif limit != size:
+            raise LedgerError(
+                f"{where} declares limit {limit}, but page 1 declared {size}; a "
+                "page number is an offset expressed in page sizes, so a walk "
+                "that changed its page size skips or repeats the rows between "
+                "the two and its numbering no longer says which rows were "
+                "listed. List the whole history at one page size."
             )
         rows = page["prs"]
         if not isinstance(rows, list):

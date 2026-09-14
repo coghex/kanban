@@ -380,6 +380,92 @@ def instantiate(template: str) -> str:
     )
 
 
+# A ledger exactly as the previous release rendered one: schema version 1,
+# whose rows carry no `title` and no `merged_at` because that writer had no
+# such fields. Held verbatim rather than rebuilt from the current module,
+# because the thing under test is whether this helper can open a document it
+# did not write, and a fixture the current renderer produced would be the
+# current shape with an older number on it.
+PREVIOUS_RELEASE_LEDGER = """# Project review ledger
+
+Machine-owned state for the `project-review` workflow: one row per merged pull
+request, per repository, with its status, the commit a completed review
+verified it against, when that review completed, the report it produced, and
+the evidence the row rests on. A checkmark means a clean review against the
+commit beside it; `[legacy]` means coverage established by a document that
+predates this ledger, with no date and no commit invented for it.
+
+Written by `project_review_ledger.py`. Edit it through that helper rather than
+by hand: the payload below is parsed strictly, and an edit it cannot read stops
+the next invocation instead of being ignored.
+
+## coghex/kanban
+
+| PR | Status | Verified at | Completed (UTC) | Report | Evidence |
+| ---: | --- | --- | --- | --- | --- |
+| #612 | ✓ clean | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` | 2026-09-05T11:22:33Z | — | review:2026-09-05 |
+| #610 | [legacy] | — | — | — | cursor:docs/project_review_boundaries.md |
+| #602 | never reviewed | — | — | — | — |
+
+- Migrated from the cursor-v2 record.
+
+<!-- project-review:ledger:v1 -->
+
+```json
+{
+  "repositories": {
+    "coghex/kanban": {
+      "direct": {
+        "endpoint": null,
+        "reviewed": []
+      },
+      "excluded": {
+        "commits": [],
+        "prs": []
+      },
+      "migration": {
+        "boundary": null,
+        "source": "cursor-v2",
+        "withheld_boundary": null
+      },
+      "rows": {
+        "602": {
+          "commit": null,
+          "completed_at": null,
+          "evidence": [],
+          "history": [],
+          "report": null,
+          "status": "never-reviewed"
+        },
+        "610": {
+          "commit": null,
+          "completed_at": null,
+          "evidence": [
+            "cursor:docs/project_review_boundaries.md"
+          ],
+          "history": [],
+          "report": null,
+          "status": "legacy"
+        },
+        "612": {
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "completed_at": "2026-09-05T11:22:33Z",
+          "evidence": [
+            "review:2026-09-05"
+          ],
+          "history": [],
+          "report": null,
+          "status": "clean"
+        }
+      }
+    }
+  },
+  "version": 1
+}
+```
+"""
+
+
 # --------------------------------------------------------------------------
 # The merged-pull-request listing a selection is made from
 
@@ -2146,6 +2232,37 @@ class InventoryTests(SelectionTestCase):
             with self.subTest(listing=label):
                 self.refuses(pages, "declares page number")
 
+    def test_a_walk_that_changed_its_page_size_is_refused(self):
+        # A page number is an offset expressed in page sizes. "Page 1 of 2,
+        # page 2 of 4" names rows 1-2 and then rows 5-8, and the rows in
+        # between are ones no page ever carried -- while contiguous numbering
+        # said the walk was whole and a short final page said it had ended.
+        cases = {
+            "a page size that grew": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 4, "prs": [merged(602), merged(601)]},
+            ],
+            "a page size that shrank": [
+                {"page": 1, "limit": 4, "prs": [merged(n) for n in (612, 610, 602, 601)]},
+                {"page": 2, "limit": 2, "prs": [merged(533)]},
+            ],
+            "a page size that changed on the last page only": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 2, "prs": [merged(602), merged(601)]},
+                {"page": 3, "limit": 3, "prs": []},
+            ],
+        }
+        for label, pages in cases.items():
+            with self.subTest(listing=label):
+                message = self.refuses(pages, "page 1 declared")
+                self.assertIn("one page size", message)
+
+    def test_one_page_size_across_the_walk_is_accepted(self):
+        # The non-vacuity control for the refusal above: the same numbering
+        # and the same short final page pass when the size never moved.
+        result = self.select([merged(number) for number in (612, 610, 602)], limit=2)
+        self.assertEqual(result["inventory"]["listed"], 3)
+
     def test_a_page_after_the_last_one_is_refused(self):
         self.refuses(
             [
@@ -2332,6 +2449,10 @@ class InventoryTests(SelectionTestCase):
                 {"page": 1, "limit": 1, "prs": [merged(612)]},
                 {"page": 3, "limit": 1, "prs": []},
             ],
+            "a walk that changed its page size": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 4, "prs": [merged(602)]},
+            ],
         }
         for label, pages in cases.items():
             with self.subTest(listing=label):
@@ -2416,6 +2537,101 @@ class ResultSchemaTests(SelectionTestCase):
             )
             seen.add(self.select(entries)["queue"]["name"])
         self.assertEqual(seen, declared)
+
+
+class SchemaUpgradeTests(SelectionTestCase):
+    """A ledger the previous release wrote is opened, not stranded."""
+
+    def previous_release(self):
+        path = LEDGER.document_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(PREVIOUS_RELEASE_LEDGER, encoding="utf-8")
+        return path
+
+    def test_a_ledger_from_the_previous_release_reads_into_the_current_shape(self):
+        state = LEDGER.state_for(
+            LEDGER.parse_document(PREVIOUS_RELEASE_LEDGER, "previous release"), REPO
+        )
+        self.assertEqual(
+            {key: value["status"] for key, value in state["rows"].items()},
+            {"612": "clean", "610": "legacy", "602": "never-reviewed"},
+        )
+        for key in state["rows"]:
+            with self.subTest(row=key):
+                # Absent, not invented: the older writer had no listing to take
+                # either from, and the next one supplies both.
+                self.assertIsNone(state["rows"][key]["title"])
+                self.assertIsNone(state["rows"][key]["merged_at"])
+        self.assertEqual(state["rows"]["610"]["evidence"], [
+            "cursor:docs/project_review_boundaries.md"
+        ])
+        self.assertEqual(state["rows"]["612"]["completed_at"], "2026-09-05T11:22:33Z")
+
+    def test_a_read_of_an_older_ledger_reports_the_current_version(self):
+        document = LEDGER.parse_document(PREVIOUS_RELEASE_LEDGER, "previous release")
+        self.assertEqual(document["version"], LEDGER.SCHEMA_VERSION)
+
+    def test_a_selection_upgrades_a_previous_release_ledger_without_losing_it(self):
+        path = self.previous_release()
+        result = self.select([merged(612), merged(610), merged(602)])
+        rows = self.rows_on_disk()
+        self.assertEqual(
+            {key: value["status"] for key, value in rows.items()},
+            {"612": "clean", "610": "legacy", "602": "never-reviewed"},
+        )
+        self.assertEqual(rows["610"]["title"], "Pull request #610")
+        self.assertEqual(rows["610"]["merged_at"], merge_time(610))
+        self.assertEqual(
+            rows["610"]["evidence"], ["cursor:docs/project_review_boundaries.md"]
+        )
+        self.assertEqual(rows["612"]["commit"], "a" * 40)
+        # #602 is the only never-reviewed row, so the first queue takes it and
+        # the legacy row keeps waiting, exactly as it would in a ledger this
+        # release had written itself.
+        self.assertEqual(result["selected"]["number"], 602)
+        self.assertIn(f'"version": {LEDGER.SCHEMA_VERSION}', path.read_text(encoding="utf-8"))
+
+    def test_an_upgraded_ledger_reads_back_as_a_current_one(self):
+        self.previous_release()
+        self.select([merged(612), merged(610), merged(602)])
+        reread = LEDGER.load_document(self.root)
+        self.assertEqual(reread["version"], LEDGER.SCHEMA_VERSION)
+        self.assertEqual(
+            LEDGER.render_document(reread),
+            LEDGER.document_path(self.root).read_text(encoding="utf-8"),
+        )
+
+    def test_a_current_document_still_states_every_row_field(self):
+        # The control the upgrade needs: it is keyed on the version the
+        # document declares, not on "a missing field is fine". A version 2
+        # document that leaves one out is the truncated edit `_require_keys`
+        # exists to refuse.
+        for field in ("title", "merged_at"):
+            with self.subTest(field=field):
+                payload = valid_payload({"602": completed_row()})
+                del payload["repositories"][REPO]["rows"]["602"][field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn(f"declares no {field}", str(raised.exception))
+
+    def test_a_schema_version_this_helper_does_not_read_is_refused(self):
+        for version in (0, LEDGER.SCHEMA_VERSION + 1, -1):
+            with self.subTest(version=version):
+                payload = valid_payload({"602": completed_row()})
+                payload["version"] = version
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn("schema version", str(raised.exception))
+
+    def test_an_older_row_that_already_carries_the_newer_fields_is_validated(self):
+        # The upgrade supplies only what the older shape genuinely lacks, so a
+        # version 1 document a hand edit gave a title to is still held to what
+        # a title has to be rather than having it replaced by a default.
+        payload = valid_payload({"602": dict(completed_row(), title=612)})
+        payload["version"] = 1
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("not a pull-request title", str(raised.exception))
 
 
 class ReconciliationTests(SelectionTestCase):
