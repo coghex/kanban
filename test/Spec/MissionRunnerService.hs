@@ -1123,6 +1123,59 @@ replaySpec = describe "replaying a mission's durable record" $ do
                      (MissionStreamId (MissionSessionId "session-b") MissionEventStreamLog, 0)
                    ]
 
+  -- An archive directory that cannot be listed is not an empty archive. Read
+  -- as one, every collected session's history disappears and nothing says so.
+  it "reports an archive directory it could not list rather than reading it as empty" $
+    withStore $ \root store -> do
+      let sessionLog = root </> "session.log"
+      ByteString.writeFile sessionLog "one\n"
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+        )
+      -- The source is collected, so an archive is the only place its history
+      -- could come from — and something is occupying the archive's own path.
+      removeFile sessionLog
+      ByteString.writeFile (missionDirectoryOf root </> "archive") "not a directory"
+      replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+      replayed.missionReplayStreams `shouldBe` []
+      Text.concat replayed.missionReplayFailures `shouldMention` "archive"
+
+  -- A seal the archive still advertises and nothing can read is a damaged
+  -- entry, not the silence §16 grants a record another release wrote. The two
+  -- arrive as one value, so they are told apart by whether the bytes are there.
+  it "reports a seal entry whose bytes are not there, beside the one that reads" $
+    withStore $ \root store -> do
+      let sessionLog session = root </> (session <> ".log")
+          sessions = ["session-a", "session-b"]
+      forM_ sessions $ \session -> ByteString.writeFile (sessionLog session) (ByteString.pack (session <> " one\n"))
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              ( snapshotWith
+                  [ sessionWith (Text.pack session) Nothing (Just (MissionLogReference (sessionLog session) MissionEventStreamLog))
+                    | session <- sessions
+                  ]
+              )
+        )
+      forM_ sessions $ \session -> do
+        void (expectRight =<< sealMissionLog store theMission (MissionSessionId (Text.pack session)) MissionEventStreamLog (sessionLog session))
+        removeFile (sessionLog session)
+      let danglingSeal = missionDirectoryOf root </> "archive" </> "session-b-event_stream.seal.json"
+      removeFile danglingSeal
+      createFileLink (root </> "nothing-is-here") danglingSeal
+      replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+      map (.missionStreamReplayId.missionStreamSession) replayed.missionReplayStreams
+        `shouldBe` [MissionSessionId "session-a"]
+      Text.concat replayed.missionReplayFailures `shouldMention` "session-b-event_stream.seal.json"
+      Map.toAscList replayed.missionReplayCursor.missionStreamsConsumed
+        `shouldBe` [ (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog, length ("session-a one\n" :: String)),
+                     (MissionStreamId (MissionSessionId "session-b") MissionEventStreamLog, 0)
+                   ]
+
   it "reports one unreadable stream without hiding what the others appended, and keeps its cursor" $
     withStore $ \root store -> do
       let readable = root </> "readable.log"

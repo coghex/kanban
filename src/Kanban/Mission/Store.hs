@@ -697,13 +697,26 @@ sealedArchiveEntries store mission =
   withMissionRoot store mission Left $ \root -> case missionArchiveDirectory root mission of
     Left message -> pure (Left message)
     Right archiveDirectory -> do
-      entries <- listMissionEntries archiveDirectory
-      let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
-      results <- mapM (readSeal root archiveDirectory) sealNames
-      pure (Right (zip sealNames results))
+      -- The strict enumeration, because both readers below are /reporting/ on
+      -- everything this archive holds rather than looking for one thing in it.
+      -- 'listMissionEntries' reads a directory it could not list as an empty
+      -- one, and an empty archive is precisely the answer that makes every
+      -- collected session's history disappear without anybody being told: the
+      -- collector would see nothing left to account for, and the reader would
+      -- report no streams and no failure. A directory that is simply not there
+      -- is still empty, which is the ordinary state of a mission that has
+      -- sealed nothing.
+      listed <- listMissionEntriesStrictly archiveDirectory
+      case listed of
+        Left message -> pure (Left message)
+        Right entries -> do
+          let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
+          results <- mapM (readSeal root archiveDirectory) sealNames
+          pure (Right (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
     readSeal root archiveDirectory name = do
+      let path = archiveDirectory </> name
       result <-
         readMissionRecordFor
           mission
@@ -711,11 +724,41 @@ sealedArchiveEntries store mission =
           store.missionStoreRepository
           missionSealedMission
           missionSealedRepository
-          (archiveDirectory </> name)
-      pure $ case result of
+          path
+      case result of
         MissionPresent sealed
-          | Just reason <- sealSubjectFailure root mission name sealed -> MissionUnreadable reason
-        other -> other
+          | Just reason <- sealSubjectFailure root mission name sealed -> pure (MissionUnreadable reason)
+        MissionAbsent -> listedButAbsent path
+        other -> pure other
+
+    -- A name this walk just listed that reads as absent is one of two things,
+    -- and 'MissionRead' spells them the same way: a record under a schema
+    -- version this release does not recognize, which §16 says is absent and
+    -- silent, or a record whose bytes were not there at all — a link that
+    -- follows to nothing, or a file removed between the listing and the read.
+    -- Only the first is silence. The second is an entry this archive still
+    -- advertises and nothing can read, and reporting it is the difference
+    -- between a session's history being knowably damaged and it simply not
+    -- appearing.
+    --
+    -- Told apart by whether the bytes can be read at all, because that is the
+    -- only thing the two differ in. A record removed between the read above and
+    -- this probe is reported rather than passed over, which is the direction
+    -- that loses nothing.
+    listedButAbsent path = do
+      probed <- try @IOException (ByteString.readFile path)
+      pure $ case probed of
+        Right _ -> MissionAbsent
+        Left exception ->
+          MissionUnreadable
+            ( "mission "
+                <> mission.unMissionId
+                <> ": the seal "
+                <> Text.pack path
+                <> " is listed in this mission's archive and could not be read ("
+                <> Text.pack (show exception)
+                <> ")"
+            )
 
 -- | Every sealed archive entry a mission holds, or the first reason one of
 -- them could not be read.
