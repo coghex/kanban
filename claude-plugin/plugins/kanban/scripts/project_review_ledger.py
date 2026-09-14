@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The project-review ledger: per-PR review state, and the migration into it.
 
-Run with: python3 project_review_ledger.py {read,migrate} --help
+Run with: python3 project_review_ledger.py {read,migrate,select} --help
 
 Issue #680, slice LEDGER-2 of `docs/project_review_ledger_design.md`. The
 sweep cursor this module supersedes records which pull requests a batch
@@ -86,15 +86,41 @@ would have lied about history:
   two failure modes a silent parser would pick between — inventing coverage
   and discarding it — are both unrecoverable, and neither is worth a guess.
 
+`select` is the scheduler on top of that document (issue #681, slice
+LEDGER-3). It reads one thing from the caller -- the pages of merged pull
+requests the caller fetched -- and it reads them with the same suspicion the
+migration reads a report with, because a listing that stopped early is
+indistinguishable from a repository with fewer pull requests in it, and the
+difference is between "#612 has never been reviewed" and "#612 was never
+listed". So the pages carry their own continuation metadata and are accepted
+only as a contiguous sequence from page 1 that ends in a page shorter than
+its own limit; anything else is refused before a row is written or a pull
+request is chosen (design D-11).
+
+A listing that passes is the repository's known universe, and it is recorded
+as one: a merged pull request with no row gains a never-reviewed one, a row
+that already exists keeps its status, evidence and history and takes the
+listing's title and merge time, and a row the listing does not name is kept
+and reported rather than deleted -- a shrunken listing is a thing to notice,
+not a thing to act on. Selection then walks D-8's three queues over the rows
+the listing named: never-reviewed newest-merged first, then `[legacy]`
+highest number first, then completed reviews oldest first, clean and
+findings-bearing alike (D-4). It is a pure function of the ledger and the
+inventory, so two runs over the same two inputs choose the same pull
+request, and the choice it does not make -- claiming it -- is LEDGER-4's.
+
 Its reach is as narrow as the cursor's, and pinned as such in
 `tools/test_agent_workflow_contract.py`: it spawns no external command, and
 every repository file it opens is under the `--root` it was given. The one
 file it reads from anywhere else is `project_review_cursor.py` beside itself,
 which is the parser this migration is required to read the existing record
-through rather than a second implementation of.
+through rather than a second implementation of. The merged-pull-request
+listing arrives on standard input for the same reason: an `--inventory <path>`
+would be the obvious convenience and it would also be the one read this module
+makes at a path nothing checked.
 
 Everything the document itself cannot prove, it refuses. A ledger with no
-marker, unreadable JSON, an unexpected version, a status outside the four, an
+marker, unreadable JSON, a version it does not read, a status outside the four, an
 abbreviated verification SHA, a non-UTC timestamp, a dated legacy row, or a
 completed review missing its commit raises `LedgerError` naming what stopped
 it. A missing document is the one absence that is not an error, because that
@@ -102,6 +128,15 @@ is exactly what a repository that has never been migrated looks like. A
 migration over a ledger that already exists refuses too: the first one is the
 one that read the evidence, and a second would overwrite completed reviews
 with legacy rows.
+
+The versions it reads are a closed set too, and a wider one than the version
+it writes: a repository migrated by the previous release holds a schema
+version 1 ledger, whose rows predate the `title` and `merged_at` version 2
+adds, and refusing it would strand that repository's only record of its
+coverage behind the helper that is meant to carry it forward. So version 1 is
+read and upgraded on the way in -- by naming the fields that version
+introduced, never by defaulting whatever a row happens to be missing -- and
+every write publishes version 2.
 """
 
 from __future__ import annotations
@@ -123,11 +158,25 @@ from pathlib import Path
 LEDGER_RELATIVE_PATH = "docs/project_review/ledger.md"
 LEDGER_DIRECTORY = posixpath.dirname(LEDGER_RELATIVE_PATH)
 
-SCHEMA_VERSION = 1
+# Version 2 adds a row's `title` and `merged_at`, which the merged-pull-request
+# listing supplies (issue #681). Version 1 is still read, because a repository
+# migrated by the previous release has a ledger in that shape and a reader that
+# refused it would strand the only record of that repository's coverage behind
+# a helper that cannot open it. It is read and never written: a version 1
+# document parses into the current shape with both fields absent, and the next
+# write publishes it as version 2.
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = (1, 2)
 
 # Distinct from `<!-- project-review:cursor:v2 -->` on purpose: the two
 # documents coexist until LEDGER-6, and a parser that anchored on the other
 # one's marker would read whichever document it was handed as its own.
+#
+# Its `v1` names the container -- one marker line, one fenced JSON payload
+# after it -- and not the payload's schema, which the payload states itself in
+# `version`. The two are versioned separately on purpose: a schema change that
+# also moved the marker would make every older document unfindable by the
+# reader that is meant to upgrade it.
 LEDGER_MARKER = "<!-- project-review:ledger:v1 -->"
 
 # The closing delimiter is a whole line. Without that, the first three
@@ -185,7 +234,21 @@ DECIMAL_RE = re.compile(rf"[0-9]{{1,{DIGIT_LIMIT}}}")
 # not against this module.
 PATH_RE = re.compile(r"\A[A-Za-z0-9._/-]+\Z")
 
-ROW_KEYS = ("status", "commit", "completed_at", "report", "evidence", "history")
+# `title` and `merged_at` are the listing's half of a row and the rest is the
+# review's. They are optional for the same reason the migration invents no
+# dates: a row imported from a report predates any listing, so it carries
+# neither until a complete inventory names its pull request, and neither is
+# ever paired with a status.
+ROW_KEYS = (
+    "status",
+    "title",
+    "merged_at",
+    "commit",
+    "completed_at",
+    "report",
+    "evidence",
+    "history",
+)
 HISTORY_KEYS = ("kind", "outcome", "commit", "completed_at", "report")
 
 # What `migrate` read the cursor's half of the evidence from, in the order
@@ -195,11 +258,13 @@ MIGRATION_SOURCES = ("cursor-v2", "cursor-v1", "boundary-document", "absent")
 DOCUMENT_HEADER = """# Project review ledger
 
 Machine-owned state for the `project-review` workflow: one row per merged pull
-request, per repository, with its status, the commit a completed review
-verified it against, when that review completed, the report it produced, and
-the evidence the row rests on. A checkmark means a clean review against the
-commit beside it; `[legacy]` means coverage established by a document that
-predates this ledger, with no date and no commit invented for it.
+request, per repository, with its title, when it merged, its status, the commit
+a completed review verified it against, when that review completed, the report
+it produced, and the evidence the row rests on. A checkmark means a clean review
+against the commit beside it; `[legacy]` means coverage established by a
+document that predates this ledger, with no date and no commit invented for it.
+A title and a merge time are the listing's to supply, so a row that no merged-PR
+listing has named yet carries neither rather than a guess.
 
 Written by `project_review_ledger.py`. Edit it through that helper rather than
 by hand: the payload below is parsed strictly, and an edit it cannot read stops
@@ -207,8 +272,9 @@ the next invocation instead of being ignored.
 """
 
 TABLE_HEADER = (
-    "| PR | Status | Verified at | Completed (UTC) | Report | Evidence |\n"
-    "| ---: | --- | --- | --- | --- | --- |"
+    "| PR | Title | Merged (UTC) | Status | Verified at | Completed (UTC) "
+    "| Report | Evidence |\n"
+    "| ---: | --- | --- | --- | --- | --- | --- | --- |"
 )
 
 STATUS_LABELS = {
@@ -310,6 +376,8 @@ def empty_repository() -> dict:
 def empty_row(status: str = "never-reviewed") -> dict:
     return {
         "status": status,
+        "title": None,
+        "merged_at": None,
         "commit": None,
         "completed_at": None,
         "report": None,
@@ -410,13 +478,18 @@ def parse_document(text: str, source: str) -> dict:
     if not isinstance(document, dict):
         raise LedgerError(f"{source} holds a ledger payload that is not an object.")
     version = document.get("version")
-    # `True == 1` and `1.0 == 1` in Python, so an equality test alone would
+    # `True == 1` and `1.0 == 1` in Python, so a membership test alone would
     # read a boolean or a float as schema version 1 and normalize a malformed
     # document into an accepted one.
-    if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version not in READABLE_SCHEMA_VERSIONS
+    ):
         raise LedgerError(
             f"{source} declares ledger schema version {version!r}; this helper "
-            f"expected the integer {SCHEMA_VERSION}."
+            f"reads {' and '.join(str(known) for known in READABLE_SCHEMA_VERSIONS)} "
+            f"and writes {SCHEMA_VERSION}."
         )
     repositories = document.get("repositories")
     if not isinstance(repositories, dict):
@@ -426,8 +499,49 @@ def parse_document(text: str, source: str) -> dict:
     for name, state in repositories.items():
         if not REPO_RE.match(str(name)):
             raise LedgerError(f"{source} names {name!r}, which is not an owner/name.")
+        if version < SCHEMA_VERSION:
+            state = _upgraded_repository(state, version)
         parsed["repositories"][name] = _validated_repository(state, f"{source}: {name}")
     return parsed
+
+
+# What each schema version added to a row, so an older document is upgraded by
+# naming the version that introduced a field rather than by defaulting whatever
+# happens to be missing. Defaulting is what `_require_keys` refuses, and for
+# good reason: it is how a truncated edit erases rows. An upgrade keyed on the
+# declared version is the opposite -- the document says which shape it is in,
+# and only the fields that shape genuinely predates are supplied.
+ROW_FIELDS_ADDED_IN = {2: ("title", "merged_at")}
+
+
+def _upgraded_repository(state, version: int):
+    """One repository's entry read out of an older schema into the current one.
+
+    Only rows change between 1 and 2, and only by gaining two fields the older
+    writer could not have known about. Everything else is passed through
+    untouched so the validation below sees exactly what the document said.
+    """
+    if not isinstance(state, dict):
+        return state
+    rows = state.get("rows")
+    if not isinstance(rows, dict):
+        return state
+    added = [
+        field
+        for introduced, fields in sorted(ROW_FIELDS_ADDED_IN.items())
+        if introduced > version
+        for field in fields
+    ]
+    upgraded = dict(state)
+    upgraded["rows"] = {
+        key: (
+            dict({field: None for field in added if field not in row}, **row)
+            if isinstance(row, dict)
+            else row
+        )
+        for key, row in rows.items()
+    }
+    return upgraded
 
 
 def load_document(root) -> dict:
@@ -491,7 +605,24 @@ ENDPOINT_KEYS = ("sha",)
 BOUNDARY_KEYS = ("number", "merged_at")
 
 
-def _require_keys(mapping, keys, source: str) -> None:
+# What an unreadable field costs the document that carries it, which is not
+# the same cost in both directions. A ledger is read and rewritten, so a field
+# nothing here understands is a field the next write drops; a listing is read
+# once and never written back, and a field nothing here understands may be the
+# very thing that said the listing was complete.
+LEDGER_UNKNOWN_FIELD_COST = "one it would drop on the next write"
+LISTING_UNKNOWN_FIELD_COST = (
+    "one whose bearing on this listing's completeness it cannot know"
+)
+
+
+def _require_keys(
+    mapping,
+    keys,
+    source: str,
+    subject: str = "a ledger",
+    consequence: str = LEDGER_UNKNOWN_FIELD_COST,
+) -> None:
     """Every declared field present and nothing else, at every level.
 
     Two silences, closed together because they are one decision. Defaulting a
@@ -500,11 +631,18 @@ def _require_keys(mapping, keys, source: str) -> None:
     unrecognized one is how a field written by a newer helper, or misspelled
     by a hand-edit, disappears through a read-and-rewrite. A strictly parsed
     document refuses both rather than normalizing either away.
+
+    `subject` is what the refusal calls the thing that owes those fields, and
+    `consequence` is what an unreadable one costs it. The merged-pull-request
+    listing is held to the same rule and is not a ledger: a refusal that told
+    its caller what "a ledger states", or that an unknown field would be
+    dropped by a write that never happens to a listing, would be describing
+    the wrong document to go and fix.
     """
     missing = [key for key in keys if key not in mapping]
     if missing:
         raise LedgerError(
-            f"{source} declares no {', '.join(missing)}; a ledger states every "
+            f"{source} declares no {', '.join(missing)}; {subject} states every "
             f"one of {', '.join(keys)} rather than leaving any to a default."
         )
     unknown = sorted(set(mapping) - set(keys))
@@ -512,7 +650,7 @@ def _require_keys(mapping, keys, source: str) -> None:
         raise LedgerError(
             f"{source} carries unrecognized field(s) {', '.join(unknown)}; it "
             f"holds exactly {', '.join(keys)}, and a field this helper cannot "
-            "read is one it would drop on the next write."
+            f"read is {consequence}."
         )
 
 
@@ -588,6 +726,10 @@ def _validated_row(row, source: str) -> dict:
             f"{', '.join(ROW_STATUSES)}."
         )
     validated = empty_row(status)
+    validated["title"] = _validated_optional_title(row["title"], f"{source}: title")
+    validated["merged_at"] = _validated_optional_timestamp(
+        row["merged_at"], f"{source}: merged_at"
+    )
     validated["commit"] = _validated_optional_sha(row["commit"], f"{source}: commit")
     validated["completed_at"] = _validated_optional_timestamp(
         row["completed_at"], f"{source}: completed_at"
@@ -640,6 +782,23 @@ def _require_completion_pairing(status: str, row: dict, source: str) -> None:
             "claim about a document, and a claim with no document behind it "
             "is indistinguishable from never-reviewed."
         )
+
+
+def _validated_optional_title(value, source: str):
+    """A pull request's own title as the listing gave it, or nothing.
+
+    Not normalized, not truncated and not invented: the title is evidence
+    about which pull request a row is, so a row shows the listing's own words
+    or shows that it has none.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise LedgerError(
+            f"{source} holds {value!r}, which is not a pull-request title."
+        )
+    _require_one_line(value, source)
+    return value
 
 
 def _validated_optional_sha(value, source: str):
@@ -699,7 +858,8 @@ def _require_one_line(value: str, source: str) -> None:
     if any(character < " " or character == "\x7f" for character in value):
         raise LedgerError(
             f"{source} holds {value!r}, which carries a control character; "
-            "an evidence note is one line of readable text."
+            "a value this helper renders into the table is one line of "
+            "readable text."
         )
 
 
@@ -891,6 +1051,8 @@ def _render_row(number: int, row: dict) -> str:
     return "| " + " | ".join(
         (
             f"#{number}",
+            _cell(row["title"]) if row["title"] else "—",
+            row["merged_at"] or "—",
             STATUS_LABELS[row["status"]],
             f"`{row['commit']}`" if row["commit"] else "—",
             row["completed_at"] or "—",
@@ -971,11 +1133,65 @@ def create_document(root, document: dict) -> Path:
     -- which a look-then-write could, and did: both passed `exists()`, both
     reached the write, and the second replaced the first.
 
-    Whole-file-then-link for the reason the write was atomic before: the
-    alternative to a complete ledger is a truncated one, and a truncated
-    ledger stops every later invocation by design.
+    An edit to an established ledger publishes through `publish_document`
+    instead, which is the same writer over `os.replace`.
     """
     path = confined(root, document_path(root))
+    parent = _prepared_directory(root, path)
+    temporary = _rendered_into_temporary(parent, document)
+    try:
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise LedgerError(
+                f"{path} already exists, so a ledger is already established "
+                "under this root. A second migration would replace completed "
+                "reviews with legacy rows; edit the ledger through this helper "
+                "instead."
+            ) from error
+        except OSError as error:
+            raise LedgerError(
+                f"{path} could not be created ({error}); a ledger this helper "
+                "cannot publish is not one it may report as written."
+            ) from error
+    finally:
+        _discard(temporary)
+    return path
+
+
+def publish_document(root, document: dict) -> Path:
+    """Replace the document with this one, atomically.
+
+    The same writer as `create_document` and deliberately not the same
+    publication: `os.link` refuses a name something already holds, which is
+    exactly what a migration wants and exactly what an edit to an established
+    ledger cannot use. `os.replace` puts a complete document where the
+    previous complete document was, in one operation, so a reader never sees
+    a half-written ledger and an interrupted write leaves the previous one
+    intact.
+
+    What it does not do is sequence two writers. Two selections racing each
+    other still lose one of their reconciliations, because each rendered the
+    whole document from the state it read; the lock that closes that is
+    D-12's, and it arrives with the claim in LEDGER-4. Until then the caller
+    is one invocation at a time.
+    """
+    path = confined(root, document_path(root))
+    parent = _prepared_directory(root, path)
+    temporary = _rendered_into_temporary(parent, document)
+    try:
+        os.replace(temporary, path)
+    except OSError as error:
+        _discard(temporary)
+        raise LedgerError(
+            f"{path} could not be replaced ({error}); a ledger this helper "
+            "cannot publish is not one it may report as written."
+        ) from error
+    return path
+
+
+def _prepared_directory(root, path: Path) -> Path:
+    """The ledger's own directory, proven usable and proven inside `root`."""
     parent = confined(root, path.parent)
     require_reachable(root, path)
     try:
@@ -986,26 +1202,31 @@ def create_document(root, document: dict) -> Path:
             "directory is the one thing this helper makes, so failing to make "
             "it is a refusal rather than a traceback."
         ) from error
-    confined(root, parent)
+    return confined(root, parent)
+
+
+def _rendered_into_temporary(parent: Path, document: dict) -> str:
+    """The whole document, written beside where it is going.
+
+    Whole-file-then-publish for the reason every write here is: the
+    alternative to a complete ledger is a truncated one, and a truncated
+    ledger stops every later invocation by design.
+    """
     handle, temporary = tempfile.mkstemp(dir=str(parent), prefix=".project-review-ledger-")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(render_document(document))
-        try:
-            os.link(temporary, path)
-        except FileExistsError as error:
-            raise LedgerError(
-                f"{path} already exists, so a ledger is already established "
-                "under this root. A second migration would replace completed "
-                "reviews with legacy rows; edit the ledger through this helper "
-                "instead."
-            ) from error
-    finally:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-    return path
+    except BaseException:
+        _discard(temporary)
+        raise
+    return temporary
+
+
+def _discard(temporary: str) -> None:
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -1768,6 +1989,399 @@ def _record_legacy(rows: dict, number: int, evidence: str, report) -> None:
 
 
 # --------------------------------------------------------------------------
+# The merged-pull-request inventory
+
+# What a caller hands `select`: the pages it fetched, in the order it fetched
+# them, each one saying what it asked for and what came back.
+#
+# The page number is the part a caller might think is redundant, and it is the
+# part that makes the sequence checkable. Page lengths alone cannot tell "page
+# 1, page 2, page 3" from "page 1, page 3" -- both are a run of full pages
+# ending in a short one -- so a listing with an interior page dropped read as
+# complete, and every pull request on the missing page became a pull request
+# this repository does not have. The numbers turn that into a contiguity
+# check against the position each page was handed in.
+INVENTORY_KEYS = ("pages",)
+PAGE_KEYS = ("page", "limit", "prs")
+LISTED_KEYS = ("number", "title", "merged_at")
+
+# The three queues of design D-8, named so a caller can tell which one its
+# pull request came out of without re-deriving the order itself.
+QUEUE_NEVER_REVIEWED = "never-reviewed"
+QUEUE_LEGACY = "legacy"
+QUEUE_REFRESH = "refresh"
+
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def parse_inventory(raw, source: str) -> dict:
+    """A complete listing of the repository's merged pull requests, or a refusal.
+
+    Complete is the whole of what this function decides, and it decides it
+    from the pages rather than from the rows on them: a contiguous sequence
+    starting at page 1, one page size across the whole walk, every page
+    holding no more than it asked for, nothing after the first page that came
+    back short, and a short page at the end. The last rule is the one design
+    D-11 turns on -- a page returned at its own limit may be a page of a
+    longer history, and nothing in the page itself can tell the two apart --
+    so a listing that ends full is refused asking for the next page rather
+    than recorded as a universe.
+
+    One page size, because a page number means nothing without one. A page
+    number is an offset expressed in page sizes, so "page 1 of 2, page 2 of
+    4" names rows 1-2 and then rows 5-8, and the two pull requests in between
+    are ones no page ever carried. Contiguous numbering said the walk was
+    whole and a short final page said it had ended, and both were true of a
+    listing with a hole in the middle of it.
+
+    Every refusal here happens before anything is selected or written, so a
+    listing this function does not accept leaves the ledger exactly as it was.
+    """
+    if not isinstance(raw, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(
+        raw,
+        INVENTORY_KEYS,
+        source,
+        "a merged-pull-request listing",
+        LISTING_UNKNOWN_FIELD_COST,
+    )
+    pages = raw["pages"]
+    if not isinstance(pages, list):
+        raise LedgerError(f"{source}: pages is not a list.")
+    if not pages:
+        raise LedgerError(
+            f"{source} carries no pages at all; an empty sequence is not a "
+            "listing that came back empty, it is a listing nobody made, and "
+            "recording it would state that this repository has never merged a "
+            "pull request."
+        )
+    listed = []
+    seen = {}
+    short = None
+    size = None
+    for index, page in enumerate(pages):
+        position = index + 1
+        where = f"{source}: page {position}"
+        if not isinstance(page, dict):
+            raise LedgerError(f"{where} is not an object.")
+        _require_keys(
+            page, PAGE_KEYS, where, "a listing page", LISTING_UNKNOWN_FIELD_COST
+        )
+        declared = page["page"]
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared != position:
+            raise LedgerError(
+                f"{where} declares page number {declared!r}; the pages are read "
+                f"as the contiguous sequence the caller fetched, so the page in "
+                f"this position is {position}. A repeat, a gap, or a listing "
+                "that does not start at page 1 is a listing with a page missing "
+                "from it, and a missing page is pull requests this repository "
+                "would be recorded as not having."
+            )
+        if short is not None:
+            raise LedgerError(
+                f"{where} follows page {short}, which came back short of its own "
+                "limit and is therefore the last page of the history; a page "
+                "after the last one describes a listing this helper cannot place."
+            )
+        limit = page["limit"]
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise LedgerError(
+                f"{where} declares limit {limit!r}, which is not a positive page "
+                "size; the limit is the only thing that says whether the page "
+                "came back short, so a page without one proves nothing about "
+                "the history behind it."
+            )
+        if size is None:
+            size = limit
+        elif limit != size:
+            raise LedgerError(
+                f"{where} declares limit {limit}, but page 1 declared {size}; a "
+                "page number is an offset expressed in page sizes, so a walk "
+                "that changed its page size skips or repeats the rows between "
+                "the two and its numbering no longer says which rows were "
+                "listed. List the whole history at one page size."
+            )
+        rows = page["prs"]
+        if not isinstance(rows, list):
+            raise LedgerError(f"{where}: prs is not a list.")
+        if len(rows) > limit:
+            raise LedgerError(
+                f"{where} carries {len(rows)} pull requests at limit {limit}; a "
+                "page cannot hold more than it asked for, so its limit does not "
+                "describe the request that produced it."
+            )
+        if len(rows) < limit:
+            short = position
+        for offset, entry in enumerate(rows):
+            listed.append(_validated_listed(entry, seen, f"{where}, entry {offset}"))
+    if short is None:
+        last = pages[-1]
+        raise LedgerError(
+            f"{source} ends with page {len(pages)}, which came back at its own "
+            f"limit of {last['limit']}; a full page may be a page of a longer "
+            "history, so the next page is needed before this listing is a "
+            "complete one."
+        )
+    return {"pages": len(pages), "listed": listed}
+
+
+def _validated_listed(entry, seen: dict, source: str) -> dict:
+    if not isinstance(entry, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(
+        entry, LISTED_KEYS, source, "a listed pull request", LISTING_UNKNOWN_FIELD_COST
+    )
+    number = entry["number"]
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise LedgerError(
+            f"{source} holds {number!r}, which is not a pull-request number."
+        )
+    if len(str(number)) > DIGIT_LIMIT:
+        # The bound the row keys are read back under. A number past it would
+        # be written into a ledger the parser then refuses, which is a
+        # repository this helper has broken rather than one it has recorded.
+        raise LedgerError(
+            f"{source} holds #{number}, which is longer than the "
+            f"{DIGIT_LIMIT} digits a pull-request number is read back under."
+        )
+    if number in seen:
+        raise LedgerError(
+            f"{source} names pull request #{number}, which {seen[number]} named "
+            "already; one pull request listed twice is a listing that does not "
+            "describe what the repository holds, and a reader that took either "
+            "copy would be choosing between them without saying so."
+        )
+    seen[number] = source
+    title = entry["title"]
+    if not isinstance(title, str):
+        raise LedgerError(
+            f"{source} holds title {title!r} for #{number}, which is not a "
+            "pull-request title."
+        )
+    _require_one_line(title, f"{source}: title")
+    if entry["merged_at"] is None:
+        raise LedgerError(
+            f"{source} names #{number} with no merge time; the never-reviewed "
+            "queue is an order over merge times, so a pull request without one "
+            "cannot be placed in it."
+        )
+    merged_at = _validated_optional_timestamp(entry["merged_at"], f"{source}: merged_at")
+    return {"number": number, "title": title, "merged_at": merged_at}
+
+
+def _instant(value, source: str) -> datetime:
+    """A validated timestamp as the moment it names.
+
+    Compared as a moment rather than as text. The spelling this document
+    accepts happens to sort chronologically, which is exactly why an ordering
+    built on it is worth stating: the next spelling that is added would sort
+    some other way, and an order that silently stopped being chronological is
+    not a thing a test would see.
+    """
+    if not isinstance(value, str):
+        raise LedgerError(
+            f"{source} holds {value!r}, which is not a time this helper can "
+            "order a queue by."
+        )
+    try:
+        return datetime.strptime(value, TIMESTAMP_FORMAT)
+    except ValueError as error:
+        raise LedgerError(f"{source} holds {value!r}, which is not a real date ({error}).") from error
+
+
+def reconcile(state: dict, inventory: dict) -> dict:
+    """Fold a complete listing into one repository's rows, in place.
+
+    The listing owns which pull requests exist and what they are called; the
+    ledger owns what has been done about them. So a listed pull request with
+    no row gains a never-reviewed one, a listed pull request that already has
+    a row keeps its status, its commit, its completed time, its report, its
+    evidence and its history and takes only the listing's title and merge
+    time, and a row the listing does not name is kept.
+
+    Kept, and reported. A row the listing lost is either a pull request that
+    stopped being merged or a listing that is lying about the repository, and
+    neither is something to resolve by deleting the only record of a review
+    that was performed (design D-11). It stops being selectable, because
+    selection is over what the repository currently holds, and it comes back
+    the moment a listing names it again.
+    """
+    rows = state["rows"]
+    added = []
+    refreshed = []
+    for entry in inventory["listed"]:
+        key = str(entry["number"])
+        row = rows.get(key)
+        if row is None:
+            row = empty_row("never-reviewed")
+            rows[key] = row
+            added.append(entry["number"])
+        else:
+            refreshed.append(entry["number"])
+        row["title"] = entry["title"]
+        row["merged_at"] = entry["merged_at"]
+    listed = {entry["number"] for entry in inventory["listed"]}
+    absent = sorted(int(key) for key in rows if int(key) not in listed)
+    return {
+        "added": sorted(added),
+        "refreshed": sorted(refreshed),
+        "absent": absent,
+    }
+
+
+def queues(state: dict, inventory: dict) -> list:
+    """Design D-8's three queues over the rows this listing named, in order.
+
+    Over the rows the listing named, because a row the listing does not name
+    is a pull request this repository does not currently hold, and scheduling
+    a review of one would be reviewing something nobody can look at. That is
+    the only thing that keeps a row out of a queue besides the repository's
+    own exclusions.
+
+    1. Never-reviewed, newest merge time first, ties by descending number.
+    2. `[legacy]`, highest number first -- numbers explicitly, not merge
+       dates, which is the distinction D-8 records the owner making.
+    3. Completed reviews, oldest completed time first, ties by ascending
+       number, clean and findings-bearing alike (D-4).
+
+    Every order is total, so the queues are a function of the ledger and the
+    listing and of nothing else -- not of the order the pages arrived in, and
+    not of the order a JSON object happened to render its keys in.
+    """
+    listed = {entry["number"] for entry in inventory["listed"]}
+    excluded = set(state["excluded"]["prs"])
+    # Read out of the rows rather than looked up by listed number, so this
+    # function is total over any state it is handed rather than raising a
+    # `KeyError` at a caller that reconciled the wrong thing. Every order
+    # below is imposed explicitly, so the order the rows happen to be stored
+    # in reaches nothing.
+    eligible = [
+        (int(key), row)
+        for key, row in state["rows"].items()
+        if int(key) in listed and int(key) not in excluded
+    ]
+    never = [item for item in eligible if item[1]["status"] == "never-reviewed"]
+    legacy = [item for item in eligible if item[1]["status"] == "legacy"]
+    refresh = [item for item in eligible if item[1]["status"] in COMPLETED_STATUSES]
+    never.sort(
+        key=lambda item: (
+            _instant(item[1]["merged_at"], f"#{item[0]}: merged_at"),
+            item[0],
+        ),
+        reverse=True,
+    )
+    legacy.sort(key=lambda item: item[0], reverse=True)
+    refresh.sort(
+        key=lambda item: (
+            _instant(item[1]["completed_at"], f"#{item[0]}: completed_at"),
+            item[0],
+        )
+    )
+    return [
+        (QUEUE_NEVER_REVIEWED, never),
+        (QUEUE_LEGACY, legacy),
+        (QUEUE_REFRESH, refresh),
+    ]
+
+
+def select(root, repo: str, inventory) -> dict:
+    """Record one complete listing and choose the one pull request to review.
+
+    The listing is parsed before the ledger is read and the choice is made
+    before anything is written, so a refusal at any point leaves the document
+    byte for byte as it was.
+
+    A ledger has to exist first, and this is not a formality. `migrate` is
+    what reads the old cursor and the sibling reports into `[legacy]` rows,
+    and it refuses to run over a ledger that already exists -- so a selection
+    that established the ledger itself would record every merged pull request
+    as never-reviewed and close the only door legacy coverage comes through.
+    A repository with no history to import still starts with `migrate`, which
+    writes it an empty ledger.
+    """
+    if not REPO_RE.match(str(repo)):
+        raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
+    listing = parse_inventory(inventory, "the merged-pull-request inventory")
+    path = confined(root, document_path(root))
+    document = load_document(root)
+    if not document["repositories"]:
+        raise LedgerError(
+            f"{path} holds no ledger, so there is nothing to record this "
+            f"listing against. Migrate {repo} first: a selection that "
+            "established the ledger itself would record every merged pull "
+            "request as never-reviewed, and no later migration could correct "
+            "it."
+        )
+    if repo not in document["repositories"]:
+        named = ", ".join(sorted(document["repositories"]))
+        raise LedgerError(
+            f"{path} holds no entry for {repo}; it holds {named}. A listing is "
+            "recorded as one repository's known universe, and a repository "
+            "this ledger has never been migrated for has no coverage for it to "
+            "be recorded against."
+        )
+    state = state_for(document, repo)
+    reconciliation = reconcile(state, listing)
+    validated = _validated_repository(state, f"the ledger reconciled for {repo}")
+    rows = validated["rows"]
+    listed = {entry["number"] for entry in listing["listed"]}
+    excluded = sorted(listed & set(validated["excluded"]["prs"]))
+    # Over every listed pull request and only those, excluded ones included:
+    # the counts describe the universe this listing established, while the
+    # queue size below describes what could have been selected out of it.
+    counts = {status: 0 for status in ROW_STATUSES}
+    for key, row in rows.items():
+        if int(key) in listed:
+            counts[row["status"]] += 1
+    chosen = None
+    for name, queue in queues(validated, listing):
+        if queue:
+            number, row = queue[0]
+            chosen = {
+                "selected": {
+                    "number": number,
+                    "title": row["title"],
+                    "merged_at": row["merged_at"],
+                    "row_status": row["status"],
+                },
+                "queue": {"name": name, "size": len(queue)},
+            }
+            break
+    document["repositories"][repo] = validated
+    written = publish_document(root, document)
+    result = {
+        "status": "selected" if chosen else "no-selectable-row",
+        "repo": repo,
+        "document": str(written),
+        "selected": chosen["selected"] if chosen else None,
+        "queue": chosen["queue"] if chosen else None,
+        "inventory": {
+            "pages": listing["pages"],
+            "listed": len(listing["listed"]),
+            "added": reconciliation["added"],
+            "refreshed": reconciliation["refreshed"],
+            "excluded": excluded,
+            "counts": counts,
+            # The rows this listing did not name, with whatever the ledger
+            # knows about them and nothing else. A row imported from a report
+            # has no title and no merge time, and inventing either here would
+            # be this helper answering a question only a listing can.
+            "retained_absent": [
+                {
+                    "number": number,
+                    "title": rows[str(number)]["title"],
+                    "merged_at": rows[str(number)]["merged_at"],
+                    "row_status": rows[str(number)]["status"],
+                }
+                for number in reconciliation["absent"]
+            ],
+        },
+    }
+    return result
+
+
+# --------------------------------------------------------------------------
 # Command line
 
 
@@ -1789,6 +2403,39 @@ def _confirmation(raw: str) -> tuple:
             raise LedgerError(f"{token!r} is not a pull-request number.")
         numbers.append(int(stripped))
     return path, numbers
+
+
+def read_inventory(stream=None) -> dict:
+    """The merged-pull-request listing, read from standard input.
+
+    Standard input and nothing else. A `--inventory <path>` would be the
+    obvious convenience and it would also be the one thing that takes this
+    module outside the reach it declares: every repository file it opens is
+    under the `--root` it was given, and a path flag is a read of whatever the
+    caller names. The listing is the caller's own `gh` output, so the caller
+    already has it in hand.
+    """
+    stream = sys.stdin if stream is None else stream
+    text = stream.read()
+    if not text.strip():
+        raise LedgerError(
+            "no merged-pull-request listing arrived on standard input; "
+            "`select` records the listing as this repository's known universe, "
+            "and an empty input is not an empty repository."
+        )
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except _DuplicateKey as error:
+        raise LedgerError(
+            f"the merged-pull-request listing names {error.key!r} more than "
+            "once in one object; a listing that repeats a key states two "
+            "values for it and a reader that took one would be choosing "
+            "without saying so."
+        ) from error
+    except ValueError as error:
+        raise LedgerError(
+            f"the merged-pull-request listing is not readable JSON ({error})."
+        ) from error
 
 
 def _emit(payload) -> int:
@@ -1819,16 +2466,32 @@ def build_parser() -> argparse.ArgumentParser:
             "of this helper's own reading of it; repeatable"
         ),
     )
+    selector = subparsers.add_parser(
+        "select",
+        help=(
+            "record a complete merged-pull-request listing from standard input "
+            "and choose the one pull request to review next"
+        ),
+    )
+    selector.add_argument("--root", required=True)
+    selector.add_argument("--repo", required=True)
     return parser
 
 
 def main(argv=None) -> int:
-    """0 migrated or read, 3 flagged with nothing written, 2 refused.
+    """0 migrated, read or selected, 3 flagged with nothing written, 2 refused.
 
     Three outcomes rather than two because a flagged migration is neither: it
     read every report successfully and is waiting for a decision only the
     operator can make, and a caller that saw it as a refusal would retry it
     unchanged forever.
+
+    A selection that finds nothing to review is a fourth thing again, and it
+    is not an outcome of its own: `no-selectable-row` is a successful run over
+    a repository whose every merged pull request is excluded or unlisted, so
+    it exits 0 and says so in the payload. A caller parses this command's
+    standard output only when it exits 0, and only a refusal writes to
+    standard error.
     """
     args = build_parser().parse_args(argv)
     if args.command == "read":
@@ -1838,6 +2501,9 @@ def main(argv=None) -> int:
                 {"status": "read", "repo": args.repo, "state": state_for(document, args.repo)}
             )
         return _emit({"status": "read", "document": document})
+
+    if args.command == "select":
+        return _emit(select(args.root, args.repo, read_inventory()))
 
     confirmations = {}
     for raw in args.confirm:

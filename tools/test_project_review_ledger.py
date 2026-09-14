@@ -62,6 +62,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -332,15 +333,28 @@ def ledger_text(payload, marker=None) -> str:
     return f"# Project review ledger\n\nProse a human wrote.\n\n{marker}\n\n```json\n{body}\n```\n"
 
 
+def row(status, **fields):
+    """One row, built from the module's own shape rather than beside it.
+
+    `empty_row` is what the helper writes, so a field added to a row turns up
+    in every fixture here instead of leaving a hand-written literal that the
+    parser then refuses for a reason the test was never about.
+    """
+    built = LEDGER.empty_row(status)
+    unknown = sorted(set(fields) - set(built))
+    assert not unknown, f"a row has no {', '.join(unknown)}"
+    built.update(fields)
+    return built
+
+
 def completed_row(status="clean", report=None):
-    return {
-        "status": status,
-        "commit": FULL_SHA,
-        "completed_at": "2026-09-05T11:22:33Z",
-        "report": report,
-        "evidence": ["review:2026-09-05"],
-        "history": [],
-    }
+    return row(
+        status,
+        commit=FULL_SHA,
+        completed_at="2026-09-05T11:22:33Z",
+        report=report,
+        evidence=["review:2026-09-05"],
+    )
 
 
 # Filling a template in is how a fixture is written here: a sentence naming a
@@ -364,6 +378,133 @@ def instantiate(template: str) -> str:
     return re.sub(
         r"\{([A-Z]+)\}", lambda hole: TEMPLATE_FILLERS[hole.group(1)], template
     )
+
+
+# A ledger exactly as the previous release rendered one: schema version 1,
+# whose rows carry no `title` and no `merged_at` because that writer had no
+# such fields. Held verbatim rather than rebuilt from the current module,
+# because the thing under test is whether this helper can open a document it
+# did not write, and a fixture the current renderer produced would be the
+# current shape with an older number on it.
+PREVIOUS_RELEASE_LEDGER = """# Project review ledger
+
+Machine-owned state for the `project-review` workflow: one row per merged pull
+request, per repository, with its status, the commit a completed review
+verified it against, when that review completed, the report it produced, and
+the evidence the row rests on. A checkmark means a clean review against the
+commit beside it; `[legacy]` means coverage established by a document that
+predates this ledger, with no date and no commit invented for it.
+
+Written by `project_review_ledger.py`. Edit it through that helper rather than
+by hand: the payload below is parsed strictly, and an edit it cannot read stops
+the next invocation instead of being ignored.
+
+## coghex/kanban
+
+| PR | Status | Verified at | Completed (UTC) | Report | Evidence |
+| ---: | --- | --- | --- | --- | --- |
+| #612 | ✓ clean | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` | 2026-09-05T11:22:33Z | — | review:2026-09-05 |
+| #610 | [legacy] | — | — | — | cursor:docs/project_review_boundaries.md |
+| #602 | never reviewed | — | — | — | — |
+
+- Migrated from the cursor-v2 record.
+
+<!-- project-review:ledger:v1 -->
+
+```json
+{
+  "repositories": {
+    "coghex/kanban": {
+      "direct": {
+        "endpoint": null,
+        "reviewed": []
+      },
+      "excluded": {
+        "commits": [],
+        "prs": []
+      },
+      "migration": {
+        "boundary": null,
+        "source": "cursor-v2",
+        "withheld_boundary": null
+      },
+      "rows": {
+        "602": {
+          "commit": null,
+          "completed_at": null,
+          "evidence": [],
+          "history": [],
+          "report": null,
+          "status": "never-reviewed"
+        },
+        "610": {
+          "commit": null,
+          "completed_at": null,
+          "evidence": [
+            "cursor:docs/project_review_boundaries.md"
+          ],
+          "history": [],
+          "report": null,
+          "status": "legacy"
+        },
+        "612": {
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "completed_at": "2026-09-05T11:22:33Z",
+          "evidence": [
+            "review:2026-09-05"
+          ],
+          "history": [],
+          "report": null,
+          "status": "clean"
+        }
+      }
+    }
+  },
+  "version": 1
+}
+```
+"""
+
+
+# --------------------------------------------------------------------------
+# The merged-pull-request listing a selection is made from
+
+# Merge order and number order agree unless a test says otherwise. Most of
+# these tests are not about the difference between them, and the two that are
+# spell their own times.
+MERGE_EPOCH = datetime(2026, 1, 1)
+
+
+def merge_time(number: int) -> str:
+    return (MERGE_EPOCH + timedelta(hours=number)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def merged(number, at=None, title=None):
+    """One pull request as the listing names it."""
+    return {
+        "number": number,
+        "title": f"Pull request #{number}" if title is None else title,
+        "merged_at": merge_time(number) if at is None else at,
+    }
+
+
+def listing(entries, limit=100):
+    """The pages a caller fetched, paginated the way `gh` hands them back.
+
+    A listing that divides exactly into full pages ends with an empty one,
+    because that is what the caller sees: it asks for the next page and gets
+    nothing, and that empty page is the proof the history stopped.
+    """
+    entries = list(entries)
+    chunks = [entries[index:index + limit] for index in range(0, len(entries), limit)]
+    if not chunks or len(chunks[-1]) == limit:
+        chunks.append([])
+    return {
+        "pages": [
+            {"page": position, "limit": limit, "prs": chunk}
+            for position, chunk in enumerate(chunks, start=1)
+        ]
+    }
 
 
 class LedgerTestCase(unittest.TestCase):
@@ -434,16 +575,7 @@ class DocumentParsingTests(LedgerTestCase):
         # An evidence note may say anything, including the marker. Such a note
         # renders into its table cell and its payload string, and a count over
         # the raw text made the document refuse its own output.
-        rows = {
-            "602": {
-                "status": "legacy",
-                "commit": None,
-                "completed_at": None,
-                "report": None,
-                "evidence": [LEDGER.LEDGER_MARKER],
-                "history": [],
-            }
-        }
+        rows = {"602": row("legacy", evidence=[LEDGER.LEDGER_MARKER])}
         document = self.parse(valid_payload(rows))
         rendered = LEDGER.render_document(document)
         self.assertEqual(rendered.count(LEDGER.LEDGER_MARKER), 3)
@@ -627,41 +759,26 @@ class DocumentParsingTests(LedgerTestCase):
             ),
             "legacy row with a commit": (
                 {
-                    "602": {
-                        "status": "legacy",
-                        "commit": FULL_SHA,
-                        "completed_at": None,
-                        "report": None,
-                        "evidence": ["cursor:docs/project_review_boundaries.md"],
-                        "history": [],
-                    }
+                    "602": row(
+                        "legacy",
+                        commit=FULL_SHA,
+                        evidence=["cursor:docs/project_review_boundaries.md"],
+                    )
                 },
                 "names a verification commit",
             ),
             "legacy row with a time": (
                 {
-                    "602": {
-                        "status": "legacy",
-                        "commit": None,
-                        "completed_at": "2026-09-05T11:22:33Z",
-                        "report": None,
-                        "evidence": ["cursor:docs/project_review_boundaries.md"],
-                        "history": [],
-                    }
+                    "602": row(
+                        "legacy",
+                        completed_at="2026-09-05T11:22:33Z",
+                        evidence=["cursor:docs/project_review_boundaries.md"],
+                    )
                 },
                 "names a completed-review time",
             ),
             "legacy row with no evidence": (
-                {
-                    "602": {
-                        "status": "legacy",
-                        "commit": None,
-                        "completed_at": None,
-                        "report": None,
-                        "evidence": [],
-                        "history": [],
-                    }
-                },
+                {"602": row("legacy")},
                 "names no evidence",
             ),
             "absolute report path": (
@@ -959,22 +1076,12 @@ class DocumentParsingTests(LedgerTestCase):
         rows = {
             "612": completed_row(),
             "610": completed_row(status="findings", report="docs/project_review/610.md"),
-            "602": {
-                "status": "legacy",
-                "commit": None,
-                "completed_at": None,
-                "report": "docs/project_review_602-562.md",
-                "evidence": ["report:docs/project_review_602-562.md"],
-                "history": [],
-            },
-            "601": {
-                "status": "never-reviewed",
-                "commit": None,
-                "completed_at": None,
-                "report": None,
-                "evidence": [],
-                "history": [],
-            },
+            "602": row(
+                "legacy",
+                report="docs/project_review_602-562.md",
+                evidence=["report:docs/project_review_602-562.md"],
+            ),
+            "601": row("never-reviewed"),
         }
         state = LEDGER.state_for(self.parse(valid_payload(rows)), REPO)
         self.assertEqual(
@@ -1000,22 +1107,8 @@ class RenderingTests(LedgerTestCase):
         rows = {
             "612": completed_row(),
             "610": completed_row(status="findings", report="docs/project_review/610.md"),
-            "602": {
-                "status": "legacy",
-                "commit": None,
-                "completed_at": None,
-                "report": None,
-                "evidence": ["cursor:docs/project_review_boundaries.md"],
-                "history": [],
-            },
-            "601": {
-                "status": "never-reviewed",
-                "commit": None,
-                "completed_at": None,
-                "report": None,
-                "evidence": [],
-                "history": [],
-            },
+            "602": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+            "601": row("never-reviewed"),
         }
         text, _ = self.rendered(rows)
         lines = {
@@ -1039,14 +1132,11 @@ class RenderingTests(LedgerTestCase):
     def test_a_findings_row_links_its_report_and_a_legacy_row_may_too(self):
         rows = {
             "610": completed_row(status="findings", report="docs/project_review/610.md"),
-            "602": {
-                "status": "legacy",
-                "commit": None,
-                "completed_at": None,
-                "report": "docs/project_review_602-562.md",
-                "evidence": ["report:docs/project_review_602-562.md"],
-                "history": [],
-            },
+            "602": row(
+                "legacy",
+                report="docs/project_review_602-562.md",
+                evidence=["report:docs/project_review_602-562.md"],
+            ),
         }
         text, _ = self.rendered(rows)
         # A link resolves from docs/project_review/ledger.md, so a report in
@@ -1059,19 +1149,11 @@ class RenderingTests(LedgerTestCase):
         )
 
     def test_a_row_with_nothing_to_show_renders_placeholders_rather_than_blanks(self):
-        rows = {
-            "601": {
-                "status": "never-reviewed",
-                "commit": None,
-                "completed_at": None,
-                "report": None,
-                "evidence": [],
-                "history": [],
-            }
-        }
-        text, _ = self.rendered(rows)
-        row = next(line for line in text.splitlines() if line.startswith("| #601"))
-        self.assertEqual(row.count("—"), 4)
+        text, _ = self.rendered({"601": row("never-reviewed")})
+        rendered = next(line for line in text.splitlines() if line.startswith("| #601"))
+        # Six: a never-reviewed row that no listing has named yet knows its
+        # number and nothing else, so every other cell is a placeholder.
+        self.assertEqual(rendered.count("—"), 6)
 
     def test_an_empty_repository_renders_a_table_free_statement(self):
         text, _ = self.rendered({})
@@ -1138,23 +1220,54 @@ class RenderingTests(LedgerTestCase):
             ],
         )
 
+    def delimiters(self):
+        """How many `|` one intact row carries, taken from the header itself.
+
+        Counted rather than written down, so a column added to the table does
+        not leave a stale number here quietly asserting the old shape.
+        """
+        return LEDGER.TABLE_HEADER.splitlines()[0].count("|")
+
     def test_a_backslash_before_a_pipe_cannot_break_the_table(self):
         # Escaping the pipe without escaping the backslash in front of it
         # produces an even backslash run, which leaves the pipe a delimiter
         # and shifts every column after it.
         text, _ = self.rendered({"612": dict(completed_row(), evidence=["left\\|right"])})
-        row = next(line for line in text.splitlines() if line.startswith("| #612"))
-        self.assertIn("left\\\\\\|right", row)
-        self.assertEqual(row.replace("\\\\", "").replace("\\|", "").count("|"), 7)
+        rendered = next(line for line in text.splitlines() if line.startswith("| #612"))
+        self.assertIn("left\\\\\\|right", rendered)
+        self.assertEqual(
+            rendered.replace("\\\\", "").replace("\\|", "").count("|"), self.delimiters()
+        )
 
     def test_a_pipe_in_evidence_cannot_break_the_table(self):
         text, _ = self.rendered({"612": dict(completed_row(), evidence=["a | b"])})
-        row = next(line for line in text.splitlines() if line.startswith("| #612"))
-        self.assertIn("a \\| b", row)
-        # Six cells, so seven delimiters once the escaped pipe is discounted;
-        # an unescaped one would render as a seventh cell and shift every
-        # column after it.
-        self.assertEqual(row.replace("\\|", "").count("|"), 7)
+        rendered = next(line for line in text.splitlines() if line.startswith("| #612"))
+        self.assertIn("a \\| b", rendered)
+        # An unescaped pipe would render as one cell more than the header
+        # declares and shift every column after it.
+        self.assertEqual(rendered.replace("\\|", "").count("|"), self.delimiters())
+
+    def test_a_pipe_in_a_title_cannot_break_the_table(self):
+        # A title is the first cell whose text this repository does not write:
+        # it arrives from the merged-pull-request listing, so it is escaped
+        # exactly as an evidence note is rather than trusted to be tame.
+        text, _ = self.rendered({"612": dict(completed_row(), title="a | b")})
+        rendered = next(line for line in text.splitlines() if line.startswith("| #612"))
+        self.assertIn("a \\| b", rendered)
+        self.assertEqual(rendered.replace("\\|", "").count("|"), self.delimiters())
+
+    def test_a_listed_title_and_merge_time_are_shown_beside_the_number(self):
+        text, _ = self.rendered(
+            {
+                "612": dict(
+                    completed_row(), title="Read the discriminators first",
+                    merged_at="2026-09-05T09:00:00Z",
+                )
+            }
+        )
+        rendered = next(line for line in text.splitlines() if line.startswith("| #612"))
+        self.assertIn("Read the discriminators first", rendered)
+        self.assertIn("2026-09-05T09:00:00Z", rendered)
 
 
 # --------------------------------------------------------------------------
@@ -2008,18 +2121,886 @@ class FlaggedMigrationTests(LedgerTestCase):
 
 
 # --------------------------------------------------------------------------
+# The inventory and the three queues
+
+
+class SelectionTestCase(LedgerTestCase):
+    """Fixtures built by the helper itself, never as objects beside it.
+
+    Every ledger a test here starts from is written through the module's own
+    writer and read back through its own parser, so a fixture that the parser
+    would refuse fails as a fixture rather than passing as a selection. The
+    rows are assembled from `empty_row`, which is the shape the helper writes,
+    so a field added to a row turns up here instead of being silently absent.
+    """
+
+    def establish(self, rows, excluded=(), repo=REPO, root=None):
+        root = self.root if root is None else root
+        document = LEDGER.empty_document()
+        state = LEDGER.empty_repository()
+        state["rows"] = dict(rows)
+        state["excluded"]["prs"] = sorted(excluded)
+        document["repositories"][repo] = state
+        if LEDGER.document_path(root).exists():
+            LEDGER.publish_document(root, document)
+        else:
+            LEDGER.create_document(root, document)
+        return LEDGER.state_for(LEDGER.load_document(root), repo)
+
+    def migrated(self, **kwargs):
+        """A ledger of `[legacy]` rows, produced by `migrate` itself."""
+        record_cursor(self.root, **kwargs)
+        return LEDGER.migrate(self.root, REPO)["state"]
+
+    def select(self, entries, limit=100, repo=REPO, root=None):
+        return LEDGER.select(
+            self.root if root is None else root, repo, listing(entries, limit)
+        )
+
+    def selected(self, entries, **kwargs):
+        return self.select(entries, **kwargs)["selected"]["number"]
+
+    def rows_on_disk(self, repo=REPO):
+        return LEDGER.state_for(LEDGER.load_document(self.root), repo)["rows"]
+
+    def clean(self, completed_at, **fields):
+        return row("clean", commit=FULL_SHA, completed_at=completed_at, **fields)
+
+    def findings(self, completed_at, report="docs/project_review/610.md", **fields):
+        return row(
+            "findings",
+            commit=FULL_SHA,
+            completed_at=completed_at,
+            report=report,
+            **fields,
+        )
+
+
+class InventoryTests(SelectionTestCase):
+    """What a listing has to prove before it is a repository's known universe."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def refuses(self, pages, expected):
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.select(self.root, REPO, {"pages": pages})
+        self.assertIn(expected, str(raised.exception))
+        return str(raised.exception)
+
+    def test_a_complete_listing_records_every_page_it_carries(self):
+        # Two full pages and an empty terminal one: the shape a caller reaches
+        # when the history divides exactly into pages, and the shape a rule
+        # written only against "the last page is shorter" would have refused.
+        result = self.select([merged(number) for number in (612, 610, 602, 601)], limit=2)
+        self.assertEqual(result["inventory"]["pages"], 3)
+        self.assertEqual(result["inventory"]["listed"], 4)
+        self.assertEqual(set(self.rows_on_disk()), {"612", "610", "602", "601"})
+
+    def test_a_listing_whose_last_page_came_back_full_asks_for_the_next_one(self):
+        message = self.refuses(
+            [{"page": 1, "limit": 2, "prs": [merged(612), merged(610)]}],
+            "the next page is needed",
+        )
+        self.assertIn("limit of 2", message)
+
+    def test_a_page_sequence_that_is_not_contiguous_from_page_one_is_refused(self):
+        # Page lengths alone cannot tell a dropped interior page from a
+        # shorter history, and the pull requests on the dropped page would be
+        # recorded as pull requests this repository does not have.
+        cases = {
+            "an interior page missing": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 3, "limit": 2, "prs": [merged(602)]},
+            ],
+            "a sequence that does not start at page 1": [
+                {"page": 2, "limit": 2, "prs": [merged(612)]},
+            ],
+            "a page number repeated": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 1, "limit": 2, "prs": [merged(602)]},
+            ],
+            "a page number that is not a number": [
+                {"page": "1", "limit": 2, "prs": [merged(612)]},
+            ],
+            "a page number that is a boolean": [
+                {"page": True, "limit": 2, "prs": [merged(612)]},
+            ],
+        }
+        for label, pages in cases.items():
+            with self.subTest(listing=label):
+                self.refuses(pages, "declares page number")
+
+    def test_a_walk_that_changed_its_page_size_is_refused(self):
+        # A page number is an offset expressed in page sizes. "Page 1 of 2,
+        # page 2 of 4" names rows 1-2 and then rows 5-8, and the rows in
+        # between are ones no page ever carried -- while contiguous numbering
+        # said the walk was whole and a short final page said it had ended.
+        cases = {
+            "a page size that grew": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 4, "prs": [merged(602), merged(601)]},
+            ],
+            "a page size that shrank": [
+                {"page": 1, "limit": 4, "prs": [merged(n) for n in (612, 610, 602, 601)]},
+                {"page": 2, "limit": 2, "prs": [merged(533)]},
+            ],
+            "a page size that changed on the last page only": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 2, "prs": [merged(602), merged(601)]},
+                {"page": 3, "limit": 3, "prs": []},
+            ],
+        }
+        for label, pages in cases.items():
+            with self.subTest(listing=label):
+                message = self.refuses(pages, "page 1 declared")
+                self.assertIn("one page size", message)
+
+    def test_one_page_size_across_the_walk_is_accepted(self):
+        # The non-vacuity control for the refusal above: the same numbering
+        # and the same short final page pass when the size never moved.
+        result = self.select([merged(number) for number in (612, 610, 602)], limit=2)
+        self.assertEqual(result["inventory"]["listed"], 3)
+
+    def test_a_page_after_the_last_one_is_refused(self):
+        self.refuses(
+            [
+                {"page": 1, "limit": 3, "prs": [merged(612)]},
+                {"page": 2, "limit": 3, "prs": [merged(610)]},
+            ],
+            "came back short of its own limit",
+        )
+
+    def test_a_listing_with_no_pages_at_all_is_refused(self):
+        # Distinct from a listing whose one page came back empty, which is a
+        # repository that has merged nothing and is accepted below.
+        self.refuses([], "carries no pages at all")
+
+    def test_a_repository_that_has_merged_nothing_lists_one_empty_page(self):
+        result = self.select([])
+        self.assertEqual(result["inventory"]["listed"], 0)
+        self.assertEqual(result["status"], "no-selectable-row")
+
+    def test_a_page_limit_that_is_not_a_positive_integer_is_refused(self):
+        for limit in (0, -1, "100", True, 1.0, None):
+            with self.subTest(limit=limit):
+                self.refuses(
+                    [{"page": 1, "limit": limit, "prs": []}], "not a positive page size"
+                )
+
+    def test_a_page_carrying_more_rows_than_it_asked_for_is_refused(self):
+        self.refuses(
+            [{"page": 1, "limit": 1, "prs": [merged(612), merged(610)]}],
+            "cannot hold more than it asked for",
+        )
+
+    def test_a_page_states_exactly_the_fields_a_page_has(self):
+        for label, page in (
+            ("a field it cannot read", {"page": 1, "limit": 2, "prs": [], "cursor": "x"}),
+            ("a field left out", {"page": 1, "limit": 2}),
+        ):
+            with self.subTest(page=label):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(self.root, REPO, {"pages": [page]})
+
+    def test_a_listing_states_exactly_the_fields_a_listing_has(self):
+        for raw in ({"pages": [], "limit": 2}, {}, [], "pages"):
+            with self.subTest(listing=raw):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(self.root, REPO, raw)
+
+    def test_a_listing_refusal_names_the_listing_rather_than_the_ledger(self):
+        # The listing and the ledger are held to the same strictness and are
+        # two different documents. A refusal that told its caller what "a
+        # ledger states", or that an unknown field would be dropped by a write
+        # that never happens to a listing, would send them to the one that is
+        # fine.
+        missing = {
+            "a merged-pull-request listing": {},
+            "a listing page": {"pages": [{"page": 1, "limit": 2}]},
+            "a listed pull request": {
+                "pages": [{"page": 1, "limit": 2, "prs": [{"number": 612, "title": "t"}]}]
+            },
+        }
+        for subject, raw in missing.items():
+            with self.subTest(subject=subject, refusal="a field left out"):
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    LEDGER.select(self.root, REPO, raw)
+                self.assertIn(f"{subject} states every one of", str(raised.exception))
+        unknown = (
+            {"pages": [], "limit": 2},
+            {"pages": [{"page": 1, "limit": 2, "prs": [], "hasNextPage": False}]},
+            {
+                "pages": [
+                    {
+                        "page": 1,
+                        "limit": 2,
+                        "prs": [dict(merged(612), author="someone")],
+                    }
+                ]
+            },
+        )
+        for raw in unknown:
+            with self.subTest(refusal="a field it cannot read"):
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    LEDGER.select(self.root, REPO, raw)
+                self.assertIn(
+                    LEDGER.LISTING_UNKNOWN_FIELD_COST, str(raised.exception)
+                )
+
+    def test_a_ledger_refusal_still_names_the_ledger(self):
+        # The non-vacuity control for the two subjects above: the ledger keeps
+        # its own wording, so "the listing names the listing" is a property of
+        # the parameter rather than of one message that fits both.
+        payload = valid_payload({"602": completed_row()})
+        del payload["repositories"][REPO]["rows"]["602"]["status"]
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("a ledger states every one of", str(raised.exception))
+        payload = valid_payload({"602": dict(completed_row(), verdict="ok")})
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn(LEDGER.LEDGER_UNKNOWN_FIELD_COST, str(raised.exception))
+
+    def test_a_pull_request_listed_twice_is_refused(self):
+        self.refuses(
+            [
+                {"page": 1, "limit": 1, "prs": [merged(612)]},
+                {"page": 2, "limit": 1, "prs": [merged(612)]},
+                {"page": 3, "limit": 1, "prs": []},
+            ],
+            "named",
+        )
+
+    def test_a_listed_pull_request_names_a_real_merge_time(self):
+        for label, entry in (
+            ("no merge time", dict(merged(612), merged_at=None)),
+            ("a merge time that is not a timestamp", dict(merged(612), merged_at="yesterday")),
+            ("a merge time that is not a date", dict(merged(612), merged_at="2026-02-30T00:00:00Z")),
+            ("a local merge time", dict(merged(612), merged_at="2026-09-05T10:00:00")),
+        ):
+            with self.subTest(entry=label):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(
+                        self.root, REPO, {"pages": [{"page": 1, "limit": 2, "prs": [entry]}]}
+                    )
+
+    def test_a_listed_title_is_one_line_of_text(self):
+        for label, title in (
+            ("a title that is not a string", 612),
+            ("a title carrying a line break", "two\nlines"),
+            ("a title carrying a line separator", "two\u2028lines"),
+            ("a title carrying a control character", "bell\x07"),
+        ):
+            with self.subTest(title=label):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(
+                        self.root,
+                        REPO,
+                        {"pages": [{"page": 1, "limit": 2, "prs": [merged(612, title=title)]}]},
+                    )
+
+    def test_a_listed_number_is_a_pull_request_number(self):
+        for label, number in (
+            ("zero", 0),
+            ("negative", -1),
+            ("a boolean", True),
+            ("a float", 612.0),
+            ("a string", "612"),
+            ("longer than a row key is read back under", 10 ** LEDGER.DIGIT_LIMIT),
+        ):
+            with self.subTest(number=label):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(
+                        self.root,
+                        REPO,
+                        {
+                            "pages": [
+                                {
+                                    "page": 1,
+                                    "limit": 2,
+                                    "prs": [merged(number, at="2026-09-05T10:00:00Z")],
+                                }
+                            ]
+                        },
+                    )
+
+    def test_a_refused_listing_leaves_the_ledger_byte_for_byte_as_it_was(self):
+        # Every refusal, not just the first one a listing can hit: the whole
+        # listing is proven before a row is written, so a page that is fine
+        # before a page that is not still records nothing.
+        self.select([merged(612), merged(610)])
+        path = LEDGER.document_path(self.root)
+        before = path.read_bytes()
+        cases = {
+            "a final page at its own limit": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]}
+            ],
+            "a malformed merge time on a later page": [
+                {"page": 1, "limit": 1, "prs": [merged(612)]},
+                {"page": 2, "limit": 1, "prs": [dict(merged(610), merged_at="soon")]},
+                {"page": 3, "limit": 1, "prs": []},
+            ],
+            "a pull request listed twice": [
+                {"page": 1, "limit": 3, "prs": [merged(612), merged(610), merged(612)]}
+            ],
+            "a page that does not follow the one before it": [
+                {"page": 1, "limit": 1, "prs": [merged(612)]},
+                {"page": 3, "limit": 1, "prs": []},
+            ],
+            "a walk that changed its page size": [
+                {"page": 1, "limit": 2, "prs": [merged(612), merged(610)]},
+                {"page": 2, "limit": 4, "prs": [merged(602)]},
+            ],
+        }
+        for label, pages in cases.items():
+            with self.subTest(listing=label):
+                with self.assertRaises(LEDGER.LedgerError):
+                    LEDGER.select(self.root, REPO, {"pages": pages})
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_a_ledger_resolving_outside_the_root_is_not_written_through(self):
+        # The reach this module declares is "files under --root", and a
+        # selection writes where a migration only read.
+        outside = tempfile.TemporaryDirectory(prefix="project-review-outside-")
+        self.addCleanup(outside.cleanup)
+        directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "docs").mkdir()
+        (root / "docs" / "project_review").symlink_to(outside.name)
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.select(root, REPO, listing([merged(612)]))
+        self.assertIn("outside", str(raised.exception))
+
+
+class ResultSchemaTests(SelectionTestCase):
+    """The object a caller parses, in both of the states it is emitted in."""
+
+    INVENTORY_KEYS = {
+        "pages",
+        "listed",
+        "added",
+        "refreshed",
+        "excluded",
+        "counts",
+        "retained_absent",
+    }
+
+    def test_a_selection_states_its_choice_its_queue_and_its_inventory(self):
+        self.establish({})
+        result = self.select([merged(612), merged(610)])
+        self.assertEqual(
+            set(result), {"status", "repo", "document", "selected", "queue", "inventory"}
+        )
+        self.assertEqual(result["repo"], REPO)
+        self.assertEqual(result["document"], str(LEDGER.document_path(self.root)))
+        self.assertEqual(
+            set(result["selected"]), {"number", "title", "merged_at", "row_status"}
+        )
+        self.assertEqual(set(result["queue"]), {"name", "size"})
+        self.assertEqual(set(result["inventory"]), self.INVENTORY_KEYS)
+        self.assertEqual(set(result["inventory"]["counts"]), set(LEDGER.ROW_STATUSES))
+
+    def test_the_no_selectable_row_state_carries_the_same_object(self):
+        # The same keys, so a caller reads one shape and branches on `status`
+        # rather than discovering which fields a second state happens to have.
+        self.establish({}, excluded=[612])
+        result = self.select([merged(612)])
+        self.assertEqual(result["status"], "no-selectable-row")
+        self.assertEqual(
+            set(result), {"status", "repo", "document", "selected", "queue", "inventory"}
+        )
+        self.assertIsNone(result["selected"])
+        self.assertIsNone(result["queue"])
+        self.assertEqual(set(result["inventory"]), self.INVENTORY_KEYS)
+
+    def test_every_reported_queue_name_is_one_the_module_declares(self):
+        declared = {
+            LEDGER.QUEUE_NEVER_REVIEWED,
+            LEDGER.QUEUE_LEGACY,
+            LEDGER.QUEUE_REFRESH,
+        }
+        entries = [merged(612), merged(610), merged(602)]
+        seen = set()
+        for excluded in ([], [612], [612, 610]):
+            self.establish(
+                {
+                    "612": row("never-reviewed", merged_at=merge_time(612)),
+                    "610": row(
+                        "legacy", evidence=["cursor:docs/project_review_boundaries.md"]
+                    ),
+                    "602": self.clean("2026-09-05T00:00:00Z"),
+                },
+                excluded=excluded,
+            )
+            seen.add(self.select(entries)["queue"]["name"])
+        self.assertEqual(seen, declared)
+
+
+class SchemaUpgradeTests(SelectionTestCase):
+    """A ledger the previous release wrote is opened, not stranded."""
+
+    def previous_release(self):
+        path = LEDGER.document_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(PREVIOUS_RELEASE_LEDGER, encoding="utf-8")
+        return path
+
+    def test_a_ledger_from_the_previous_release_reads_into_the_current_shape(self):
+        state = LEDGER.state_for(
+            LEDGER.parse_document(PREVIOUS_RELEASE_LEDGER, "previous release"), REPO
+        )
+        self.assertEqual(
+            {key: value["status"] for key, value in state["rows"].items()},
+            {"612": "clean", "610": "legacy", "602": "never-reviewed"},
+        )
+        for key in state["rows"]:
+            with self.subTest(row=key):
+                # Absent, not invented: the older writer had no listing to take
+                # either from, and the next one supplies both.
+                self.assertIsNone(state["rows"][key]["title"])
+                self.assertIsNone(state["rows"][key]["merged_at"])
+        self.assertEqual(state["rows"]["610"]["evidence"], [
+            "cursor:docs/project_review_boundaries.md"
+        ])
+        self.assertEqual(state["rows"]["612"]["completed_at"], "2026-09-05T11:22:33Z")
+
+    def test_a_read_of_an_older_ledger_reports_the_current_version(self):
+        document = LEDGER.parse_document(PREVIOUS_RELEASE_LEDGER, "previous release")
+        self.assertEqual(document["version"], LEDGER.SCHEMA_VERSION)
+
+    def test_a_selection_upgrades_a_previous_release_ledger_without_losing_it(self):
+        path = self.previous_release()
+        result = self.select([merged(612), merged(610), merged(602)])
+        rows = self.rows_on_disk()
+        self.assertEqual(
+            {key: value["status"] for key, value in rows.items()},
+            {"612": "clean", "610": "legacy", "602": "never-reviewed"},
+        )
+        self.assertEqual(rows["610"]["title"], "Pull request #610")
+        self.assertEqual(rows["610"]["merged_at"], merge_time(610))
+        self.assertEqual(
+            rows["610"]["evidence"], ["cursor:docs/project_review_boundaries.md"]
+        )
+        self.assertEqual(rows["612"]["commit"], "a" * 40)
+        # #602 is the only never-reviewed row, so the first queue takes it and
+        # the legacy row keeps waiting, exactly as it would in a ledger this
+        # release had written itself.
+        self.assertEqual(result["selected"]["number"], 602)
+        self.assertIn(f'"version": {LEDGER.SCHEMA_VERSION}', path.read_text(encoding="utf-8"))
+
+    def test_an_upgraded_ledger_reads_back_as_a_current_one(self):
+        self.previous_release()
+        self.select([merged(612), merged(610), merged(602)])
+        reread = LEDGER.load_document(self.root)
+        self.assertEqual(reread["version"], LEDGER.SCHEMA_VERSION)
+        self.assertEqual(
+            LEDGER.render_document(reread),
+            LEDGER.document_path(self.root).read_text(encoding="utf-8"),
+        )
+
+    def test_a_current_document_still_states_every_row_field(self):
+        # The control the upgrade needs: it is keyed on the version the
+        # document declares, not on "a missing field is fine". A version 2
+        # document that leaves one out is the truncated edit `_require_keys`
+        # exists to refuse.
+        for field in ("title", "merged_at"):
+            with self.subTest(field=field):
+                payload = valid_payload({"602": completed_row()})
+                del payload["repositories"][REPO]["rows"]["602"][field]
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn(f"declares no {field}", str(raised.exception))
+
+    def test_a_schema_version_this_helper_does_not_read_is_refused(self):
+        for version in (0, LEDGER.SCHEMA_VERSION + 1, -1):
+            with self.subTest(version=version):
+                payload = valid_payload({"602": completed_row()})
+                payload["version"] = version
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(payload)
+                self.assertIn("schema version", str(raised.exception))
+
+    def test_an_older_row_that_already_carries_the_newer_fields_is_validated(self):
+        # The upgrade supplies only what the older shape genuinely lacks, so a
+        # version 1 document a hand edit gave a title to is still held to what
+        # a title has to be rather than having it replaced by a default.
+        payload = valid_payload({"602": dict(completed_row(), title=612)})
+        payload["version"] = 1
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.parse(payload)
+        self.assertIn("not a pull-request title", str(raised.exception))
+
+
+class ReconciliationTests(SelectionTestCase):
+    """The listing says what exists; the ledger says what was done about it."""
+
+    def test_a_listed_pull_request_with_no_row_gains_a_never_reviewed_one(self):
+        self.establish({"612": self.clean("2026-09-05T11:22:33Z")})
+        result = self.select([merged(612), merged(610)])
+        rows = self.rows_on_disk()
+        self.assertEqual(rows["610"]["status"], "never-reviewed")
+        self.assertEqual(rows["610"]["title"], "Pull request #610")
+        self.assertEqual(rows["610"]["merged_at"], merge_time(610))
+        self.assertEqual(result["inventory"]["added"], [610])
+        self.assertEqual(result["inventory"]["refreshed"], [612])
+
+    def test_an_existing_row_keeps_its_review_and_takes_the_listing_metadata(self):
+        # The case design D-9 leaves behind: a row imported from a report
+        # predates every listing, so the first inventory is where it learns
+        # what its pull request is called and when it merged. Learning that
+        # must not cost it the coverage it was imported with.
+        self.migrated(reviewed=[602, 601], boundary=533)
+        before = self.rows_on_disk()["602"]
+        self.assertEqual(before["status"], "legacy")
+        self.assertIsNone(before["title"])
+        self.select([merged(602, title="The imported one"), merged(601)])
+        after = self.rows_on_disk()["602"]
+        self.assertEqual(after["status"], "legacy")
+        self.assertEqual(after["title"], "The imported one")
+        self.assertEqual(after["merged_at"], merge_time(602))
+        self.assertEqual(after["evidence"], before["evidence"])
+        self.assertEqual(after["history"], before["history"])
+
+    def test_a_completed_row_keeps_every_field_a_review_wrote(self):
+        established = self.establish(
+            {
+                "612": self.findings(
+                    "2026-09-05T11:22:33Z",
+                    evidence=["review:2026-09-05"],
+                    history=[
+                        {
+                            "kind": "review",
+                            "outcome": "clean",
+                            "commit": FULL_SHA,
+                            "completed_at": "2026-09-01T00:00:00Z",
+                            "report": None,
+                        }
+                    ],
+                )
+            }
+        )
+        self.select([merged(612)])
+        after = self.rows_on_disk()["612"]
+        for field in ("status", "commit", "completed_at", "report", "evidence", "history"):
+            with self.subTest(field=field):
+                self.assertEqual(after[field], established["rows"]["612"][field])
+
+    def test_a_row_the_listing_does_not_name_is_kept_and_reported(self):
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T11:22:33Z"),
+                "610": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+            }
+        )
+        result = self.select([merged(612)])
+        self.assertIn("610", self.rows_on_disk())
+        self.assertEqual(
+            result["inventory"]["retained_absent"],
+            [
+                {
+                    "number": 610,
+                    # Nothing invented for a row no listing has ever named:
+                    # the ledger knows its number and its coverage and says
+                    # only that.
+                    "title": None,
+                    "merged_at": None,
+                    "row_status": "legacy",
+                }
+            ],
+        )
+
+    def test_a_retained_row_is_not_selected_while_the_listing_omits_it(self):
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T11:22:33Z"),
+                "610": row("never-reviewed", merged_at=merge_time(610)),
+            }
+        )
+        self.assertEqual(self.selected([merged(612)]), 612)
+        self.assertEqual(self.selected([merged(612), merged(610)]), 610)
+
+    def test_a_row_the_ledger_lost_comes_back_as_never_reviewed(self):
+        # Losing a row loses its history, which is the cost of losing it; what
+        # must not happen is the pull request quietly staying out of the
+        # schedule because nothing remembers it exists.
+        self.establish({"612": self.clean("2026-09-05T11:22:33Z")})
+        result = self.select([merged(612), merged(610)])
+        self.assertEqual(result["selected"]["number"], 610)
+        self.assertEqual(result["selected"]["row_status"], "never-reviewed")
+
+
+class QueueOrderTests(SelectionTestCase):
+    """Design D-8's three queues, in order, over a listing that names them all."""
+
+    def test_the_never_reviewed_queue_takes_the_newest_merge_first(self):
+        self.establish({})
+        result = self.select([merged(602), merged(612), merged(610)])
+        self.assertEqual(result["selected"]["number"], 612)
+        self.assertEqual(result["queue"], {"name": "never-reviewed", "size": 3})
+
+    def test_a_never_reviewed_tie_is_broken_by_the_higher_number(self):
+        # Two pull requests merged in the same second: the order still has to
+        # be total, or the choice depends on the order the pages arrived in.
+        self.establish({})
+        same = "2026-09-05T10:00:00Z"
+        result = self.select([merged(610, at=same), merged(612, at=same)])
+        self.assertEqual(result["selected"]["number"], 612)
+
+    def test_the_legacy_queue_takes_the_highest_number_first(self):
+        # Numbers explicitly, not merge dates: D-8 records the owner choosing
+        # that distinction, so the fixture merges the lower number later.
+        self.migrated(reviewed=[602, 612])
+        result = self.select(
+            [merged(602, at="2026-09-09T00:00:00Z"), merged(612, at="2026-09-01T00:00:00Z")]
+        )
+        self.assertEqual(result["selected"]["number"], 612)
+        self.assertEqual(result["queue"], {"name": "legacy", "size": 2})
+
+    def test_the_refresh_queue_takes_the_oldest_completed_review_first(self):
+        # Clean and findings-bearing rows in one queue (D-4): a review with
+        # findings is a completed attempt, so it waits its turn behind older
+        # attempts instead of monopolizing the schedule.
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": self.findings("2026-09-03T00:00:00Z"),
+                "602": self.clean("2026-09-04T00:00:00Z"),
+            }
+        )
+        result = self.select([merged(612), merged(610), merged(602)])
+        self.assertEqual(result["selected"]["number"], 610)
+        self.assertEqual(result["queue"], {"name": "refresh", "size": 3})
+
+    def test_a_refresh_tie_is_broken_by_the_lower_number(self):
+        same = "2026-09-05T00:00:00Z"
+        self.establish({"612": self.clean(same), "610": self.clean(same)})
+        self.assertEqual(self.selected([merged(612), merged(610)]), 610)
+
+    def test_the_last_never_reviewed_row_empties_the_first_queue(self):
+        rows = {
+            "612": row("never-reviewed", merged_at=merge_time(612)),
+            "610": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+        }
+        self.establish(rows)
+        self.assertEqual(self.selected([merged(612), merged(610)]), 612)
+        self.establish(dict(rows, **{"612": self.clean("2026-09-05T00:00:00Z")}))
+        result = self.select([merged(612), merged(610)])
+        self.assertEqual(result["selected"]["number"], 610)
+        self.assertEqual(result["queue"]["name"], "legacy")
+
+    def test_converting_the_last_legacy_row_empties_the_second_queue(self):
+        legacy = row("legacy", evidence=["cursor:docs/project_review_boundaries.md"])
+        self.establish({"612": self.clean("2026-09-05T00:00:00Z"), "610": legacy})
+        self.assertEqual(self.selected([merged(612), merged(610)]), 610)
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": self.findings("2026-09-06T00:00:00Z"),
+            }
+        )
+        result = self.select([merged(612), merged(610)])
+        self.assertEqual(result["selected"]["number"], 612)
+        self.assertEqual(result["queue"]["name"], "refresh")
+
+    def test_a_newly_merged_pull_request_outranks_conversion_and_refresh(self):
+        # Priority is reevaluated on every invocation (D-8), so a pull request
+        # that merged while the legacy queue was being worked does not wait
+        # for that queue to empty.
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+            }
+        )
+        self.assertEqual(self.selected([merged(612), merged(610)]), 610)
+        result = self.select([merged(612), merged(610), merged(613)])
+        self.assertEqual(result["selected"]["number"], 613)
+        self.assertEqual(result["queue"]["name"], "never-reviewed")
+
+    def test_a_completed_review_is_not_selected_ahead_of_an_older_one(self):
+        # With a stable inventory the schedule moves forward: the pull request
+        # just reviewed goes to the back, and the one that has waited longest
+        # comes next (D-4).
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": self.clean("2026-09-04T00:00:00Z"),
+                "602": self.clean("2026-09-03T00:00:00Z"),
+            }
+        )
+        entries = [merged(612), merged(610), merged(602)]
+        self.assertEqual(self.selected(entries), 602)
+        self.establish(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": self.clean("2026-09-04T00:00:00Z"),
+                "602": self.clean("2026-09-06T00:00:00Z"),
+            }
+        )
+        self.assertEqual(self.selected(entries), 610)
+
+    def test_selection_is_a_function_of_the_ledger_and_the_listing(self):
+        self.establish({})
+        entries = [merged(612), merged(610), merged(602)]
+        first = self.select(entries)
+        second = self.select(list(reversed(entries)))
+        self.assertEqual(first["selected"], second["selected"])
+        self.assertEqual(first["queue"], second["queue"])
+
+    def test_the_only_merged_pull_request_repeats_in_the_refresh_queue(self):
+        # A one-pull-request repository necessarily repeats it (D-4), and the
+        # result says which queue that came from so a caller can tell a repeat
+        # from a first review.
+        self.establish({"612": self.clean("2026-09-05T00:00:00Z")})
+        result = self.select([merged(612)])
+        self.assertEqual(result["selected"]["number"], 612)
+        self.assertEqual(result["selected"]["row_status"], "clean")
+        self.assertEqual(result["queue"], {"name": "refresh", "size": 1})
+
+
+class ExclusionAndEmptinessTests(SelectionTestCase):
+    """What the repository has taken out of scope, and what is left."""
+
+    def excluded_ledger(self, rows):
+        return self.establish(rows, excluded=[610])
+
+    def test_an_excluded_pull_request_is_never_selected_in_any_queue(self):
+        cases = {
+            "never-reviewed": row("never-reviewed", merged_at=merge_time(610)),
+            "legacy": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+            "clean": self.clean("2026-09-01T00:00:00Z"),
+            "findings": self.findings("2026-09-01T00:00:00Z"),
+        }
+        for status, excluded_row in cases.items():
+            with self.subTest(queue=status):
+                directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
+                self.addCleanup(directory.cleanup)
+                root = Path(directory.name)
+                (root / "docs").mkdir()
+                self.establish(
+                    {"610": excluded_row, "602": self.clean("2026-09-09T00:00:00Z")},
+                    excluded=[610],
+                    root=root,
+                )
+                result = self.select([merged(610), merged(602)], root=root)
+                self.assertEqual(result["selected"]["number"], 602)
+                self.assertEqual(result["inventory"]["excluded"], [610])
+
+    def test_a_queue_size_counts_only_what_it_could_have_selected(self):
+        self.excluded_ledger(
+            {
+                "612": row("never-reviewed", merged_at=merge_time(612)),
+                "610": row("never-reviewed", merged_at=merge_time(610)),
+            }
+        )
+        result = self.select([merged(612), merged(610)])
+        self.assertEqual(result["queue"], {"name": "never-reviewed", "size": 1})
+
+    def test_the_inventory_counts_cover_every_listed_row_including_excluded_ones(self):
+        self.excluded_ledger(
+            {
+                "612": self.clean("2026-09-05T00:00:00Z"),
+                "610": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"]),
+            }
+        )
+        result = self.select([merged(612), merged(610), merged(602)])
+        self.assertEqual(
+            result["inventory"]["counts"],
+            {"clean": 1, "findings": 0, "legacy": 1, "never-reviewed": 1},
+        )
+        self.assertEqual(result["inventory"]["listed"], 3)
+
+    def test_a_repository_with_nothing_selectable_says_so_rather_than_refusing(self):
+        # A distinct successful state, not a refusal: there is nothing wrong
+        # with the listing or the ledger, and a caller that retried this as a
+        # failure would retry it unchanged forever.
+        self.excluded_ledger({"610": row("never-reviewed", merged_at=merge_time(610))})
+        result = self.select([merged(610)])
+        self.assertEqual(result["status"], "no-selectable-row")
+        self.assertIsNone(result["selected"])
+        self.assertIsNone(result["queue"])
+        self.assertEqual(result["inventory"]["counts"]["never-reviewed"], 1)
+
+    def test_the_listing_is_recorded_even_when_nothing_is_selectable(self):
+        # The universe is what the listing says it is whether or not anything
+        # in it can be reviewed, so the next invocation starts from the rows
+        # this one recorded rather than discovering them again.
+        self.establish({}, excluded=[610, 602])
+        result = self.select([merged(610), merged(602)])
+        self.assertEqual(result["status"], "no-selectable-row")
+        self.assertEqual(set(self.rows_on_disk()), {"610", "602"})
+        self.assertEqual(result["inventory"]["excluded"], [602, 610])
+
+
+class SelectionRefusalTests(SelectionTestCase):
+    """A selection needs a ledger a migration established, not one it invents."""
+
+    def test_a_selection_without_a_ledger_refuses_rather_than_establishing_one(self):
+        # `migrate` refuses to run over an existing ledger, so a selection
+        # that created one would record every merged pull request as
+        # never-reviewed and close the only door legacy coverage comes
+        # through.
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.select([merged(612)])
+        self.assertIn("holds no ledger", str(raised.exception))
+        self.assertFalse(LEDGER.document_path(self.root).exists())
+
+    def test_a_selection_for_a_repository_the_ledger_does_not_name_is_refused(self):
+        self.establish({})
+        path = LEDGER.document_path(self.root)
+        before = path.read_bytes()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.select([merged(612)], repo="coghex/other")
+        self.assertIn("holds no entry for coghex/other", str(raised.exception))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_repository_identity_that_is_not_owner_name_is_refused(self):
+        self.establish({})
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.select([merged(612)], repo="kanban")
+        self.assertIn("owner/name", str(raised.exception))
+
+    def test_a_ledger_this_helper_cannot_read_is_not_an_absent_one(self):
+        path = LEDGER.document_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Not a ledger\n", encoding="utf-8")
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.select([merged(612)])
+        self.assertIn("not a project-review ledger", str(raised.exception))
+
+    def test_another_repository_entry_survives_a_selection(self):
+        document = LEDGER.empty_document()
+        for name in (REPO, "coghex/other"):
+            document["repositories"][name] = LEDGER.empty_repository()
+        document["repositories"]["coghex/other"]["rows"]["7"] = row(
+            "legacy", evidence=["cursor:docs/project_review_boundaries.md"]
+        )
+        LEDGER.create_document(self.root, document)
+        self.select([merged(612)])
+        reread = LEDGER.load_document(self.root)
+        self.assertEqual(
+            set(reread["repositories"]["coghex/other"]["rows"]), {"7"}
+        )
+        self.assertEqual(set(reread["repositories"][REPO]["rows"]), {"612"})
+
+
+# --------------------------------------------------------------------------
 # The command line
 
 
 class CommandLineTests(LedgerTestCase):
     """Three outcomes, three exit codes, one JSON shape."""
 
-    def run_module(self, *argv):
+    def run_module(self, *argv, stdin=None):
         return subprocess.run(
             [sys.executable, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), *argv],
             capture_output=True,
             text=True,
-            stdin=subprocess.DEVNULL,
+            input=stdin,
+            stdin=None if stdin is not None else subprocess.DEVNULL,
         )
 
     def test_read_and_migrate_succeed_with_exit_zero(self):
@@ -2049,6 +3030,59 @@ class CommandLineTests(LedgerTestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("project-review ledger:", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_a_selection_exits_zero_with_its_choice_on_stdout(self):
+        self.run_module("migrate", "--root", str(self.root), "--repo", REPO)
+        pages = json.dumps(listing([merged(612), merged(610)]))
+        result = self.run_module(
+            "select", "--root", str(self.root), "--repo", REPO, stdin=pages
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reported = json.loads(result.stdout)
+        self.assertEqual(reported["status"], "selected")
+        self.assertEqual(reported["selected"]["number"], 612)
+
+    def test_a_selection_with_nothing_to_review_still_exits_zero(self):
+        self.run_module("migrate", "--root", str(self.root), "--repo", REPO)
+        result = self.run_module(
+            "select",
+            "--root",
+            str(self.root),
+            "--repo",
+            REPO,
+            stdin=json.dumps(listing([])),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reported = json.loads(result.stdout)
+        self.assertEqual(reported["status"], "no-selectable-row")
+        self.assertIsNone(reported["selected"])
+
+    def test_a_refused_listing_exits_two_with_nothing_on_stdout(self):
+        # A caller parses stdout only on exit 0, so a refusal that printed a
+        # partial object there would be parsed as a selection.
+        self.run_module("migrate", "--root", str(self.root), "--repo", REPO)
+        full = {"pages": [{"page": 1, "limit": 1, "prs": [merged(612)]}]}
+        result = self.run_module(
+            "select", "--root", str(self.root), "--repo", REPO, stdin=json.dumps(full)
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("the next page is needed", result.stderr)
+
+    def test_a_listing_this_command_cannot_read_is_refused(self):
+        self.run_module("migrate", "--root", str(self.root), "--repo", REPO)
+        for label, stdin in (
+            ("nothing at all", ""),
+            ("whitespace", "   \n"),
+            ("text that is not JSON", "not json"),
+            ("a repeated key", '{"pages": [], "pages": []}'),
+        ):
+            with self.subTest(stdin=label):
+                result = self.run_module(
+                    "select", "--root", str(self.root), "--repo", REPO, stdin=stdin
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
 
     def test_read_without_a_repository_prints_the_whole_document(self):
         record_cursor(self.root, reviewed=[602])
