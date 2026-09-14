@@ -1524,9 +1524,10 @@ Operator documentation: [docs/issue-approval.md](issue-approval.md).
   controller. It owns no review policy whatever.
 - **Backend selection:** the same `tools/service_manager.select_backend`
   probe §2.4 describes, constructed for the `issue-approval`
-  `ServiceNamespace` instead of the drainer's. That namespace is what keeps the
-  two services' identifiers, definitions and legacy questions from ever
-  colliding: neither can name, load, unload, or acknowledge the other's job,
+  `ServiceNamespace` instead of the drainer's. A namespace is what keeps each
+  service's identifiers, definitions and legacy questions from ever
+  colliding with another's: none can name, load, unload, or acknowledge another
+  service's job,
   and this one reports no machine-wide singleton at all, because its jobs have
   always been per-repository. `tools/install_issue_approval.py` consults
   `sys.platform` no more than `tools/install_drainer.py` does — its only
@@ -2729,7 +2730,9 @@ that location's row, because the complete location still has to match on its
 own.
 
 `launchagents-dir` and `systemd-user-unit-dir` are the manager-owned locations
-both services' definitions are written into: a LaunchAgent plist under
+every managed service's definitions are written into — §2.4's, §2.8's and
+§2.12's alike, because a namespace changes the identifier a job is loaded under
+and not where its definition sits: a LaunchAgent plist under
 `~/Library/LaunchAgents`, a user unit under `~/.config/systemd/user`
 (`$XDG_CONFIG_HOME/systemd/user` when that variable names an absolute
 directory). Both carry `owner: kanban`, on the same footing as

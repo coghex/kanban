@@ -638,6 +638,32 @@ unavailableVocabularySpec = describe "why there is no runner to observe" $ do
     [expected | (expected, unavailable) <- reached, Just _ <- [unavailable.missionRunnerUnavailableController]]
       `shouldBe` [MissionRunnerJobStopped]
 
+  -- The one activity that becomes an unavailability. A rule that turned every
+  -- non-live activity into "installed and stopped" would report a failed run as
+  -- a deliberate stop, which is the reading that tells nobody anything went
+  -- wrong — and 'missionRunnerUnavailableStatus' would then hand back
+  -- 'MissionRunnerStopped' for it, erasing the failure a second time.
+  it "makes an unavailability of a stopped runner and of nothing else" $
+    forM_
+      [ ("running", Nothing),
+        ("idle", Nothing),
+        ("waiting", Nothing),
+        ("failed", Nothing),
+        ("unknown", Nothing),
+        ("reticulating", Nothing),
+        ("stopped", Just MissionRunnerJobStopped)
+      ]
+      $ \(state, expected) -> do
+        controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd installedPlist boardRepository (installedCommand []))
+        observed <- expectRight (decodeMissionRunnerStatus boardIdentity (acceptedStatus ["\"state\":\"" <> state <> "\""]))
+        let reported = missionRunnerStoppedJob controller observed.observedMissionRunnerStatus
+        fmap (.missionRunnerUnavailableCase) reported `shouldBe` expected
+        -- And the activity a status of its own carries survives untouched.
+        case reported of
+          Nothing -> pure ()
+          Just unavailable ->
+            (missionRunnerUnavailableStatus unavailable).missionRunnerActivity `shouldBe` MissionRunnerStopped
+
   it "shows an unsupported host and a stopped job as their own activities, and every other case as unknown" $ do
     reached <- everyUnavailableCase
     [ (expected, (missionRunnerUnavailableStatus unavailable).missionRunnerActivity)
@@ -682,7 +708,9 @@ everyUnavailableCase = withTemporaryCacheRoot $ \root -> do
   noDefinition <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity missingDefinition
   controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd installedPlist boardRepository (installedCommand []))
   stopped <- expectRight (decodeMissionRunnerStatus boardIdentity (acceptedStatus ["\"state\":\"stopped\""]))
-  notRunning <- expectLeft (missionRunnerAvailability controller stopped.observedMissionRunnerStatus)
+  notRunning <-
+    maybe (fail "expected a stopped job to be an unavailability") pure
+      (missionRunnerStoppedJob controller stopped.observedMissionRunnerStatus)
   -- Both ways of having no entry report the same case, which is the claim that
   -- an absent record and a record without this repository are one condition.
   noRecord.missionRunnerUnavailableCase `shouldBe` noEntry.missionRunnerUnavailableCase
@@ -947,6 +975,48 @@ replaySpec = describe "replaying a mission's durable record" $ do
             (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog)
             replayed.missionReplayCursor.missionStreamsConsumed
             `shouldBe` Just 0
+
+  -- A link that follows to nothing is occupied, so it is not a collected
+  -- source. A reader that let the read decide would map its ENOENT to an empty
+  -- stream and report neither the damage nor the archive beside it, pass after
+  -- pass.
+  it "reports a live source that is there and will not open, rather than reading it as empty" $
+    withStore $ \root store -> do
+      let sessionLog = root </> "session.log"
+      createFileLink (root </> "nothing-is-here") sessionLog
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+        )
+      replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+      replayed.missionReplayStreams `shouldBe` []
+      replayed.missionReplayFailures `shouldSatisfy` (not . null)
+      Text.concat replayed.missionReplayFailures `shouldMention` Text.pack sessionLog
+      Map.lookup (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog) replayed.missionReplayCursor.missionStreamsConsumed
+        `shouldBe` Just 0
+
+  it "says which sealed copy it did not read in a damaged live source's place" $
+    withStore $ \root store -> do
+      let sessionLog = root </> "session.log"
+      ByteString.writeFile sessionLog "one\n"
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+        )
+      void (expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog sessionLog)
+      -- The source is replaced by a link to nothing: still occupied, so still
+      -- not the collected source the archive stands in for.
+      removeFile sessionLog
+      createFileLink (root </> "nothing-is-here") sessionLog
+      replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+      replayed.missionReplayStreams `shouldBe` []
+      Text.concat replayed.missionReplayFailures `shouldMention` "sealed copy"
+      Map.lookup (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog) replayed.missionReplayCursor.missionStreamsConsumed
+        `shouldBe` Just 0
 
   it "reports one unreadable stream without hiding what the others appended, and keeps its cursor" $
     withStore $ \root store -> do

@@ -62,6 +62,7 @@ module Kanban.Mission.Store
     missionSealFailureMessage,
     sealMissionLog,
     missionSealedArchivePath,
+    readMissionSealedArchive,
     readMissionSealedArchives,
     verifyMissionSealedArchive,
 
@@ -74,7 +75,7 @@ module Kanban.Mission.Store
 where
 
 import Control.Exception (IOException, try)
-import Control.Monad (filterM)
+import Control.Monad (filterM, void)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -800,12 +801,20 @@ missionSealedArchivePath store mission sealed =
         <> " rather than mission "
         <> mission.unMissionId
 
--- | Re-reads an archived copy and checks it against what the seal recorded.
+-- | The archived bytes one seal describes, read once and checked against what
+-- that seal recorded.
 --
--- The archived copy is what is verified — never the source, which the whole
--- point of a seal is to outlive.
-verifyMissionSealedArchive :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ())
-verifyMissionSealedArchive store mission sealed = do
+-- One read is the whole point. A caller that verified through one read and
+-- then consumed through another would be acting on bytes nothing checked: an
+-- archive is an ordinary owner-writable file, and everything between the two
+-- reads is a window in which it can be replaced. So what comes back is exactly
+-- what was hashed.
+--
+-- The archived copy is what is read — never the source, which the whole point
+-- of a seal is to outlive.
+readMissionSealedArchive ::
+  MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ByteString.ByteString)
+readMissionSealedArchive store mission sealed = do
   resolved <- missionSealedArchivePath store mission sealed
   case resolved of
     Left message -> pure (Left message)
@@ -829,7 +838,7 @@ verifyMissionSealedArchive store mission sealed = do
                   Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
               | sha256Hex bytes /= sealed.missionSealedDigest ->
                   Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
-              | otherwise -> Right ()
+              | otherwise -> Right bytes
   where
     mismatch path' what expected found =
       "mission "
@@ -842,6 +851,14 @@ verifyMissionSealedArchive store mission sealed = do
         <> found
         <> " but its seal records "
         <> expected
+
+-- | Re-reads an archived copy and checks it against what the seal recorded.
+--
+-- The check above with the bytes discarded, so there is one reading of an
+-- archive and one statement of what makes it acceptable.
+verifyMissionSealedArchive :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ())
+verifyMissionSealedArchive store mission sealed =
+  void <$> readMissionSealedArchive store mission sealed
 
 -- | Why a mission may not be archived or deleted.
 data MissionDispositionRefusal

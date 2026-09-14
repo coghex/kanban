@@ -72,7 +72,7 @@ module Kanban.MissionRunnerService
     MissionRunnerSeverity (..),
     MissionRunnerStatus (..),
     decodeMissionRunnerStatus,
-    missionRunnerAvailability,
+    missionRunnerStoppedJob,
     missionRunnerIsRunning,
     missionRunnerStatusFromControllerExit,
     missionRunnerUnavailableStatus,
@@ -120,17 +120,24 @@ import Kanban.Mission
     MissionLogReference (..),
     MissionRead (..),
     MissionSealedArchive (..),
-    MissionSessionId,
+    MissionSessionId (..),
     MissionSessionNode (..),
     MissionSnapshot (..),
     MissionStore,
     missionSealedArchivePath,
     readMissionJournal,
-    readMissionJournalSince,
+    readMissionSealedArchive,
     readMissionSealedArchives,
     readMissionSnapshot,
-    verifyMissionSealedArchive,
   )
+-- | The one byte-offset consumption rule, taken from where issue #8 established
+-- it. "Kanban.Mission.Journal" drives it over a mission's journal from a path;
+-- this module drives it over bytes it already holds, because a session's log is
+-- read for its own reasons (an occupied source that will not open is a failure,
+-- not an empty read) and a sealed copy's bytes are the ones the store already
+-- verified. Re-deriving the arithmetic beside either would be a second chance
+-- to get it wrong.
+import Kanban.Worker (consumeJournalLines)
 import Kanban.ServiceProcess
   ( diagnosticMessage,
     invocationFailureMessage,
@@ -1055,27 +1062,40 @@ missionRunnerIsRunning status = case status.missionRunnerActivity of
   MissionRunnerUnsupported -> False
   MissionRunnerUnknown -> False
 
--- | What a discovered controller and the status it reported say about whether
--- there is a runner to observe.
+-- | The unavailability a discovered controller's own status amounts to, or
+-- nothing at all when that status is already the answer.
 --
 -- The one producer of 'MissionRunnerJobStopped', and the reason that case keeps
 -- its controller: the job was discovered, so starting it is something this
 -- dashboard can still do, and an unavailability that threw the handle away
 -- would make the one repair unreachable.
-missionRunnerAvailability ::
-  MissionRunnerController -> MissionRunnerStatus -> Either MissionRunnerUnavailable MissionRunnerController
-missionRunnerAvailability controller status
-  | missionRunnerIsRunning status = Right controller
-  | otherwise =
-      Left
-        ( MissionRunnerUnavailable
-            MissionRunnerJobStopped
-            ( missionRunnerUnavailableHeadline MissionRunnerJobStopped
-                <> ": "
-                <> sanitizeText status.missionRunnerDetail
-            )
-            (Just controller)
-        )
+--
+-- Exactly one activity becomes an unavailability here, and "not running" is
+-- deliberately not the test. A failed run, a status this reader could not use,
+-- and a host that cannot run the service at all are three states of their own,
+-- each reported as itself; a rule that turned every non-live activity into
+-- "installed and stopped" would erase precisely the distinctions the
+-- vocabulary above exists to keep — a failed run would be reported as a
+-- deliberate stop, which is the one reading that tells nobody anything went
+-- wrong.
+missionRunnerStoppedJob :: MissionRunnerController -> MissionRunnerStatus -> Maybe MissionRunnerUnavailable
+missionRunnerStoppedJob controller status = case status.missionRunnerActivity of
+  MissionRunnerStopped ->
+    Just
+      ( MissionRunnerUnavailable
+          MissionRunnerJobStopped
+          ( missionRunnerUnavailableHeadline MissionRunnerJobStopped
+              <> ": "
+              <> sanitizeText status.missionRunnerDetail
+          )
+          (Just controller)
+      )
+  MissionRunnerAdvancing -> Nothing
+  MissionRunnerIdle -> Nothing
+  MissionRunnerWaiting -> Nothing
+  MissionRunnerFailed -> Nothing
+  MissionRunnerUnsupported -> Nothing
+  MissionRunnerUnknown -> Nothing
 
 -- * Control
 
@@ -1311,16 +1331,20 @@ data MissionReplay = MissionReplay
 --
 -- A live source that has been collected falls back to the mission's sealed copy
 -- of it, resolved through the store rather than joined from the name the seal
--- carries, and checked against the digest and byte length the seal records
--- before a byte of it is believed. The seal is a copy of the whole source, so
--- the cursor carries across the switch unchanged and the reader continues
--- exactly where it stopped.
+-- carries, and read by the one operation that checks the bytes it returns
+-- against the digest and byte length the seal records. The seal is a copy of
+-- the whole source, so the cursor carries across the switch unchanged and the
+-- reader continues exactly where it stopped.
 --
 -- What cannot be read is reported rather than returned as nothing: an
 -- unreadable journal, an unreadable snapshot, a stream whose source is there
 -- and will not open, and an archive that does not match its seal each leave
 -- their own cursor exactly where it was, so the pass after this one reads
--- precisely what this one could not.
+-- precisely what this one could not. "There and will not open" is decided by
+-- what occupies the path rather than by what a read of it returns, because the
+-- two disagree exactly where it matters: a link that follows to nothing is
+-- occupied, and a reader that took its ENOENT for an ordinary absence would
+-- report neither the damaged source nor the archive sitting beside it.
 replayMissionRecord :: MissionStore -> MissionId -> MissionReplayCursor -> IO MissionReplay
 replayMissionRecord store mission cursor = do
   journalResult <- readMissionJournal store mission cursor.missionJournalConsumed
@@ -1428,48 +1452,80 @@ readPlannedStream ::
   PlannedStream ->
   IO (Maybe MissionStreamReplay, (MissionStreamId, Int), [Text])
 readPlannedStream store mission cursor planned = do
-  live <- case planned.plannedStreamLive of
-    Nothing -> pure Nothing
-    Just path -> do
-      -- Occupancy again, for the reason 'resolveMissionRunnerDefinition' gives:
-      -- the fallback below is for a source that has been *collected*, and a
-      -- source that is still there but cannot be read is not that. Reading it
-      -- and reporting the failure is what keeps a replaced or damaged live log
-      -- from being silently answered with an archive of some earlier one.
-      present <- recordPathOccupied path
-      pure (if present then Just path else Nothing)
+  live <- readLiveSource
   case live of
-    Just path -> consume (MissionStreamLive path) path
-    Nothing -> case planned.plannedStreamSeal of
+    LiveStream path content -> pure (consume (MissionStreamLive path) content)
+    LiveUnreadable path detail -> pure (Nothing, (streamId, consumed), [liveFailure path detail])
+    LiveCollected -> case planned.plannedStreamSeal of
       Nothing -> pure (Nothing, (streamId, consumed), [])
       Just sealed -> do
-        -- Verified before a byte of it is emitted, and before the cursor moves
-        -- past one. A seal records the digest and the byte length of what was
-        -- copied, and the archive is the only copy left once the source has
-        -- been collected: an archive that is missing, truncated, or edited
-        -- would otherwise be replayed as this session's durable history, and
-        -- a missing one would be replayed as *nothing at all*, since an absent
-        -- file is an empty read rather than a failure. Re-read per pass rather
-        -- than remembered, because there is nowhere durable to remember it and
-        -- the caller decides how often this runs.
-        verified <- verifyMissionSealedArchive store mission sealed
-        case verified of
-          Left message -> pure (Nothing, (streamId, consumed), [message])
-          Right () -> do
-            resolved <- missionSealedArchivePath store mission sealed
-            case resolved of
-              Left message -> pure (Nothing, (streamId, consumed), [message])
-              Right path -> consume (MissionStreamSealed path) path
+        -- One read, and the bytes it returns are the bytes it checked against
+        -- the digest and byte length the seal records. The archive is the only
+        -- copy left once the source has been collected, so a missing,
+        -- truncated, or edited one would otherwise be replayed as this
+        -- session's durable history — and a missing one as *none* of it, since
+        -- an absent file read by offset is an empty read rather than a failure.
+        -- Verified per pass rather than remembered, because there is nowhere
+        -- durable to remember it and the caller decides how often this runs.
+        archived <- readMissionSealedArchive store mission sealed
+        resolved <- missionSealedArchivePath store mission sealed
+        pure $ case (archived, resolved) of
+          (Left message, _) -> (Nothing, (streamId, consumed), [message])
+          (_, Left message) -> (Nothing, (streamId, consumed), [message])
+          (Right content, Right path) -> consume (MissionStreamSealed path) content
   where
     streamId = planned.plannedStreamId
     consumed = Map.findWithDefault 0 streamId cursor.missionStreamsConsumed
 
-    consume source path = do
-      result <- readMissionJournalSince path consumed
-      pure $ case result of
-        Left message -> (Nothing, (streamId, consumed), [message])
-        Right (lines', advanced) ->
-          ( Just (MissionStreamReplay streamId planned.plannedStreamParent source lines'),
+    -- Occupancy decides which of the three answers this is, for the reason
+    -- 'resolveMissionRunnerDefinition' gives one level up. The fallback above
+    -- is for a source that has been *collected*, and a source that is still
+    -- there and will not open is not that — a dangling link included, which is
+    -- why the read is not left to decide: a reader that mapped that link's
+    -- ENOENT to an empty read would report neither the damage nor the archive
+    -- beside it, pass after pass.
+    readLiveSource = case planned.plannedStreamLive of
+      Nothing -> pure LiveCollected
+      Just path -> do
+        occupied <- recordPathOccupied path
+        if not occupied
+          then pure LiveCollected
+          else do
+            content <- try @IOException (ByteString.readFile path)
+            pure $ case content of
+              Left exception -> LiveUnreadable path (Text.pack (show exception))
+              Right bytes -> LiveStream path bytes
+
+    -- Names the sealed copy that was *not* read in its place, so the omission
+    -- is something an operator can act on rather than a stream that quietly
+    -- stopped growing.
+    liveFailure path detail =
+      "the log of session "
+        <> streamId.missionStreamSession.unMissionSessionId
+        <> " is at "
+        <> Text.pack path
+        <> " and could not be read ("
+        <> detail
+        <> ")"
+        <> case planned.plannedStreamSeal of
+          Just _ ->
+            "; the mission's sealed copy of it was not read in its place, \
+            \because a source that is there and will not open is not a \
+            \collected one"
+          Nothing -> ""
+
+    consume source content =
+      let (lines', advanced) = consumeJournalLines consumed content
+       in ( Just (MissionStreamReplay streamId planned.plannedStreamParent source lines'),
             (streamId, advanced),
             []
           )
+
+-- | What a session's live log turned out to be on this pass.
+data LiveSource
+  = -- | Nothing at all is at the recorded path, which is what a collected
+    -- source looks like.
+    LiveCollected
+  | -- | Something is there and could not be read.
+    LiveUnreadable FilePath Text
+  | LiveStream FilePath ByteString.ByteString
