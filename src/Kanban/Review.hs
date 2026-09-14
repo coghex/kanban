@@ -41,6 +41,7 @@ module Kanban.Review
     ReviewApproval (..),
     ReviewChoice (..),
     ReviewClient,
+    PendingRequest (..),
     ReviewConnection (..),
     ReviewEvent (..),
     ReviewLaunch (..),
@@ -104,6 +105,7 @@ module Kanban.Review
     killThreadToolProcesses,
     missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
+    newRecordingReviewClientLoggingForTesting,
     newReviewClientForTesting,
     reviewClientLogPath,
     reviewConnectionProcesses,
@@ -846,7 +848,24 @@ reviewClientLogPath client = sessionLogPath <$> client.reviewSessionLog
 -- | A 'newReviewClientForTesting' whose one connection records what the
 -- client writes to it.
 newRecordingReviewClientForTesting :: ModelRoster -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
-newRecordingReviewClientForTesting roster eventSink = do
+newRecordingReviewClientForTesting roster = newRecordingReviewClientLoggingForTesting roster SharedProcess Nothing
+
+-- | As 'newRecordingReviewClientForTesting', but against a session log the
+-- caller opened.
+--
+-- The testing clients carry no log by default, because almost nothing they
+-- are used for reads one. What does is a connection's end: the entry naming
+-- how the backend finished is written there and nowhere else, so a test that
+-- has to prove that entry says what it should -- and that there is exactly
+-- one of it -- needs a client whose log it can read back.
+--
+-- The shape is the caller's too, because what a connection's end reports
+-- depends on it: a shared-process client's connection ending is the client
+-- ending, while one of a per-thread client's connections ending settles just
+-- the starts and turns that were on it. A test about that settlement has to
+-- be able to ask for the shape that makes it.
+newRecordingReviewClientLoggingForTesting :: ModelRoster -> ReviewProcessShape -> Maybe SessionLog -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
+newRecordingReviewClientLoggingForTesting roster processShape sessionLog eventSink = do
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
   interrupts <- newMVar Map.empty
@@ -855,7 +874,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   toolProxies <- newMVar Map.empty
   let client =
         ReviewClient
-          { reviewBackend = placeholderReviewBackend,
+          { reviewBackend = placeholderReviewBackend {backendProcessShape = processShape},
             reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
@@ -868,7 +887,7 @@ newRecordingReviewClientForTesting roster eventSink = do
             reviewRepositorySlug = "coghex/kanban",
             reviewWorkflowConfig = defaultWorkflowConfig,
             reviewModelRoster = roster,
-            reviewSessionLog = Nothing,
+            reviewSessionLog = sessionLog,
             reviewCommandBounds = githubCommandBounds,
             reviewClaudeBounds = githubCommandBounds
           }
@@ -1667,17 +1686,22 @@ takeConnectionTurns client connection =
 -- | Wait out one connection's provider process, then end the connection.
 --
 -- The wait is 'reapManagedHandle' rather than a bare 'waitForProcess'
--- because this is not the only reaper of this handle: the connection's
--- shutdown reaches the same child through 'terminalConnectionCleanup', and
--- so does the output reader's terminal path. A wait that raised because
--- something else had already collected the child would take everything
--- below it with it -- the cleanup, the connection's removal from the pool,
--- the turns waiting to be failed, and the one signal 'stopReviewClient'
--- blocks on -- turning a reaped child into a shutdown that never finishes.
+-- because of what hangs below it. Everything this function does after the
+-- wait is the connection's end: the cleanup, its removal from the pool, the
+-- turns waiting to be failed, and the one signal 'stopReviewClient' blocks
+-- on. A wait that raised would take all of it, so a child this process has
+-- no wait left to make would not merely cost an exit status — it would
+-- leave a shutdown that never finishes.
 --
--- What it costs is the exit status, and only in that case. A status another
--- reaper took is one this connection cannot report, so it says so rather
--- than standing a number in for it.
+-- That state is reachable rather than hypothetical: this connection's
+-- child is also reached by 'terminalConnectionCleanup', from here and from
+-- the output reader's terminal path. Whether those can arrive in an order
+-- that leaves this wait with nothing to collect is not something this
+-- function needs to decide — it is cheap to be right either way, and
+-- expensive to be wrong.
+--
+-- What the case costs is the exit status alone. A status this connection
+-- cannot be told is one it does not report, rather than one it invents.
 watchServerProcess :: ReviewClient -> ReviewConnection -> IO ()
 watchServerProcess client connection = do
   exitStatus <- reapManagedHandle connection.connectionProcess

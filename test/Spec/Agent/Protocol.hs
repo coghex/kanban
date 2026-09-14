@@ -3,14 +3,15 @@
 -- classified.
 module Spec.Agent.Protocol (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (throwTo)
+import Control.Concurrent (forkIO, modifyMVar_, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Control.Exception (SomeException, throwTo, try)
 import Control.Monad (void)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
-import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text
+import qualified Data.Map.Strict as Map
 import qualified Data.Text.Encoding as TextEncoding
 import Kanban.Domain
 import Kanban.Models (ProviderName (..))
@@ -22,6 +23,7 @@ import Kanban.Review
     GitHubIssueToolRequest (..),
     ReviewAnswer (..),
     ReviewChoice (..),
+    PendingRequest (..),
     ReviewConnection (..),
     ReviewEvent (..),
     ReviewOutputKind (..),
@@ -103,6 +105,8 @@ import Spec.Support.Process
     waitForConnectionStops,
     waitForHeldConnections,
     withFakeReviewClient,
+    readTwoConnectionLog,
+    withPerThreadTwoConnectionReviewClient,
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
     undeliveredSteers,
@@ -559,14 +563,22 @@ spec = do
     -- through the pool's own reservation, and it starts no loops -- so the
     -- two reader signals below stand in for readers that finish, which is
     -- what makes "the watcher waits for both of them" observable.
-    it "ends a connection whose exit status another reaper took, instead of stranding its shutdown" $
-      withTwoConnectionReviewClient $ \fixture -> do
+    it "ends a connection whose exit status is no longer there to collect, instead of stranding its shutdown" $
+      withPerThreadTwoConnectionReviewClient $ \fixture -> do
         let client = fixture.twoConnectionClient
             connection = fixture.secondConnection
+        -- The two kinds of work a dying connection owes an answer to: a
+        -- review whose start is still in flight, and a turn already running.
+        -- Seeded on the connection itself because the paths that ordinarily
+        -- register them choose their own connection, and what is under test
+        -- is this one's end.
+        startId <- atomicModifyIORef' connection.connectionNextRequestId (\value -> (value + 1, value))
+        modifyMVar_ connection.connectionPendingRequests (pure . Map.insert startId (PendingThreadStart 844))
+        handleWireMessage client connection (turnStartedOn "turn-a")
         pid <- getPid connection.connectionProcess >>= requireJust "the connection's provider reported no pid"
         signalProcess sigKILL pid
-        -- Answered for this pid here, so the watcher's wait below is the one
-        -- that gets ECHILD. This is exactly the outcome two reapers race for.
+        -- Collected here, so the watcher's wait below is certain to be the
+        -- one that finds nothing left to wait for.
         void (getProcessStatus True False pid)
         finished <- newIORef ([] :: [Text])
         void (forkIO (threadDelay 150000 >> modifyIORef finished (<> ["output"]) >> putMVar connection.connectionOutputDone ()))
@@ -579,16 +591,60 @@ spec = do
         -- The connection is gone from the pool, and its sibling is untouched.
         remaining <- reviewConnectionsForTesting client
         map (.connectionId) remaining `shouldBe` [fixture.firstConnection.connectionId]
-        -- Reported once, and saying the status was unavailable rather than
-        -- standing a number in for it. This is the same text the
-        -- backend-finished log entry carries, since both render one value.
         recorded <- readIORef fixture.twoConnectionEvents
+        -- Each owed answer settled, and settled once.
+        [issueNumber | ReviewStartFailed issueNumber _ <- recorded] `shouldBe` [844]
+        [threadId | ReviewTurnCompleted threadId TurnFailed _ _ <- recorded]
+          `shouldBe` [threadOn connection collidingThread]
+        -- Reported once, and saying the status was unavailable rather than
+        -- standing a number in for it.
         let endings = [message | ReviewClientStopped message <- recorded] <> [message | ReviewConnectionStopped _ message <- recorded]
         length endings `shouldBe` 1
         endings `shouldSatisfy` all (Data.Text.isInfixOf "exit status was not available")
         endings `shouldSatisfy` all (not . Data.Text.isInfixOf "exited with status")
+        -- And the one place that end is written down says the same thing,
+        -- once. The events above are the client's own report; this is the
+        -- record an operator reads afterwards.
+        logged <- readTwoConnectionLog fixture
+        let finishedEntries = filter (Data.Text.isInfixOf "backend-finished") logged
+        length finishedEntries `shouldBe` 1
+        finishedEntries `shouldSatisfy` all (Data.Text.isInfixOf "exit status was not available")
         -- The signal 'stopReviewClient' waits on, filled last of all.
         timeout 3000000 (readMVar connection.connectionWatchDone) `shouldReturn` Just ()
+
+    -- The unforced half the amended contract asks for: a connection's own
+    -- watcher running while its shutdown reaches the same child, with both
+    -- threads' outcomes captured rather than assumed and the whole thing
+    -- bounded, so a thread that died cannot pass as one that finished and a
+    -- wait that never returns fails instead of hanging.
+    it "ends a connection exactly once when its shutdown and its watcher run together" $
+      withPerThreadTwoConnectionReviewClient $ \fixture -> do
+        let client = fixture.twoConnectionClient
+            connection = fixture.secondConnection
+        handleWireMessage client connection (turnStartedOn "turn-a")
+        -- This connection starts no loops of its own, so the reader signals
+        -- the watcher waits on are filled here.
+        putMVar connection.connectionOutputDone ()
+        putMVar connection.connectionErrorDone ()
+        watcherOutcome <- newEmptyMVar
+        shutdownOutcome <- newEmptyMVar
+        void (forkIO (try @SomeException (watchServerProcess client connection) >>= putMVar watcherOutcome))
+        void (forkIO (try @SomeException (killManagedProcess connection.connectionManaged) >>= putMVar shutdownOutcome))
+        outcomes <- timeout 30000000 ((,) <$> takeMVar watcherOutcome <*> takeMVar shutdownOutcome)
+        case outcomes of
+          Nothing -> expectationFailure "the watcher and the shutdown did not both finish"
+          Just (Left failure, _) -> expectationFailure ("the watcher raised: " <> show failure)
+          Just (_, Left failure) -> expectationFailure ("the shutdown raised: " <> show failure)
+          Just (Right (), Right ()) -> pure ()
+        -- Whichever of them collected the child, the connection ended once:
+        -- one report, one failed turn, and the sibling still in the pool.
+        recorded <- readIORef fixture.twoConnectionEvents
+        let endings = [message | ReviewClientStopped message <- recorded] <> [message | ReviewConnectionStopped _ message <- recorded]
+        length endings `shouldBe` 1
+        [threadId | ReviewTurnCompleted threadId TurnFailed _ _ <- recorded]
+          `shouldBe` [threadOn connection collidingThread]
+        remaining <- reviewConnectionsForTesting client
+        map (.connectionId) remaining `shouldBe` [fixture.firstConnection.connectionId]
 
     it "gives two connections' identically named threads separate identities" $
       withTwoConnectionReviewClient $ \fixture -> do
