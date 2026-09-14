@@ -3673,8 +3673,53 @@ above are unchanged, and persistence the user switched off is not a failure.
   and an uninstall would delete the modules a run starting in that moment is
   about to execute. Because that lock is never waited for, a contender is
   refused rather than queued, and the refusal says whether it lost to a run to
-  be stopped or to a transition to be waited for. Kanban reads none of it yet; discovery, status and
-  incident decoding, and the start/stop seam are a later slice's.
+  be stopped or to a transition to be waited for. Kanban reads it through a
+  module of its own, on the other two services' terms and sharing no type and
+  no constructor with either.
+  The discovery record is resolved through the one Haskell resolution point
+  rather than spelled, so this reader and the controller cannot disagree about
+  which installation a host has; the installed job's command is read out of the
+  definition that record names, on both service managers, through the one
+  reading of a systemd unit's `ExecStart`; and the job's own subcommand and
+  everything it carries for it are dropped before the checkout and the identity
+  are rebound, which for this controller means binding them after the
+  subcommand rather than before it, since that is where its parser declares
+  them. The status document is decoded against a pinned schema and version and
+  against the board's own repository identity, and the states it distinguishes
+  are the runner's own: a pass advancing, idle between passes, waiting on a
+  person, stopped on purpose, and a run that failed. The open incidents
+  published beside them are decoded there too, each checked for its own schema
+  and version before its payload, so one another release wrote is absent rather
+  than misread.
+- Why there is *no* runner to observe is its own vocabulary rather than a single
+  unknown, because the repairs differ: a host with no supported service manager,
+  no installation for this repository, a record that will not decode, a record
+  declaring a schema or a version this release does not read, a record naming
+  the manager this host does not have, a definition that cannot be read, and a
+  job that is installed and simply stopped. The last keeps the controller
+  discovery found, because starting it is the repair and an unavailability that
+  threw the handle away would put that out of reach. None of them is an error,
+  and none is reported as an absent installation. Start and stop go through the
+  same bounded, process-grouped invocation the two services above use, and keep
+  the same distinction between a transition whose consequence the next status
+  read reconciles and an operation that gets no such promise.
+- One mission's durable events replay from a cursor its caller supplies: the
+  mission's own journal under the store's decoding rules — a line another
+  release wrote consumed and absent, a malformed or foreign one reported rather
+  than emitted as an event — and every session's log in its tree beside it,
+  each with an offset of its own so one stream's progress is never another's, an
+  unterminated trailing line left whole for the next pass, and a source that has
+  been collected read from the mission's own sealed copy, resolved through the
+  store rather than from the name the seal carries. A session that appears after
+  the first read replays from its beginning; reopening with the returned cursors
+  duplicates nothing and omits nothing.
+- Reading or controlling the runner acquires no advancement authority. No
+  mission advancement lease is taken and none is ever asked for, so observing a
+  mission never makes the observer eligible to advance it, and a lease somebody
+  else holds cannot turn a status read into a refusal. Nothing here follows
+  anything — no thread, no subscription, and no recurring poll of its own —
+  so the timer inventory below is the one it already was. The console that renders
+  all of this, and the cadence it reads at, are a later slice's.
 - That service's discovery record is `config.json` in its own resolved
   directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
   `$XDG_DATA_HOME/kanban/mission-runner` (`~/.local/share` when that variable is
@@ -3709,6 +3754,8 @@ above are unchanged, and persistence the user switched off is not a failure.
   issue approval service's — plus one local one-shot timer per settled
   notice, which delivers that notice's ten-second expiry (section 6) as an
   ordinary application event and triggers the redraw that reclaims its rows.
+  The mission runner is the third managed service and adds no third check: its
+  reader is driven by whoever calls it and owns no cadence of its own.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,

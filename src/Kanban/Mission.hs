@@ -124,6 +124,12 @@ module Kanban.Mission
     MissionJournalLine (MissionJournalEvent, MissionJournalMalformed, MissionJournalRefused),
     recordMissionEvent,
     readMissionJournal,
+    -- | The byte-offset consumption rule itself, for the one reader that has
+    -- to drive it across a mission's session logs as well as its journal: a
+    -- session's log is the provider's own stream rather than a mission record,
+    -- so there is nothing about it to decode, and re-deriving the offset
+    -- arithmetic beside it would be a second chance to get it wrong.
+    readMissionJournalSince,
 
     -- * Sealed archives and collection evidence
     MissionArchiveState (..),
@@ -132,6 +138,7 @@ module Kanban.Mission
     MissionWorktreeState (..),
     MissionSealedArchive (..),
     missionSealDigestAlgorithm,
+    missionSealedArchivePath,
     sha256Hex,
     MissionSealFailure (..),
     missionSealFailureMessage,
@@ -343,7 +350,7 @@ import Kanban.Mission.Control
 import Kanban.Mission.Controller
 import Kanban.Mission.Digest (sha256Hex)
 import Kanban.Mission.Invocation
-import Kanban.Mission.Journal (MissionJournalLine (..))
+import Kanban.Mission.Journal (MissionJournalLine (..), readMissionJournalSince)
 import Kanban.Mission.Lease
   ( MissionHolderPresence (..),
     MissionLease (..),
@@ -400,6 +407,7 @@ import Kanban.Mission.Store
     listMissionsStrictly,
     missionDispositionRefusalMessage,
     missionSealFailureMessage,
+    missionSealedArchivePath,
     openMissionStore,
     readMissionJournal,
     readMissionSealedArchives,

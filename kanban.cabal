@@ -133,6 +133,7 @@ library kanban-internal
     Kanban.Layout
     Kanban.ManagedPaths
     Kanban.Mission
+    Kanban.MissionRunnerService
     Kanban.Models
     Kanban.Paths
     Kanban.Ping
@@ -322,6 +323,7 @@ test-suite kanban-test
     Spec.Mission
     Spec.Mission.Runner
     Spec.Mission.Scheduler
+    Spec.MissionRunnerService
     Spec.OperatingMode
     Spec.Repository.Authority
     Spec.Repository.Identity
