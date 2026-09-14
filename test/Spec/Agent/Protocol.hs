@@ -548,21 +548,20 @@ spec = do
                 ]
             )
 
-    -- Issue #692. The watcher is one of two reapers of its connection's
-    -- child: shutdown reaches the same handle through
-    -- 'terminalConnectionCleanup', and so does the output reader's terminal
-    -- path. When the watcher is the one that finds no child left, everything
-    -- below its wait is what used to be lost with it -- the cleanup, the
-    -- removal from the pool, the turns waiting to be failed, and the signal
-    -- 'stopReviewClient' blocks on, which is a shutdown that never returns
-    -- rather than merely a missing exit status.
+    -- Issue #692. Everything the watcher does is below its wait -- the
+    -- cleanup, the removal from the pool, the turns waiting to be failed, and
+    -- the signal 'stopReviewClient' blocks on -- so a wait that raised took
+    -- all of it, which is a shutdown that never returns rather than merely a
+    -- missing exit status. This is that whole sequence, driven on a
+    -- connection whose child is no longer there to collect.
     --
-    -- Forced rather than raced: the child is reaped directly before the
-    -- watcher runs, so the watcher's own wait is certain to be the one that
-    -- finds nothing. The connection is a real one, attached to a real client
-    -- through the pool's own reservation, and it starts no loops -- so the
-    -- two reader signals below stand in for readers that finish, which is
-    -- what makes "the watcher waits for both of them" observable.
+    -- Produced out of band rather than by racing anything: the child is
+    -- collected directly before the watcher runs, so the watcher's wait is
+    -- certainly the one with no child left to wait for. The connection is a
+    -- real one, attached to a real client through the pool's own
+    -- reservation, and it starts no loops -- so the two reader signals below
+    -- stand in for readers that finish, which is what makes "the watcher
+    -- waits for both of them" observable.
     it "ends a connection whose exit status is no longer there to collect, instead of stranding its shutdown" $
       withPerThreadTwoConnectionReviewClient $ \fixture -> do
         let client = fixture.twoConnectionClient
