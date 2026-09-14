@@ -267,9 +267,11 @@ how long to wait between them belong to the supervisor above it
 (`tools/mission_runner_service.py`), which runs either as a job installed per
 repository by `tools/install_mission_runner.py` or in the foreground, and which
 excludes the two from each other through one per-identity run lock. Kanban
-reads none of that yet: discovery, status decoding, and dashboard start/stop
-are a later slice's, so a job is installed and controlled from the command line
-(section 15).
+discovers that job, decodes the status document and incidents it publishes,
+starts and stops it, and replays a mission's own durable events from a cursor
+(section 15); what it does not yet do is render any of that or poll on a
+cadence of its own, so nothing on the board shows it and a job is still watched
+from the command line.
 
 A pass admits at most two missions, and the ceiling is a compiled value with no
 configuration surface; fair rotation, a configurable capacity, and priority for
@@ -3624,8 +3626,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   refresh never disturbs the service's own status: the durable warning or error
   it reported is what still stands after it.
 - The unattended mission runner is the third managed service, installed the same
-  way and discovered on the same terms, with none of the dashboard lifecycle
-  above yet: `tools/install_mission_runner.py` loads one stopped job per
+  way and discovered on the same terms, and read on them too — but with none of
+  the dashboard *lifecycle* above: no optimistic transition state, no busy
+  flag, and no poll of its own, for the reason the bullets after this one give.
+  `tools/install_mission_runner.py` loads one stopped job per
   canonical GitHub repository in a `mission-runner` namespace of its own,
   through `tools/mission_runner_service.py`'s own install, start, stop, and
   uninstall operations rather than by spawning the copy it installs, and it
@@ -3673,8 +3677,53 @@ above are unchanged, and persistence the user switched off is not a failure.
   and an uninstall would delete the modules a run starting in that moment is
   about to execute. Because that lock is never waited for, a contender is
   refused rather than queued, and the refusal says whether it lost to a run to
-  be stopped or to a transition to be waited for. Kanban reads none of it yet; discovery, status and
-  incident decoding, and the start/stop seam are a later slice's.
+  be stopped or to a transition to be waited for. Kanban reads it through a
+  module of its own, on the other two services' terms and sharing no type and
+  no constructor with either.
+  The discovery record is resolved through the one Haskell resolution point
+  rather than spelled, so this reader and the controller cannot disagree about
+  which installation a host has; the installed job's command is read out of the
+  definition that record names, on both service managers, through the one
+  reading of a systemd unit's `ExecStart`; and the job's own subcommand and
+  everything it carries for it are dropped before the checkout and the identity
+  are rebound, which for this controller means binding them after the
+  subcommand rather than before it, since that is where its parser declares
+  them. The status document is decoded against a pinned schema and version and
+  against the board's own repository identity, and the states it distinguishes
+  are the runner's own: a pass advancing, idle between passes, waiting on a
+  person, stopped on purpose, and a run that failed. The open incidents
+  published beside them are decoded there too, each checked for its own schema
+  and version before its payload, so one another release wrote is absent rather
+  than misread.
+- Why there is *no* runner to observe is its own vocabulary rather than a single
+  unknown, because the repairs differ: a host with no supported service manager,
+  no installation for this repository, a record that will not decode, a record
+  declaring a schema or a version this release does not read, a record naming
+  the manager this host does not have, a definition that cannot be read, and a
+  job that is installed and simply stopped. The last keeps the controller
+  discovery found, because starting it is the repair and an unavailability that
+  threw the handle away would put that out of reach. None of them is an error,
+  and none is reported as an absent installation. Start and stop go through the
+  same bounded, process-grouped invocation the two services above use, and keep
+  the same distinction between a transition whose consequence the next status
+  read reconciles and an operation that gets no such promise.
+- One mission's durable events replay from a cursor its caller supplies: the
+  mission's own journal under the store's decoding rules — a line another
+  release wrote consumed and absent, a malformed or foreign one reported rather
+  than emitted as an event — and every session's log in its tree beside it,
+  each with an offset of its own so one stream's progress is never another's, an
+  unterminated trailing line left whole for the next pass, and a source that has
+  been collected read from the mission's own sealed copy, resolved through the
+  store rather than from the name the seal carries. A session that appears after
+  the first read replays from its beginning; reopening with the returned cursors
+  duplicates nothing and omits nothing.
+- Reading or controlling the runner acquires no advancement authority. No
+  mission advancement lease is taken and none is ever asked for, so observing a
+  mission never makes the observer eligible to advance it, and a lease somebody
+  else holds cannot turn a status read into a refusal. Nothing here follows
+  anything — no thread, no subscription, and no recurring poll of its own —
+  so the timer inventory below is the one it already was. The console that renders
+  all of this, and the cadence it reads at, are a later slice's.
 - That service's discovery record is `config.json` in its own resolved
   directory — `~/Library/Application Support/kanban/mission-runner` on macOS and
   `$XDG_DATA_HOME/kanban/mission-runner` (`~/.local/share` when that variable is
@@ -3709,6 +3758,8 @@ above are unchanged, and persistence the user switched off is not a failure.
   issue approval service's — plus one local one-shot timer per settled
   notice, which delivers that notice's ten-second expiry (section 6) as an
   ordinary application event and triggers the redraw that reclaims its rows.
+  The mission runner is the third managed service and adds no third check: its
+  reader is driven by whoever calls it and owns no cadence of its own.
 - Board and usage refresh independently.
 - Codex and Claude failures are independent of one another.
 - A refresh records its completion time and whether displayed data is fresh,
@@ -3842,11 +3893,13 @@ Defaults:
   release. The per-identity run lock beside them is what makes a second
   wrapper for one repository refuse rather than interleave, and the transition
   and per-installation link locks beside that one are what keep an install, a
-  start, a stop, and an uninstall of one job from interleaving. Nothing in
-  Kanban
-  reads any of it yet — discovery and decoding are a later slice's — so until
-  then the wrapper and its installer are the whole of the traffic. Three of its
-  commands are about this runtime:
+  start, a stop, and an uninstall of one job from interleaving. Kanban reads
+  this runtime through the reader section 15 describes: the status document and
+  the incidents beside it, each against the schema and version above, and a
+  mission's own journal and session logs from a cursor. It writes none of it,
+  takes no lock here, and its start and stop go through the wrapper's own
+  commands rather than around them. Three of those commands are about this
+  runtime:
   `run` writes the status document and opens an incident when a pass fails;
   `status` only reads, creating no directory, rewriting no document and
   resolving no incident, because it is the diagnostic reached for when the
@@ -4497,7 +4550,9 @@ and refuses a second wrapper for the same repository. That wrapper is now a
 managed job as well: `tools/install_mission_runner.py` installs one stopped job
 per canonical GitHub repository in a `mission-runner` namespace of its own,
 writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
-Decoding its runtime from the dashboard, capacity
+`Kanban.MissionRunnerService` discovers that job, decodes its status document
+and incidents, starts and stops it, and replays a mission's durable events from
+a cursor; rendering any of that, capacity
 arbitration, fair rotation, and descendant-tree termination are not
 implemented. Board frames are
 bounded as section 7 describes: each column is laid out once per change to what

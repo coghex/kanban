@@ -51,10 +51,10 @@ data ManagedComponent
     -- recorded, read by "Kanban.Drainer".
     DrainerComponent
   | -- | What @tools\/install_mission_runner.py@ and
-    -- @tools\/mission_runner_service.py@ record. Nothing in the dashboard
-    -- reads it yet — discovery and decoding are RUN-3's — so this constructor
-    -- exists to hold the location, and the rules that select it, to the one
-    -- answer the Python resolver gives for the same host.
+    -- @tools\/mission_runner_service.py@ record, read by
+    -- "Kanban.MissionRunnerService". This constructor holds the location, and
+    -- the rules that select it, to the one answer the Python resolver gives
+    -- for the same host.
     MissionRunnerComponent
   deriving stock (Eq, Show)
 

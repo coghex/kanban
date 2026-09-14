@@ -61,7 +61,10 @@ module Kanban.Mission.Store
     MissionSealFailure (..),
     missionSealFailureMessage,
     sealMissionLog,
+    missionSealedArchivePath,
+    readMissionSealedArchive,
     readMissionSealedArchives,
+    readableMissionSealedArchives,
     verifyMissionSealedArchive,
 
     -- * Archive and delete
@@ -73,7 +76,7 @@ module Kanban.Mission.Store
 where
 
 import Control.Exception (IOException, try)
-import Control.Monad (filterM)
+import Control.Monad (filterM, void)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -684,23 +687,36 @@ commitSeal mission repository session kind source archivePath sealPath = do
         Right False -> Left (MissionSealAlreadySealed session kind)
         Right True -> Right sealed
 
--- | Every sealed archive entry a mission holds.
+-- | This mission's seal records, in archive order, each decoded on its own.
 --
--- An entry whose record will not decode is reported rather than skipped: a
--- collector deciding what may be removed must not be told an archive is empty
--- because its index was damaged.
-readMissionSealedArchives :: MissionStore -> MissionId -> IO (Either Text [MissionSealedArchive])
-readMissionSealedArchives store mission =
+-- The one walk behind both readers below, so the strict and the lenient answer
+-- can never turn out to be about different sets of entries.
+sealedArchiveEntries ::
+  MissionStore -> MissionId -> IO (Either Text [(FilePath, MissionRead MissionSealedArchive)])
+sealedArchiveEntries store mission =
   withMissionRoot store mission Left $ \root -> case missionArchiveDirectory root mission of
     Left message -> pure (Left message)
     Right archiveDirectory -> do
-      entries <- listMissionEntries archiveDirectory
-      let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
-      results <- mapM (readSeal root archiveDirectory) sealNames
-      pure (collect (zip sealNames results))
+      -- The strict enumeration, because both readers below are /reporting/ on
+      -- everything this archive holds rather than looking for one thing in it.
+      -- 'listMissionEntries' reads a directory it could not list as an empty
+      -- one, and an empty archive is precisely the answer that makes every
+      -- collected session's history disappear without anybody being told: the
+      -- collector would see nothing left to account for, and the reader would
+      -- report no streams and no failure. A directory that is simply not there
+      -- is still empty, which is the ordinary state of a mission that has
+      -- sealed nothing.
+      listed <- listMissionEntriesStrictly archiveDirectory
+      case listed of
+        Left message -> pure (Left message)
+        Right entries -> do
+          let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
+          results <- mapM (readSeal root archiveDirectory) sealNames
+          pure (Right (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
     readSeal root archiveDirectory name = do
+      let path = archiveDirectory </> name
       result <-
         readMissionRecordFor
           mission
@@ -708,17 +724,90 @@ readMissionSealedArchives store mission =
           store.missionStoreRepository
           missionSealedMission
           missionSealedRepository
-          (archiveDirectory </> name)
-      pure $ case result of
+          path
+      case result of
         MissionPresent sealed
-          | Just reason <- sealSubjectFailure root mission name sealed -> MissionUnreadable reason
-        other -> other
+          | Just reason <- sealSubjectFailure root mission name sealed -> pure (MissionUnreadable reason)
+        MissionAbsent -> listedButAbsent path
+        other -> pure other
 
+    -- A name this walk just listed that reads as absent is one of two things,
+    -- and 'MissionRead' spells them the same way: a record under a schema
+    -- version this release does not recognize, which §16 says is absent and
+    -- silent, or a record whose bytes were not there at all — a link that
+    -- follows to nothing, or a file removed between the listing and the read.
+    -- Only the first is silence. The second is an entry this archive still
+    -- advertises and nothing can read, and reporting it is the difference
+    -- between a session's history being knowably damaged and it simply not
+    -- appearing.
+    --
+    -- Told apart by whether the bytes can be read at all, because that is the
+    -- only thing the two differ in. A record removed between the read above and
+    -- this probe is reported rather than passed over, which is the direction
+    -- that loses nothing.
+    listedButAbsent path = do
+      probed <- try @IOException (ByteString.readFile path)
+      pure $ case probed of
+        Right _ -> MissionAbsent
+        Left exception ->
+          MissionUnreadable
+            ( "mission "
+                <> mission.unMissionId
+                <> ": the seal "
+                <> Text.pack path
+                <> " is listed in this mission's archive and could not be read ("
+                <> Text.pack (show exception)
+                <> ")"
+            )
+
+-- | Every sealed archive entry a mission holds, or the first reason one of
+-- them could not be read.
+--
+-- All-or-nothing on purpose, and for one caller in particular. An entry whose
+-- record will not decode is reported rather than skipped: a collector deciding
+-- what may be /removed/ must not be told an archive is empty because its index
+-- was damaged, because the thing it would then remove is the last copy.
+--
+-- A reader that removes nothing wants 'readableMissionSealedArchives' instead.
+readMissionSealedArchives :: MissionStore -> MissionId -> IO (Either Text [MissionSealedArchive])
+readMissionSealedArchives store mission = (>>= collect) <$> sealedArchiveEntries store mission
+  where
     collect pairs = case [message | (_, MissionUnreadable message) <- pairs] of
       message : _ -> Left message
       [] -> case [message | (_, MissionRefused message) <- pairs] of
         message : _ -> Left message
         [] -> Right [sealed | (_, MissionPresent sealed) <- pairs]
+
+-- | The same entries, entry by entry: the ones that read, and a message for
+-- each one that did not.
+--
+-- The lenient half of a deliberate pair, and the two are not interchangeable.
+-- The strict one above belongs to a caller that is about to delete something,
+-- where one entry it cannot account for has to stop the whole decision. A
+-- reader replaying a mission's history deletes nothing, and there one damaged
+-- entry taking every other session's archive down with it would leave those
+-- sessions unreadable for as long as the damage lasted — which is the opposite
+-- of what a reader owes: what it cannot read is reported /beside/ what it can,
+-- not instead of it.
+--
+-- An entry written under a schema version this release does not recognize is
+-- absent here exactly as it is everywhere else (§16), so it appears in neither
+-- list.
+readableMissionSealedArchives :: MissionStore -> MissionId -> IO ([MissionSealedArchive], [Text])
+readableMissionSealedArchives store mission = do
+  entries <- sealedArchiveEntries store mission
+  pure $ case entries of
+    Left message -> ([], [message])
+    Right decoded ->
+      ( [sealed | (_, MissionPresent sealed) <- decoded],
+        [message | (_, entry) <- decoded, message <- failureOf entry]
+      )
+  where
+    failureOf entry = case entry of
+      MissionUnreadable message -> [message]
+      MissionRefused message -> [message]
+      MissionAbsent -> []
+      MissionPresent _ -> []
 
 -- | Why a seal record does not describe the entry it was read as, if it does
 -- not.
@@ -750,86 +839,113 @@ sealSubjectFailure root mission name sealed = case (,) <$> sealPath <*> archiveP
         <> " does not describe the entry it was read as, because "
         <> detail
 
+-- | Where one seal's archived copy is, or why this seal describes no archive of
+-- this mission at all.
+--
+-- The path is recomputed from the session and log kind this record is /about/,
+-- never joined from the name it carries. A record is durable data: one that has
+-- been edited could name @../../elsewhere@ or some other mission's archive, and
+-- a reader that opened the file a record merely named would be reading whatever
+-- was there under this seal's identity. The recorded name is still compared, so
+-- a record that disagrees with its own subject is reported rather than quietly
+-- resolved to the right file.
+--
+-- Both identities are checked for the reason every read here checks both: a
+-- seal is what a collector trusts before it removes a source, and one carried
+-- in from another mission or another repository would have a reader resolve a
+-- file it knows nothing about.
+--
+-- Shared by 'verifyMissionSealedArchive' and by every other reader of an
+-- archived copy, so which file a seal names is stated once.
+missionSealedArchivePath :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text FilePath)
+missionSealedArchivePath store mission sealed =
+  withMissionRoot store mission Left $ \root ->
+    pure $ case missionArchivePath root mission sealed.missionSealedSession sealed.missionSealedKind of
+      Left message -> Left message
+      Right path
+        | sealed.missionSealedMission /= mission ->
+            Left (foreign' ("mission " <> sealed.missionSealedMission.unMissionId))
+        | sealed.missionSealedRepository /= store.missionStoreRepository ->
+            Left (foreign' "another repository")
+        | sealed.missionSealedName /= takeFileName path ->
+            Left
+              ( "mission "
+                  <> mission.unMissionId
+                  <> ": the seal of session "
+                  <> sealed.missionSealedSession.unMissionSessionId
+                  <> " names the archived file "
+                  <> Text.pack (show sealed.missionSealedName)
+                  <> " rather than "
+                  <> Text.pack (show (takeFileName path))
+              )
+        | otherwise -> Right path
+  where
+    foreign' subject =
+      "the seal of session "
+        <> sealed.missionSealedSession.unMissionSessionId
+        <> " belongs to "
+        <> subject
+        <> " rather than mission "
+        <> mission.unMissionId
+
+-- | The archived bytes one seal describes, read once and checked against what
+-- that seal recorded.
+--
+-- One read is the whole point. A caller that verified through one read and
+-- then consumed through another would be acting on bytes nothing checked: an
+-- archive is an ordinary owner-writable file, and everything between the two
+-- reads is a window in which it can be replaced. So what comes back is exactly
+-- what was hashed.
+--
+-- The archived copy is what is read — never the source, which the whole point
+-- of a seal is to outlive.
+readMissionSealedArchive ::
+  MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ByteString.ByteString)
+readMissionSealedArchive store mission sealed = do
+  resolved <- missionSealedArchivePath store mission sealed
+  case resolved of
+    Left message -> pure (Left message)
+    Right path
+      | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
+          pure
+            ( Left
+                ( "the archive of session "
+                    <> sealed.missionSealedSession.unMissionSessionId
+                    <> " records the digest algorithm "
+                    <> sealed.missionSealedDigestAlgorithm
+                    <> ", which this release cannot verify"
+                )
+            )
+      | otherwise -> do
+          bytesResult <- try @IOException (ByteString.readFile path)
+          pure $ case bytesResult of
+            Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
+            Right bytes
+              | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
+                  Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
+              | sha256Hex bytes /= sealed.missionSealedDigest ->
+                  Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
+              | otherwise -> Right bytes
+  where
+    mismatch path' what expected found =
+      "mission "
+        <> mission.unMissionId
+        <> ": "
+        <> Text.pack path'
+        <> " has "
+        <> what
+        <> " "
+        <> found
+        <> " but its seal records "
+        <> expected
+
 -- | Re-reads an archived copy and checks it against what the seal recorded.
 --
--- The archived copy is what is verified — never the source, which the whole
--- point of a seal is to outlive.
+-- The check above with the bytes discarded, so there is one reading of an
+-- archive and one statement of what makes it acceptable.
 verifyMissionSealedArchive :: MissionStore -> MissionId -> MissionSealedArchive -> IO (Either Text ())
 verifyMissionSealedArchive store mission sealed =
-  withMissionRoot store mission Left $ \root ->
-    case missionArchivePath root mission sealed.missionSealedSession sealed.missionSealedKind of
-      Left message -> pure (Left message)
-      Right path
-        -- Both identities, for the reason every read here checks both: a seal
-        -- is what a collector trusts before it removes a source, and one
-        -- carried in from another mission or another repository would have it
-        -- verify a file it knows nothing about.
-        | sealed.missionSealedMission /= mission ->
-            pure (Left (foreign' ("mission " <> sealed.missionSealedMission.unMissionId)))
-        | sealed.missionSealedRepository /= store.missionStoreRepository ->
-            pure (Left (foreign' "another repository"))
-        -- The path is recomputed from the session and log kind this record is
-        -- *about*, never joined from the name it carries. A record is durable
-        -- data: one that has been edited could name `../../elsewhere` or some
-        -- other mission's archive, and a verification that read that file would
-        -- hash whatever was there and report success against the forged digest
-        -- beside it. The recorded name is still compared, so a record that
-        -- disagrees with its own subject is reported rather than quietly
-        -- verified against the right file.
-        | sealed.missionSealedName /= takeFileName path ->
-            pure
-              ( Left
-                  ( "mission "
-                      <> mission.unMissionId
-                      <> ": the seal of session "
-                      <> sealed.missionSealedSession.unMissionSessionId
-                      <> " names the archived file "
-                      <> Text.pack (show sealed.missionSealedName)
-                      <> " rather than "
-                      <> Text.pack (show (takeFileName path))
-                      <> ", and was not verified against it"
-                  )
-              )
-        | sealed.missionSealedDigestAlgorithm /= missionSealDigestAlgorithm ->
-            pure
-              ( Left
-                  ( "the archive of session "
-                      <> sealed.missionSealedSession.unMissionSessionId
-                      <> " records the digest algorithm "
-                      <> sealed.missionSealedDigestAlgorithm
-                      <> ", which this release cannot verify"
-                  )
-              )
-        | otherwise -> do
-            bytesResult <- try @IOException (ByteString.readFile path)
-            pure $ case bytesResult of
-              Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
-              Right bytes
-                | fromIntegral (ByteString.length bytes) /= sealed.missionSealedByteLength ->
-                    Left (mismatch path "byte length" (Text.pack (show sealed.missionSealedByteLength)) (Text.pack (show (ByteString.length bytes))))
-                | sha256Hex bytes /= sealed.missionSealedDigest ->
-                    Left (mismatch path "digest" sealed.missionSealedDigest (sha256Hex bytes))
-                | otherwise -> Right ()
-        where
-          mismatch path' what expected found =
-            "mission "
-              <> mission.unMissionId
-              <> ": "
-              <> Text.pack path'
-              <> " has "
-              <> what
-              <> " "
-              <> found
-              <> " but its seal records "
-              <> expected
-          foreign' subject =
-            "the seal of session "
-              <> sealed.missionSealedSession.unMissionSessionId
-              <> " belongs to "
-              <> subject
-              <> " rather than mission "
-              <> mission.unMissionId
-              <> ", and was not verified"
+  void <$> readMissionSealedArchive store mission sealed
 
 -- | Why a mission may not be archived or deleted.
 data MissionDispositionRefusal

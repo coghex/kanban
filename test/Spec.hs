@@ -55,6 +55,7 @@ import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
 import qualified Spec.Mission.Runner as MissionRunner
 import qualified Spec.Mission.Scheduler as MissionScheduler
+import qualified Spec.MissionRunnerService as MissionRunnerService
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -243,6 +244,11 @@ suiteGroups =
     SuiteGroup "Spec.OperatingMode" PingLane OperatingMode.spec,
     SuiteGroup "Spec.SingleAgentMode" PingLane SingleAgentMode.spec,
     SuiteGroup "Spec.ApprovalService" DeadlineLane ApprovalService.spec, -- 8.9s
+    -- Beside the other managed service's dashboard group, whose lane
+    -- conventions it follows: both stand fake controllers up in a temporary
+    -- directory and let one of them wedge, so both spend most of their time
+    -- waiting out a bounded invocation rather than computing.
+    SuiteGroup "Spec.MissionRunnerService" DeadlineLane MissionRunnerService.spec,
     SuiteGroup "Spec.Repository.State" PingLane RepositoryState.spec,
     SuiteGroup "Spec.GitHub.PullRequestStatus" PingLane PullRequestStatus.spec,
     SuiteGroup "Spec.Config.Consumers" PingLane ConfigConsumers.spec,
