@@ -922,20 +922,21 @@ decodeMissionRunnerStatus identity bytes = case eitherDecode bytes of
   Right raw -> Right (observationFrom identity raw)
 
 observationFrom :: Text -> RawMissionRunnerStatus -> MissionRunnerObservation
-observationFrom identity raw = MissionRunnerObservation status incidents
+observationFrom identity raw = case containment of
+  -- Nothing of the payload survives a document this reader may not read, and
+  -- that is what the envelope check being *first* is for. An incident, an
+  -- attention entry, a process identifier or a stamp carried out of a
+  -- foreign or future document would be some other runner's state presented
+  -- as this one's — and the incident is the sharpest case, because it is the
+  -- field an operator would act on.
+  Just message -> MissionRunnerObservation (bareStatus MissionRunnerUnknown message) Nothing
+  Nothing -> MissionRunnerObservation (statusFrom raw.rawState) (Just (maybe [] readableIncidents raw.rawOpenIncidents))
   where
-    -- Only ever reported for a document this reader accepted. A rejected one
-    -- describes some other runner, so its incident set is not this
-    -- repository's to show.
-    incidents = case containment of
-      Just _ -> Nothing
-      Nothing -> Just (maybe [] readableIncidents raw.rawOpenIncidents)
-
     incident = case raw.rawOpenIncident >>= readableIncident of
       Just newest -> Just newest
-      Nothing -> case incidents of
-        Just (newest : _) -> Just newest
-        _ -> Nothing
+      Nothing -> case maybe [] readableIncidents raw.rawOpenIncidents of
+        newest : _ -> Just newest
+        [] -> Nothing
 
     -- Per entry rather than per list, for 'usableField''s reason one level
     -- down: an attention entry naming no mission is the one this reader drops,
@@ -973,22 +974,18 @@ observationFrom identity raw = MissionRunnerObservation status incidents
     identityMatches (Just recorded) = Text.toLower recorded == Text.toLower identity
     identityMatches Nothing = False
 
-    status = case containment of
-      Just message -> reported MissionRunnerUnknown message
-      Nothing -> stateFrom raw.rawState
-
     -- The controller's own `unknown` carries the reason it did not believe its
     -- stored document, and that reason is the whole of what a reader can say
     -- about it.
-    stateFrom (Just "running") = live MissionRunnerAdvancing "advancing"
-    stateFrom (Just "idle") = live MissionRunnerIdle "idle"
-    stateFrom (Just "waiting") = live MissionRunnerWaiting "waiting on input"
-    stateFrom (Just "stopped") = live MissionRunnerStopped "stopped"
-    stateFrom (Just "failed") = live MissionRunnerFailed "failed"
-    stateFrom (Just "unknown") =
+    statusFrom (Just "running") = live MissionRunnerAdvancing "advancing"
+    statusFrom (Just "idle") = live MissionRunnerIdle "idle"
+    statusFrom (Just "waiting") = live MissionRunnerWaiting "waiting on input"
+    statusFrom (Just "stopped") = live MissionRunnerStopped "stopped"
+    statusFrom (Just "failed") = live MissionRunnerFailed "failed"
+    statusFrom (Just "unknown") =
       reported MissionRunnerUnknown (maybe "the mission runner controller could not say" sanitizeText raw.rawReason)
-    stateFrom (Just other) = reported MissionRunnerUnknown ("unknown state: " <> sanitizeText other)
-    stateFrom Nothing = reported MissionRunnerUnknown "the mission runner controller reported no state"
+    statusFrom (Just other) = reported MissionRunnerUnknown ("unknown state: " <> sanitizeText other)
+    statusFrom Nothing = reported MissionRunnerUnknown "the mission runner controller reported no state"
 
     -- The controller's own message when it wrote one, and the state's own
     -- wording when it did not.
@@ -1026,6 +1023,17 @@ readableIncident value = case value of
         usableValue value
   _ -> Nothing
 
+-- | A status that reports one thing and carries no payload at all: an activity
+-- and the sentence that explains it.
+--
+-- The one construction for every status that is /about/ a runner rather than
+-- from one — a document this reader may not read, and a runner there is no
+-- controller for. Spelled once, because a second spelling is how a field would
+-- come to be carried by one of them and not the other.
+bareStatus :: MissionRunnerActivity -> Text -> MissionRunnerStatus
+bareStatus activity detail =
+  MissionRunnerStatus activity detail Nothing Nothing Nothing Nothing Nothing Nothing [] Nothing
+
 -- | The status a dashboard shows for a runner it has no live controller for.
 --
 -- An unsupported host and a stopped job each get their own activity, so nothing
@@ -1034,17 +1042,7 @@ readableIncident value = case value of
 -- the same reason a failed poll is.
 missionRunnerUnavailableStatus :: MissionRunnerUnavailable -> MissionRunnerStatus
 missionRunnerUnavailableStatus unavailable =
-  MissionRunnerStatus
-    activity
-    (sanitizeText unavailable.missionRunnerUnavailableMessage)
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    Nothing
-    []
-    Nothing
+  bareStatus activity (sanitizeText unavailable.missionRunnerUnavailableMessage)
   where
     activity = case unavailable.missionRunnerUnavailableCase of
       MissionRunnerHostHasNoManager -> MissionRunnerUnsupported

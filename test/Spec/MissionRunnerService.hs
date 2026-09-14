@@ -538,6 +538,44 @@ statusDecodingSpec = describe "decoding the status document" $ do
         observed.observedMissionRunnerStatus.missionRunnerDetail `shouldMention` mentioned
         observed.observedMissionRunnerIncidents `shouldBe` Nothing
 
+  -- The envelope check is first so that nothing past it is interpreted. A
+  -- document this reader may not read is some other runner's, and its
+  -- incidents, attention, process identifiers and stamps are that runner's
+  -- too — the incident most of all, since it is the field an operator acts on.
+  it "carries nothing out of a document it may not read" $
+    forM_
+      [ "\"schema\":\"kanban-issue-approval-status\",\"version\":1,\"repository\":\"example/project\"",
+        "\"schema\":\"kanban-mission-runner-status\",\"version\":2,\"repository\":\"example/project\"",
+        "\"schema\":\"kanban-mission-runner-status\",\"version\":1,\"repository\":\"someone/else\""
+      ]
+      $ \envelope -> do
+        let payload =
+              [ "\"state\":\"running\"",
+                "\"reason\":\"a reason from a document this reader may not read\"",
+                "\"runner_pid\":4242",
+                "\"pass_pid\":4243",
+                "\"passes\":7",
+                "\"started_at\":\"2026-09-13T00:00:00Z\"",
+                "\"updated_at\":\"2026-09-13T00:00:42Z\"",
+                "\"open_incident\":" <> incidentDocument ["\"summary\":\"another runner's incident\""],
+                "\"open_incidents\":[" <> incidentDocument [] <> "]",
+                "\"attention\":["
+                  <> document ["\"mission\":\"mission-9999\"", "\"attention_id\":\"someone/else#mission-9999@2026-09-13T00:00:42Z\""]
+                  <> "]"
+              ]
+        observed <- expectRight (decodeMissionRunnerStatus boardIdentity (LazyByteString.pack (document (envelope : payload))))
+        let reported = observed.observedMissionRunnerStatus
+        reported.missionRunnerActivity `shouldBe` MissionRunnerUnknown
+        observed.observedMissionRunnerIncidents `shouldBe` Nothing
+        reported.missionRunnerIncident `shouldBe` Nothing
+        reported.missionRunnerAttention `shouldBe` []
+        reported.missionRunnerReason `shouldBe` Nothing
+        reported.missionRunnerPid `shouldBe` Nothing
+        reported.missionRunnerPassPid `shouldBe` Nothing
+        reported.missionRunnerPasses `shouldBe` Nothing
+        reported.missionRunnerStartedAt `shouldBe` Nothing
+        reported.missionRunnerUpdatedAt `shouldBe` Nothing
+
   it "refuses a document about another repository" $ do
     observed <-
       expectRight
