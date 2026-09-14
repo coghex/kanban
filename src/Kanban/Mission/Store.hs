@@ -64,6 +64,7 @@ module Kanban.Mission.Store
     missionSealedArchivePath,
     readMissionSealedArchive,
     readMissionSealedArchives,
+    readableMissionSealedArchives,
     verifyMissionSealedArchive,
 
     -- * Archive and delete
@@ -686,20 +687,20 @@ commitSeal mission repository session kind source archivePath sealPath = do
         Right False -> Left (MissionSealAlreadySealed session kind)
         Right True -> Right sealed
 
--- | Every sealed archive entry a mission holds.
+-- | This mission's seal records, in archive order, each decoded on its own.
 --
--- An entry whose record will not decode is reported rather than skipped: a
--- collector deciding what may be removed must not be told an archive is empty
--- because its index was damaged.
-readMissionSealedArchives :: MissionStore -> MissionId -> IO (Either Text [MissionSealedArchive])
-readMissionSealedArchives store mission =
+-- The one walk behind both readers below, so the strict and the lenient answer
+-- can never turn out to be about different sets of entries.
+sealedArchiveEntries ::
+  MissionStore -> MissionId -> IO (Either Text [(FilePath, MissionRead MissionSealedArchive)])
+sealedArchiveEntries store mission =
   withMissionRoot store mission Left $ \root -> case missionArchiveDirectory root mission of
     Left message -> pure (Left message)
     Right archiveDirectory -> do
       entries <- listMissionEntries archiveDirectory
       let sealNames = sort (filter (".seal.json" `isSuffixOfPath`) entries)
       results <- mapM (readSeal root archiveDirectory) sealNames
-      pure (collect (zip sealNames results))
+      pure (Right (zip sealNames results))
   where
     isSuffixOfPath suffix name = suffix `Text.isSuffixOf` Text.pack name
     readSeal root archiveDirectory name = do
@@ -716,11 +717,54 @@ readMissionSealedArchives store mission =
           | Just reason <- sealSubjectFailure root mission name sealed -> MissionUnreadable reason
         other -> other
 
+-- | Every sealed archive entry a mission holds, or the first reason one of
+-- them could not be read.
+--
+-- All-or-nothing on purpose, and for one caller in particular. An entry whose
+-- record will not decode is reported rather than skipped: a collector deciding
+-- what may be /removed/ must not be told an archive is empty because its index
+-- was damaged, because the thing it would then remove is the last copy.
+--
+-- A reader that removes nothing wants 'readableMissionSealedArchives' instead.
+readMissionSealedArchives :: MissionStore -> MissionId -> IO (Either Text [MissionSealedArchive])
+readMissionSealedArchives store mission = (>>= collect) <$> sealedArchiveEntries store mission
+  where
     collect pairs = case [message | (_, MissionUnreadable message) <- pairs] of
       message : _ -> Left message
       [] -> case [message | (_, MissionRefused message) <- pairs] of
         message : _ -> Left message
         [] -> Right [sealed | (_, MissionPresent sealed) <- pairs]
+
+-- | The same entries, entry by entry: the ones that read, and a message for
+-- each one that did not.
+--
+-- The lenient half of a deliberate pair, and the two are not interchangeable.
+-- The strict one above belongs to a caller that is about to delete something,
+-- where one entry it cannot account for has to stop the whole decision. A
+-- reader replaying a mission's history deletes nothing, and there one damaged
+-- entry taking every other session's archive down with it would leave those
+-- sessions unreadable for as long as the damage lasted — which is the opposite
+-- of what a reader owes: what it cannot read is reported /beside/ what it can,
+-- not instead of it.
+--
+-- An entry written under a schema version this release does not recognize is
+-- absent here exactly as it is everywhere else (§16), so it appears in neither
+-- list.
+readableMissionSealedArchives :: MissionStore -> MissionId -> IO ([MissionSealedArchive], [Text])
+readableMissionSealedArchives store mission = do
+  entries <- sealedArchiveEntries store mission
+  pure $ case entries of
+    Left message -> ([], [message])
+    Right decoded ->
+      ( [sealed | (_, MissionPresent sealed) <- decoded],
+        [message | (_, entry) <- decoded, message <- failureOf entry]
+      )
+  where
+    failureOf entry = case entry of
+      MissionUnreadable message -> [message]
+      MissionRefused message -> [message]
+      MissionAbsent -> []
+      MissionPresent _ -> []
 
 -- | Why a seal record does not describe the entry it was read as, if it does
 -- not.

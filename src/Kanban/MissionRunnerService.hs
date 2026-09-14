@@ -127,8 +127,8 @@ import Kanban.Mission
     missionSealedArchivePath,
     readMissionJournal,
     readMissionSealedArchive,
-    readMissionSealedArchives,
     readMissionSnapshot,
+    readableMissionSealedArchives,
   )
 -- | The one byte-offset consumption rule, taken from where issue #8 established
 -- it. "Kanban.Mission.Journal" drives it over a mission's journal from a path;
@@ -1354,7 +1354,12 @@ replayMissionRecord :: MissionStore -> MissionId -> MissionReplayCursor -> IO Mi
 replayMissionRecord store mission cursor = do
   journalResult <- readMissionJournal store mission cursor.missionJournalConsumed
   snapshotResult <- readMissionSnapshot store mission
-  sealsResult <- readMissionSealedArchives store mission
+  -- The lenient reader rather than the collector's own. A collector is about
+  -- to delete sources, so one seal it cannot account for has to stop its whole
+  -- decision; this one deletes nothing, and a single damaged @.seal.json@
+  -- taking every other collected session's archive down with it would hide
+  -- exactly what the failure list exists to report beside.
+  (seals, sealFailures) <- readableMissionSealedArchives store mission
   let (events, journalConsumed, journalFailures) = case journalResult of
         -- The cursor does not move on a failed read, so the next pass reads
         -- exactly what this one could not rather than starting past it.
@@ -1367,9 +1372,6 @@ replayMissionRecord store mission cursor = do
         MissionAbsent -> ([], [])
         MissionRefused message -> ([], [message])
         MissionUnreadable message -> ([], [message])
-      (seals, sealFailures) = case sealsResult of
-        Left message -> ([], [message])
-        Right entries -> (entries, [])
   read' <- mapM (readPlannedStream store mission cursor) (plannedStreams sessions seals)
   pure
     MissionReplay

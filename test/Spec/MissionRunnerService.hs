@@ -1087,6 +1087,42 @@ replaySpec = describe "replaying a mission's durable record" $ do
       Map.lookup (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog) replayed.missionReplayCursor.missionStreamsConsumed
         `shouldBe` Just 0
 
+  -- One damaged index entry must not make every other collected session's
+  -- archive unreadable. The store's strict reader is the collector's, because
+  -- a collector is about to delete sources; a reader deletes nothing.
+  it "replays the collected sessions whose seals read, beside the one whose seal did not" $
+    withStore $ \root store -> do
+      let sessionLog session = root </> (session <> ".log")
+          sessions = ["session-a", "session-b"]
+      forM_ sessions $ \session -> ByteString.writeFile (sessionLog session) (ByteString.pack (session <> " one\n"))
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              ( snapshotWith
+                  [ sessionWith (Text.pack session) Nothing (Just (MissionLogReference (sessionLog session) MissionEventStreamLog))
+                    | session <- sessions
+                  ]
+              )
+        )
+      forM_ sessions $ \session -> do
+        void (expectRight =<< sealMissionLog store theMission (MissionSessionId (Text.pack session)) MissionEventStreamLog (sessionLog session))
+        removeFile (sessionLog session)
+      -- One session's seal record is damaged; the other's archive is intact.
+      ByteString.writeFile
+        (missionDirectoryOf root </> "archive" </> "session-b-event_stream.seal.json")
+        "{not a seal record"
+      replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+      map (.missionStreamReplayId.missionStreamSession) replayed.missionReplayStreams
+        `shouldBe` [MissionSessionId "session-a"]
+      map (.missionStreamReplayLines) replayed.missionReplayStreams `shouldBe` [["session-a one"]]
+      replayed.missionReplayFailures `shouldSatisfy` (not . null)
+      -- And only the session that replayed advanced.
+      Map.toAscList replayed.missionReplayCursor.missionStreamsConsumed
+        `shouldBe` [ (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog, length ("session-a one\n" :: String)),
+                     (MissionStreamId (MissionSessionId "session-b") MissionEventStreamLog, 0)
+                   ]
+
   it "reports one unreadable stream without hiding what the others appended, and keeps its cursor" $
     withStore $ \root store -> do
       let readable = root </> "readable.log"
