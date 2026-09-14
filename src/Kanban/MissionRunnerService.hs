@@ -365,24 +365,6 @@ parseMissionRunnerRecord = withObject "mission runner install record" $ \value -
                 )
           | otherwise -> Right <$> read' backend
 
--- | The installed document: one entry per canonical GitHub repository beside
--- the installer's own shared keys, and whatever shape the writer declared for
--- itself.
---
--- Entries stay unparsed until one is selected, so a malformed entry for another
--- repository cannot make this one's runner undiscoverable.
-data MissionRunnerRecordDocument = MissionRunnerRecordDocument
-  { recordDocumentSchema :: Maybe Value,
-    recordDocumentVersion :: Maybe Value,
-    recordDocumentRepositories :: Map Text Value
-  }
-
-instance FromJSON MissionRunnerRecordDocument where
-  parseJSON = withObject "mission runner install record" $ \value ->
-    MissionRunnerRecordDocument (KeyMap.lookup "schema" value) (KeyMap.lookup "version" value)
-      . fromMaybe Map.empty
-      <$> value .:? "repositories"
-
 -- | Why a record document is not one this release may read.
 --
 -- Three answers rather than one string, because they are three different
@@ -428,10 +410,17 @@ missionRunnerRecordPath = managedRecordPath MissionRunnerComponent
 missionRunnerRecordFromBytes ::
   Text -> ByteString.ByteString -> Either MissionRunnerRecordFailure (Maybe MissionRunnerRecord)
 missionRunnerRecordFromBytes identity bytes = do
-  document <- case eitherDecodeStrict bytes :: Either String MissionRunnerRecordDocument of
+  fields <- case eitherDecodeStrict bytes :: Either String Value of
     Left message -> Left (malformed (withoutJsonPath (Text.pack message)))
-    Right decoded -> Right decoded
-  case (document.recordDocumentSchema, document.recordDocumentVersion) of
+    Right (Aeson.Object fields) -> Right fields
+    Right _ -> Left (malformed "it is not a JSON object")
+  -- The discriminators before anything else in the document is looked at, and
+  -- that ordering is the whole of the guarantee. A reader that decoded the
+  -- payload first would report a later release's record by whatever its *own*
+  -- payload parser made of it: @{"schema": "future", "repositories": []}@ would
+  -- come back as a broken record rather than as one written under a schema this
+  -- release does not read, which is the opposite of what §16's rule asks for.
+  case (KeyMap.lookup "schema" fields, KeyMap.lookup "version" fields) of
     (Just declared, _) ->
       Left
         ( MissionRunnerRecordFailure
@@ -444,15 +433,33 @@ missionRunnerRecordFromBytes identity bytes = do
             MissionRunnerRecordVersionUnknown
             ("it declares the version " <> describedJson declared <> ", and this release reads a record that declares none")
         )
-    (Nothing, Nothing) ->
+    (Nothing, Nothing) -> do
+      records <- repositoriesTable fields
       case [ value
-             | (key, value) <- Map.toList document.recordDocumentRepositories,
+             | (key, value) <- Map.toList records,
                Text.toLower key == Text.toLower identity
            ] of
         [] -> Right Nothing
         value : _ -> Just <$> validated value
   where
     malformed = MissionRunnerRecordFailure MissionRunnerRecordUnreadable
+
+    -- Absent is an empty table and anything else present is a broken one.
+    -- @installed_repository_records@ reads a missing key the same way — the
+    -- installer's own @update_json_document@ preserves whatever top-level keys
+    -- it finds, so a document that simply has no entries yet is a record with
+    -- nothing installed. A @repositories@ that is null, an array, or a scalar
+    -- is not that: something wrote it, and reporting it as "nothing is
+    -- installed" would send an operator to install over a record that is
+    -- already damaged. Entries inside it stay unparsed until one is selected,
+    -- so a malformed entry for another repository cannot make this one's runner
+    -- undiscoverable.
+    repositoriesTable fields = case KeyMap.lookup "repositories" fields of
+      Nothing -> Right Map.empty
+      Just value -> case Aeson.fromJSON value :: Aeson.Result (Map Text Value) of
+        Aeson.Success table -> Right table
+        Aeson.Error _ ->
+          Left (malformed ("its repositories key holds " <> describedJson value <> " rather than a table of entries"))
     validated value = case parseEither parseMissionRunnerRecord value of
       Left message -> Left (malformed (withoutJsonPath (Text.pack message)))
       Right (Left message) -> Left (malformed message)

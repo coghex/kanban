@@ -267,9 +267,11 @@ how long to wait between them belong to the supervisor above it
 (`tools/mission_runner_service.py`), which runs either as a job installed per
 repository by `tools/install_mission_runner.py` or in the foreground, and which
 excludes the two from each other through one per-identity run lock. Kanban
-reads none of that yet: discovery, status decoding, and dashboard start/stop
-are a later slice's, so a job is installed and controlled from the command line
-(section 15).
+discovers that job, decodes the status document and incidents it publishes,
+starts and stops it, and replays a mission's own durable events from a cursor
+(section 15); what it does not yet do is render any of that or poll on a
+cadence of its own, so nothing on the board shows it and a job is still watched
+from the command line.
 
 A pass admits at most two missions, and the ceiling is a compiled value with no
 configuration surface; fair rotation, a configurable capacity, and priority for
@@ -3624,8 +3626,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   refresh never disturbs the service's own status: the durable warning or error
   it reported is what still stands after it.
 - The unattended mission runner is the third managed service, installed the same
-  way and discovered on the same terms, with none of the dashboard lifecycle
-  above yet: `tools/install_mission_runner.py` loads one stopped job per
+  way and discovered on the same terms, and read on them too — but with none of
+  the dashboard *lifecycle* above: no optimistic transition state, no busy
+  flag, and no poll of its own, for the reason the bullets after this one give.
+  `tools/install_mission_runner.py` loads one stopped job per
   canonical GitHub repository in a `mission-runner` namespace of its own,
   through `tools/mission_runner_service.py`'s own install, start, stop, and
   uninstall operations rather than by spawning the copy it installs, and it

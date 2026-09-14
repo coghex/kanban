@@ -261,6 +261,37 @@ recordDecodingSpec = describe "decoding the discovery record" $ do
     failure.missionRunnerRecordFailureCase `shouldBe` MissionRunnerRecordVersionUnknown
     failure.missionRunnerRecordFailureDetail `shouldMention` "2"
 
+  -- The discriminators are read before the payload, so a document a later
+  -- release wrote is reported as that even when this release's payload parser
+  -- can make nothing of what is beside them.
+  it "reports a declared schema or version ahead of a payload it cannot parse" $
+    forM_
+      [ (document ["\"schema\":\"future\"", "\"repositories\":[]"], MissionRunnerRecordSchemaUnknown),
+        (document ["\"version\":2", "\"repositories\":[]"], MissionRunnerRecordVersionUnknown),
+        (document ["\"schema\":\"future\"", "\"repositories\":null"], MissionRunnerRecordSchemaUnknown)
+      ]
+      $ \(body, expected) -> do
+        failure <- expectLeft (missionRunnerRecordFromBytes boardIdentity (ByteString.pack body))
+        failure.missionRunnerRecordFailureCase `shouldBe` expected
+
+  -- A `repositories` key holding something that is not a table was written by
+  -- something, so reading it as "nothing is installed" would send an operator
+  -- to install over a record that is already damaged.
+  it "reports a repositories key that is not a table as a damaged record" $
+    forM_ ["\"repositories\":null", "\"repositories\":[]", "\"repositories\":\"none\""] $ \entry -> do
+      failure <- expectLeft (missionRunnerRecordFromBytes boardIdentity (ByteString.pack (document [entry])))
+      failure.missionRunnerRecordFailureCase `shouldBe` MissionRunnerRecordUnreadable
+      failure.missionRunnerRecordFailureDetail `shouldMention` "repositories"
+
+  it "reads a document that simply holds no entries as no installation" $
+    forM_ [document [], document ["\"repositories\":" <> document []]] $ \body ->
+      missionRunnerRecordFromBytes boardIdentity (ByteString.pack body) `shouldBe` Right Nothing
+
+  it "reports a document that is not a JSON object at all as a damaged record" $ do
+    failure <- expectLeft (missionRunnerRecordFromBytes boardIdentity "[]")
+    failure.missionRunnerRecordFailureCase `shouldBe` MissionRunnerRecordUnreadable
+    failure.missionRunnerRecordFailureDetail `shouldMention` "not a JSON object"
+
   it "keeps the three record failures apart from one another and from an absent installation" $ do
     let cases =
           [ ("{not json", MissionRunnerRecordUnreadable),
