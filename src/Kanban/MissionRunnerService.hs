@@ -112,7 +112,7 @@ import qualified Data.Text.Encoding as Text
 import Kanban.ApprovalService (systemdUserManagerIsLive)
 import Kanban.Domain (Repository (..))
 import Kanban.Drainer (normalizedRepositoryIdentity, unitExecStartArguments)
-import Kanban.ManagedPaths (ManagedComponent (MissionRunnerComponent), managedRecordPath)
+import Kanban.ManagedPaths (ManagedComponent (MissionRunnerComponent), managedRecordPath, recordPathOccupied)
 import Kanban.Mission
   ( MissionId,
     MissionJournalLine,
@@ -129,6 +129,7 @@ import Kanban.Mission
     readMissionJournalSince,
     readMissionSealedArchives,
     readMissionSnapshot,
+    verifyMissionSealedArchive,
   )
 import Kanban.ServiceProcess
   ( diagnosticMessage,
@@ -137,7 +138,7 @@ import Kanban.ServiceProcess
     serviceTransitionCommand,
   )
 import Kanban.Text (sanitizeText, withoutJsonPath)
-import System.Directory (doesFileExist, findExecutable)
+import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
 import System.FilePath (isAbsolute)
 import System.Info (os)
@@ -525,7 +526,17 @@ resolveMissionRunnerDefinition detected identity recordPath =
             )
         )
     Just hostBackend -> do
-      recorded <- doesFileExist recordPath
+      -- Occupancy rather than readability, and the difference is the whole of
+      -- requirement 3's "never as an absent installation".
+      -- 'Kanban.ManagedPaths' selects this location precisely because
+      -- something is at it, a directory or a dangling link included, and never
+      -- falls through to the other candidate; a reader that asked
+      -- @doesFileExist@ would take that damaged record for no record at all,
+      -- report a service nobody installed, and leave the thing actually in the
+      -- way unmentioned. Only a path with nothing at all at it is an absent
+      -- installation here. What is wrong with an occupied one is the read's
+      -- answer, below.
+      recorded <- recordPathOccupied recordPath
       if not recorded
         then pure (Left notInstalled)
         else do
@@ -560,8 +571,12 @@ resolveMissionRunnerDefinition detected identity recordPath =
             <> missionRunnerReinstallHint
         )
 
+    -- The same distinction one level down: a definition path with nothing at
+    -- it is missing, and one occupied by something that is not a definition is
+    -- handed to the reader, whose own complaint says what is there. Both are
+    -- the unreadable-definition state; only one of them is "reinstall".
     definitionOf record = do
-      installed <- doesFileExist record.missionRunnerRecordDefinition
+      installed <- recordPathOccupied record.missionRunnerRecordDefinition
       pure $
         if installed
           then Right (record.missionRunnerRecordBackend, record.missionRunnerRecordDefinition)
@@ -625,8 +640,8 @@ unreadableMissionRunnerDefinition backend definition detail =
 -- something else, and appending a subcommand to whatever it does say would
 -- invoke an argument vector nobody planned.
 controllerFromMissionRunnerCommand ::
-  MissionRunnerBackend -> Repository -> [String] -> Either Text MissionRunnerController
-controllerFromMissionRunnerCommand backend repository arguments = case arguments of
+  MissionRunnerBackend -> FilePath -> Repository -> [String] -> Either Text MissionRunnerController
+controllerFromMissionRunnerCommand backend definition repository arguments = case arguments of
   executable : rawArguments
     | "run" `elem` rawArguments,
       leading <- takeWhile (/= "run") rawArguments,
@@ -639,7 +654,17 @@ controllerFromMissionRunnerCommand backend repository arguments = case arguments
               (normalizedRepositoryIdentity repository)
               backend
           )
-  _ -> Left (missionRunnerCommandField backend <> " do not identify the mission runner controller")
+  -- Reported through 'unreadableMissionRunnerDefinition' like every other way
+  -- a definition can fail to yield a controller, so the one state a caller
+  -- sees always names the file to go and look at and the command that repairs
+  -- it. A bare "these arguments do not identify the controller" names neither.
+  _ ->
+    Left
+      ( unreadableMissionRunnerDefinition
+          backend
+          definition
+          (missionRunnerCommandField backend <> " do not identify the mission runner controller")
+      )
 
 missionRunnerCommandField :: MissionRunnerBackend -> Text
 missionRunnerCommandField MissionRunnerLaunchd = "launchd ProgramArguments"
@@ -1161,9 +1186,15 @@ discoverMissionRunnerController repository = do
           Right (ExitFailure _, standardOutput, errors) ->
             Left (unreadableMissionRunnerDefinition MissionRunnerLaunchd plist (diagnosticMessage standardOutput errors))
         arguments <- case eitherDecode (LazyByteString.pack output) of
-          Left message -> Left ("could not decode launchd ProgramArguments: " <> Text.pack message)
+          Left message ->
+            Left
+              ( unreadableMissionRunnerDefinition
+                  MissionRunnerLaunchd
+                  plist
+                  ("its ProgramArguments did not decode: " <> Text.pack message)
+              )
           Right values -> Right values
-        controllerFromMissionRunnerCommand MissionRunnerLaunchd repository arguments
+        controllerFromMissionRunnerCommand MissionRunnerLaunchd plist repository arguments
     Right (MissionRunnerSystemd, unit) -> do
       contents <- try @IOException (ByteString.readFile unit)
       pure . asUnreadableDefinition $ do
@@ -1187,7 +1218,7 @@ systemdMissionRunnerControllerFromUnit repository unit text = do
   arguments <- case unitExecStartArguments text of
     Left message -> Left (unreadableMissionRunnerDefinition MissionRunnerSystemd unit message)
     Right values -> Right values
-  controllerFromMissionRunnerCommand MissionRunnerSystemd repository arguments
+  controllerFromMissionRunnerCommand MissionRunnerSystemd unit repository arguments
 
 -- * Replaying a mission's durable events
 
@@ -1280,8 +1311,16 @@ data MissionReplay = MissionReplay
 --
 -- A live source that has been collected falls back to the mission's sealed copy
 -- of it, resolved through the store rather than joined from the name the seal
--- carries. The seal is a copy of the whole source, so the cursor carries across
--- the switch unchanged and the reader continues exactly where it stopped.
+-- carries, and checked against the digest and byte length the seal records
+-- before a byte of it is believed. The seal is a copy of the whole source, so
+-- the cursor carries across the switch unchanged and the reader continues
+-- exactly where it stopped.
+--
+-- What cannot be read is reported rather than returned as nothing: an
+-- unreadable journal, an unreadable snapshot, a stream whose source is there
+-- and will not open, and an archive that does not match its seal each leave
+-- their own cursor exactly where it was, so the pass after this one reads
+-- precisely what this one could not.
 replayMissionRecord :: MissionStore -> MissionId -> MissionReplayCursor -> IO MissionReplay
 replayMissionRecord store mission cursor = do
   journalResult <- readMissionJournal store mission cursor.missionJournalConsumed
@@ -1310,7 +1349,17 @@ replayMissionRecord store mission cursor = do
         missionReplayCursor =
           MissionReplayCursor
             journalConsumed
-            (Map.fromList [advanced | (_, advanced, _) <- read']),
+            -- This pass's offsets over the ones it was given, not instead of
+            -- them. A pass that could not read the snapshot plans no streams
+            -- at all, and a cursor rebuilt from what it planned would drop
+            -- every offset the passes before it earned -- so the read after
+            -- the snapshot became readable again would replay each of those
+            -- streams from byte zero. 'Map.union' is left-biased, so a stream
+            -- this pass did read still supersedes its old entry.
+            ( Map.union
+                (Map.fromList [advanced | (_, advanced, _) <- read'])
+                cursor.missionStreamsConsumed
+            ),
         missionReplayFailures =
           journalFailures
             <> snapshotFailures
@@ -1382,17 +1431,35 @@ readPlannedStream store mission cursor planned = do
   live <- case planned.plannedStreamLive of
     Nothing -> pure Nothing
     Just path -> do
-      present <- doesFileExist path
+      -- Occupancy again, for the reason 'resolveMissionRunnerDefinition' gives:
+      -- the fallback below is for a source that has been *collected*, and a
+      -- source that is still there but cannot be read is not that. Reading it
+      -- and reporting the failure is what keeps a replaced or damaged live log
+      -- from being silently answered with an archive of some earlier one.
+      present <- recordPathOccupied path
       pure (if present then Just path else Nothing)
   case live of
     Just path -> consume (MissionStreamLive path) path
     Nothing -> case planned.plannedStreamSeal of
       Nothing -> pure (Nothing, (streamId, consumed), [])
       Just sealed -> do
-        resolved <- missionSealedArchivePath store mission sealed
-        case resolved of
+        -- Verified before a byte of it is emitted, and before the cursor moves
+        -- past one. A seal records the digest and the byte length of what was
+        -- copied, and the archive is the only copy left once the source has
+        -- been collected: an archive that is missing, truncated, or edited
+        -- would otherwise be replayed as this session's durable history, and
+        -- a missing one would be replayed as *nothing at all*, since an absent
+        -- file is an empty read rather than a failure. Re-read per pass rather
+        -- than remembered, because there is nowhere durable to remember it and
+        -- the caller decides how often this runs.
+        verified <- verifyMissionSealedArchive store mission sealed
+        case verified of
           Left message -> pure (Nothing, (streamId, consumed), [message])
-          Right path -> consume (MissionStreamSealed path) path
+          Right () -> do
+            resolved <- missionSealedArchivePath store mission sealed
+            case resolved of
+              Left message -> pure (Nothing, (streamId, consumed), [message])
+              Right path -> consume (MissionStreamSealed path) path
   where
     streamId = planned.plannedStreamId
     consumed = Map.findWithDefault 0 streamId cursor.missionStreamsConsumed

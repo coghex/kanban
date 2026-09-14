@@ -3889,11 +3889,13 @@ Defaults:
   release. The per-identity run lock beside them is what makes a second
   wrapper for one repository refuse rather than interleave, and the transition
   and per-installation link locks beside that one are what keep an install, a
-  start, a stop, and an uninstall of one job from interleaving. Nothing in
-  Kanban
-  reads any of it yet — discovery and decoding are a later slice's — so until
-  then the wrapper and its installer are the whole of the traffic. Three of its
-  commands are about this runtime:
+  start, a stop, and an uninstall of one job from interleaving. Kanban reads
+  this runtime through the reader section 15 describes: the status document and
+  the incidents beside it, each against the schema and version above, and a
+  mission's own journal and session logs from a cursor. It writes none of it,
+  takes no lock here, and its start and stop go through the wrapper's own
+  commands rather than around them. Three of those commands are about this
+  runtime:
   `run` writes the status document and opens an incident when a pass fails;
   `status` only reads, creating no directory, rewriting no document and
   resolving no incident, because it is the diagnostic reached for when the
@@ -4544,7 +4546,9 @@ and refuses a second wrapper for the same repository. That wrapper is now a
 managed job as well: `tools/install_mission_runner.py` installs one stopped job
 per canonical GitHub repository in a `mission-runner` namespace of its own,
 writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
-Decoding its runtime from the dashboard, capacity
+`Kanban.MissionRunnerService` discovers that job, decodes its status document
+and incidents, starts and stops it, and replays a mission's durable events from
+a cursor; rendering any of that, capacity
 arbitration, fair rotation, and descendant-tree termination are not
 implemented. Board frames are
 bounded as section 7 describes: each column is laid out once per change to what

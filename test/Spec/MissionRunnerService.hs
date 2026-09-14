@@ -48,6 +48,7 @@ import Kanban.Mission
     MissionTargetKind (..),
     acquireMissionLease,
     createMissionSpecification,
+    missionSealedArchivePath,
     openMissionStore,
     recordMissionEvent,
     releaseMissionLease,
@@ -62,7 +63,7 @@ import Spec.Support.Env
   )
 import Spec.Support.Expect (shouldMention, shouldNotMention)
 import Spec.Support.Process (fakeMissionRunnerController)
-import System.Directory (createDirectoryIfMissing, doesPathExist, removeFile)
+import System.Directory (createDirectoryIfMissing, createFileLink, doesPathExist, removeFile)
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.Files (setFileMode)
 import Test.Hspec
@@ -317,6 +318,41 @@ controllerDiscoverySpec = describe "discovering the installed job" $ do
       unavailable.missionRunnerUnavailableCase `shouldBe` MissionRunnerDefinitionUnreadable
       unavailable.missionRunnerUnavailableMessage `shouldMention` Text.pack installedPlist
 
+  -- The record's location is selected *because* something is at it, so a
+  -- damaged occupant is the one thing a reader must not take for an absent
+  -- installation: reporting "not installed" would send an operator to
+  -- reinstall over a path the installer itself refuses to write.
+  it "reports a record path occupied by a directory as unreadable, not as no installation" $
+    withTemporaryCacheRoot $ \root -> do
+      let recordPath = root </> "config.json"
+      createDirectoryIfMissing True recordPath
+      unavailable <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity recordPath
+      unavailable.missionRunnerUnavailableCase `shouldBe` MissionRunnerRecordUnreadable
+
+  it "reports a record path occupied by a link that follows to nothing the same way" $
+    withTemporaryCacheRoot $ \root -> do
+      let recordPath = root </> "config.json"
+      createFileLink (root </> "nothing-is-here") recordPath
+      unavailable <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity recordPath
+      unavailable.missionRunnerUnavailableCase `shouldBe` MissionRunnerRecordUnreadable
+
+  it "reads a record path with nothing at all at it as no installation" $
+    withTemporaryCacheRoot $ \root -> do
+      unavailable <-
+        expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity (root </> "absent.json")
+      unavailable.missionRunnerUnavailableCase `shouldBe` MissionRunnerJobNotInstalled
+
+  it "hands an occupied but unreadable definition to the reader rather than calling it missing" $
+    withTemporaryCacheRoot $ \root -> do
+      let recordPath = root </> "config.json"
+          definition = root </> "definition"
+      createDirectoryIfMissing True definition
+      ByteString.writeFile
+        recordPath
+        (recordFor "example/project" (map (rebindDefinition definition) systemdEntry))
+      resolved <- expectRight =<< resolveMissionRunnerDefinition (Just MissionRunnerSystemd) boardIdentity recordPath
+      resolved `shouldBe` (MissionRunnerSystemd, definition)
+
   it "reports a record describing the manager this host does not have" $
     withStagedRecord systemdEntry $ \recordPath _ -> do
       unavailable <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity recordPath
@@ -332,7 +368,7 @@ controllerDiscoverySpec = describe "discovering the installed job" $ do
     controller.missionRunnerControllerBackend `shouldBe` MissionRunnerSystemd
 
   it "rebinds the command to this dashboard's own checkout and identity" $ do
-    controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd boardRepository (installedCommand []))
+    controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd installedPlist boardRepository (installedCommand []))
     controller.missionRunnerControllerRepository `shouldBe` boardRepository.repositoryRoot
     controller.missionRunnerControllerIdentity `shouldBe` boardIdentity
     missionRunnerCommandArguments controller "status"
@@ -348,7 +384,7 @@ controllerDiscoverySpec = describe "discovering the installed job" $ do
   it "drops the definition's own subcommand and everything it carries for it" $ do
     controller <-
       expectRight
-        (controllerFromMissionRunnerCommand MissionRunnerLaunchd boardRepository (installedCommand ["--config", "/etc/kanban.toml"]))
+        (controllerFromMissionRunnerCommand MissionRunnerLaunchd installedPlist boardRepository (installedCommand ["--config", "/etc/kanban.toml"]))
     controller.missionRunnerControllerArguments `shouldBe` [installedController]
     missionRunnerCommandArguments controller "stop" `shouldNotContain` ["--config"]
     missionRunnerCommandArguments controller "stop" `shouldNotContain` ["run"]
@@ -358,17 +394,35 @@ controllerDiscoverySpec = describe "discovering the installed job" $ do
       expectRight
         ( controllerFromMissionRunnerCommand
             MissionRunnerLaunchd
+            installedPlist
             boardRepository
             [installedInterpreter, installedController, "--path", "/somewhere/else", "run", "--repo", "someone/else"]
         )
     controller.missionRunnerControllerArguments `shouldBe` [installedController]
     filter (== "--path") (missionRunnerCommandArguments controller "status") `shouldBe` ["--path"]
 
-  it "refuses a definition that names no run subcommand at all" $ do
+  it "refuses a definition that names no run subcommand at all, naming the file and the repair" $ do
     refusal <-
       expectLeft
-        (controllerFromMissionRunnerCommand MissionRunnerSystemd boardRepository [installedInterpreter, installedController])
+        (controllerFromMissionRunnerCommand MissionRunnerSystemd installedUnit boardRepository [installedInterpreter, installedController])
     refusal `shouldMention` "ExecStart"
+    refusal `shouldMention` Text.pack installedUnit
+    refusal `shouldMention` "install_mission_runner.py"
+
+  -- Every way a definition can fail to yield a controller reports the same
+  -- state and names the same two things. A refusal that named neither the file
+  -- nor the repair would be the one failure an operator could not act on.
+  it "names the definition and the repair for a command vector on either backend" $
+    forM_
+      [ (MissionRunnerLaunchd, installedPlist, [] :: [String]),
+        (MissionRunnerLaunchd, installedPlist, [installedInterpreter, installedController]),
+        (MissionRunnerSystemd, installedUnit, []),
+        (MissionRunnerSystemd, installedUnit, ["run", "--path", "/somewhere"])
+      ]
+      $ \(backend, definition, arguments) -> do
+        refusal <- expectLeft (controllerFromMissionRunnerCommand backend definition boardRepository arguments)
+        refusal `shouldMention` Text.pack definition
+        refusal `shouldMention` "install_mission_runner.py"
 
   it "refuses a unit whose ExecStart names nothing at all" $ do
     refusal <- expectLeft (systemdMissionRunnerControllerFromUnit boardRepository installedUnit "[Service]\nType=exec\n")
@@ -381,15 +435,28 @@ withStagedRecord :: [String] -> (FilePath -> FilePath -> IO result) -> IO result
 withStagedRecord entry action = withTemporaryCacheRoot $ \root -> do
   let recordPath = root </> "config.json"
       definition = root </> "definition"
-      recorded = map (rebind definition) entry
+      recorded = map (rebindDefinition definition) entry
   ByteString.writeFile definition "the installed job"
   ByteString.writeFile recordPath (recordFor "example/project" recorded)
   action recordPath definition
-  where
-    rebind definition field
-      | field == "\"plist_path\":\"" <> installedPlist <> "\"" = "\"plist_path\":\"" <> definition <> "\""
-      | field == "\"unit_path\":\"" <> installedUnit <> "\"" = "\"unit_path\":\"" <> definition <> "\""
-      | otherwise = field
+
+-- | The three ways a sealed archive can stop being what its seal recorded: it
+-- is gone, it is short, or its bytes changed. Each is something a reader that
+-- trusted the seal's name alone would replay as this session's own durable
+-- history — the first of them as no history at all.
+damagedArchives :: [(String, FilePath -> IO ())]
+damagedArchives =
+  [ ("a missing archive", removeFile),
+    ("a truncated archive", \path -> ByteString.writeFile path "on"),
+    ("an edited archive", \path -> ByteString.writeFile path "three\n")
+  ]
+
+-- | Re-points a record entry's definition path at one a fixture really made.
+rebindDefinition :: FilePath -> String -> String
+rebindDefinition definition field
+  | field == "\"plist_path\":\"" <> installedPlist <> "\"" = "\"plist_path\":\"" <> definition <> "\""
+  | field == "\"unit_path\":\"" <> installedUnit <> "\"" = "\"unit_path\":\"" <> definition <> "\""
+  | otherwise = field
 
 -- * Status decoding
 
@@ -613,7 +680,7 @@ everyUnavailableCase = withTemporaryCacheRoot $ \root -> do
   otherVersion <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity versionRecord
   otherManager <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity systemdRecord
   noDefinition <- expectLeft =<< resolveMissionRunnerDefinition (Just MissionRunnerLaunchd) boardIdentity missingDefinition
-  controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd boardRepository (installedCommand []))
+  controller <- expectRight (controllerFromMissionRunnerCommand MissionRunnerLaunchd installedPlist boardRepository (installedCommand []))
   stopped <- expectRight (decodeMissionRunnerStatus boardIdentity (acceptedStatus ["\"state\":\"stopped\""]))
   notRunning <- expectLeft (missionRunnerAvailability controller stopped.observedMissionRunnerStatus)
   -- Both ways of having no entry report the same case, which is the claim that
@@ -820,6 +887,67 @@ replaySpec = describe "replaying a mission's durable record" $ do
       [source | MissionStreamSealed source <- map (.missionStreamReplaySource) second.missionReplayStreams]
         `shouldSatisfy` ((== 1) . length)
 
+  -- A pass that cannot read the snapshot plans no streams at all. A cursor
+  -- rebuilt from what this pass planned would therefore throw away every
+  -- offset the passes before it earned, and the read after the snapshot came
+  -- back would replay the whole of each stream a second time.
+  it "keeps the offsets of streams a failed snapshot read left it unable to plan" $
+    withStore $ \root store -> do
+      let sessionLog = root </> "session.log"
+      ByteString.writeFile sessionLog "one\n"
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+        )
+      first <- replayMissionRecord store theMission emptyMissionReplayCursor
+      map (.missionStreamReplayLines) first.missionReplayStreams `shouldBe` [["one"]]
+      -- The snapshot becomes unreadable, and the log grows while it is.
+      ByteString.writeFile (missionSnapshotOf root) "{not a snapshot"
+      ByteString.appendFile sessionLog "two\n"
+      blind <- replayMissionRecord store theMission first.missionReplayCursor
+      blind.missionReplayStreams `shouldBe` []
+      blind.missionReplayFailures `shouldSatisfy` (not . null)
+      blind.missionReplayCursor.missionStreamsConsumed
+        `shouldBe` first.missionReplayCursor.missionStreamsConsumed
+      -- And when it comes back, only what was appended since is replayed.
+      void
+        ( expectRight
+            =<< writeMissionSnapshot
+              store
+              (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+        )
+      resumed <- replayMissionRecord store theMission blind.missionReplayCursor
+      map (.missionStreamReplayLines) resumed.missionReplayStreams `shouldBe` [["two"]]
+
+  -- The archive is the only copy left once the source is collected, so it is
+  -- exactly the thing a reader must not believe on the strength of its name.
+  it "refuses a sealed archive that is not what its seal recorded" $
+    forM_ (damagedArchives :: [(String, FilePath -> IO ())]) $ \(_shape, damage) ->
+        withStore $ \root store -> do
+          let sessionLog = root </> "session.log"
+          ByteString.writeFile sessionLog "one\n"
+          void
+            ( expectRight
+                =<< writeMissionSnapshot
+                  store
+                  (snapshotWith [sessionWith "session-a" Nothing (Just (MissionLogReference sessionLog MissionEventStreamLog))])
+            )
+          sealed <- expectRight =<< sealMissionLog store theMission (MissionSessionId "session-a") MissionEventStreamLog sessionLog
+          removeFile sessionLog
+          archive <- expectRight =<< missionSealedArchivePath store theMission sealed
+          damage archive
+          replayed <- replayMissionRecord store theMission emptyMissionReplayCursor
+          replayed.missionReplayStreams `shouldBe` []
+          replayed.missionReplayFailures `shouldSatisfy` (not . null)
+          -- And the cursor is exactly where it was, so a repaired archive is
+          -- replayed whole rather than from wherever a believed read left off.
+          Map.lookup
+            (MissionStreamId (MissionSessionId "session-a") MissionEventStreamLog)
+            replayed.missionReplayCursor.missionStreamsConsumed
+            `shouldBe` Just 0
+
   it "reports one unreadable stream without hiding what the others appended, and keeps its cursor" $
     withStore $ \root store -> do
       let readable = root </> "readable.log"
@@ -914,6 +1042,9 @@ missionDirectoryOf root =
 
 missionJournalOf :: FilePath -> FilePath
 missionJournalOf root = missionDirectoryOf root </> "events.jsonl"
+
+missionSnapshotOf :: FilePath -> FilePath
+missionSnapshotOf root = missionDirectoryOf root </> "snapshot.json"
 
 missionLeaseOf :: FilePath -> FilePath
 missionLeaseOf root = missionDirectoryOf root </> "lease"
