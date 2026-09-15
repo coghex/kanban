@@ -4,7 +4,7 @@
 module Spec.Agent.ManagedProcess.Lifecycle (examples) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Exception (finally, throwIO)
+import Control.Exception (SomeException, finally, throwIO, try)
 import Control.Monad (void, when)
 import Data.Aeson (eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Char8 as ByteString
@@ -27,6 +27,7 @@ import Kanban.Process
     interruptManagedProcess,
     killManagedProcess,
     killVerifiedGroupWith,
+    reapManagedHandle,
     liveProcesses,
     managedProcess,
     managedProcessGroup,
@@ -106,11 +107,12 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
-import System.Posix.Process (getProcessID)
+import System.Posix.Process (ProcessStatus (..), getProcessID, getProcessStatus)
 import System.Posix.Signals (raiseSignal, sigKILL, sigTERM, signalProcessGroup)
 import System.Process
   ( CreateProcess (..),
     createProcess,
+    getPid,
     getProcessExitCode,
     proc,
     waitForProcess
@@ -149,6 +151,54 @@ examples = do
         groupLeaderProblem `shouldSatisfy` isJust
         killManagedProcess managed
         timeout 3000000 (waitForProcess process) `shouldReturn` Just (ExitFailure (-9))
+
+    -- Issue #692. A wait that finds no child to collect used to raise out of
+    -- a reap whose whole purpose was to leave nothing behind. The state is
+    -- reachable from outside this handle -- a child collected by anything
+    -- that is not a wait on the handle itself leaves it there -- and reaching
+    -- it is not a failure of the request that got there.
+    --
+    -- Produced out of band rather than by racing anything, so the case is
+    -- exercised every run and so that what it exercises is unambiguous:
+    -- collecting the child directly leaves this process with no such child to
+    -- wait for, which is the state under test. This says nothing about how
+    -- two waits on one handle behave -- the test above waits twice on one
+    -- handle in sequence and gets the recorded status back.
+    it "reports no exit status, rather than raising, when the child is already collected" $
+      withManagedShell "exit 7" $ \process -> do
+        managed <- managedProcessFor process
+        pid <- getPid process >>= requireJust "the managed shell reported no pid"
+        getProcessStatus True False pid `shouldReturn` Just (Exited (ExitFailure 7))
+        timeout 3000000 (reapManagedHandle process) `shouldReturn` Just Nothing
+        -- And the primitive every caller shares survives the same outcome,
+        -- which is the escape this issue was filed for.
+        timeout 3000000 (killManagedProcess managed) `shouldReturn` Just ()
+
+    -- Concurrency coverage rather than a claim about it: a wait and a
+    -- termination run together against one live handle, and what is asserted
+    -- is only that both finish and neither raises. Which of them collects the
+    -- child, and whether the other is answered from the recorded status or
+    -- finds none, is deliberately not asserted -- that is the scheduler's,
+    -- and the forced case above is where the no-child outcome is actually
+    -- pinned down.
+    --
+    -- Both outcomes are captured rather than assumed, because a thread that
+    -- died is otherwise indistinguishable from one that finished, and the
+    -- whole thing is bounded so a wait that never returns fails instead of
+    -- hanging.
+    it "runs a wait and a termination together against one live handle without either raising" $
+      withManagedShell "sleep 30" $ \process -> do
+        managed <- managedProcessFor process
+        waiting <- newEmptyMVar
+        terminating <- newEmptyMVar
+        void (forkIO (try @SomeException (reapManagedHandle process) >>= putMVar waiting))
+        void (forkIO (try @SomeException (killManagedProcess managed) >>= putMVar terminating))
+        outcomes <- timeout 20000000 ((,) <$> takeMVar waiting <*> takeMVar terminating)
+        case outcomes of
+          Nothing -> expectationFailure "the concurrent wait and termination did not both finish"
+          Just (Left failure, _) -> expectationFailure ("the wait raised: " <> show failure)
+          Just (_, Left failure) -> expectationFailure ("the termination raised: " <> show failure)
+          Just (Right _, Right ()) -> pure ()
 
     it "excludes a killed process from a snapshot even before its parent reaps it" $
       withManagedShell "trap '' TERM; while :; do sleep 1; done" $ \process -> do

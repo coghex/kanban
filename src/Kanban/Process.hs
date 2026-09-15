@@ -17,6 +17,7 @@ module Kanban.Process
     interruptManagedProcess,
     interruptThenKillManagedProcess,
     killManagedProcess,
+    reapManagedHandle,
     killVerifiedGroup,
     killVerifiedGroupWith,
     liveProcesses,
@@ -34,7 +35,7 @@ module Kanban.Process
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, catchJust, try)
 import Control.Monad (void, when)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.List (find)
@@ -393,23 +394,62 @@ interruptThenKillManagedProcess process = do
   threadDelay terminationGraceMicros
   killManagedProcess process
 
+-- | Reap a handle for its exit status, or report that there was no child
+-- left to reap.
+--
+-- Waiting is how a caller here says "leave nothing behind", and a wait that
+-- finds no child to collect has reached that state rather than failed to.
+-- @ECHILD@ reaches Haskell as a does-not-exist 'IOError', and it says only
+-- that this process has no such child to wait for — not who collected it,
+-- or whether there ever was one. A reaper does not need to know: either way
+-- there is nothing left of it, which is what it was asking for. So that one
+-- outcome produces 'Nothing' instead of an exception.
+--
+-- Defensive rather than diagnostic. This does not assert how a handle comes
+-- to be in that state, and it is not a claim that two waits on one
+-- 'ProcessHandle' race each other — the tests below wait twice on one handle
+-- in sequence and get the recorded status back the second time. It is the
+-- ordinary robustness a shared termination primitive owes: the state is
+-- reachable, and reaching it must not raise out of a caller whose request
+-- has in fact been satisfied.
+--
+-- Narrow on purpose. Only the does-not-exist outcome is absorbed: every
+-- other 'IOError' is a reap that genuinely failed and still propagates, and
+-- an asynchronous cancellation delivered to a thread parked in here is not
+-- an 'IOError' this predicate accepts, so a shutdown still interrupts a
+-- wait rather than being swallowed by it.
+reapManagedHandle :: ProcessHandle -> IO (Maybe ExitCode)
+reapManagedHandle processHandle =
+  catchJust
+    (\failure -> if isDoesNotExistError failure then Just () else Nothing)
+    (Just <$> waitForProcess processHandle)
+    (\() -> pure Nothing)
+
 -- | TERM, a grace period, then KILL — signalling the pgid captured at spawn
 -- time regardless of whether the leader's own handle has already been
 -- reaped, so a leader that exited (naturally or otherwise) before this ran
 -- never leaves a surviving group member unsignalled. This is deliberately
 -- unconditional: confirming the group is actually empty first would need a
 -- process-table census, which is out of scope for this best-effort
--- ownership mechanism (see issue #16). 'waitForProcess', not the
--- non-blocking 'getProcessExitCode', reaps the handle last: SIGKILL cannot
+-- ownership mechanism (see issue #16). The reap comes last, and through
+-- 'reapManagedHandle' rather than 'waitForProcess' directly: SIGKILL cannot
 -- be caught or deferred, so the leader (if it was ever actually still
 -- running) dies essentially immediately, and this blocks only long enough
 -- to guarantee it is actually reaped rather than possibly left a zombie.
+--
+-- The non-blocking 'getProcessExitCode' is still not what this wants, and
+-- neither is a bare wait. This primitive is shared — the review client
+-- reaches it from a connection's shutdown, the same connection's watcher
+-- waits on that connection's handle, and a short-lived command reaches it
+-- from several completion paths — so it has to be callable against a handle
+-- whose child is already gone. A caller here asked for a process that is
+-- over and has one; an exit status it cannot be told is not an error.
 killManagedProcess :: ManagedProcess -> IO ()
 killManagedProcess (LocalManagedProcess processHandle capturedPid) = do
   signalOwnedGroup sigTERM processHandle capturedPid
   threadDelay terminationGraceMicros
   signalOwnedGroup sigKILL processHandle capturedPid
-  void (waitForProcess processHandle)
+  void (reapManagedHandle processHandle)
 killManagedProcess (PersistentManagedProcess processId) = do
   ignoreIOException (signalProcessGroup sigTERM processId)
   threadDelay terminationGraceMicros

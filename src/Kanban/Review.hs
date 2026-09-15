@@ -41,6 +41,7 @@ module Kanban.Review
     ReviewApproval (..),
     ReviewChoice (..),
     ReviewClient,
+    PendingRequest (..),
     ReviewConnection (..),
     ReviewEvent (..),
     ReviewLaunch (..),
@@ -104,11 +105,13 @@ module Kanban.Review
     killThreadToolProcesses,
     missingEmbeddedReviewMessage,
     newRecordingReviewClientForTesting,
+    newRecordingReviewClientLoggingForTesting,
     newReviewClientForTesting,
     reviewClientLogPath,
     reviewConnectionProcesses,
     reviewThreadOwnProcesses,
     reviewConnectionsForTesting,
+    watchServerProcess,
     reviewDeveloperInstructions,
     newToolRegistry,
     outcomeUnknownDiagnostic,
@@ -173,7 +176,7 @@ import Kanban.Models
     assignmentFor,
     assignmentUnavailableMessage,
   )
-import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess, reapManagedHandle)
 import Kanban.ProviderAdapter
   ( EmbeddedReviewBackend (..),
     ProviderAdapter (..),
@@ -339,7 +342,6 @@ import System.Process
     createPipe,
     createProcess,
     proc,
-    waitForProcess,
   )
 import System.Timeout (timeout)
 
@@ -846,7 +848,24 @@ reviewClientLogPath client = sessionLogPath <$> client.reviewSessionLog
 -- | A 'newReviewClientForTesting' whose one connection records what the
 -- client writes to it.
 newRecordingReviewClientForTesting :: ModelRoster -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
-newRecordingReviewClientForTesting roster eventSink = do
+newRecordingReviewClientForTesting roster = newRecordingReviewClientLoggingForTesting roster SharedProcess Nothing
+
+-- | As 'newRecordingReviewClientForTesting', but against a session log the
+-- caller opened.
+--
+-- The testing clients carry no log by default, because almost nothing they
+-- are used for reads one. What does is a connection's end: the entry naming
+-- how the backend finished is written there and nowhere else, so a test that
+-- has to prove that entry says what it should -- and that there is exactly
+-- one of it -- needs a client whose log it can read back.
+--
+-- The shape is the caller's too, because what a connection's end reports
+-- depends on it: a shared-process client's connection ending is the client
+-- ending, while one of a per-thread client's connections ending settles just
+-- the starts and turns that were on it. A test about that settlement has to
+-- be able to ask for the shape that makes it.
+newRecordingReviewClientLoggingForTesting :: ModelRoster -> ReviewProcessShape -> Maybe SessionLog -> (ReviewEvent -> IO ()) -> IO (ReviewClient, Handle)
+newRecordingReviewClientLoggingForTesting roster processShape sessionLog eventSink = do
   connections <- newConnectionPool
   activeTurns <- newMVar Map.empty
   interrupts <- newMVar Map.empty
@@ -855,7 +874,7 @@ newRecordingReviewClientForTesting roster eventSink = do
   toolProxies <- newMVar Map.empty
   let client =
         ReviewClient
-          { reviewBackend = placeholderReviewBackend,
+          { reviewBackend = placeholderReviewBackend {backendProcessShape = processShape},
             reviewProcessRegistered = \_ _ -> pure (),
             reviewConnections = connections,
             reviewActiveTurns = activeTurns,
@@ -868,7 +887,7 @@ newRecordingReviewClientForTesting roster eventSink = do
             reviewRepositorySlug = "coghex/kanban",
             reviewWorkflowConfig = defaultWorkflowConfig,
             reviewModelRoster = roster,
-            reviewSessionLog = Nothing,
+            reviewSessionLog = sessionLog,
             reviewCommandBounds = githubCommandBounds,
             reviewClaudeBounds = githubCommandBounds
           }
@@ -1664,14 +1683,34 @@ takeConnectionTurns client connection =
     let (mine, rest) = Map.partitionWithKey (\threadId _ -> threadId.reviewThreadConnection == connection.connectionId) turns
      in pure (rest, Map.keys mine)
 
+-- | Wait out one connection's provider process, then end the connection.
+--
+-- The wait is 'reapManagedHandle' rather than a bare 'waitForProcess'
+-- because of what hangs below it. Everything this function does after the
+-- wait is the connection's end: the cleanup, its removal from the pool, the
+-- turns waiting to be failed, and the one signal 'stopReviewClient' blocks
+-- on. A wait that raised would take all of it, so a child this process has
+-- no wait left to make would not merely cost an exit status — it would
+-- leave a shutdown that never finishes.
+--
+-- That state is reachable rather than hypothetical: this connection's
+-- child is also reached by 'terminalConnectionCleanup', from here and from
+-- the output reader's terminal path. Whether those can arrive in an order
+-- that leaves this wait with nothing to collect is not something this
+-- function needs to decide — it is cheap to be right either way, and
+-- expensive to be wrong.
+--
+-- What the case costs is the exit status alone. A status this connection
+-- cannot be told is one it does not report, rather than one it invents.
 watchServerProcess :: ReviewClient -> ReviewConnection -> IO ()
 watchServerProcess client connection = do
-  exitCode <- waitForProcess connection.connectionProcess
+  exitStatus <- reapManagedHandle connection.connectionProcess
+  let ending = renderConnectionEnd client exitStatus
   terminalConnectionCleanup client connection
   takeMVar connection.connectionOutputDone
   takeMVar connection.connectionErrorDone
   takeConnection client.reviewConnections connection.connectionId
-  mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" (renderExitCode client exitCode)) client.reviewSessionLog
+  mapM_ (\sessionLog -> logMessage sessionLog "backend-finished" ending) client.reviewSessionLog
   -- The transcript records the client's whole session rather than one
   -- process's share of it, so it is closed when the client is finished. A
   -- shared-process client is finished exactly here, when the connection every
@@ -1680,7 +1719,7 @@ watchServerProcess client connection = do
   -- transcript open for the reviews still to come, so 'stopReviewClient'
   -- closes that one.
   when (client.reviewBackend.backendProcessShape == SharedProcess) (closeReviewLog client.reviewSessionLog)
-  reportConnectionStopped client connection (renderExitCode client exitCode)
+  reportConnectionStopped client connection ending
   -- Last, and after both reader signals above: this is the one signal
   -- 'stopReviewClient' waits on, so it must not be filled while any of this
   -- connection's loops could still run.
@@ -2056,6 +2095,19 @@ decodeLine = Text.stripEnd . TextEncoding.decodeUtf8With lenientDecode . LazyByt
 renderExitCode :: ReviewClient -> ExitCode -> Text
 renderExitCode client ExitSuccess = backendSentence client <> " exited"
 renderExitCode client (ExitFailure code) = backendSentence client <> " exited with status " <> Text.pack (show code)
+
+-- | How a connection's end reads, including the end whose status nobody here
+-- can name.
+--
+-- A child this process never observed exiting has no status to report, and
+-- the one thing that must not happen is a number being chosen for it: a
+-- substituted success would read as a clean shutdown and a substituted
+-- failure as a crash, and the session log is the record an operator goes to
+-- precisely when they cannot tell which it was.
+renderConnectionEnd :: ReviewClient -> Maybe ExitCode -> Text
+renderConnectionEnd client (Just exitCode) = renderExitCode client exitCode
+renderConnectionEnd client Nothing =
+  backendSentence client <> " ended, and its exit status was not available: it had already been reaped."
 
 -- | The backend's label at the start of a sentence.
 backendSentence :: ReviewClient -> Text
