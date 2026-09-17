@@ -803,31 +803,45 @@ lifecycleSpec = describe "one running host" $ do
           length observed `shouldBe` 2
           ("state absent or undecodable" `isInfixOf` describeUnsettled unsettled) `shouldBe` True
 
-    it "does not report a child that terminalized after the bound ran out" $
+    -- Round 2's blocker. The first attempt at this raced a forked writer
+    -- against the bound and, because the bound elapses in about 25ms while the
+    -- writer slept 60ms, never once reached the branch it existed to cover.
+    -- The observation sequence is scripted instead, so the window is not
+    -- waited for at all.
+    let scriptedObserver script = do
+          remaining <- newMVar script
+          let observe _ =
+                modifyMVar remaining $ \unread -> case unread of
+                  [] -> fail "the teardown probed more times than the script allows"
+                  next : rest -> pure (rest, next)
+          pure (observe, readMVar remaining)
+
+    it "drops a child that reached a terminal state only on the final read" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          -- The boundary: the last in-bound probe sees a running child, and the
-          -- child reaches its terminal state before the final read. It settled,
-          -- late, so it is not reported at all -- reporting it would print
-          -- "did not reach a terminal state within the bound: late-action
-          -- (terminal)", a contradiction of exactly the kind this change exists
-          -- to stop producing.
-          late <- seedChild "late-action" (Just WorkerRunning)
-          now <- getCurrentTime
-          settleAfterBound <-
-            forkIO
-              ( do
-                  threadDelay 60000
-                  writeChildState late (runningChildState late now) {workerStateStatus = WorkerTerminal SolveCompleted}
-              )
-          unsettled <- endEveryChildWithin 1 testRepository
-          killThread settleAfterBound
-          -- Whichever side of the boundary the write landed on, the one thing
-          -- that must never appear is a terminal child in an unsettled report.
-          final <- decodeChildState late
-          case fmap (.workerStateStatus) final of
-            Just (WorkerTerminal _) -> unsettled `shouldBe` []
-            _ -> map (.unsettledChildId) unsettled `shouldBe` [WorkerId "late-action"]
+          _ <- seedChild "late-action" (Just WorkerRunning)
+          -- Two in-bound probes at `attempts = 1`, then the final read. Running
+          -- for both probes and terminal for the read is precisely the boundary
+          -- transition: the child settled late, so nothing is reported.
+          (observe, leftover) <- scriptedObserver [ChildLastSeen WorkerRunning, ChildLastSeen WorkerRunning, ChildSettled]
+          unsettled <- endEveryChildObservedBy observe 1 testRepository
+          unsettled `shouldBe` []
+          -- Exhausted, which is what proves the final read happened at all: a
+          -- run that stopped at the bound would leave ChildSettled unconsumed
+          -- and pass the assertion above for the wrong reason.
+          leftover >>= (`shouldBe` [])
+
+    it "still reports a child that is non-terminal on the final read too" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          _ <- seedChild "stuck-action" (Just WorkerRunning)
+          -- The same sequence but for the last element, so the pair isolates
+          -- the final read as the only thing that decides between them.
+          (observe, leftover) <- scriptedObserver [ChildLastSeen WorkerRunning, ChildLastSeen WorkerRunning, ChildLastSeen WorkerRunning]
+          unsettled <- endEveryChildObservedBy observe 1 testRepository
+          map (.unsettledChildId) unsettled `shouldBe` [WorkerId "stuck-action"]
+          map (.unsettledChildObservation) unsettled `shouldBe` [LastSeen WorkerRunning]
+          leftover >>= (`shouldBe` [])
 
     it "reports nothing when every child recorded a terminal state" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -2586,7 +2600,19 @@ endEveryChild = endEveryChildWithin defaultPollAttempts
 -- is exactly what the caller must not go on to describe as the host failing
 -- to exit.
 endEveryChildWithin :: Int -> Repository -> IO [UnsettledChild]
-endEveryChildWithin attempts repository = do
+endEveryChildWithin = endEveryChildObservedBy observeChild
+
+-- | 'endEveryChildWithin' with the observation itself injected.
+--
+-- The seam exists for one case that timing cannot reach deterministically: a
+-- child that is non-terminal on every in-bound probe and terminal on the final
+-- read. Waiting for that window in real time is a race — the bound is two
+-- probes about 25ms apart — so the sequence is scripted instead, and the
+-- branch that drops a late settle is exercised on purpose rather than by luck.
+-- Every caller but that test passes 'observeChild'.
+endEveryChildObservedBy ::
+  (WorkerDescriptor -> IO ChildObservation) -> Int -> Repository -> IO [UnsettledChild]
+endEveryChildObservedBy observe attempts repository = do
   history <- discoverWorkerHistory repository
   let children = issueActionsIn history
   sequence_
@@ -2610,7 +2636,7 @@ endEveryChildWithin attempts repository = do
           -- reported at all. Reporting it would print "never recorded a
           -- terminal state: <id> (terminal)", which is the same shape of false
           -- diagnostic this whole change exists to remove.
-          final <- observeChild descriptor
+          final <- observe descriptor
           pure $ case final of
             ChildSettled -> Nothing
             ChildLastSeen status -> Just (reported descriptor (LastSeen status))
@@ -2621,15 +2647,18 @@ endEveryChildWithin attempts repository = do
           unsettledChildObservation = observation
         }
     settledOnly descriptor = do
-      observed <- observeChild descriptor
+      observed <- observe descriptor
       pure (if observed == ChildSettled then Just () else Nothing)
-    observeChild descriptor = do
-      recorded <- decodeChildState descriptor
-      pure $ case recorded of
-        Nothing -> ChildStateUnavailable
-        Just state
-          | terminalState state.workerStateStatus -> ChildSettled
-          | otherwise -> ChildLastSeen state.workerStateStatus
+
+-- | What one read of a child's recorded state saw.
+observeChild :: WorkerDescriptor -> IO ChildObservation
+observeChild descriptor = do
+  recorded <- decodeChildState descriptor
+  pure $ case recorded of
+    Nothing -> ChildStateUnavailable
+    Just state
+      | terminalState state.workerStateStatus -> ChildSettled
+      | otherwise -> ChildLastSeen state.workerStateStatus
 
 -- | The teardown's report for children that never settled.
 describeUnsettled :: [UnsettledChild] -> String
