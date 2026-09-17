@@ -579,10 +579,26 @@ CLEANUP = {
     "remove the worktree": (
         "**Remove the temporary worktree** — when step 4 created it:"
     ),
-    "remove only the scratch directories this run made": (
-        "**Remove the scratch directories this invocation made**, naming only "
-        "the variables it actually set — `$REVIEW_ROOT` from step 4, "
-        "`$SCRATCH` from step 1:"
+    "the worktree's scratch goes only after it does": (
+        "**Remove its scratch directory — only once that removal succeeded:**"
+    ),
+    "why a failed removal keeps its directory": (
+        "`$REVIEW_ROOT` *contains* `$REVIEW_WT`, so removing it after a failed "
+        "`worktree remove` would delete the very worktree the previous step "
+        "just reported it had retained"
+    ),
+    "a partial removal ends either way": (
+        "A partial removal can end either way, with the record dropped and the "
+        "tree still on disk or both still there, so neither is assumed."
+    ),
+    "a failed removal reports the repair": (
+        "When step 3 fails, keep `$REVIEW_ROOT`, report it by path, and say "
+        'that `git -C "$ROOT" worktree prune` is what clears any record still '
+        "naming it once the directory itself is dealt with."
+    ),
+    "the inventory scratch is independent": (
+        "`$SCRATCH` never holds a worktree, so this step is independent of "
+        "every one above it and runs whatever they did."
     ),
     "never derive a removal target": (
         "**Never derive a removal target from another path**: `dirname` of a "
@@ -622,8 +638,15 @@ CLEANUP_COMMANDS = (
     'python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"',
     'python3 "$LEDGER" release --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$TOKEN"',
     'git -C "$ROOT" worktree remove --force "$REVIEW_WT"',
-    'rm -rf "$REVIEW_ROOT" "$SCRATCH"',
+    'rm -rf "$REVIEW_ROOT"',
+    'rm -rf "$SCRATCH"',
 )
+
+# The spelling that made the retained-path rule unkeepable: `$REVIEW_ROOT`
+# contains `$REVIEW_WT`, so one removal covering both deletes the worktree that
+# `git worktree remove` had just failed to remove -- and leaves Git's own
+# record pointing at a directory that is gone.
+REFUSED_COMBINED_REMOVAL = 'rm -rf "$REVIEW_ROOT" "$SCRATCH"'
 
 # A removal target built out of another path. `dirname` of an unset variable is
 # `.`, so a cleanup that derived its scratch parents this way would recursively
@@ -697,6 +720,28 @@ LEGACY_HANDLING = {
 # Requirement 4: what an earlier finding's return does to this review's report,
 # and what a fix link costs before it may be recorded.
 FINDING_HISTORY = {
+    "the history is read under the claim": (
+        "**Read the ledger again for that history, now that the claim is "
+        "held:**"
+    ),
+    "the pre-claim read is not that history": (
+        "The read before the migration step is not that history. It was taken "
+        "before the inventory and before the claim, and between the two another "
+        "invocation can have recorded a review of this very pull request and "
+        "linked a report to it; on a repository that migrated in this run it "
+        "held no rows at all."
+    ),
+    "a stale snapshot files somebody else's finding again": (
+        "A finding compared against that snapshot is a finding compared "
+        "against a row that has since moved, and the entry it then files is "
+        "the second copy of somebody else's."
+    ),
+    "the claim is what makes the row stable": (
+        "The claim is what makes this row stable — nobody else can record "
+        "against it while this invocation holds it — so the read taken after "
+        "it is the one that can be trusted, and `claim`'s own payload does not "
+        "carry the row's history."
+    ),
     "new": (
         "**New** — no earlier report for this pull request describes it. It may "
         "produce a new report entry."
@@ -1583,6 +1628,43 @@ class LedgerWorkflowTests(unittest.TestCase):
                 # And the prose says why, so the next author does not read the
                 # local symref back in as a simplification.
                 self.assertIn("refs/remotes/origin/HEAD", content)
+
+    def test_the_dedup_history_is_read_after_the_claim(self):
+        # Round 2's blocker: the read taken before the inventory is a snapshot
+        # of a row anyone could still record against. The ordering is what is
+        # pinned -- the second `read` sits after the claim and inside step 6 --
+        # because both reads are the same command and a substring check cannot
+        # tell them apart.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            reads = [
+                match.start()
+                for match in re.finditer(re.escape(LEDGER_INVOCATIONS[0]), content)
+            ]
+            with self.subTest(asset=relative_path):
+                self.assertEqual(len(reads), 2, reads)
+                claim = content.index(LEDGER_INVOCATIONS[2])
+                self.assertLess(reads[0], claim)
+                self.assertGreater(reads[1], claim)
+                self.assertGreater(
+                    reads[1],
+                    content.index(
+                        "### 6. Verify each finding against the pinned tree"
+                    ),
+                )
+
+    def test_a_failed_worktree_removal_keeps_its_own_scratch_directory(self):
+        # Round 2's blocker: `$REVIEW_ROOT` contains `$REVIEW_WT`, so one
+        # removal covering both scratch directories deletes the worktree the
+        # step before it had just reported retaining.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(REFUSED_COMBINED_REMOVAL, content)
+                self.assertLess(
+                    content.index('git -C "$ROOT" worktree remove'),
+                    content.index('rm -rf "$REVIEW_ROOT"'),
+                )
 
     def test_no_removal_target_is_derived_from_another_path(self):
         # The other half of the round-1 cleanup blocker: `dirname` of a
@@ -3054,9 +3136,12 @@ def asset_command(relative_path: str, prefix: str) -> str:
     invocation is drift, not a detail.
     """
     found = asset_commands_starting(relative_path, prefix)
-    if len(found) != 1:
+    # The same invocation may legitimately appear twice -- `read` is made once
+    # before the migration decision and again under the claim -- so identical
+    # matches are one command. Two *different* ones are drift.
+    if len(set(found)) != 1:
         raise AssertionError(
-            f"{relative_path} spells {len(found)} commands starting {prefix!r}: {found}"
+            f"{relative_path} spells {len(set(found))} commands starting {prefix!r}: {found}"
         )
     return found[0]
 
@@ -3843,19 +3928,80 @@ class EarlyExits(WorkflowRunCase):
         cwd = self.workflow.base / "working-directory"
         cwd.mkdir()
         (cwd / "keep.md").write_text("not this\n", encoding="utf-8")
-        command = asset_command(self.workflow.asset, "rm -rf")
-        self.assertNotIn("dirname", command)
-        completed = subprocess.run(
-            ["sh", "-c", command],
-            cwd=str(cwd),
-            env=dict(self.workflow.env, SCRATCH=str(scratch), REVIEW_ROOT=""),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        for prefix in ('rm -rf "$REVIEW_ROOT"', 'rm -rf "$SCRATCH"'):
+            command = asset_command(self.workflow.asset, prefix)
+            self.assertNotIn("dirname", command)
+            completed = subprocess.run(
+                ["sh", "-c", command],
+                cwd=str(cwd),
+                env=dict(self.workflow.env, SCRATCH=str(scratch), REVIEW_ROOT=""),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            with self.subTest(command=prefix):
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertTrue((cwd / "keep.md").is_file())
         self.assertFalse(scratch.exists())
         self.assertTrue((cwd / "keep.md").is_file())
+
+
+class CleanupFailure(WorkflowRunCase):
+    """Round 2's blocker: a removal that failed retains what it could not remove."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+
+    def test_a_failed_worktree_removal_retains_the_directory_it_named(self):
+        # The removal is made to fail for real -- the scratch parent loses its
+        # write permission, so `git worktree remove` cannot unlink the tree --
+        # and then the asset's own two removal lines are run in the order it
+        # spells them. `$REVIEW_ROOT` survives, with the worktree and Git's
+        # record of it both intact, and `$SCRATCH` goes anyway.
+        pin, review_wt = self.workflow.pin()
+        review_root = review_wt.parent
+        scratch = self.workflow.base / "scratch-independent"
+        scratch.mkdir()
+        (scratch / "inventory.json").write_text("{}", encoding="utf-8")
+        mode = review_root.stat().st_mode
+        os.chmod(review_root, 0o500)
+
+        def restore():
+            # Suppressed because the body below removes the directory on the
+            # way out; this is the safety net for a failure before that.
+            with contextlib.suppress(FileNotFoundError):
+                os.chmod(review_root, mode)
+
+        self.addCleanup(restore)
+
+        removal = self.workflow.sh(
+            asset_command(self.workflow.asset, 'git -C "$ROOT" worktree remove'),
+            check=False,
+            REVIEW_WT=str(review_wt),
+        )
+        self.assertNotEqual(removal.returncode, 0, removal.stdout)
+        # Step 4 is conditional on that success, so it does not run and the
+        # worktree is still on disk to be reported. Whether Git's own record
+        # survived the partial removal is Git's business and varies -- here it
+        # dropped the record first and then failed to unlink the tree -- which
+        # is exactly why the asset assumes neither and names `worktree prune`
+        # as the repair for a record that did survive.
+        self.assertTrue(review_wt.is_dir())
+        # Step 5 is independent of both, and still removes the inventory's own
+        # scratch directory.
+        self.workflow.sh(
+            asset_command(self.workflow.asset, 'rm -rf "$SCRATCH"'), SCRATCH=str(scratch)
+        )
+        self.assertFalse(scratch.exists())
+        self.assertTrue(review_wt.is_dir())
+
+        # Tidying up after a deliberately broken removal is this test's own
+        # business, not the workflow's: the record is already gone here, so
+        # `worktree remove` would refuse a second time.
+        os.chmod(review_root, mode)
+        e2e_git(self.workflow.root, "worktree", "prune")
+        shutil.rmtree(review_root)
 
 
 class LegacyMigration(WorkflowRunCase):
@@ -4037,6 +4183,38 @@ class CompletedReviews(WorkflowRunCase):
         for key in ("612", "610"):
             self.assertRegex(rows[key]["completed_at"], self.module.TIMESTAMP_RE)
         self.assertNotEqual(first["selected"]["number"], second["selected"]["number"])
+
+    def test_the_row_history_a_dedup_needs_is_only_visible_after_the_claim(self):
+        # Round 2's blocker. The read the workflow takes before the inventory
+        # is a snapshot of a row anybody can still record against, so a finding
+        # compared against it can be one somebody else has already reported.
+        # Here another invocation records exactly that between the two reads.
+        snapshot = self.workflow.rows()
+
+        recorded = self.workflow.review_once(
+            outcome="findings", findings=REPORT_FIXTURE
+        )
+        reviewed = recorded["selected"]["number"]
+        report = recorded["report"]
+        self.assertIsNotNone(report)
+
+        inventory, _ = self.workflow.inventory()
+        registration = self.workflow.register()
+        claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+        self.assertEqual(claimed["status"], "claimed")
+        # The claim's own payload carries the row's status but not its history,
+        # so it cannot stand in for the read either.
+        self.assertNotIn("history", claimed["selected"])
+
+        after = self.workflow.rows()
+        self.assertNotIn(str(reviewed), snapshot)
+        allocations = [
+            entry["report"]
+            for entry in after[str(reviewed)]["history"]
+            if entry.get("report")
+        ]
+        self.assertIn(report, allocations)
+        self.workflow.complete_attempt(registration["attempt"])
 
     def test_a_repeats_only_review_allocates_no_report_and_is_not_clean(self):
         # The approving issue review's spec addition: a review whose only
@@ -4308,6 +4486,7 @@ def _end_to_end_cases():
         FreshRepository,
         PinnedTree,
         EarlyExits,
+        CleanupFailure,
         LegacyMigration,
         QueueOrder,
         CompletedReviews,

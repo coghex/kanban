@@ -421,9 +421,25 @@ For every suspected finding:
    An already-tracked finding is not a new report entry; name it in the
    completion message.
 4. Read the reports the row's own history links and compare the finding with
-   their `PRR-*` entries. That history is in the `read` output from the
-   migration step, under this pull request's row. Three dispositions follow, and
-   they are not interchangeable:
+   their `PRR-*` entries. **Read the ledger again for that history, now that
+   the claim is held:**
+
+   ```bash
+   python3 "$LEDGER" read --root "$DOCS_WT" --repo "$REPO"
+   ```
+
+   The read before the migration step is not that history. It was taken before
+   the inventory and before the claim, and between the two another invocation
+   can have recorded a review of this very pull request and linked a report to
+   it; on a repository that migrated in this run it held no rows at all. A
+   finding compared against that snapshot is a finding compared against a row
+   that has since moved, and the entry it then files is the second copy of
+   somebody else's. The claim is what makes this row stable — nobody else can
+   record against it while this invocation holds it — so the read taken after it
+   is the one that can be trusted, and `claim`'s own payload does not carry the
+   row's history.
+
+   Three dispositions follow, and they are not interchangeable:
    - **New** — no earlier report for this pull request describes it. It may
      produce a new report entry.
    - **Repeated** — an earlier report's `PRR-k` describes it and it is still
@@ -598,18 +614,35 @@ not run, and not running it is not a failure.
    git -C "$ROOT" worktree remove --force "$REVIEW_WT"
    ```
 
-4. **Remove the scratch directories this invocation made**, naming only the
-   variables it actually set — `$REVIEW_ROOT` from step 4, `$SCRATCH` from
-   step 1:
+4. **Remove its scratch directory — only once that removal succeeded:**
 
    ```bash
-   rm -rf "$REVIEW_ROOT" "$SCRATCH"
+   rm -rf "$REVIEW_ROOT"
    ```
 
-   Both are `mktemp -d` results held in variables of their own. **Never derive a
-   removal target from another path**: `dirname` of a variable that was never
-   set is `.`, and a recursive removal of the working directory is the one
-   mistake this workflow could make that nothing later could repair.
+   `$REVIEW_ROOT` *contains* `$REVIEW_WT`, so removing it after a failed
+   `worktree remove` would delete the very worktree the previous step just
+   reported it had retained — and where that failure left Git's administrative
+   record in `$ROOT`'s common directory behind, leave the record naming a
+   directory that is gone. A partial removal can end either way, with the record
+   dropped and the tree still on disk or both still there, so neither is assumed.
+   When step 3 fails, keep `$REVIEW_ROOT`, report it by path, and say that
+   `git -C "$ROOT" worktree prune` is what clears any record still naming it once
+   the directory itself is dealt with.
+
+5. **Remove the inventory's scratch directory** — when step 1 made it:
+
+   ```bash
+   rm -rf "$SCRATCH"
+   ```
+
+   `$SCRATCH` never holds a worktree, so this step is independent of every one
+   above it and runs whatever they did.
+
+Both scratch directories are `mktemp -d` results held in variables of their own.
+**Never derive a removal target from another path**: `dirname` of a variable
+that was never set is `.`, and a recursive removal of the working directory is
+the one mistake this workflow could make that nothing later could repair.
 
 **A cleanup step that fails is reported with the path it retained, never as
 removed.** Name the worktree still on disk, or the claim still held, so a human

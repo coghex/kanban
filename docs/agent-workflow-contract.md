@@ -3799,11 +3799,27 @@ other's rows, and a third fence added later cannot silently displace either.
 Every tracked Markdown file in this repository takes exactly one publication
 lane:
 
-- `coordination` — a coordination record whose content no runtime, installer,
-  or test reads: a findings, code-health, or design document and its status
+- `coordination` — a coordination record whose content nothing in *this*
+  repository reads: a findings, code-health, or design document and its status
   ledger, or a free-form note or roadmap sketch under a declared coordination
   directory.
   Eligible for direct publication to `master`, bypassing the pull-request lane.
+
+  "Nothing in this repository" is the whole of the test, and it is deliberately
+  narrower than "nothing at all". A packaged workflow may read and write a
+  coordination document — `project_review_ledger.py` parses, rewrites and
+  checkpoints `docs/project_review/ledger.md` on every review, so that document
+  is machine-readable workflow state rather than prose nobody parses — and the
+  lane still holds, because what it protects is the tree: this repository's
+  build, its tests, its installers and its executable read none of it, so a
+  change to it alone can invalidate nothing and `build-test` cannot notice it
+  either way. The helper that does read it is a bundled asset operating on
+  whichever repository it was pointed at, reading that repository's review state
+  and none of Kanban's own behavior; its tests build their own documents in
+  temporary directories rather than parsing the tracked one, which is why the
+  `test-parsed` reason is absent from that row and would be a contradiction on
+  it. A document any of this repository's own consumers reads is `pr-atomic`
+  however coordination-shaped it looks.
 - `pr-atomic` — a document that lands atomically with its implementation
   through the pull-request lane, because changing it on its own can invalidate
   the tree.
@@ -3904,7 +3920,10 @@ recording only one would understate what a change to it can break:
   file to stay consistent with behavior in the same pull request.
 - `audit-report` — a findings, code-health, or design document carrying its
   own status ledger, which `tools/test_source_distribution.py` lists in
-  `EXCLUDED_TRACKED_PATHS`.
+  `EXCLUDED_TRACKED_PATHS`. The ledger may be machine-readable and a packaged
+  workflow may maintain it, as the `docs/project_review/` row's is: the reason
+  is about what the document records and who in this repository reads it, per
+  the `coordination` definition above, not about whether a human typed it.
 - `coordination-note` — a free-form note, roadmap sketch, or other
   non-authoritative coordination document whose content no runtime,
   installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`

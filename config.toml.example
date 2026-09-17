@@ -259,11 +259,14 @@ enabled = false
 
 # Kanban's own repository, and the one live table in this file. The entries
 # below are exactly the `coordination` rows of docs/agent-workflow-contract.md
-# section 7 -- the findings, code-health, and design documents whose content no
-# runtime, installer, or test reads, plus the docs/coordination/ directory of
+# section 7 -- the findings, code-health, and design documents whose content
+# nothing in that repository reads, plus the docs/coordination/ directory of
 # free-form notes and the docs/project_review/ directory holding the
 # project-review ledger and its reports, each declared once rather than per
-# file -- so the drainer may
+# file. The ledger there is machine-readable and the packaged project-review
+# workflow rewrites it every review; it stays in this list because nothing in
+# the repository it describes -- no build, test, installer or executable --
+# reads it, which is the criterion section 7 states. So the drainer may
 # merge past an advance that only touches them instead of requesting a branch
 # update that cannot change the result. tools/test_document_classification.py
 # reconciles this list against those rows by effective coverage, so the two
