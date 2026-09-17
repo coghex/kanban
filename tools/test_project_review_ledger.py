@@ -66,6 +66,7 @@ import json
 import os
 import re
 import signal
+import socket
 import threading
 import subprocess
 import sys
@@ -3681,10 +3682,20 @@ class LivenessSignalTests(LeaseTestCase):
 
     def test_a_descriptor_whose_closure_cannot_be_observed_is_refused(self):
         read_end, write_end = self.liveness_pipe()
+        datagram, datagram_peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        listening = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        unconnected = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        for each in (datagram, datagram_peer, listening, unconnected):
+            self.addCleanup(each.close)
+        listening.bind(("127.0.0.1", 0))
+        listening.listen(1)
         with open(self.root / "regular", "w") as regular:
             for name, descriptor in (
                 ("a pipe's write end", write_end),
                 ("a regular file", regular.fileno()),
+                ("a datagram socket", datagram.fileno()),
+                ("a listening socket", listening.fileno()),
+                ("an unconnected stream socket", unconnected.fileno()),
             ):
                 with self.subTest(descriptor=name):
                     completed = self.helper(
@@ -3737,6 +3748,57 @@ class LivenessSignalTests(LeaseTestCase):
         self.assertEqual(result["claim"]["liveness"], "descriptor")
         self.assertEqual(result["status"], "claimed")
         self.assert_renewal_stops_within_one_interval(result, lambda: os.close(write_end))
+
+    def test_closing_a_connected_socket_peer_stops_renewal_within_one_interval(self):
+        held, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(held.close)
+        self.addCleanup(peer.close)
+        result = self.claim([merged(612)], fd=held.fileno())
+        self.assertEqual(result["claim"]["liveness"], "descriptor")
+        self.assert_renewal_stops_within_one_interval(result, peer.close)
+
+    def signal_lost_while_the_renewer_starts(self, lose, **source):
+        """Run `claim` in process, losing the signal just after its renewer starts."""
+        started = []
+        original = LEDGER._start_renewer
+
+        def start_then_lose(*arguments):
+            renewer = original(*arguments)
+            started.append(renewer)
+            lose()
+            return renewer
+
+        LEDGER._start_renewer = start_then_lose
+        self.addCleanup(setattr, LEDGER, "_start_renewer", original)
+        before = self.ledger_bytes()
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            LEDGER.claim(
+                self.root,
+                REPO,
+                listing([merged(612)]),
+                renewal=LEASE_RENEWAL,
+                expiry=LEASE_EXPIRY,
+                **source,
+            )
+        self.assertEqual(raised.exception.reason, "liveness-lost")
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll())
+        self.assertEqual(self.ledger_bytes(), before)
+        leases = self.common() / LEDGER.RUNTIME_DIRECTORY / "leases"
+        self.assertEqual(list(leases.glob("*.json")) if leases.exists() else [], [])
+        self.assertIsNone(LEDGER.observed_lock(self.root))
+
+    def test_a_signal_lost_while_the_renewer_starts_records_nothing(self):
+        with self.subTest(signal="descriptor"):
+            read_end, write_end = self.liveness_pipe()
+            self.signal_lost_while_the_renewer_starts(
+                lambda: self.close_quietly(write_end), liveness_fd=read_end
+            )
+        with self.subTest(signal="owner process"):
+            session = self.session()
+            self.signal_lost_while_the_renewer_starts(
+                lambda: self.end_session(session), owner_pid=session.pid
+            )
 
     def test_the_owner_process_exiting_stops_renewal_within_one_interval(self):
         session = self.session()
@@ -3975,7 +4037,11 @@ class SignalSafeLockTests(LeaseTestCase):
             while time.monotonic() < give_up:
                 os.kill(renewer, signal.SIGTERM)
                 time.sleep(0.003)
+        # However many signals arrive, the stop still retires the record once
+        # the lease's deadline has passed.
         wait_until(lambda: not process_running(renewer), "the signalled renewer never exited")
+        self.assertIsNone(self.heartbeat(token))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
         held = LEDGER.observed_lock(self.root)
         if held is not None:
             self.assertNotEqual(LEDGER.lock_holder(self.root, held)["pid"], renewer)

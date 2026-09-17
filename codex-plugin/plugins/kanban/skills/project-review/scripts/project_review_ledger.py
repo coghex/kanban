@@ -3236,7 +3236,8 @@ def liveness_source(liveness_fd=None, owner_pid=None) -> dict:
 
 
 def _require_live_descriptor(fd) -> None:
-    """A descriptor whose closure is observable: a pipe's or socket's read side.
+    """A descriptor whose closure is observable: a pipe's read side, or a
+    connected stream socket.
 
     Readable end-of-file is the signal. A regular file never reaches it by
     anyone closing anything, and a pipe's write end is never readable at all,
@@ -3261,7 +3262,9 @@ def _require_live_descriptor(fd) -> None:
                 f"descriptor {fd} is not the read side of a pipe, so its "
                 "writers closing it would never be seen.",
             )
-    elif not stat.S_ISSOCK(mode):
+    elif stat.S_ISSOCK(mode):
+        _require_connected_stream(fd)
+    else:
         raise LeaseRefused(
             "liveness-invalid",
             f"descriptor {fd} is neither a pipe nor a socket, so nothing closing "
@@ -3271,6 +3274,37 @@ def _require_live_descriptor(fd) -> None:
         raise LeaseRefused(
             "liveness-lost", f"descriptor {fd} is already closed by every writer."
         )
+
+
+def _require_connected_stream(fd: int) -> None:
+    """A socket whose peer closing it reads as end-of-file, or a refusal.
+
+    Only a connected stream socket has one. A datagram socket has no peer
+    close to read, and a listening or unconnected socket has no peer at all,
+    so either would renew forever or stop on unrelated traffic. The check
+    runs on a duplicate, so the caller's descriptor is left exactly as it was.
+    """
+    try:
+        probe = socket.socket(fileno=os.dup(fd))
+    except OSError as error:
+        raise LeaseRefused("liveness-invalid", f"descriptor {fd} is not a usable socket ({error}).") from error
+    try:
+        if probe.type != socket.SOCK_STREAM:
+            raise LeaseRefused(
+                "liveness-invalid",
+                f"descriptor {fd} is not a stream socket, so its peer closing it "
+                "cannot be observed.",
+            )
+        try:
+            probe.getpeername()
+        except OSError as error:
+            raise LeaseRefused(
+                "liveness-invalid",
+                f"descriptor {fd} is a socket with no connected peer ({error}), "
+                "so nothing closing it can be observed.",
+            ) from error
+    finally:
+        probe.close()
 
 
 def _descriptor_closed(fd: int, timeout: float) -> bool:
@@ -3362,17 +3396,17 @@ def claim(
             )
         row["claim"] = {"token": token, "started_at": precise_timestamp(now), **settings}
         deadline = now + settings["expiry_seconds"]
-        # Asked again here, under the lock and before the first write: the
-        # check before the lock was taken says nothing about a session that
-        # ended while this invocation waited for it.
-        if _signal_lost(source, 0):
-            raise LeaseRefused(
-                "liveness-lost",
-                "the liveness signal was lost while this claim waited for the "
-                "repository lock; nothing was claimed.",
-            )
+        # Asked again here, under the lock: the check before the lock was
+        # taken says nothing about a session that ended while this invocation
+        # waited for it.
+        _require_signal_held(source)
         renewer = _start_renewer(root, repo, number, token, source)
         try:
+            # And again once the renewer exists, immediately before each of
+            # the two writes: the signal can go while the renewer is being
+            # started, and a claim published after that is one no session
+            # stands behind.
+            _require_signal_held(source)
             write_heartbeat(
                 common,
                 {
@@ -3384,6 +3418,7 @@ def claim(
                     "renewer": {"host": socket.gethostname(), "pid": renewer.pid},
                 },
             )
+            _require_signal_held(source)
             written = _publish_reconciled(root, repo, chosen)
         except BaseException:
             _stop_started_renewer(renewer)
@@ -3402,6 +3437,15 @@ def claim(
             None if previous is None else {"previous_token": previous["token"]}
         )
         return result
+
+
+def _require_signal_held(source: dict) -> None:
+    if _signal_lost(source, 0):
+        raise LeaseRefused(
+            "liveness-lost",
+            "the liveness signal was lost before this claim was recorded; "
+            "nothing was claimed.",
+        )
 
 
 def _start_renewer(root, repo: str, number: int, token: str, source: dict):
@@ -3447,12 +3491,16 @@ def _start_renewer(root, repo: str, number: int, token: str, source: dict):
 
 
 def _stop_started_renewer(renewer) -> None:
-    try:
-        renewer.terminate()
-        renewer.wait(timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        with contextlib.suppress(OSError):
-            renewer.kill()
+    """Kill a renewer whose claim was never recorded, and reap it.
+
+    Outright rather than by a stop signal: a signalled renewer retires its
+    heartbeat record under the lock, and this invocation still holds that lock
+    and removes the record itself.
+    """
+    with contextlib.suppress(OSError):
+        renewer.kill()
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        renewer.wait(timeout=30)
 
 
 # How many stop signals this process has received. The handler only counts:
@@ -3496,9 +3544,9 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     last renewal's deadline passes -- the lease lapses after its expiry, as
     D-17 says, rather than the moment cleanup runs. SIGTERM, SIGHUP and
     SIGINT are a stop like a lost signal: renewal ends within a second and the
-    record is retired the same way. A second one while it waits abandons the
-    wait and leaves the record for a release or a takeover to remove, as a
-    renewer that was killed outright does. A signal is only counted when it
+    record is retired the same way, however many of them arrive; only a
+    renewer killed outright leaves its record for a release or a takeover to
+    remove. A signal is only counted when it
     arrives and acted on between waits, so no signal can interrupt the
     renewer while it holds the lock. A renewer removes no ledger claim and no
     lock it does not hold.
@@ -3594,11 +3642,9 @@ def _retired(root, repo: str, number: int, token: str, poll: float, reason: str)
     It looks again at the recorded deadline rather than polling the lock
     towards it: nothing but a renewal can make a live record removable sooner
     than its deadline, and a renewal only moves the deadline later, which the
-    next look sees. The wait is taken a second at a time, so a stop signal
-    that arrives during it -- one more than there were when retirement began
-    -- abandons it promptly.
+    next look sees. Further stop signals do not cut it short: retiring the
+    record is what a stop is for.
     """
-    baseline = stop_requests()
     while True:
         try:
             outcome = retire_heartbeat(root, repo, number, token, lock_wait=poll)
@@ -3615,11 +3661,7 @@ def _retired(root, repo: str, number: int, token: str, poll: float, reason: str)
             record = read_heartbeat(git_common_directory(root), token)
             if record is not None:
                 wake = max(wake, _precise_instant(record["deadline"], "the heartbeat deadline"))
-        wake += LOCK_POLL_SECONDS
-        while time.time() < wake:
-            if stop_requests() > baseline:
-                return reason
-            time.sleep(min(RENEWER_POLL_SECONDS, max(0.0, wake - time.time())))
+        time.sleep(max(0.0, wake - time.time()) + LOCK_POLL_SECONDS)
 
 
 def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float = None) -> str:
