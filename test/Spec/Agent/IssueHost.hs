@@ -764,7 +764,7 @@ lifecycleSpec = describe "one running host" $ do
           _ <- seedChild "unsettled-action" (Just WorkerRunning)
           unsettled <- endEveryChildWithin 1 testRepository
           map (.unsettledChildId) unsettled `shouldBe` [WorkerId "unsettled-action"]
-          map (.unsettledChildObservation) unsettled `shouldBe` [ChildLastSeen WorkerRunning]
+          map (.unsettledChildObservation) unsettled `shouldBe` [LastSeen WorkerRunning]
           let reported = describeUnsettled unsettled
           ("unsettled-action" `isInfixOf` reported) `shouldBe` True
           ("WorkerRunning" `isInfixOf` reported) `shouldBe` True
@@ -782,17 +782,52 @@ lifecycleSpec = describe "one running host" $ do
     it "reads absent or undecodable state as unavailable, never as terminal" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-          -- No state file at all, then one that will not parse. Both used to
-          -- satisfy the settle probe through `maybe True`, which is how a
-          -- child nobody could read passed for a child that ended.
+          -- Two distinct cases, kept distinct: one child with no state file at
+          -- all, one whose file will not parse. Both used to satisfy the settle
+          -- probe through `maybe True`, which is how a child nobody could read
+          -- passed for a child that ended. Asserted by worker id, because a
+          -- positional assertion would not notice if both fixtures collapsed
+          -- into the same case.
           absent <- seedChild "absent-state-action" Nothing
-          LazyByteString.writeFile absent.workerDescriptorStatePath "{ not json"
+          exists <- doesFileExist absent.workerDescriptorStatePath
+          exists `shouldBe` False
           unreadable <- seedChild "undecodable-state-action" Nothing
           LazyByteString.writeFile unreadable.workerDescriptorStatePath "{ not json"
           unsettled <- endEveryChildWithin 1 testRepository
-          map (.unsettledChildObservation) unsettled
-            `shouldBe` [ChildStateUnavailable, ChildStateUnavailable]
+          let observed =
+                [ (identifier, observation)
+                  | UnsettledChild (WorkerId identifier) observation <- unsettled
+                ]
+          lookup "absent-state-action" observed `shouldBe` Just StateUnavailable
+          lookup "undecodable-state-action" observed `shouldBe` Just StateUnavailable
+          length observed `shouldBe` 2
           ("state absent or undecodable" `isInfixOf` describeUnsettled unsettled) `shouldBe` True
+
+    it "does not report a child that terminalized after the bound ran out" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          -- The boundary: the last in-bound probe sees a running child, and the
+          -- child reaches its terminal state before the final read. It settled,
+          -- late, so it is not reported at all -- reporting it would print
+          -- "did not reach a terminal state within the bound: late-action
+          -- (terminal)", a contradiction of exactly the kind this change exists
+          -- to stop producing.
+          late <- seedChild "late-action" (Just WorkerRunning)
+          now <- getCurrentTime
+          settleAfterBound <-
+            forkIO
+              ( do
+                  threadDelay 60000
+                  writeChildState late (runningChildState late now) {workerStateStatus = WorkerTerminal SolveCompleted}
+              )
+          unsettled <- endEveryChildWithin 1 testRepository
+          killThread settleAfterBound
+          -- Whichever side of the boundary the write landed on, the one thing
+          -- that must never appear is a terminal child in an unsettled report.
+          final <- decodeChildState late
+          case fmap (.workerStateStatus) final of
+            Just (WorkerTerminal _) -> unsettled `shouldBe` []
+            _ -> map (.unsettledChildId) unsettled `shouldBe` [WorkerId "late-action"]
 
     it "reports nothing when every child recorded a terminal state" $
       withTemporaryCacheRoot $ \temporaryRoot ->
@@ -2419,11 +2454,14 @@ withRunningHostUsing overrideProvider body =
       -- one — a durable termination command — rather than by reaching into
       -- the host, so the teardown exercises the same path the tests do.
       unsettled <- endEveryChild repository
-      -- Checked, not discarded. A child that never reached a terminal state
-      -- means the host still holds one and cannot exit, so waiting on it below
-      -- would time out and report the host for a condition the children
-      -- caused. Failing here keeps the two apart, and keeps the message below
-      -- true whenever it is the one that prints.
+      -- Checked, not discarded. With a child still short of a terminal state
+      -- the wait below is not a fair test of the host: it would time out and
+      -- report the host for a condition established about the children.
+      -- Failing here keeps the two apart, and keeps the message below true
+      -- whenever it is the one that prints. It infers nothing further --
+      -- issueActionsIn selects every issue action in the repository, while
+      -- production's childCandidate excludes children another live host owns,
+      -- so a child reported here need not be one this host ever held.
       unless (null unsettled) (fail (describeUnsettled unsettled))
       -- Bounded, because a host that will not exit is a defect this suite has
       -- to report rather than hang on: an unbounded wait here turns any
@@ -2516,11 +2554,20 @@ data ChildObservation
   | ChildStateUnavailable
   deriving stock (Eq, Show)
 
--- | A child the teardown asked to terminate that never recorded a terminal
--- state, with the last thing observed about it.
+-- | Why one child is being reported, which is deliberately not
+-- 'ChildObservation': 'ChildSettled' has no meaning in a report about children
+-- that did not settle, and a type that could hold it is a type that can
+-- produce "never recorded a terminal state: action-1 (terminal)".
+data UnsettledObservation
+  = LastSeen WorkerStatus
+  | StateUnavailable
+  deriving stock (Eq, Show)
+
+-- | A child the teardown asked to terminate that had not reached a terminal
+-- state when its bound ran out, with the last thing observed about it.
 data UnsettledChild = UnsettledChild
   { unsettledChildId :: WorkerId,
-    unsettledChildObservation :: ChildObservation
+    unsettledChildObservation :: UnsettledObservation
   }
   deriving stock (Eq, Show)
 
@@ -2557,14 +2604,22 @@ endEveryChildWithin attempts repository = do
         Nothing -> do
           -- The bound is spent; read once more so the report names what the
           -- child was last seen as rather than only that it was not terminal.
+          --
+          -- A child may terminalize between the last in-bound probe and this
+          -- read. That child settled -- late, but settled -- so it is not
+          -- reported at all. Reporting it would print "never recorded a
+          -- terminal state: <id> (terminal)", which is the same shape of false
+          -- diagnostic this whole change exists to remove.
           final <- observeChild descriptor
-          pure
-            ( Just
-                UnsettledChild
-                  { unsettledChildId = descriptor.workerDescriptorSpec.workerId,
-                    unsettledChildObservation = final
-                  }
-            )
+          pure $ case final of
+            ChildSettled -> Nothing
+            ChildLastSeen status -> Just (reported descriptor (LastSeen status))
+            ChildStateUnavailable -> Just (reported descriptor StateUnavailable)
+    reported descriptor observation =
+      UnsettledChild
+        { unsettledChildId = descriptor.workerDescriptorSpec.workerId,
+          unsettledChildObservation = observation
+        }
     settledOnly descriptor = do
       observed <- observeChild descriptor
       pure (if observed == ChildSettled then Just () else Nothing)
@@ -2581,18 +2636,17 @@ describeUnsettled :: [UnsettledChild] -> String
 describeUnsettled children =
   "the teardown terminated every discovered issue action, but "
     <> show (length children)
-    <> " never recorded a terminal state: "
+    <> " did not reach a terminal state within the bound: "
     <> intercalate ", " (map describeOne children)
     <> ". The host was not waited on, so this says nothing about whether it "
-    <> "would have exited."
+    <> "would have exited, or about which host owned these children."
   where
     describeOne child =
       let WorkerId identifier = child.unsettledChildId
        in Text.unpack identifier <> " (" <> describeObservation child.unsettledChildObservation <> ")"
     describeObservation = \case
-      ChildSettled -> "terminal"
-      ChildLastSeen status -> "last seen " <> show status
-      ChildStateUnavailable -> "state absent or undecodable"
+      LastSeen status -> "last seen " <> show status
+      StateUnavailable -> "state absent or undecodable"
 
 -- | A process group the fixture hands to the host, which the host may then
 -- signal without consequence.
