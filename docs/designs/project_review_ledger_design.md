@@ -818,7 +818,7 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
 
 ### LEDGER-1. Enroll the design document in §7 and its sibling registries
 
-- **Outcome:** `docs/project_review_ledger_design.md` has a `coordination` /
+- **Outcome:** `docs/designs/project_review_ledger_design.md` has a `coordination` /
   `audit-report` row, an `EXCLUDED_TRACKED_PATHS` entry, and a
   `config.toml.example` entry, with §7's prose lists audited, so
   `/process-design-doc` can publish edits to this document directly.

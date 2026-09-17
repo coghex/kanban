@@ -6,7 +6,7 @@ lifecycle hooks (`hooks/hooks.json` in each bundle). The automated suite,
 `tools/test_project_review_liveness.py`, pins the adapter's contract with
 deterministic hook payloads. This document shows that the installed runtimes
 actually deliver those payloads, with the lifetimes the contract assumes. Design
-D-17 and its 2026-09-17 amendment in `docs/project_review_ledger_design.md`
+D-17 and its 2026-09-17 amendment in `docs/designs/project_review_ledger_design.md`
 state the rules; `docs/agent-workflow-contract.md` §2.13 describes the adapter's
 interface.
 

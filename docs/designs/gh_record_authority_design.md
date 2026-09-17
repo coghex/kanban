@@ -942,7 +942,7 @@ Its remaining uncertainty, which Q-1 restated and D-1 settled:
 From epic `#499`'s `Related` section, the one sentence in which the supersession
 D-8 has now adopted was recorded:
 
-> `docs/gh_record_authority_design.md` — supporting record for decisions D-1
+> `docs/designs/gh_record_authority_design.md` — supporting record for decisions D-1
 > through D-7. Its earlier assumption that the legacy path is repository-unique
 > and requires no path migration is superseded by this issue's canonical-key and
 > compatibility requirements.

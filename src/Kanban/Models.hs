@@ -1,5 +1,5 @@
 -- | The model roster: which model and effort every agent role runs on, per
--- provider (@docs/model_settings_design.md@, MODEL-1).
+-- provider (@docs/designs/model_settings_design.md@, MODEL-1).
 --
 -- Two layers, deliberately provider-generic. /Providers/ declare what
 -- exists — an ordered model list and an effort vocabulary per brand — and

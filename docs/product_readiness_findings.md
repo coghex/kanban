@@ -270,7 +270,7 @@ no document says what triggers it, so it has run exactly once.
 - `docs/design.md:3278` onward — section 21 records the release *evidence* gates
   (REL-1 through REL-4) that preceded the first release, and nothing about
   subsequent ones.
-- `docs/public_release_design.md` — 5 of 5 slices processed; the arc's scope was
+- `docs/designs/public_release_design.md` — 5 of 5 slices processed; the arc's scope was
   publishing the first release, not establishing a cadence.
 - `kanban.cabal:3` — still `1.0.0.0`, though the tree has diverged by 34 merges.
 - `CHANGELOG.md` — see PROD-4; the two findings are the two halves of the same
@@ -458,7 +458,7 @@ release a feature that landed before the first release was published.
 - `docs/design.md:886-892` — the shipped shape differs from the deferred one in
   a way worth preserving: completed pull requests appear *in* Done under a
   filter criterion, not in a separate view.
-- `docs/card_filter_design.md` — 6 of 6 slices processed; the arc that delivered
+- `docs/designs/card_filter_design.md` — 6 of 6 slices processed; the arc that delivered
   it is complete.
 
 **Handoff context:**
@@ -477,7 +477,7 @@ release a feature that landed before the first release was published.
 
 > **Disposition:** No issue — the amendment is already a planned child of epic #354,
 > "MRB-3. Add the repository tab bar and amend the design contract".
-> `docs/multi_repo_boards_design.md` decision D-4 (user signoff 2026-08-10) settles
+> `docs/designs/multi_repo_boards_design.md` decision D-4 (user signoff 2026-08-10) settles
 > both what it says — §3's non-goal is *narrowed*, keeping merged interleaved boards,
 > automatic background refresh, and forge adapters excluded — and when it lands: "in
 > MRB-3's PR with the first visible multi-repo behavior." Landing it earlier is also
@@ -497,7 +497,7 @@ this contradiction is ahead of the work rather than behind it.
   running board. Each invocation represents one repository selected by its path."
 - Epic #354, "Run one Kanban session over several repositories," open, labelled
   `epic` and `multi-repo`.
-- `docs/multi_repo_boards_design.md` — the arc's design document, 625 lines, 1 of
+- `docs/designs/multi_repo_boards_design.md` — the arc's design document, 625 lines, 1 of
   6 slices processed; MRB-1 through MRB-5 are unprocessed.
 - MRB-1's own scope, "Add a configured repository roster with per-repo paths,"
   directly contradicts "each invocation represents one repository selected by its
@@ -527,7 +527,7 @@ this contradiction is ahead of the work rather than behind it.
 ### [no-issue] PROD-11. Section 20 still defers multi-repository aggregation
 
 > **Disposition:** No issue — the same planned child of epic #354 that carries §3's
-> amendment carries this one. `docs/multi_repo_boards_design.md` decision D-4 (user
+> amendment carries this one. `docs/designs/multi_repo_boards_design.md` decision D-4 (user
 > signoff 2026-08-10) states that "§20's 'Multi-repository aggregation' deferral is
 > removed"; MRB-3's outcome is "design.md §3/§20 amended"; and the arc's in-scope list
 > names "the design.md §3/§20 amendment" as one item, so §3 and §20 are a single
@@ -543,7 +543,7 @@ correcting section 3 alone leaves the contradiction half-fixed.
 - `docs/design.md:3271` — deferred idea: "Multi-repository aggregation."
 - `docs/design.md:204` — the section 3 non-goal PROD-10 covers, stating the same
   restriction in more detail.
-- Epic #354 and `docs/multi_repo_boards_design.md`, as in PROD-10.
+- Epic #354 and `docs/designs/multi_repo_boards_design.md`, as in PROD-10.
 - The duplication is why this is filed separately: a change that amends only
   section 3 leaves section 20 contradicting the arc, and section 20 is the list a
   reader consults for "what is deliberately not being built."
@@ -623,7 +623,7 @@ completed checklist rather than its purpose.
 - `docs/design.md:40-61` — "## Release scope".
 - `docs/design.md:62-133` — "## Current state and evidence".
 - `docs/design.md:134` — "## 1. Purpose", the actual beginning of the contract.
-- Epic #268 closed `2026-08-16T13:20:26Z`; `docs/public_release_design.md` shows
+- Epic #268 closed `2026-08-16T13:20:26Z`; `docs/designs/public_release_design.md` shows
   5 of 5 slices processed.
 
 **Handoff context:**
@@ -694,11 +694,11 @@ consequence; it will not be the last.
   apparatus, 8% of the document, still present three days after epic #268 closed.
 - Five further design documents carry the same "Design state" header and
   processing-status shape and will reach the same end state:
-  `docs/card_filter_design.md` (6 of 6 processed),
-  `docs/usage_awareness_design.md` (5 of 5),
-  `docs/claude_document_workflows_design.md` (5 of 5),
-  `docs/issue_search_design.md` (4 of 4), and
-  `docs/public_release_design.md` (5 of 5) — every one of them already complete.
+  `docs/designs/card_filter_design.md` (6 of 6 processed),
+  `docs/designs/usage_awareness_design.md` (5 of 5),
+  `docs/designs/claude_document_workflows_design.md` (5 of 5),
+  `docs/designs/issue_search_design.md` (4 of 4), and
+  `docs/designs/public_release_design.md` (5 of 5) — every one of them already complete.
 - `docs/agent-workflow-contract.md` and the `process-design-doc` command define
   how apparatus is *added* and how a slice is recorded; neither defines a
   terminal state for the apparatus itself.
@@ -714,7 +714,7 @@ consequence; it will not be the last.
 - **Scope and constraints:** The distinction the rule has to draw is between a
   *specification document* like `docs/design.md`, where apparatus is a visitor
   in a permanent contract, and an *arc document* like
-  `docs/card_filter_design.md`, which is entirely apparatus and may reasonably
+  `docs/designs/card_filter_design.md`, which is entirely apparatus and may reasonably
   keep it as a record. Do not write a rule that deletes the second kind.
   Decide where the rule lives — `docs/agent-workflow-contract.md` governs the
   workflows that create the apparatus and is the strongest candidate. This is

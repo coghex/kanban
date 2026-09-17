@@ -75,7 +75,7 @@ the collision defeats that safety property and can lose durable state.
 - `docs/design.md:3125-3158` — mission history is durable state, and foreign
   repository or mission identities must be refused rather than adopted or
   written.
-- `docs/superagent_design.md:524-532` — each mission belongs under a private,
+- `docs/designs/superagent_design.md:524-532` — each mission belongs under a private,
   repository-qualified durable root.
 
 **Handoff context:**

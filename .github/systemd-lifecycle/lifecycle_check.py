@@ -2,7 +2,7 @@
 
 """Drives the PR drainer's whole lifecycle against a real systemd user session.
 
-`docs/linux_portability_design.md` decision D-1 makes this the evidence for the
+`docs/designs/linux_portability_design.md` decision D-1 makes this the evidence for the
 Linux claim, which is why it asserts on durable state rather than on generated
 files: install, start, status, stop, and uninstall each have to reach the state
 they claim, in the user manager and in the discovery record both. A check that

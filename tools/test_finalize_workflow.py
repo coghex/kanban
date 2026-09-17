@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_finalize_workflow.py
 
-Issue #544, slice VEND-7 of `docs/workflow_command_vendoring_design.md` and the
+Issue #544, slice VEND-7 of `docs/designs/workflow_command_vendoring_design.md` and the
 last of the eight commands the arc vendors. It is the only one with no Codex
 counterpart to reconcile against — the personal collection held a single Claude
 copy — so every difference between that copy and what ships here was decided

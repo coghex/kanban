@@ -2,7 +2,7 @@
 
 Run with: python3 tools/render_command_sources.py [--check]
 
-Issue #375, slice VEND-0 of `docs/workflow_command_vendoring_design.md`. Its
+Issue #375, slice VEND-0 of `docs/designs/workflow_command_vendoring_design.md`. Its
 D-3 decides the vendored workflow commands are authored once and rendered into
 both bundles rather than maintained as two hand-edited copies, because the two
 personal copies of every command have already drifted — `project-review`'s by
@@ -48,7 +48,7 @@ vocabulary fails loudly when a bundle directory is missing instead of quietly
 shrinking to nothing.
 
 Deliberate per-brand *body* text — argument conventions and installed-helper
-resolution, which `docs/workflow_command_vendoring_design.md` D-2/D-7 require to
+resolution, which `docs/designs/workflow_command_vendoring_design.md` D-2/D-7 require to
 survive reconciliation — stays authored in the one source, inside a
 `<!-- brand:claude -->` / `<!-- brand:codex -->` / `<!-- /brand -->` block. The
 shipped `solve` pair needs exactly that: `$ARGUMENTS` against a prompt argument,

@@ -8602,7 +8602,7 @@ the same automated gates, and is verified below as a consumer receives it.
 
 #### Consumer verification
 
-`docs/public_release_design.md` D-7 assigns consumer-side verification of the
+`docs/designs/public_release_design.md` D-7 assigns consumer-side verification of the
 published archive to this slice. The sole asset was downloaded from the Release,
 unpacked in a clean directory outside any checkout, and built and tested there —
 macOS 15.6 on arm64, GHC 9.12.2, Cabal 3.16.1.0. `$CONS` is that directory; the

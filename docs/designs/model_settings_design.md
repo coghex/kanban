@@ -1334,7 +1334,7 @@ Probed directly, not read from documentation:
 - **Acceptance signals:** the release artifact contains the example roster;
   no tracked document names a wire model ID outside the defaults table and
   the historical reports.
-- **Out of scope:** coordination with `docs/public_release_design.md`'s
+- **Out of scope:** coordination with `docs/designs/public_release_design.md`'s
   slices beyond adding one packaged file.
 - **Open questions:** None
 

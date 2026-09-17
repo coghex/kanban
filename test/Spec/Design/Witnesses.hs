@@ -209,7 +209,7 @@ spec = describe "docs/design.md §3 and §20" $ do
       -- The parse found the real tuple, not an empty one that would let every
       -- path through: a document the release deliberately leaves out is
       -- covered by it.
-      any (`exclusionCovers` "docs/multi_repo_boards_design.md") excluded `shouldBe` True
+      any (`exclusionCovers` "docs/designs/multi_repo_boards_design.md") excluded `shouldBe` True
       -- The two files the mechanism itself opens, held against the same
       -- authority a witness's reads are.
       any (`exclusionCovers` designDocumentPath) excluded `shouldBe` False
@@ -223,10 +223,10 @@ spec = describe "docs/design.md §3 and §20" $ do
           [ Declaration
               3
               "Resting on an arc document."
-              (Witnessed (WitnessedFact "a fact" "a rationale" ["docs/multi_repo_boards_design.md"] (pure Nothing)))
+              (Witnessed (WitnessedFact "a fact" "a rationale" ["docs/designs/multi_repo_boards_design.md"] (pure Nothing)))
           ]
       faults
-        `shouldBe` [ "3: Resting on an arc document. reads docs/multi_repo_boards_design.md, which "
+        `shouldBe` [ "3: Resting on an arc document. reads docs/designs/multi_repo_boards_design.md, which "
                        <> Text.pack distributionExclusionsPath
                        <> " excludes from the source distribution"
                    ]
@@ -431,7 +431,7 @@ declarations =
             { factStatement =
                 "The dashboard's action inventory is exactly the recorded `BoardAction` values and its pointer claims exactly the recorded press combinations, none of which selects, cycles, or aggregates a second repository; and `criteriaDataset` has the type `FilterCriteria -> Maybe RepoSnapshot -> Maybe CompletedHistory -> Maybe RepoSnapshot`, deriving one board's dataset from at most one repository's snapshot.",
               factRationale =
-                "A running board can only show a second repository if something reaches one: a key, a click, or a dataset built from more than one snapshot. All three are closed here. The witness deliberately does not assert that Kanban resolves or holds one repository — docs/multi_repo_boards_design.md's MRB-1 resolves a whole roster and MRB-2 holds per-repository state, both while these entries stand — and it changes with MRB-3, whose tab row adds the `[`, `]` and `1`-`9` bindings and a click target in the same pull request that amends this entry.",
+                "A running board can only show a second repository if something reaches one: a key, a click, or a dataset built from more than one snapshot. All three are closed here. The witness deliberately does not assert that Kanban resolves or holds one repository — docs/designs/multi_repo_boards_design.md's MRB-1 resolves a whole roster and MRB-2 holds per-repository state, both while these entries stand — and it changes with MRB-3, whose tab row adds the `[`, `]` and `1`-`9` bindings and a click target in the same pull request that amends this entry.",
               factReads = [],
               factCheck = do
                 claims <- pointerClaims

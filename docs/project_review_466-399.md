@@ -221,27 +221,27 @@ after the migration is complete.
 > **Captured note:** Reconcile direct landing commit `2e2003e` with the Mission
 > Control design that `b03d6e6` marked ready: its current-state evidence must
 > stop saying issue #425 remains open, the approval arc is only partly landed,
-> and `docs/superagent_design.md` has no coordination classification.
+> and `docs/designs/superagent_design.md` has no coordination classification.
 
 **Verification:** The ready document contains two stale readiness claims. Issue
 #425 closed on 2026-08-21 through the operating-documentation merge and epic
 #318 is now closed, so the issue-approval authority is complete rather than
 partly landed with documentation outstanding. More directly, `2e2003e` added
-`docs/superagent_design.md` to the section 7 coordination table,
+`docs/designs/superagent_design.md` to the section 7 coordination table,
 `config.toml.example`, and the source-distribution exclusion in the same commit
 that landed the document; its current-state section still predicts that exact
 classification as a future change and calls the file pr-atomic.
 
 **Evidence:**
 
-- `docs/superagent_design.md:9` — the document declares itself ready for issue
+- `docs/designs/superagent_design.md:9` — the document declares itself ready for issue
   processing.
-- `docs/superagent_design.md:105` — the current-state evidence calls the
+- `docs/designs/superagent_design.md:105` — the current-state evidence calls the
   persistent approval arc partly landed; lines 108–110 say #425 remains open.
-- `docs/superagent_design.md:116` — the same current-state section says this
+- `docs/designs/superagent_design.md:116` — the same current-state section says this
   design is absent from section 7 and therefore pr-atomic.
 - `docs/agent-workflow-contract.md:2587` — the live section 7 table classifies
-  `docs/superagent_design.md` as `coordination | audit-report`.
+  `docs/designs/superagent_design.md` as `coordination | audit-report`.
 - `config.toml.example:218` and `tools/test_source_distribution.py:256` — the
   other two classification registries name the same document, exactly as
   direct commit `2e2003e` intended.

@@ -1,7 +1,7 @@
 # A container that boots systemd as PID 1, so the drainer's Linux lifecycle can
 # be exercised against a real user manager rather than against generated files.
 #
-# `docs/linux_portability_design.md` decision D-1 fixes that standard: no Linux
+# `docs/designs/linux_portability_design.md` decision D-1 fixes that standard: no Linux
 # host is known to exist for this project, so the Linux claim is
 # container-verified. A job that only asserted on the unit file it had just
 # written would prove the writer and nothing else — not that systemd loads that
