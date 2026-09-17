@@ -10,6 +10,13 @@ LEDGER-6 switches it over, so until then these tests are the module's only
 caller. That makes them the whole of its contract rather than a sample of it,
 and these properties follow.
 
+Issue #682 (LEDGER-4) adds the lease, and its tests are process-level on
+purpose: every claim runs the real renewer against a real liveness signal --
+a pipe the test holds, or a stand-in session process -- in a temporary Git
+repository, because the lock reference and the heartbeat records live in its
+common directory. Renewal timings are sub-second, and every renewer a claim
+reports is stopped through the pid it recorded.
+
 * **Fixtures are produced by the mechanism they stand in for.** Every v2
   cursor here is written by `project_review_cursor.py`'s own `record` and
   `write_document`, so a cursor shape this migration cannot read is a cursor
@@ -53,14 +60,17 @@ guesswork, which is how the cursor's own predecessor lost a batch.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import re
+import signal
 import threading
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -322,6 +332,7 @@ def valid_payload(rows=None, repo=REPO):
                 "direct": {"endpoint": None, "reviewed": []},
                 "excluded": {"prs": [], "commits": []},
                 "migration": {"source": None, "boundary": None, "withheld_boundary": None},
+                "lease_defaults": None,
             }
         },
     }
@@ -505,6 +516,17 @@ def listing(entries, limit=100):
             for position, chunk in enumerate(chunks, start=1)
         ]
     }
+
+
+def git(cwd, *arguments, check=True):
+    return subprocess.run(
+        ["git", *arguments], cwd=str(cwd), capture_output=True, text=True, check=check
+    )
+
+
+def initialize_repository(root) -> None:
+    """A Git repository at `root`, which is where the selection lock lives."""
+    git(root, "init", "-q")
 
 
 class LedgerTestCase(unittest.TestCase):
@@ -868,7 +890,7 @@ class DocumentParsingTests(LedgerTestCase):
                 "links no report",
             ),
             "history entry with no time": (
-                {"602": dict(completed_row(), history=[{"kind": "takeover", "outcome": None,
+                {"602": dict(completed_row(), history=[{"kind": "interrupted", "outcome": None,
                                                         "commit": None, "completed_at": None,
                                                         "report": None}])},
                 "not self-contained",
@@ -964,7 +986,7 @@ class DocumentParsingTests(LedgerTestCase):
         # a row without `history` as one whose previous attempts never
         # happened. Both are silent, and both erase state the document exists
         # to keep.
-        for field in ("rows", "direct", "excluded", "migration"):
+        for field in LEDGER.REPOSITORY_KEYS:
             with self.subTest(repository_field=field):
                 payload = valid_payload({"602": completed_row()})
                 del payload["repositories"][REPO][field]
@@ -1197,10 +1219,9 @@ class RenderingTests(LedgerTestCase):
                     },
                     {
                         "kind": "takeover",
-                        "outcome": None,
-                        "commit": None,
-                        "completed_at": "2026-09-05T10:00:00Z",
-                        "report": None,
+                        "at": "2026-09-05T10:00:00.250000Z",
+                        "previous_token": "a" * 32,
+                        "token": "b" * 32,
                     },
                 ],
             )
@@ -1212,7 +1233,7 @@ class RenderingTests(LedgerTestCase):
         # refresh never erases the previous verification's date and hash.
         history = reparsed["repositories"][REPO]["rows"]["612"]["history"]
         self.assertEqual(
-            [(entry["kind"], entry["outcome"], entry["commit"]) for entry in history],
+            [(entry["kind"], entry.get("outcome"), entry.get("commit")) for entry in history],
             [
                 ("review", "findings", OTHER_SHA),
                 ("review", "clean", FULL_SHA),
@@ -2132,7 +2153,15 @@ class SelectionTestCase(LedgerTestCase):
     would refuse fails as a fixture rather than passing as a selection. The
     rows are assembled from `empty_row`, which is the shape the helper writes,
     so a field added to a row turns up here instead of being silently absent.
+
+    The root is a Git repository because selection runs under the helper's
+    repository lock, which is a reference in that repository's common
+    directory.
     """
+
+    def setUp(self):
+        super().setUp()
+        initialize_repository(self.root)
 
     def establish(self, rows, excluded=(), repo=REPO, root=None):
         root = self.root if root is None else root
@@ -2468,15 +2497,26 @@ class InventoryTests(SelectionTestCase):
         directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
+        initialize_repository(root)
         (root / "docs").mkdir()
         (root / "docs" / "project_review").symlink_to(outside.name)
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.select(root, REPO, listing([merged(612)]))
-        self.assertIn("outside", str(raised.exception))
+        self.assertIn("which is outside", str(raised.exception))
 
 
 class ResultSchemaTests(SelectionTestCase):
     """The object a caller parses, in both of the states it is emitted in."""
+
+    RESULT_KEYS = {
+        "status",
+        "repo",
+        "document",
+        "selected",
+        "queue",
+        "skipped_claims",
+        "inventory",
+    }
 
     INVENTORY_KEYS = {
         "pages",
@@ -2492,12 +2532,13 @@ class ResultSchemaTests(SelectionTestCase):
         self.establish({})
         result = self.select([merged(612), merged(610)])
         self.assertEqual(
-            set(result), {"status", "repo", "document", "selected", "queue", "inventory"}
+            set(result), self.RESULT_KEYS
         )
         self.assertEqual(result["repo"], REPO)
         self.assertEqual(result["document"], str(LEDGER.document_path(self.root)))
         self.assertEqual(
-            set(result["selected"]), {"number", "title", "merged_at", "row_status"}
+            set(result["selected"]),
+            {"number", "title", "merged_at", "row_status", "expired_claim"},
         )
         self.assertEqual(set(result["queue"]), {"name", "size"})
         self.assertEqual(set(result["inventory"]), self.INVENTORY_KEYS)
@@ -2510,7 +2551,7 @@ class ResultSchemaTests(SelectionTestCase):
         result = self.select([merged(612)])
         self.assertEqual(result["status"], "no-selectable-row")
         self.assertEqual(
-            set(result), {"status", "repo", "document", "selected", "queue", "inventory"}
+            set(result), self.RESULT_KEYS
         )
         self.assertIsNone(result["selected"])
         self.assertIsNone(result["queue"])
@@ -2603,10 +2644,10 @@ class SchemaUpgradeTests(SelectionTestCase):
 
     def test_a_current_document_still_states_every_row_field(self):
         # The control the upgrade needs: it is keyed on the version the
-        # document declares, not on "a missing field is fine". A version 2
+        # document declares, not on "a missing field is fine". A current
         # document that leaves one out is the truncated edit `_require_keys`
         # exists to refuse.
-        for field in ("title", "merged_at"):
+        for field in ("title", "merged_at", "claim"):
             with self.subTest(field=field):
                 payload = valid_payload({"602": completed_row()})
                 del payload["repositories"][REPO]["rows"]["602"][field]
@@ -2879,6 +2920,7 @@ class ExclusionAndEmptinessTests(SelectionTestCase):
                 directory = tempfile.TemporaryDirectory(prefix="project-review-root-")
                 self.addCleanup(directory.cleanup)
                 root = Path(directory.name)
+                initialize_repository(root)
                 (root / "docs").mkdir()
                 self.establish(
                     {"610": excluded_row, "602": self.clean("2026-09-09T00:00:00Z")},
@@ -2993,6 +3035,10 @@ class SelectionRefusalTests(SelectionTestCase):
 
 class CommandLineTests(LedgerTestCase):
     """Three outcomes, three exit codes, one JSON shape."""
+
+    def setUp(self):
+        super().setUp()
+        initialize_repository(self.root)
 
     def run_module(self, *argv, stdin=None):
         return subprocess.run(
@@ -3376,6 +3422,836 @@ class FilesystemTests(LedgerTestCase):
         self.assertEqual(LEDGER.migrate(self.root, REPO)["status"], "migrated")
 
 
+# --------------------------------------------------------------------------
+# The lease (issue #682)
+#
+# Real renewers, real liveness signals, real Git repositories. Every claim a
+# test takes goes through the command line, because that is how the renewer
+# leaves its invoking helper behind -- and every renewer a claim reports is
+# stopped by the pid the claim recorded, in a cleanup registered the moment the
+# claim returns, so a failing assertion cannot leave a renewer keeping some
+# later test's temporary repository claimed.
+
+# Short enough for a test, long enough that a loaded runner's `git` spawns fit
+# comfortably inside one renewal.
+LEASE_RENEWAL = 0.25
+LEASE_EXPIRY = 1.5
+
+# How long a test waits for something the lease promises "within one
+# interval" before failing. The promise itself is asserted from timestamps the
+# renewer wrote; this bound only keeps a broken renewer from hanging the suite.
+SETTLE_SECONDS = 15.0
+
+HOLD_LOCK_PROGRAM = """
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("held_ledger", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules["held_ledger"] = module
+spec.loader.exec_module(module)
+with module.repository_lock(sys.argv[2]):
+    print("held", flush=True)
+    time.sleep(600)
+"""
+
+LONG_CHILD_SESSION_PROGRAM = """
+import subprocess, sys
+subprocess.run([sys.executable, "-c", "import time; time.sleep(600)"])
+"""
+
+
+def wait_until(predicate, message, timeout=SETTLE_SECONDS, interval=0.02):
+    give_up = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= give_up:
+            raise AssertionError(message)
+        time.sleep(interval)
+
+
+def process_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def instant(value: str) -> float:
+    return LEDGER._precise_instant(value, "a test timestamp")
+
+
+class LeaseTestCase(SelectionTestCase):
+    def helper(self, *argv, stdin=None, pass_fds=(), cwd=None):
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), *argv],
+            capture_output=True,
+            text=True,
+            input=stdin,
+            stdin=None if stdin is not None else subprocess.DEVNULL,
+            pass_fds=pass_fds,
+            cwd=None if cwd is None else str(cwd),
+            timeout=60,
+        )
+
+    def session(self, program="import time; time.sleep(600)", pass_fds=()):
+        """A stand-in review session, in a process group of its own."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", program],
+            stdin=subprocess.DEVNULL,
+            pass_fds=pass_fds,
+            start_new_session=True,
+        )
+        self.addCleanup(self.end_session, process)
+        return process
+
+    def end_session(self, process):
+        # The whole group, so a long-running child the session started goes
+        # with it; then reaped, because a zombie still answers `kill -0`.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=SETTLE_SECONDS)
+
+    def liveness_pipe(self):
+        read_end, write_end = os.pipe()
+        for descriptor in (read_end, write_end):
+            self.addCleanup(self.close_quietly, descriptor)
+        return read_end, write_end
+
+    @staticmethod
+    def close_quietly(descriptor):
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+    def claim_arguments(self, root=None, renewal=LEASE_RENEWAL, expiry=LEASE_EXPIRY):
+        arguments = ["claim", "--root", str(self.root if root is None else root), "--repo", REPO]
+        if renewal is not None:
+            arguments += ["--renewal", str(renewal)]
+        if expiry is not None:
+            arguments += ["--expiry", str(expiry)]
+        return arguments
+
+    def claim(self, entries, pid=None, fd=None, cwd=None, **settings):
+        signal_arguments = (
+            ["--owner-pid", str(pid)] if pid is not None else ["--liveness-fd", str(fd)]
+        )
+        completed = self.helper(
+            *self.claim_arguments(**settings),
+            *signal_arguments,
+            stdin=json.dumps(listing(entries)),
+            pass_fds=() if fd is None else (fd,),
+            cwd=cwd,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return self.claimed(completed.stdout)
+
+    def claimed(self, stdout):
+        result = json.loads(stdout)
+        if result.get("claim"):
+            self.addCleanup(self.stop_renewer, result["claim"]["renewer"]["pid"])
+        return result
+
+    def stop_renewer(self, pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+        try:
+            wait_until(lambda: not process_running(pid), f"renewer {pid} did not stop")
+        except AssertionError:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            raise
+
+    def lease_command(self, command, number, token, root=None):
+        return self.helper(
+            command,
+            "--root",
+            str(self.root if root is None else root),
+            "--repo",
+            REPO,
+            "--pr",
+            str(number),
+            "--token",
+            token,
+        )
+
+    def common(self):
+        return LEDGER.git_common_directory(self.root)
+
+    def heartbeat(self, token):
+        return LEDGER.read_heartbeat(self.common(), token)
+
+    def renewals(self, token):
+        record = self.heartbeat(token)
+        return None if record is None else record["renewals"]
+
+    def claim_on_disk(self, number):
+        return self.rows_on_disk()[str(number)]["claim"]
+
+    def ledger_bytes(self):
+        return LEDGER.document_path(self.root).read_bytes()
+
+    def expire(self, claimed, session):
+        """Take a claim's session away and wait out its lease."""
+        token = claimed["claim"]["token"]
+        renewer = claimed["claim"]["renewer"]["pid"]
+        self.end_session(session)
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its session")
+        deadline = instant(self.heartbeat(token)["deadline"])
+        wait_until(lambda: time.time() > deadline + 0.05, "the lease did not lapse")
+
+    def refused(self, completed, reason):
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn(f"refused ({reason})", completed.stderr)
+        return completed.stderr
+
+
+class LivenessSignalTests(LeaseTestCase):
+    """Renewal follows the session's signal, and nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def test_a_claim_with_no_liveness_signal_is_refused_and_records_nothing(self):
+        before = self.ledger_bytes()
+        session = self.session()
+        read_end, _ = self.liveness_pipe()
+        for name, signal_arguments, fds in (
+            ("neither", [], ()),
+            ("both", ["--owner-pid", str(session.pid), "--liveness-fd", str(read_end)], (read_end,)),
+        ):
+            with self.subTest(signal=name):
+                completed = self.helper(
+                    *self.claim_arguments(),
+                    *signal_arguments,
+                    stdin=json.dumps(listing([merged(612)])),
+                    pass_fds=fds,
+                )
+                self.refused(completed, "liveness-required")
+                self.assertEqual(self.ledger_bytes(), before)
+                self.assertFalse((self.common() / LEDGER.RUNTIME_DIRECTORY).exists())
+
+    def test_a_signal_already_lost_is_refused_and_records_nothing(self):
+        before = self.ledger_bytes()
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        read_end, write_end = self.liveness_pipe()
+        os.close(write_end)
+        for name, signal_arguments, fds in (
+            ("an exited owner", ["--owner-pid", str(gone.pid)], ()),
+            ("a closed descriptor", ["--liveness-fd", str(read_end)], (read_end,)),
+        ):
+            with self.subTest(signal=name):
+                completed = self.helper(
+                    *self.claim_arguments(),
+                    *signal_arguments,
+                    stdin=json.dumps(listing([merged(612)])),
+                    pass_fds=fds,
+                )
+                self.refused(completed, "liveness-lost")
+                self.assertEqual(self.ledger_bytes(), before)
+
+    def test_a_descriptor_whose_closure_cannot_be_observed_is_refused(self):
+        read_end, write_end = self.liveness_pipe()
+        with open(self.root / "regular", "w") as regular:
+            for name, descriptor in (
+                ("a pipe's write end", write_end),
+                ("a regular file", regular.fileno()),
+            ):
+                with self.subTest(descriptor=name):
+                    completed = self.helper(
+                        *self.claim_arguments(),
+                        "--liveness-fd",
+                        str(descriptor),
+                        stdin=json.dumps(listing([merged(612)])),
+                        pass_fds=(descriptor,),
+                    )
+                    self.refused(completed, "liveness-invalid")
+
+    def test_a_captured_claim_returns_while_its_renewer_keeps_renewing(self):
+        session = self.session()
+        started = time.monotonic()
+        completed = self.helper(
+            *self.claim_arguments(),
+            "--owner-pid",
+            str(session.pid),
+            stdin=json.dumps(listing([merged(612)])),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(time.monotonic() - started, 30)
+        result = self.claimed(completed.stdout)
+        token = result["claim"]["token"]
+        self.assertTrue(process_running(result["claim"]["renewer"]["pid"]))
+        wait_until(lambda: (self.renewals(token) or 0) >= 2, "no renewals arrived")
+        self.assertTrue(process_running(result["claim"]["renewer"]["pid"]))
+
+    def assert_renewal_stops_within_one_interval(self, result, lose_signal):
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        lost_at = time.time()
+        lose_signal()
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its signal")
+        record = self.heartbeat(token)
+        last_renewal = instant(record["deadline"]) - LEASE_EXPIRY
+        self.assertLessEqual(last_renewal, lost_at + LEASE_RENEWAL)
+        time.sleep(3 * LEASE_RENEWAL)
+        self.assertEqual(self.heartbeat(token), record)
+
+    def test_closing_the_descriptor_stops_renewal_within_one_interval(self):
+        read_end, write_end = self.liveness_pipe()
+        result = self.claim([merged(612)], fd=read_end)
+        self.assertEqual(result["claim"]["liveness"], "descriptor")
+        self.assertEqual(result["status"], "claimed")
+        self.assert_renewal_stops_within_one_interval(result, lambda: os.close(write_end))
+
+    def test_the_owner_process_exiting_stops_renewal_within_one_interval(self):
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        self.assertEqual(result["claim"]["liveness"], "process")
+        self.assert_renewal_stops_within_one_interval(
+            result, lambda: self.end_session(session)
+        )
+
+    def test_a_long_running_child_does_not_interrupt_renewal(self):
+        read_end, write_end = self.liveness_pipe()
+        session = self.session(LONG_CHILD_SESSION_PROGRAM, pass_fds=(write_end,))
+        os.close(write_end)
+        result = self.claim([merged(612)], fd=read_end)
+        token = result["claim"]["token"]
+        # Past the claim's whole expiry, so a renewer that had stopped would
+        # show as a lapsed lease rather than merely as fewer renewals.
+        wait_until(lambda: (self.renewals(token) or 0) >= 2, "no renewals arrived")
+        time.sleep(LEASE_EXPIRY + LEASE_RENEWAL)
+        fenced = self.lease_command("fence", 612, token)
+        self.assertEqual(fenced.returncode, 0, fenced.stderr)
+        self.assertGreaterEqual(self.renewals(token), 4)
+        self.assertEqual(session.poll(), None)
+        renewer = result["claim"]["renewer"]["pid"]
+        self.end_session(session)
+        wait_until(lambda: not process_running(renewer), "the renewer outlived the session")
+
+
+class ReleaseTests(LeaseTestCase):
+    def test_the_current_owner_releases_its_claim_and_its_renewer_stops(self):
+        self.establish({"602": self.clean("2026-09-01T00:00:00Z")})
+        session = self.session()
+        result = self.claim([merged(602)], pid=session.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        released = self.lease_command("release", 602, token)
+        self.assertEqual(released.returncode, 0, released.stderr)
+        self.assertEqual(json.loads(released.stdout)["status"], "released")
+        self.assertIsNone(self.claim_on_disk(602))
+        self.assertIsNone(self.heartbeat(token))
+        wait_until(lambda: not process_running(renewer), "the released claim's renewer kept running")
+        self.assertEqual(self.rows_on_disk()["602"]["completed_at"], "2026-09-01T00:00:00Z")
+
+
+class HeartbeatRemovalTests(LeaseTestCase):
+    def test_a_heartbeat_removed_from_under_a_live_owner_is_written_again(self):
+        # Absence is a defined state -- the deadline falls back to the claim's
+        # own start and expiry -- so it is not a release. The renewer answers
+        # it with a fenced renewal, which a live owner passes.
+        self.establish({})
+        result = self.claim([merged(612)], pid=self.session().pid, expiry=30)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        LEDGER.heartbeat_path(self.common(), token).unlink()
+        record = wait_until(lambda: self.heartbeat(token), "the heartbeat was not written again")
+        self.assertEqual(record["renewer"]["pid"], renewer)
+        self.assertTrue(process_running(renewer))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+
+
+class RepositoryLockTests(LeaseTestCase):
+    """The helper's own mutex recovers from a dead holder and from nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def holder(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", HOLD_LOCK_PROGRAM, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), str(self.root)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.kill_holder, process)
+        self.assertEqual(process.stdout.readline().strip(), "held")
+        return process
+
+    def kill_holder(self, process):
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        process.wait(timeout=SETTLE_SECONDS)
+        process.stdout.close()
+
+    def test_a_holder_killed_inside_the_lock_is_recovered_by_the_next_invocation(self):
+        holder = self.holder()
+        observed = LEDGER.observed_lock(self.root)
+        self.assertEqual(LEDGER.lock_holder(self.root, observed)["pid"], holder.pid)
+        self.kill_holder(holder)
+        self.assertEqual(LEDGER.observed_lock(self.root), observed)
+        completed = self.helper(
+            "select", "--root", str(self.root), "--repo", REPO,
+            stdin=json.dumps(listing([merged(612)])),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["selected"]["number"], 612)
+        self.assertIsNone(LEDGER.observed_lock(self.root))
+
+    def test_a_delayed_recovery_cannot_delete_the_replacement_lock(self):
+        first = self.holder()
+        stale = LEDGER.observed_lock(self.root)
+        self.kill_holder(first)
+        # The replacement recovers the dead lock itself and holds its own.
+        replacement = self.holder()
+        current = LEDGER.observed_lock(self.root)
+        self.assertNotEqual(current, stale)
+        self.assertFalse(LEDGER.clear_dead_lock(self.root, stale))
+        self.assertEqual(LEDGER.observed_lock(self.root), current)
+        self.assertEqual(LEDGER.lock_holder(self.root, current)["pid"], replacement.pid)
+
+    def test_a_live_holder_is_waited_on_for_a_bounded_time_and_never_removed(self):
+        holder = self.holder()
+        observed = LEDGER.observed_lock(self.root)
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            with LEDGER.repository_lock(self.root, wait=0.3):
+                self.fail("the lock was taken from a live holder")
+        self.assertEqual(raised.exception.reason, "lock-busy")
+        self.assertEqual(raised.exception.owner["pid"], holder.pid)
+        self.assertEqual(LEDGER.observed_lock(self.root), observed)
+
+    def plant_lock(self, content: bytes) -> str:
+        proc = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=str(self.root), input=content, capture_output=True, check=True,
+        )
+        blob = proc.stdout.decode().strip()
+        git(self.root, "update-ref", LEDGER.LOCK_REF, blob, "")
+        return blob
+
+    def test_an_unverifiable_holder_is_refused_at_once_and_left_in_place(self):
+        cases = {
+            "another host": (
+                json.dumps({"host": "elsewhere.invalid", "pid": os.getpid(), "nonce": "0" * 32}).encode(),
+                "lock-unverifiable",
+            ),
+            "an unreadable record": (b"not a lock record", "lock-unreadable"),
+        }
+        for name, (content, reason) in cases.items():
+            with self.subTest(holder=name):
+                blob = self.plant_lock(content)
+                started = time.monotonic()
+                with self.assertRaises(LEDGER.LeaseRefused) as raised:
+                    with LEDGER.repository_lock(self.root, wait=SETTLE_SECONDS):
+                        self.fail("the lock was taken from an unverifiable holder")
+                self.assertLess(time.monotonic() - started, SETTLE_SECONDS / 2)
+                self.assertEqual(raised.exception.reason, reason)
+                self.assertIsNotNone(raised.exception.owner)
+                self.assertEqual(LEDGER.observed_lock(self.root), blob)
+                git(self.root, "update-ref", "-d", LEDGER.LOCK_REF, blob)
+
+    def test_the_lock_is_one_reference_every_linked_worktree_sees(self):
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-q", "--allow-empty", "-m", "base")
+        linked = Path(tempfile.mkdtemp(prefix="project-review-linked-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(linked)]))
+        git(self.root, "worktree", "add", "-q", "--detach", str(linked / "wt"))
+        holder = self.holder()
+        seen = git(linked / "wt", "rev-parse", "--verify", "--quiet", LEDGER.LOCK_REF).stdout.strip()
+        self.assertEqual(seen, LEDGER.observed_lock(self.root))
+        self.assertEqual(LEDGER.lock_holder(linked / "wt", seen)["pid"], holder.pid)
+
+
+class ClaimRaceTests(LeaseTestCase):
+    """Two invocations, one owner, whichever of them gets the lock first."""
+
+    def race(self, cwds, entries):
+        sessions = [self.session() for _ in cwds]
+        processes = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / CLAUDE_LEDGER_HELPER),
+                    *self.claim_arguments(),
+                    "--owner-pid",
+                    str(session.pid),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(cwd),
+            )
+            for session, cwd in zip(sessions, cwds)
+        ]
+        payload = json.dumps(listing(entries))
+        for process in processes:
+            process.stdin.write(payload)
+        for process in processes:
+            process.stdin.close()
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, stderr)
+            results.append(self.claimed(stdout))
+        return sessions, sorted(results, key=lambda result: result["status"])
+
+    def linked_worktrees(self):
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-q", "--allow-empty", "-m", "base")
+        parent = Path(tempfile.mkdtemp(prefix="project-review-linked-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(parent)]))
+        worktrees = []
+        for name in ("session-a", "session-b"):
+            git(self.root, "worktree", "add", "-q", "--detach", str(parent / name))
+            worktrees.append(parent / name)
+        return worktrees
+
+    def test_two_linked_worktrees_racing_for_one_unclaimed_pull_request_yield_one_owner(self):
+        self.establish({})
+        worktrees = self.linked_worktrees()
+        _, (loser, winner) = self.race(worktrees, [merged(612)])
+        self.assertEqual((loser["status"], winner["status"]), ("all-claimed", "claimed"))
+        token = winner["claim"]["token"]
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+        self.assertEqual(
+            [(skipped["number"], skipped["token"]) for skipped in loser["skipped_claims"]],
+            [(612, token)],
+        )
+        self.assertIsNone(loser["document"])
+        self.assertEqual(self.rows_on_disk()["612"]["history"], [])
+
+    def test_two_selectors_racing_for_one_expired_claim_yield_one_takeover(self):
+        self.establish({})
+        session = self.session()
+        first = self.claim([merged(612)], pid=session.pid)
+        previous = first["claim"]["token"]
+        self.expire(first, session)
+        _, (loser, winner) = self.race([self.root, self.root], [merged(612)])
+        self.assertEqual((loser["status"], winner["status"]), ("all-claimed", "claimed"))
+        token = winner["claim"]["token"]
+        self.assertEqual(winner["takeover"], {"previous_token": previous})
+        self.assertEqual(winner["selected"]["expired_claim"]["token"], previous)
+        history = self.rows_on_disk()["612"]["history"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["kind"], "takeover")
+        self.assertEqual((history[0]["previous_token"], history[0]["token"]), (previous, token))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+        self.assertIsNone(self.heartbeat(previous))
+
+
+class FencingTests(LeaseTestCase):
+    """A token that no longer owns the row changes nothing, however it asks."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def test_an_expired_owner_is_refused_before_any_takeover(self):
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        token = result["claim"]["token"]
+        self.expire(result, session)
+        ledger, record = self.ledger_bytes(), self.heartbeat(token)
+        for command in ("renew", "release", "fence"):
+            with self.subTest(command=command):
+                message = self.refused(self.lease_command(command, 612, token), "expired")
+                self.assertIn(token, message)
+                self.assertEqual(self.ledger_bytes(), ledger)
+                self.assertEqual(self.heartbeat(token), record)
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            with LEDGER.fenced(self.root, REPO, 612, token):
+                self.fail("an expired token passed the fencing check")
+        self.assertEqual(raised.exception.reason, "expired")
+
+    def test_a_replaced_owner_is_refused_and_leaves_the_replacement_intact(self):
+        session = self.session()
+        first = self.claim([merged(612)], pid=session.pid)
+        stale = first["claim"]["token"]
+        self.expire(first, session)
+        replacement = self.claim([merged(612)], pid=self.session().pid)
+        token = replacement["claim"]["token"]
+        ledger = self.ledger_bytes()
+        replacement_record = LEDGER.heartbeat_path(self.common(), token)
+        replacement_renewer = replacement["claim"]["renewer"]["pid"]
+        for command in ("renew", "release", "fence"):
+            with self.subTest(command=command):
+                message = self.refused(self.lease_command(command, 612, stale), "replaced")
+                self.assertIn(token, message)
+                self.assertEqual(self.ledger_bytes(), ledger)
+                self.assertTrue(replacement_record.exists())
+                # The lock is free, or held for a moment by the replacement's
+                # own renewer; the refused invocation left nothing behind.
+                held = LEDGER.observed_lock(self.root)
+                if held is not None:
+                    with contextlib.suppress(LEDGER.LeaseRefused):
+                        self.assertEqual(
+                            LEDGER.lock_holder(self.root, held)["pid"], replacement_renewer
+                        )
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            with LEDGER.fenced(self.root, REPO, 612, stale):
+                self.fail("a replaced token passed the fencing check")
+        self.assertEqual(raised.exception.reason, "replaced")
+        self.assertEqual(raised.exception.owner, {"token": token})
+        self.assertEqual(self.lease_command("fence", 612, token).returncode, 0)
+        self.assertTrue(process_running(replacement_renewer))
+        self.assertTrue(replacement_record.exists())
+
+    def stopped_claim(self):
+        """A live claim whose renewer is gone, so the heartbeat holds still."""
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid, renewal=0.25, expiry=30)
+        self.stop_renewer(result["claim"]["renewer"]["pid"])
+        return result["claim"]
+
+    def test_an_absent_heartbeat_falls_back_to_the_claims_start_and_expiry(self):
+        claimed = self.stopped_claim()
+        LEDGER.heartbeat_path(self.common(), claimed["token"]).unlink()
+        fenced = self.lease_command("fence", 612, claimed["token"])
+        self.assertEqual(fenced.returncode, 0, fenced.stderr)
+        self.assertAlmostEqual(
+            instant(json.loads(fenced.stdout)["deadline"]),
+            instant(claimed["started_at"]) + claimed["expiry_seconds"],
+            places=5,
+        )
+
+    def test_an_unreadable_or_foreign_heartbeat_refuses_every_decision_that_needs_it(self):
+        claimed = self.stopped_claim()
+        path = LEDGER.heartbeat_path(self.common(), claimed["token"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        cases = {
+            "unparseable": ("{ not json", "heartbeat-unreadable"),
+            "another claim's": (
+                json.dumps(dict(record, pr=611)),
+                "heartbeat-mismatch",
+            ),
+        }
+        for name, (content, reason) in cases.items():
+            path.write_text(content, encoding="utf-8")
+            ledger = self.ledger_bytes()
+            for command in ("renew", "release", "fence"):
+                with self.subTest(record=name, command=command):
+                    self.refused(self.lease_command(command, 612, claimed["token"]), reason)
+            with self.subTest(record=name, command="claim"):
+                completed = self.helper(
+                    *self.claim_arguments(),
+                    "--owner-pid",
+                    str(self.session().pid),
+                    stdin=json.dumps(listing([merged(612)])),
+                )
+                self.refused(completed, reason)
+            with self.subTest(record=name, command="select"):
+                completed = self.helper(
+                    "select", "--root", str(self.root), "--repo", REPO,
+                    stdin=json.dumps(listing([merged(612)])),
+                )
+                self.refused(completed, reason)
+            self.assertEqual(self.ledger_bytes(), ledger)
+            self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+
+class ClaimedSelectionTests(LeaseTestCase):
+    def test_a_live_claim_is_skipped_reported_and_selection_continues_in_order(self):
+        self.establish({"602": row("legacy", evidence=["cursor:docs/project_review_boundaries.md"])})
+        entries = [merged(612), merged(610), merged(602)]
+        first = self.claim(entries, pid=self.session().pid)
+        self.assertEqual(first["selected"]["number"], 612)
+        second = self.claim(entries, pid=self.session().pid)
+        self.assertEqual(second["selected"]["number"], 610)
+        self.assertEqual(
+            [(skipped["number"], skipped["token"]) for skipped in second["skipped_claims"]],
+            [(612, first["claim"]["token"])],
+        )
+        selected = LEDGER.select(self.root, REPO, listing(entries))
+        self.assertEqual(selected["selected"]["number"], 602)
+        self.assertEqual(selected["queue"]["name"], LEDGER.QUEUE_LEGACY)
+        self.assertEqual(
+            [skipped["number"] for skipped in selected["skipped_claims"]], [612, 610]
+        )
+        for skipped in selected["skipped_claims"]:
+            instant(skipped["deadline"])
+
+    def test_a_repository_whose_every_candidate_is_claimed_writes_nothing(self):
+        self.establish({})
+        first = self.claim([merged(612)], pid=self.session().pid)
+        before = self.ledger_bytes()
+        second = self.claim([merged(612)], pid=self.session().pid)
+        self.assertEqual(second["status"], "all-claimed")
+        self.assertIsNone(second["claim"])
+        self.assertIsNone(second["selected"])
+        self.assertIsNone(second["document"])
+        selected = LEDGER.select(self.root, REPO, listing([merged(612)]))
+        self.assertEqual(selected["status"], "all-claimed")
+        self.assertEqual(
+            [skipped["token"] for skipped in selected["skipped_claims"]],
+            [first["claim"]["token"]],
+        )
+        self.assertEqual(self.ledger_bytes(), before)
+
+
+class LeaseSettingsTests(LeaseTestCase):
+    def test_production_defaults_are_a_minute_and_a_quarter_hour(self):
+        self.assertEqual(
+            LEDGER.effective_lease_settings(LEDGER.empty_repository()),
+            {"renewal_seconds": 60, "expiry_seconds": 900},
+        )
+
+    def test_an_existing_claim_keeps_the_settings_it_was_taken_with(self):
+        self.establish({})
+        configured = self.helper(
+            "lease-defaults", "--root", str(self.root), "--repo", REPO,
+            "--renewal", "0.25", "--expiry", "1.5",
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        entries = [merged(612), merged(610)]
+        first = self.claim(entries, pid=self.session().pid, renewal=None, expiry=None)
+        taken = self.claim_on_disk(612)
+        self.assertEqual((taken["renewal_seconds"], taken["expiry_seconds"]), (0.25, 1.5))
+        changed = self.helper(
+            "lease-defaults", "--root", str(self.root), "--repo", REPO,
+            "--renewal", "0.5", "--expiry", "40",
+        )
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        second = self.claim(entries, pid=self.session().pid, renewal=0.3, expiry=20)
+        self.assertEqual(second["selected"]["number"], 610)
+        self.assertEqual(self.claim_on_disk(612), taken)
+        self.assertEqual(
+            {key: self.claim_on_disk(610)[key] for key in LEDGER.LEASE_SETTING_KEYS},
+            {"renewal_seconds": 0.3, "expiry_seconds": 20},
+        )
+        # A renewal after the change still extends by the claim's own expiry.
+        token = first["claim"]["token"]
+        count = self.renewals(token)
+        wait_until(lambda: self.renewals(token) > count, "no renewal after the change")
+        record = self.heartbeat(token)
+        self.assertLessEqual(instant(record["deadline"]) - time.time(), 1.5)
+
+    def test_a_pair_that_would_lapse_between_renewals_is_refused(self):
+        self.establish({})
+        for renewal, expiry in (("1", "1"), ("2", "1"), ("nan", "5"), ("0", "5")):
+            with self.subTest(renewal=renewal, expiry=expiry):
+                completed = self.helper(
+                    "lease-defaults", "--root", str(self.root), "--repo", REPO,
+                    "--renewal", renewal, "--expiry", expiry,
+                )
+                self.assertEqual(completed.returncode, 2, completed.stdout)
+
+
+class CompletedReviewTimestampTests(LeaseTestCase):
+    def test_claim_renewal_release_and_takeover_leave_the_completed_review_alone(self):
+        completed_at = "2026-09-01T00:00:00Z"
+        self.establish({"602": self.clean(completed_at)})
+
+        def unchanged():
+            current = self.rows_on_disk()["602"]
+            self.assertEqual((current["status"], current["commit"], current["completed_at"]),
+                             ("clean", FULL_SHA, completed_at))
+
+        session = self.session()
+        first = self.claim([merged(602)], pid=session.pid)
+        unchanged()
+        renewed = self.lease_command("renew", 602, first["claim"]["token"])
+        self.assertEqual(renewed.returncode, 0, renewed.stderr)
+        unchanged()
+        self.expire(first, session)
+        second = self.claim([merged(602)], pid=self.session().pid)
+        self.assertEqual(second["takeover"], {"previous_token": first["claim"]["token"]})
+        unchanged()
+        released = self.lease_command("release", 602, second["claim"]["token"])
+        self.assertEqual(released.returncode, 0, released.stderr)
+        unchanged()
+
+
+class RuntimeSeparationTests(LeaseTestCase):
+    def test_renewals_rewrite_no_publishable_document_and_no_tracked_state(self):
+        self.establish({})
+        git(self.root, "add", "-A")
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-q", "-m", "ledger")
+        result = self.claim([merged(612)], pid=self.session().pid)
+        token = result["claim"]["token"]
+
+        def snapshot():
+            documents = {
+                str(path.relative_to(self.root)): path.read_bytes()
+                for path in sorted((self.root / "docs").rglob("*"))
+                if path.is_file()
+            }
+            status = git(self.root, "status", "--porcelain", "--untracked-files=all").stdout
+            return documents, status
+
+        after_claim = snapshot()
+        wait_until(lambda: (self.renewals(token) or 0) >= 2, "no renewals arrived")
+        self.assertEqual(snapshot(), after_claim)
+        record = LEDGER.heartbeat_path(self.common(), token).resolve()
+        self.assertIn(self.common().resolve(), record.parents)
+        self.assertNotIn((self.root / "docs").resolve(), record.parents)
+
+
+class LeaseSchemaTests(LedgerTestCase):
+    def test_a_version_2_ledger_reads_with_no_claims_and_no_defaults(self):
+        payload = valid_payload({"612": completed_row()})
+        payload["version"] = 2
+        del payload["repositories"][REPO]["lease_defaults"]
+        del payload["repositories"][REPO]["rows"]["612"]["claim"]
+        state = LEDGER.state_for(self.parse(payload), REPO)
+        self.assertIsNone(state["lease_defaults"])
+        self.assertIsNone(state["rows"]["612"]["claim"])
+
+    def test_every_malformed_claim_or_takeover_is_refused(self):
+        claim = {
+            "token": "a" * 32,
+            "started_at": "2026-09-05T10:00:00.000000Z",
+            "renewal_seconds": 60,
+            "expiry_seconds": 900,
+        }
+        takeover = {
+            "kind": "takeover",
+            "at": "2026-09-05T10:00:00.000000Z",
+            "previous_token": "a" * 32,
+            "token": "b" * 32,
+        }
+        cases = {
+            "short token": dict(row("never-reviewed"), claim=dict(claim, token="abc")),
+            "second-precision start": dict(
+                row("never-reviewed"), claim=dict(claim, started_at="2026-09-05T10:00:00Z")
+            ),
+            "expiry before renewal": dict(row("never-reviewed"), claim=dict(claim, expiry_seconds=30)),
+            "boolean seconds": dict(row("never-reviewed"), claim=dict(claim, renewal_seconds=True)),
+            "claim missing its start": dict(
+                row("never-reviewed"), claim={k: v for k, v in claim.items() if k != "started_at"}
+            ),
+            "takeover by the same token": dict(
+                row("never-reviewed"), history=[dict(takeover, token="a" * 32)]
+            ),
+            "takeover naming one token": dict(
+                row("never-reviewed"),
+                history=[{k: v for k, v in takeover.items() if k != "previous_token"}],
+            ),
+        }
+        for name, malformed in cases.items():
+            with self.subTest(shape=name):
+                with self.assertRaises(LEDGER.LedgerError):
+                    self.parse(valid_payload({"612": malformed}))
+        parsed = self.parse(
+            valid_payload({"612": dict(row("never-reviewed"), claim=claim, history=[takeover])})
+        )
+        self.assertEqual(LEDGER.state_for(parsed, REPO)["rows"]["612"]["claim"], claim)
+        defaults = valid_payload()
+        defaults["repositories"][REPO]["lease_defaults"] = {"renewal_seconds": 5, "expiry_seconds": 5}
+        with self.assertRaises(LEDGER.LedgerError):
+            self.parse(defaults)
+
+
 class BundledLedgerHelperTests(unittest.TestCase):
     """The module ships in both bundles and nothing invokes it yet."""
 
@@ -3405,16 +4281,21 @@ class BundledLedgerHelperTests(unittest.TestCase):
         self.assertNotEqual(LEDGER.LEDGER_MARKER, CURSOR.LEGACY_CURSOR_MARKER)
         self.assertNotEqual(LEDGER.LEDGER_RELATIVE_PATH, CURSOR.DOCUMENT_RELATIVE_PATH)
 
-    def test_the_helper_spawns_no_external_command(self):
-        # Pinned as an absence because a helper that shelled out would need
-        # declaring in docs/agent-workflow-contract.md, and would also be
-        # reaching a checkout the caller never told it about. Its declared
-        # surface in tools/test_agent_workflow_contract.py is an empty set for
-        # exactly this reason.
+    def test_the_helper_spawns_only_git_and_itself(self):
+        # Issue #682 gives the helper two spawns: `git`, for the common
+        # directory and the lock reference, and the renewer, which is this
+        # file run through `sys.executable`. Both are declared in
+        # docs/agent-workflow-contract.md and pinned in
+        # tools/test_agent_workflow_contract.py; what is pinned here is that
+        # nothing reaches a shell or a spawn spelled some other way.
         source = (REPO_ROOT / CLAUDE_LEDGER_HELPER).read_text(encoding="utf-8")
-        for forbidden in ("subprocess", "os.system", "os.popen"):
+        for forbidden in ("os.system", "os.popen", "os.spawn", "os.exec", "shell=True"):
             with self.subTest(spelling=forbidden):
                 self.assertNotIn(forbidden, source)
+        spawns = re.findall(r"subprocess\.(\w+)\(\s*\[\s*([\w.\"]+)", source)
+        self.assertEqual(
+            sorted(set(spawns)), [("Popen", "sys.executable"), ("run", '"git"')]
+        )
 
     def test_no_bundled_asset_resolves_the_new_module(self):
         # Design D-19: the installed command keeps reading the v2 cursor until

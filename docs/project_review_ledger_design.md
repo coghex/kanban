@@ -220,13 +220,21 @@ and never a step of this sequence (D-16).
 
 The claim is a lease renewed by a regular heartbeat independent of review
 phases, because a long build or test outlives any phase-boundary renewal.
-`claim` starts a renewer that rewrites the lease's expiry every `renewal`
-seconds while the review session's liveness signal is held; cancellation,
-session termination, or loss of that signal stops renewal, and the lease
-lapses after `expiry`. Both intervals default to 60 seconds and 15 minutes,
-may be given per-repository defaults in the ledger, are overridden by
-invocation flags, and are written into the claim so a later change to a
-default never alters an existing claim.
+The ledger row holds the claim's owner token, its start, and its effective
+renewal and expiry settings, written once when the claim is taken; the
+renewable expiry lives in a heartbeat record under the Git common directory,
+outside `docs/`, so a heartbeat never rewrites the ledger or any other
+publishable document. `claim` starts a renewer that rewrites that record's
+deadline every `renewal` seconds while the review session's liveness signal
+— an inherited descriptor the session holds open, or an owner process the
+invocation names explicitly — is held; cancellation, session termination, or
+loss of that signal stops renewal, and the lease lapses after `expiry`. When
+the heartbeat record is absent the deadline is the claim's start plus its
+expiry; when it is present but unreadable, or names another claim, every
+decision that needs the deadline refuses. Both intervals default to 60
+seconds and 15 minutes, may be given per-repository defaults in the ledger,
+are overridden by invocation flags, and are written into the claim so a
+later change to a default never alters an existing claim.
 
 Takeover of an expired claim is one compare-and-swap under the helper's
 lock: the taker verifies the expiry has passed, replaces the owner token,
@@ -378,8 +386,10 @@ fifteen pages of a hundred per invocation.
 
 ### D-12. An expiring claim is taken before review effort is spent
 
-Approved 2026-09-12. Selection writes a claim with an owner token and an
-expiry, and the owner renews it while the review runs. The guarantees the
+Approved 2026-09-12. Selection writes a claim with an owner token, its
+start, and its effective renewal and expiry settings, and the owner renews
+it while the review runs; the renewable expiry is a runtime heartbeat record,
+not a ledger field (D-17). The guarantees the
 owner named are the contract:
 
 - two agents cannot actively claim the same PR;
@@ -471,7 +481,9 @@ Approved 2026-09-12 with a lifecycle correction. The lease renews every 60
 seconds and expires after 15 minutes by default. The ledger may carry
 per-repository defaults; invocation flags override them and take
 precedence; the claim records its effective settings, and changing a
-default never silently changes an existing claim. Takeover is automatic on
+default never silently changes an existing claim. The expiry a renewal
+extends is kept in a runtime heartbeat record rather than in the ledger, so
+renewal never rewrites a publishable document (D-18). Takeover is automatic on
 the next selection once a claim has expired, performed atomically under
 the helper's lock, recorded as an ownership transition, and needs no manual
 intervention for ordinary crash recovery. There is no archival in the first
@@ -519,21 +531,24 @@ reports `docs/project_review/<N>.md` and `docs/project_review/<N>_<k>.md`;
 Kanban's §7 row, `EXCLUDED_TRACKED_PATHS` entry, and `config.toml.example`
 entry name the directory once, with a tracked seed so the directory exists
 before the workflow writes to it; a consumer enrolls the directory through
-one `direct_publication_paths` entry; the lock and the liveness handle live
-under the helper's managed runtime root, never in `docs/`.
+one `direct_publication_paths` entry; the helper's lock is a Git reference
+and the lease's heartbeat records a runtime directory, both in the
+repository's Git common directory that every linked worktree shares, and
+never in `docs/`.
 
 ### D-19. Seven slices, explicit dependencies, and no partial switch-over
 
 Approved 2026-09-12. The seven delivery slices and their ordering stand.
-LEDGER-2 establishes the ledger; LEDGER-3 and LEDGER-4 depend on
-LEDGER-2; LEDGER-5 depends on the selection and lease contracts from
-LEDGER-3 and LEDGER-4; LEDGER-6 integrates the completed backend and
-publication support; LEDGER-7 adds repetition only after the single-review
-workflow works end to end; LEDGER-1 can land independently first. The
-existing `project-review` workflow stays operational until LEDGER-6
-switches it over: an earlier slice never partially migrates a live
-consumer record and never leaves the installed command dependent on an
-unfinished piece.
+LEDGER-2 establishes the ledger; LEDGER-3 depends on LEDGER-2; LEDGER-4
+depends on LEDGER-2 and LEDGER-3, because the claim is taken by the ordered
+selector under the helper's lock; LEDGER-5 depends on the selection and
+lease contracts from LEDGER-3 and LEDGER-4; LEDGER-6 integrates the
+completed backend and publication support; LEDGER-7 adds repetition only
+after the single-review workflow works end to end; LEDGER-1 can land
+independently first. The existing `project-review` workflow stays
+operational until LEDGER-6 switches it over: an earlier slice never
+partially migrates a live consumer record and never leaves the installed
+command dependent on an unfinished piece.
 
 The arc carries an end-to-end acceptance test proving that a fresh
 repository starts correctly; legacy coverage imports truthfully; the three
@@ -820,7 +835,7 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
 - **Scope:** the lease record, the lock, the renewer and its liveness
   signal, takeover, and the fencing primitive.
 - **Phase:** 2
-- **Depends on:** LEDGER-2
+- **Depends on:** LEDGER-2, LEDGER-3
 - **Ordering:** `critical path`
 - **Relevant decisions:** D-12, D-17
 - **Acceptance signals:** behavioral tests for crash recovery (renewer
