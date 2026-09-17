@@ -32,6 +32,8 @@ module Spec.Support.Process
     isTerminal,
     withRecordingReviewClient,
     withRecordingReviewClientUsing,
+    readTwoConnectionLog,
+    withPerThreadTwoConnectionReviewClient,
     withTwoConnectionReviewClient,
     TwoConnectionClient (..),
     withFakeReviewClient,
@@ -97,6 +99,7 @@ import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (dropWhileEnd, find, findIndex, findIndices, isPrefixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text
+import qualified Data.Text.IO as TextIO
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime (..))
 import Kanban.Domain
@@ -108,6 +111,7 @@ import Kanban.Process
     ProcessIdentity (..),
     identityForPid,
     killManagedProcess,
+    reapManagedHandle,
     managedProcess,
     readProcessSnapshot
   )
@@ -123,7 +127,7 @@ import Kanban.Review
     ReviewEvent (..),
     ReviewLaunch (..),
     ReviewOutputKind (..),
-    ReviewProcessShape,
+    ReviewProcessShape (..),
     ReviewProtocol (..),
     ReviewThreadId (..),
     ReviewWireMessage (..),
@@ -131,6 +135,7 @@ import Kanban.Review
     connectionId,
     decodeReviewWireMessage,
     newRecordingReviewClientForTesting,
+    newRecordingReviewClientLoggingForTesting,
     newReviewClientForTesting,
     reviewConnectionsForTesting,
     runAuthenticatedClaude,
@@ -174,6 +179,7 @@ import Kanban.Worker
     monitorWorker,
     runWorker
   )
+import Kanban.Transcript (SessionLog, closeSessionLog, openSessionLog, sessionLogPath)
 import Spec.Support.Env (ignoringIOException, withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (requireJust)
 import Spec.Support.Fixtures (epoch, fixtureReviewThread)
@@ -295,9 +301,13 @@ withManagedShell command = bracket start stop
     start = do
       (_, _, _, process) <- createProcess (proc "sh" ["-c", command]) {create_group = True}
       pure process
+    -- Reaped through the primitive that tolerates a child something else
+    -- already took. A test may deliberately reap one out from under its
+    -- handle (issue #692), and a teardown that raised on finding no child
+    -- would fail the example that proved the production path survives it.
     stop process = do
       managedProcessFor process >>= killManagedProcess
-      void (timeout 3000000 (waitForProcess process))
+      void (timeout 3000000 (reapManagedHandle process))
 
 managedProcessFor :: ProcessHandle -> IO ManagedProcess
 managedProcessFor process = fst <$> managedProcess process
@@ -336,7 +346,7 @@ withNonLeaderShell command = bracket start stop
     stop process = do
       maybePid <- getPid process
       mapM_ (\pid -> void (try (signalProcess sigKILL pid) :: IO (Either IOException ()))) maybePid
-      void (timeout 3000000 (waitForProcess process))
+      void (timeout 3000000 (reapManagedHandle process))
 
 processIdentity :: Int -> Int -> Int -> Text -> ProcessIdentity
 processIdentity processId parentId groupId command =
@@ -633,21 +643,62 @@ data TwoConnectionClient = TwoConnectionClient
     firstWire :: Handle,
     secondConnection :: ReviewConnection,
     secondWire :: Handle,
-    twoConnectionEvents :: IORef [ReviewEvent]
+    twoConnectionEvents :: IORef [ReviewEvent],
+    -- | The session log this client writes to, when the fixture opened one.
+    twoConnectionLog :: Maybe SessionLog
   }
 
+-- | Every line the fixture's session log holds.
+--
+-- Closed first, because the client holds a write handle on it and GHC
+-- refuses to open a file it already has one on. Closing twice is harmless:
+-- the fixture's own teardown closes it again, and an already-closed handle
+-- is a no-op. Nothing may be asserted about the log after this.
+readTwoConnectionLog :: TwoConnectionClient -> IO [Text]
+readTwoConnectionLog fixture = case fixture.twoConnectionLog of
+  Nothing -> fail "this fixture opened no session log"
+  Just sessionLog -> do
+    closeSessionLog sessionLog
+    Data.Text.lines <$> TextIO.readFile (sessionLogPath sessionLog)
+
 withTwoConnectionReviewClient :: (TwoConnectionClient -> IO result) -> IO result
-withTwoConnectionReviewClient action = do
+withTwoConnectionReviewClient = withTwoConnectionReviewClientLogging SharedProcess False
+
+-- | As 'withTwoConnectionReviewClient', but per-thread and with a real
+-- session log the test can read back.
+--
+-- Both differences are what a connection's end is asserted against. The log
+-- is the only place the @backend-finished@ entry is written, so it is the
+-- only way to prove what that entry says and that there is one of it; and a
+-- per-thread client is the shape whose connection ending settles the starts
+-- and turns that were on that connection rather than reporting the whole
+-- client stopped.
+withPerThreadTwoConnectionReviewClient :: (TwoConnectionClient -> IO result) -> IO result
+withPerThreadTwoConnectionReviewClient = withTwoConnectionReviewClientLogging ProcessPerThread True
+
+withTwoConnectionReviewClientLogging :: ReviewProcessShape -> Bool -> (TwoConnectionClient -> IO result) -> IO result
+withTwoConnectionReviewClientLogging processShape logging action = do
   events <- newIORef []
-  bracket
-    ( do
-        (client, firstHandle) <- newRecordingReviewClientForTesting defaultRoster (\event -> modifyIORef events (<> [event]))
-        first <- soleReviewConnection client
-        (second, secondHandle) <- addRecordingReviewConnectionForTesting client
-        pure (TwoConnectionClient client first firstHandle second secondHandle events)
-    )
-    (\fixture -> stopReviewClient fixture.twoConnectionClient >> hClose fixture.firstWire >> hClose fixture.secondWire)
-    action
+  withTemporaryCacheRoot $ \temporaryRoot -> do
+    let repositoryRoot = temporaryRoot </> "repo"
+    createDirectoryIfMissing True repositoryRoot
+    sessionLog <-
+      if not logging
+        then pure Nothing
+        else do
+          opened <- openSessionLog (Repository repositoryRoot "coghex" "kanban") "two-connection-fixture" 0 Nothing
+          case opened of
+            Left message -> fail ("the fixture could not open a session log: " <> Data.Text.unpack message)
+            Right value -> pure (Just value)
+    bracket
+      ( do
+          (client, firstHandle) <- newRecordingReviewClientLoggingForTesting defaultRoster processShape sessionLog (\event -> modifyIORef events (<> [event]))
+          first <- soleReviewConnection client
+          (second, secondHandle) <- addRecordingReviewConnectionForTesting client
+          pure (TwoConnectionClient client first firstHandle second secondHandle events sessionLog)
+      )
+      (\fixture -> stopReviewClient fixture.twoConnectionClient >> hClose fixture.firstWire >> hClose fixture.secondWire)
+      action
 
 -- | A backend whose provider is a fake executable on disk: it records its own
 -- pid, writes one line to its stderr, answers the initialize handshake the

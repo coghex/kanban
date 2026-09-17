@@ -239,6 +239,10 @@ FLOW_MODULE_PROCESS_IMPORTS = {
         "createProcess",
         "waitForProcess",
     },
+    # Review.hs reaps through `Kanban.Process.reapManagedHandle` rather than
+    # waiting on a handle itself (issue #692), so it no longer names
+    # `waitForProcess` at all -- one spelling of the reap, in the module that
+    # owns the termination primitive.
     "src/Kanban/Review.hs": {
         "CreateProcess",
         "ProcessHandle",
@@ -246,7 +250,6 @@ FLOW_MODULE_PROCESS_IMPORTS = {
         "createPipe",
         "createProcess",
         "proc",
-        "waitForProcess",
     },
     "src/Kanban/Review/Tools.hs": {
         "CreateProcess",
