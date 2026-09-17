@@ -17,6 +17,15 @@ repository, because the lock reference and the heartbeat records live in its
 common directory. Renewal timings are sub-second, and every renewer a claim
 reports is stopped through the pid it recorded.
 
+Issue #683 (LEDGER-5) adds `allocate-report` and `record`, and every test
+that runs either builds its fixtures through the module's own `migrate`, `claim`,
+`allocate-report` and `record` in a real docs worktree: a committed ledger
+beside an operator's modified, staged and untracked files. What a record
+checkpointed is read back out of Git -- the commit's changed paths, the
+ledger at HEAD, the index and the status -- rather than taken from the
+record's own result, and every refusal is asserted to leave the ledger bytes,
+the branch and the operator's files exactly as they were.
+
 * **Fixtures are produced by the mechanism they stand in for.** Every v2
   cursor here is written by `project_review_cursor.py`'s own `record` and
   `write_document`, so a cursor shape this migration cannot read is a cursor
@@ -73,6 +82,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -4328,11 +4338,11 @@ module.install_stop_handlers()
 window = sys.argv[3]
 real_git = module._git
 
-def git(root, arguments, input_bytes=None):
+def git(root, arguments, input_bytes=None, index_file=None):
     releasing = arguments[:2] == ["update-ref", "-d"]
     if window == "release" and releasing:
         os.kill(os.getpid(), signal.SIGTERM)
-    proc = real_git(root, arguments, input_bytes)
+    proc = real_git(root, arguments, input_bytes, index_file)
     if window == "acquire" and arguments[:1] == ["update-ref"] and not releasing:
         os.kill(os.getpid(), signal.SIGTERM)
     return proc
@@ -4894,6 +4904,843 @@ class LeaseSchemaTests(LedgerTestCase):
         defaults["repositories"][REPO]["lease_defaults"] = {"renewal_seconds": 5, "expiry_seconds": 5}
         with self.assertRaises(LEDGER.LedgerError):
             self.parse(defaults)
+
+
+# --------------------------------------------------------------------------
+# Completing an attempt (issue #683, LEDGER-5)
+
+# A lease that outlives any record a test makes, so an ordinary record never
+# races its own expiry on a loaded runner. The takeover tests use the short
+# one above, because they have to wait it out.
+RECORD_EXPIRY = 60.0
+
+LEGACY_REPORT = "docs/project_review_602-562.md"
+
+# A pre-ledger report in the shape the tracked ones have once `process-report`
+# has dispositioned some of their findings: every marker form the heading
+# takes, one key headed twice in two forms, and fenced examples that look like
+# headings and are not.
+REFERENCED_REPORT = """# Project Review Findings: PRs #602–#562
+
+Status legend: `[ ]` unprocessed · `[#N]` filed as issue N · `[no-issue]`
+reviewed and deliberately never to be filed · `[deferred]` blocked on a
+concrete precondition
+
+## Status
+
+- [x] PRR-1. Filed finding — [#615]
+- [ ] PRR-2. Unprocessed finding
+- [x] PRR-3. Declined finding — [no-issue]
+- [ ] PRR-4. Deferred finding — [deferred]
+- [ ] PRR-5. A finding headed twice
+- [ ] PRR-7. A finding with an example of itself
+
+## 1. Chapter
+
+### [#615] PRR-1. Filed finding
+
+### PRR-2. Unprocessed finding
+
+### [no-issue] PRR-3. Declined finding
+
+> **Disposition:** No issue — reason.
+
+### [deferred] PRR-4. Deferred finding
+
+### PRR-5. A finding headed twice
+
+### [#700] PRR-5. A finding headed twice
+
+```markdown
+### PRR-6. Only ever an example
+```
+
+### PRR-7. A finding with an example of itself
+
+~~~~
+### PRR-7. The same heading, quoted
+~~~
+### PRR-6. Still inside the tilde fence, which three tildes do not close
+~~~~
+"""
+
+
+def new_report(*keys) -> str:
+    lines = ["# Project Review Findings: PR", "", "## Status", ""]
+    lines += [f"- [ ] {key}. A new finding" for key in keys]
+    lines += ["", "## 1. Chapter", ""]
+    for key in keys:
+        lines += [f"### {key}. A new finding", ""]
+    return "\n".join(lines)
+
+
+class RecordTestCase(LeaseTestCase):
+    """A docs worktree with a committed ledger and an operator's own work in it.
+
+    The ledger is written by `migrate` and committed, the operator has a
+    modified file, a staged change and an untracked file, and every claim is
+    taken through the real `claim` command with a real renewer. Whatever a
+    record commits is read back out of Git, never inferred from its result.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for key, value in (
+            ("user.name", "Ledger Test"),
+            ("user.email", "ledger@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            git(self.root, "config", key, value)
+        (self.root / "docs" / "notes.md").write_text("notes\n", encoding="utf-8")
+        (self.root / "docs" / "staged.md").write_text("staged\n", encoding="utf-8")
+
+    def migrate_and_commit(self, **cursor):
+        if cursor:
+            record_cursor(self.root, **cursor)
+        LEDGER.migrate(self.root, REPO)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "base")
+        (self.root / "docs" / "notes.md").write_text("notes, edited\n", encoding="utf-8")
+        (self.root / "docs" / "staged.md").write_text("staged, edited\n", encoding="utf-8")
+        git(self.root, "add", "docs/staged.md")
+        (self.root / "docs" / "untracked.md").write_text("untracked\n", encoding="utf-8")
+
+    def claim_pr(self, entries, expiry=RECORD_EXPIRY):
+        session = self.session()
+        result = self.claim(entries, pid=session.pid, expiry=expiry)
+        return result, session
+
+    def allocate(self, number, token):
+        return LEDGER.allocate_report(self.root, REPO, number, token)["report"]
+
+    def write(self, relative, text):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def record(self, number, token, outcome="clean", commit=FULL_SHA, **links):
+        return LEDGER.record(self.root, REPO, number, token, outcome, commit, **links)
+
+    def head(self):
+        return git(self.root, "rev-parse", "HEAD").stdout.strip()
+
+    def branch(self):
+        return git(self.root, "symbolic-ref", "HEAD").stdout.strip()
+
+    def changed(self, commit):
+        listed = git(self.root, "diff-tree", "--no-commit-id", "-r", "--name-status", f"{commit}^", commit)
+        return sorted(tuple(line.split("\t")) for line in listed.stdout.splitlines())
+
+    def operator_state(self):
+        """Everything the operator had in the worktree, apart from the ledger's own paths."""
+        status = [
+            line
+            for line in git(self.root, "status", "--porcelain=v1", "--untracked-files=all").stdout.splitlines()
+            if "docs/project_review/" not in line
+        ]
+        return (
+            status,
+            git(self.root, "diff", "--cached", "--", "docs/staged.md").stdout,
+            git(self.root, "diff", "--", "docs/notes.md").stdout,
+            (self.root / "docs" / "untracked.md").read_bytes(),
+        )
+
+    def refuses(self, attempt, message=None, reason=None):
+        """`attempt` raises and changes nothing: ledger bytes, branch, index, or files."""
+        before = (self.ledger_bytes(), self.head(), self.operator_state())
+        error = LEDGER.LeaseRefused if reason else LEDGER.LedgerError
+        with self.assertRaises(error) as raised:
+            attempt()
+        if reason:
+            self.assertEqual(raised.exception.reason, reason)
+        if message:
+            self.assertIn(message, str(raised.exception))
+        self.assertEqual((self.ledger_bytes(), self.head(), self.operator_state()), before)
+        return raised.exception
+
+    def attempts(self, number):
+        return [
+            entry
+            for entry in self.rows_on_disk()[str(number)]["history"]
+            if entry["kind"] == LEDGER.ATTEMPT_KIND
+        ]
+
+
+class RecordTests(RecordTestCase):
+    def test_a_clean_record_completes_the_row_in_one_path_scoped_commit(self):
+        self.migrate_and_commit()
+        operator = self.operator_state()
+        parent = self.head()
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        renewer = claimed["claim"]["renewer"]["pid"]
+        result = self.record(612, token)
+
+        self.assertEqual(result["status"], "recorded")
+        row = self.rows_on_disk()["612"]
+        self.assertEqual(
+            (row["status"], row["commit"], row["completed_at"], row["report"], row["claim"]),
+            ("clean", FULL_SHA, result["completed_at"], None, None),
+        )
+        self.assertRegex(row["completed_at"], LEDGER.TIMESTAMP_RE)
+        self.assertEqual(
+            self.attempts(612),
+            [
+                {
+                    "kind": "attempt",
+                    "token": token,
+                    "outcome": "clean",
+                    "commit": FULL_SHA,
+                    "completed_at": result["completed_at"],
+                    "report": None,
+                    "repeats": [],
+                    "recurrences": [],
+                    "fixes": [],
+                }
+            ],
+        )
+        head = self.head()
+        self.assertEqual(result["checkpoint"]["commit"], head)
+        self.assertEqual(git(self.root, "rev-parse", "HEAD^").stdout.strip(), parent)
+        self.assertEqual(self.changed(head), [("M", LEDGER.LEDGER_RELATIVE_PATH)])
+        message = git(self.root, "log", "-1", "--format=%B").stdout
+        for part in (REPO, "#612", "clean"):
+            self.assertIn(part, message)
+        self.assertEqual(
+            git(self.root, "show", f"HEAD:{LEDGER.LEDGER_RELATIVE_PATH}").stdout.encode("utf-8"),
+            self.ledger_bytes(),
+        )
+        self.assertNotIn(
+            "docs/project_review/",
+            git(self.root, "status", "--porcelain=v1", "--untracked-files=all").stdout,
+        )
+        self.assertEqual(self.operator_state(), operator)
+        # Never pushed: the repository has no remote to push to, and the
+        # checkpoint is local history only.
+        self.assertEqual(git(self.root, "remote").stdout, "")
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its released claim")
+        self.assertIsNone(self.heartbeat(token))
+
+    def test_a_findings_record_commits_the_ledger_and_the_report_it_allocated(self):
+        self.migrate_and_commit()
+        operator = self.operator_state()
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        allocated = self.helper("allocate-report", "--root", str(self.root), "--repo", REPO,
+                                "--pr", "612", "--token", token)
+        self.assertEqual(allocated.returncode, 0, allocated.stderr)
+        report = json.loads(allocated.stdout)["report"]
+        self.assertEqual(report, "docs/project_review/612.md")
+        self.write(report, new_report("PRR-1"))
+        completed = self.helper(
+            "record", "--root", str(self.root), "--repo", REPO, "--pr", "612", "--token", token,
+            "--outcome", "findings", "--commit", FULL_SHA, "--report", report,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        row = self.rows_on_disk()["612"]
+        self.assertEqual((row["status"], row["commit"], row["report"], row["claim"]),
+                         ("findings", FULL_SHA, report, None))
+        self.assertEqual(self.attempts(612)[0]["report"], report)
+        self.assertEqual(
+            self.changed(self.head()),
+            [("A", report), ("M", LEDGER.LEDGER_RELATIVE_PATH)],
+        )
+        self.assertEqual(result["checkpoint"]["paths"], sorted([report, LEDGER.LEDGER_RELATIVE_PATH]))
+        self.assertEqual(self.operator_state(), operator)
+        rendered = self.ledger_bytes().decode("utf-8")
+        self.assertIn("[docs/project_review/612.md](612.md)", rendered)
+        self.assertNotIn("612.md#", rendered)
+
+    def test_a_never_reviewed_row_and_a_legacy_row_each_convert_on_record(self):
+        self.migrate_and_commit(reviewed=[602])
+        before = self.rows_on_disk()["602"]
+        self.assertEqual(before["status"], "legacy")
+        for number, outcome, status_before in ((612, "clean", "never-reviewed"), (602, "findings", "legacy")):
+            with self.subTest(pr=number):
+                claimed, _ = self.claim_pr([merged(number)])
+                token = claimed["claim"]["token"]
+                self.assertEqual(claimed["selected"]["row_status"], status_before)
+                links = {}
+                if outcome == "findings":
+                    links["report"] = self.allocate(number, token)
+                    self.write(links["report"], new_report("PRR-1"))
+                self.record(number, token, outcome, **links)
+                row = self.rows_on_disk()[str(number)]
+                self.assertEqual((row["status"], row["commit"], row["claim"]), (outcome, FULL_SHA, None))
+        # Converting keeps the evidence the legacy row rested on.
+        self.assertEqual(self.rows_on_disk()["602"]["evidence"], before["evidence"])
+
+    def test_both_outcomes_advance_the_completed_time_and_reorder_the_refresh_queue(self):
+        self.migrate_and_commit()
+        entries = [merged(612), merged(610)]
+
+        def review(outcome):
+            claimed, _ = self.claim_pr(entries)
+            number, token = claimed["selected"]["number"], claimed["claim"]["token"]
+            links = {}
+            if outcome == "findings":
+                links["report"] = self.allocate(number, token)
+                self.write(links["report"], new_report("PRR-1"))
+            return number, self.record(number, token, outcome, **links)["completed_at"]
+
+        first, _ = review("clean")
+        self.assertEqual(first, 612)
+        # A second apart, so the order below is the timestamps' and not the
+        # tie-break's, which would put #610 first anyway.
+        time.sleep(1.1)
+        second, _ = review("findings")
+        self.assertEqual(second, 610)
+        selected = LEDGER.select(self.root, REPO, listing(entries))
+        self.assertEqual((selected["queue"]["name"], selected["selected"]["number"]),
+                         (LEDGER.QUEUE_REFRESH, 612))
+        time.sleep(1.1)
+        again, clean_again = review("clean")
+        self.assertEqual(again, 612)
+        self.assertGreater(clean_again, self.rows_on_disk()["610"]["completed_at"])
+        self.assertEqual(LEDGER.select(self.root, REPO, listing(entries))["selected"]["number"], 610)
+        time.sleep(1.1)
+        findings_again, _ = review("findings")
+        self.assertEqual(findings_again, 610)
+        self.assertEqual(LEDGER.select(self.root, REPO, listing(entries))["selected"]["number"], 612)
+        self.assertEqual(len(self.attempts(610)), 2)
+        self.assertEqual(len(self.attempts(612)), 2)
+
+
+class ReportAllocationTests(RecordTestCase):
+    def test_later_reports_take_the_next_sequence_and_never_an_existing_name(self):
+        self.migrate_and_commit()
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        self.assertEqual(self.allocate(612, token), "docs/project_review/612.md")
+        self.assertEqual(self.allocate(612, token), "docs/project_review/612_2.md")
+        self.write("docs/project_review/612.md", new_report("PRR-1"))
+        self.record(612, token, "findings", report="docs/project_review/612.md")
+
+        # A name committed and deleted from the worktree, and a name on disk
+        # that nothing recorded, are both taken.
+        self.write("docs/project_review/612_4.md", "tracked\n")
+        git(self.root, "add", "docs/project_review/612_4.md")
+        git(self.root, "commit", "-q", "-m", "tracked report")
+        (self.root / "docs/project_review/612_4.md").unlink()
+        self.write("docs/project_review/612_5.md", "untracked\n")
+
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        self.assertEqual(self.allocate(612, token), "docs/project_review/612_3.md")
+        self.assertEqual(self.allocate(612, token), "docs/project_review/612_6.md")
+        allocations = [
+            entry["report"]
+            for entry in self.rows_on_disk()["612"]["history"]
+            if entry["kind"] == LEDGER.ALLOCATION_KIND
+        ]
+        self.assertEqual(len(allocations), len(set(allocations)))
+        self.assertEqual((self.root / "docs/project_review/612_5.md").read_text(), "untracked\n")
+
+    def test_two_concurrent_allocations_never_return_the_same_name(self):
+        self.migrate_and_commit()
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        command = [sys.executable, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), "allocate-report",
+                   "--root", str(self.root), "--repo", REPO, "--pr", "612", "--token", token]
+        racers = [
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+            for _ in range(4)
+        ]
+        reports = []
+        for racer in racers:
+            stdout, stderr = finished(racer)
+            self.assertEqual(racer.returncode, 0, stderr)
+            reports.append(json.loads(stdout)["report"])
+        self.assertEqual(
+            sorted(reports),
+            ["docs/project_review/612.md", "docs/project_review/612_2.md",
+             "docs/project_review/612_3.md", "docs/project_review/612_4.md"],
+        )
+
+    def test_an_allocation_is_fenced_like_every_other_mutation(self):
+        self.migrate_and_commit()
+        session = self.session()
+        first = self.claim([merged(612)], pid=session.pid)
+        stale = first["claim"]["token"]
+        self.expire(first, session)
+        self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, stale), reason="expired")
+        replacement, _ = self.claim_pr([merged(612)])
+        self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, stale), reason="replaced")
+        completed = self.helper("allocate-report", "--root", str(self.root), "--repo", REPO,
+                                "--pr", "612", "--token", stale)
+        self.assertIn(replacement["claim"]["token"], self.refused(completed, "replaced"))
+
+    def test_a_lease_that_runs_out_before_the_ledger_is_replaced_allocates_nothing(self):
+        # Both stretches of work between the fencing check and `os.replace`:
+        # finding a free name, and rendering the ledger that records it.
+        self.migrate_and_commit()
+        for stage in ("_next_report_path", "_rendered_into_temporary"):
+            with self.subTest(stage=stage):
+                claimed = self.claim([merged(612)], pid=self.session().pid)
+                token = claimed["claim"]["token"]
+                original = getattr(LEDGER, stage)
+
+                def slow(*arguments, original=original):
+                    produced = original(*arguments)
+                    # The lock is held, so nothing renews meanwhile.
+                    time.sleep(LEASE_EXPIRY + 0.5)
+                    return produced
+
+                setattr(LEDGER, stage, slow)
+                try:
+                    self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, token),
+                                 "before the allocation was published", reason="expired")
+                finally:
+                    setattr(LEDGER, stage, original)
+                self.assertEqual(
+                    [entry for entry in self.rows_on_disk()["612"]["history"]
+                     if entry["kind"] == LEDGER.ALLOCATION_KIND],
+                    [],
+                )
+                self.assertEqual(
+                    sorted(path.name for path in LEDGER.document_path(self.root).parent.iterdir()),
+                    ["ledger.md"],
+                )
+                self.stop_renewer(claimed["claim"]["renewer"]["pid"])
+
+
+class ReferenceTests(RecordTestCase):
+    def setUp(self):
+        super().setUp()
+        self.migrate_and_commit()
+        # Written after the migration, which would otherwise read it as a
+        # pre-ledger report to import, and committed alone, as the report an
+        # earlier batch landed.
+        self.write(LEGACY_REPORT, REFERENCED_REPORT)
+        git(self.root, "add", LEGACY_REPORT)
+        git(self.root, "commit", "-q", "-m", "earlier report", "--", LEGACY_REPORT)
+        claimed, _ = self.claim_pr([merged(612)])
+        self.token = claimed["claim"]["token"]
+
+    def test_finding_headings_count_every_marker_form_and_nothing_fenced(self):
+        self.assertEqual(
+            LEDGER.finding_headings(REFERENCED_REPORT),
+            {"PRR-1": 1, "PRR-2": 1, "PRR-3": 1, "PRR-4": 1, "PRR-5": 2, "PRR-7": 1},
+        )
+
+    def test_a_reference_to_every_processed_heading_form_is_recorded(self):
+        repeats = [f"{LEGACY_REPORT}#PRR-{key}" for key in (1, 2, 3, 4, 7)]
+        self.record(612, self.token, "findings", repeats=repeats)
+        row = self.rows_on_disk()["612"]
+        self.assertEqual((row["status"], row["report"]), ("findings", LEGACY_REPORT))
+        self.assertEqual(
+            self.attempts(612)[0]["repeats"],
+            [{"report": LEGACY_REPORT, "key": f"PRR-{key}"} for key in (1, 2, 3, 4, 7)],
+        )
+        # The referenced report is not the attempt's to commit.
+        self.assertEqual(self.changed(self.head()), [("M", LEDGER.LEDGER_RELATIVE_PATH)])
+
+    def test_an_unverifiable_reference_is_refused_before_anything_is_written(self):
+        outside = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False)
+        self.addCleanup(os.unlink, outside.name)
+        outside.write("### PRR-1. Outside the root\n")
+        outside.close()
+        os.symlink(outside.name, self.root / "docs" / "escape.md")
+        report = self.report()
+        cases = {
+            "a missing report": ("docs/project_review_1-1.md#PRR-1", "does not exist"),
+            "a missing heading": (f"{LEGACY_REPORT}#PRR-9", "no finding"),
+            "a heading only inside a fence": (f"{LEGACY_REPORT}#PRR-6", "no finding"),
+            "a heading duplicated across two forms": (f"{LEGACY_REPORT}#PRR-5", "2 findings"),
+            "a report resolving outside the root": ("docs/escape.md#PRR-1", "outside"),
+            "an escaping path": ("docs/../escape.md#PRR-1", "repository-relative"),
+            "a fragment that is not a key": (f"{LEGACY_REPORT}#finding-1", "PRR-k"),
+        }
+        for name, (reference, message) in cases.items():
+            for field in ("repeats", "recurrences"):
+                with self.subTest(case=name, field=field):
+                    self.refuses(
+                        lambda: self.record(612, self.token, "findings",
+                                            report=None if field == "repeats" else report,
+                                            **{field: [reference]}),
+                        message,
+                    )
+            with self.subTest(case=name, field="fixed"):
+                self.refuses(
+                    lambda: self.record(612, self.token, fixed=[f"{reference}=700"],
+                                        fixed_merges=[f"{reference}={OTHER_SHA}"]),
+                    message,
+                )
+        self.assertEqual(self.claim_on_disk(612)["token"], self.token)
+
+    def report(self):
+        if not hasattr(self, "_report"):
+            self._report = self.allocate(612, self.token)
+            self.write(self._report, new_report("PRR-1"))
+        return self._report
+
+    def test_a_recurrence_is_recorded_apart_from_a_repeat(self):
+        report = self.report()
+        self.record(612, self.token, "findings", report=report,
+                    repeats=[f"{LEGACY_REPORT}#PRR-1"], recurrences=[f"{LEGACY_REPORT}#PRR-2"])
+        attempt = self.attempts(612)[0]
+        self.assertEqual(attempt["repeats"], [{"report": LEGACY_REPORT, "key": "PRR-1"}])
+        self.assertEqual(attempt["recurrences"], [{"report": LEGACY_REPORT, "key": "PRR-2"}])
+        self.assertEqual(self.rows_on_disk()["612"]["report"], report)
+        self.assertEqual((self.root / LEGACY_REPORT).read_text(encoding="utf-8"), REFERENCED_REPORT)
+
+    def test_a_finding_cannot_be_both_repeated_and_recurring(self):
+        reference = f"{LEGACY_REPORT}#PRR-1"
+        report = self.report()
+        self.refuses(
+            lambda: self.record(612, self.token, "findings", report=report,
+                                repeats=[reference], recurrences=[reference]),
+            "never both",
+        )
+
+    def test_a_fix_link_needs_its_merge_commit_and_changes_no_status(self):
+        reference = f"{LEGACY_REPORT}#PRR-2"
+        self.refuses(lambda: self.record(612, self.token, fixed=[f"{reference}=700"]),
+                     "--fixed-merge")
+        self.refuses(lambda: self.record(612, self.token, fixed_merges=[f"{reference}={OTHER_SHA}"]),
+                     "no --fixed link")
+        self.refuses(lambda: self.record(612, self.token, fixed=[f"{reference}=700"],
+                                         fixed_merges=[f"{reference}=abc123"]),
+                     "40-character")
+        self.record(612, self.token, fixed=[f"{reference}=#700"],
+                    fixed_merges=[f"{reference}={OTHER_SHA}"])
+        row = self.rows_on_disk()["612"]
+        self.assertEqual((row["status"], row["commit"], row["report"]), ("clean", FULL_SHA, None))
+        self.assertEqual(
+            self.attempts(612)[0]["fixes"],
+            [{"report": LEGACY_REPORT, "key": "PRR-2", "pr": 700, "merge_commit": OTHER_SHA}],
+        )
+
+    def test_a_dirty_referenced_report_is_left_out_of_the_checkpoint(self):
+        edited = REFERENCED_REPORT + "\nAn operator's unsaved note.\n"
+        self.write(LEGACY_REPORT, edited)
+        git(self.root, "add", LEGACY_REPORT)
+        self.write(LEGACY_REPORT, edited + "And an unstaged one.\n")
+        staged = git(self.root, "diff", "--cached", "--", LEGACY_REPORT).stdout
+        report = self.report()
+        self.record(612, self.token, "findings", report=report, repeats=[f"{LEGACY_REPORT}#PRR-1"])
+        self.assertEqual(self.changed(self.head()), [("A", report), ("M", LEDGER.LEDGER_RELATIVE_PATH)])
+        self.assertEqual(git(self.root, "diff", "--cached", "--", LEGACY_REPORT).stdout, staged)
+        self.assertEqual((self.root / LEGACY_REPORT).read_text(encoding="utf-8"),
+                         edited + "And an unstaged one.\n")
+
+
+class RecordRequestRefusalTests(RecordTestCase):
+    def setUp(self):
+        super().setUp()
+        self.migrate_and_commit()
+        claimed, _ = self.claim_pr([merged(612)])
+        self.token = claimed["claim"]["token"]
+
+    def test_an_attempt_that_names_no_evidence_or_the_wrong_evidence_is_refused(self):
+        report = self.allocate(612, self.token)
+        self.write(report, new_report("PRR-1"))
+        cases = {
+            "findings with no evidence": (dict(outcome="findings"), "names no evidence"),
+            "clean with a report": (dict(outcome="clean", report=report), "found nothing"),
+            "an outcome outside the two": (dict(outcome="legacy"), "not one of"),
+            "an abbreviated verification commit": (dict(commit=FULL_SHA[:12]), "40-character"),
+            "an uppercase verification commit": (dict(commit=FULL_SHA.upper()), "40-character"),
+            "a report never allocated": (
+                dict(outcome="findings", report="docs/project_review/612_9.md"), "never allocated"
+            ),
+            "a report that is not an allocated name": (
+                dict(outcome="findings", report="docs/notes.md"), "not a name"
+            ),
+        }
+        for name, (arguments, message) in cases.items():
+            with self.subTest(case=name):
+                arguments = dict(dict(outcome="clean", commit=FULL_SHA), **arguments)
+                self.refuses(lambda: self.record(612, self.token, **arguments), message)
+
+    def test_an_allocated_report_that_was_never_written_or_is_a_link_is_refused(self):
+        report = self.allocate(612, self.token)
+        self.refuses(lambda: self.record(612, self.token, "findings", report=report), "never written")
+        os.symlink(self.root / "docs" / "notes.md", self.root / report)
+        self.refuses(lambda: self.record(612, self.token, "findings", report=report), "regular file")
+
+    def test_a_worktree_with_no_commit_identity_is_refused_before_anything_is_written(self):
+        git(self.root, "config", "--unset", "user.name")
+        git(self.root, "config", "--unset", "user.email")
+        isolated = tempfile.TemporaryDirectory()
+        self.addCleanup(isolated.cleanup)
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_")) and name != "EMAIL"
+        }
+        environment.update(
+            HOME=isolated.name,
+            XDG_CONFIG_HOME=isolated.name,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+        )
+        with unittest.mock.patch.dict(os.environ, environment, clear=True):
+            self.refuses(lambda: self.record(612, self.token), "no commit identity")
+
+    def test_a_detached_head_is_refused_before_anything_is_written(self):
+        git(self.root, "checkout", "-q", "--detach")
+        self.refuses(lambda: self.record(612, self.token), "detached HEAD")
+
+    def test_a_second_record_with_the_same_token_is_refused(self):
+        self.record(612, self.token)
+        self.refuses(lambda: self.record(612, self.token), reason="unclaimed")
+        self.assertEqual(len(self.attempts(612)), 1)
+
+
+class TakeoverRecordTests(RecordTestCase):
+    def test_a_former_owners_late_completion_is_refused_and_touches_nothing_of_the_replacement(self):
+        self.migrate_and_commit()
+        session = self.session()
+        first = self.claim([merged(612)], pid=session.pid)
+        stale = first["claim"]["token"]
+        stale_report = self.allocate(612, stale)
+        self.write(stale_report, new_report("PRR-1"))
+        self.expire(first, session)
+
+        replacement, _ = self.claim_pr([merged(612)])
+        token = replacement["claim"]["token"]
+        report = self.allocate(612, token)
+        self.assertEqual(report, "docs/project_review/612_2.md")
+        self.write(report, new_report("PRR-1"))
+        claim = self.claim_on_disk(612)
+
+        for name, attempt in {
+            "record": lambda: self.record(612, stale, "findings", report=stale_report),
+            "allocate-report": lambda: LEDGER.allocate_report(self.root, REPO, 612, stale),
+        }.items():
+            with self.subTest(command=name):
+                refusal = self.refuses(attempt, reason="replaced")
+                self.assertIn(token, str(refusal))
+        completed = self.helper(
+            "record", "--root", str(self.root), "--repo", REPO, "--pr", "612", "--token", stale,
+            "--outcome", "findings", "--commit", FULL_SHA, "--report", stale_report,
+        )
+        self.refused(completed, "replaced")
+        self.assertEqual(self.claim_on_disk(612), claim)
+        self.assertEqual((self.root / report).read_text(encoding="utf-8"), new_report("PRR-1"))
+        self.assertEqual((self.root / stale_report).read_text(encoding="utf-8"), new_report("PRR-1"))
+        self.assertIsNotNone(self.heartbeat(token))
+
+        # The replacement cannot present the former owner's report as its own.
+        self.refuses(lambda: self.record(612, token, "findings", report=stale_report),
+                     "allocated by")
+        self.record(612, token, "findings", report=report)
+        self.assertEqual(self.changed(self.head()), [("A", report), ("M", LEDGER.LEDGER_RELATIVE_PATH)])
+
+
+class CheckpointPublicationTests(RecordTestCase):
+    def setUp(self):
+        super().setUp()
+        self.migrate_and_commit()
+
+    def patch(self, name, replacement):
+        original = getattr(LEDGER, name)
+        setattr(LEDGER, name, replacement(original))
+        self.addCleanup(setattr, LEDGER, name, original)
+
+    def test_a_checkpoint_that_cannot_be_published_is_a_failed_record(self):
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        lock = LEDGER.git_common_directory(self.root) / f"{self.branch()}.lock"
+        lock.write_text("", encoding="utf-8")
+        before = (self.ledger_bytes(), self.head(), self.operator_state())
+        completed = self.helper(
+            "record", "--root", str(self.root), "--repo", REPO, "--pr", "612",
+            "--token", token, "--outcome", "clean", "--commit", FULL_SHA,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("record failed, attempt not completed", completed.stderr)
+        self.assertIn(str(LEDGER.document_path(self.root)), completed.stderr)
+        self.assertEqual((self.ledger_bytes(), self.head(), self.operator_state()), before)
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+        lock.unlink()
+        self.assertEqual(self.record(612, token)["status"], "recorded")
+        self.assertEqual(len(self.attempts(612)), 1)
+
+    def interrupt_after_the_branch_moves(self, error):
+        def publish(original):
+            def interrupted(root, document):
+                raise error
+            return interrupted
+
+        self.patch("publish_document", publish)
+
+    def test_an_interruption_after_the_checkpoint_leaves_the_attempt_incomplete_and_recoverable(self):
+        for name, error, raised in (
+            ("interrupted", KeyboardInterrupt(), KeyboardInterrupt),
+            ("failed", LEDGER.LedgerError("disk full"), LEDGER.CheckpointFailed),
+        ):
+            with self.subTest(case=name):
+                claimed, _ = self.claim_pr([merged(612)])
+                token = claimed["claim"]["token"]
+                ledger, parent = self.ledger_bytes(), self.head()
+                original = LEDGER.publish_document
+                self.interrupt_after_the_branch_moves(error)
+                with self.assertRaises(raised) as caught:
+                    self.record(612, token)
+                LEDGER.publish_document = original
+                published = self.head()
+                self.assertNotEqual(published, parent)
+                if raised is LEDGER.CheckpointFailed:
+                    self.assertEqual(caught.exception.published, published)
+                    self.assertIn("Record again with the same token", str(caught.exception))
+                # The ledger still says what it said: claimed, and not completed.
+                self.assertEqual(self.ledger_bytes(), ledger)
+                self.assertEqual(self.claim_on_disk(612)["token"], token)
+                pending = LEDGER.select(self.root, REPO, listing([merged(612)]))
+                self.assertEqual(pending["status"], "all-claimed")
+                attempts = len(self.attempts(612))
+
+                result = self.record(612, token)
+                self.assertEqual(result["checkpoint"]["parent"], published)
+                self.assertEqual(len(self.attempts(612)), attempts + 1)
+                self.assertEqual(
+                    git(self.root, "show", f"HEAD:{LEDGER.LEDGER_RELATIVE_PATH}").stdout.encode("utf-8"),
+                    self.ledger_bytes(),
+                )
+                self.assertNotIn(
+                    "docs/project_review/",
+                    git(self.root, "status", "--porcelain=v1").stdout,
+                )
+
+    def test_a_lease_that_runs_out_while_the_checkpoint_is_built_never_moves_the_branch(self):
+        session = self.session()
+        claimed = self.claim([merged(612)], pid=session.pid)
+        token = claimed["claim"]["token"]
+
+        def slow(original):
+            def build(root, common, target, files, message, presented):
+                built = original(root, common, target, files, message, presented)
+                # The lock is held, so nothing renews meanwhile.
+                time.sleep(LEASE_EXPIRY + 0.5)
+                return built
+            return build
+
+        self.patch("_checkpoint_commit", slow)
+        self.refuses(lambda: self.record(612, token), "before its checkpoint was published",
+                     reason="expired")
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+
+    def test_no_claim_lands_between_the_fencing_check_and_the_checkpoint(self):
+        claimed, _ = self.claim_pr([merged(612)])
+        token = claimed["claim"]["token"]
+        observed = {}
+
+        def interleaved(original):
+            def publish(root, target, commit, message):
+                racer = subprocess.Popen(
+                    [sys.executable, str(REPO_ROOT / CLAUDE_LEDGER_HELPER),
+                     *self.claim_arguments(expiry=RECORD_EXPIRY),
+                     "--owner-pid", str(self.session().pid)],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                racer.stdin.write(json.dumps(listing([merged(612)])))
+                racer.stdin.close()
+                time.sleep(1.0)
+                observed["waiting"] = racer.poll() is None
+                observed["claim"] = self.claim_on_disk(612)
+                observed["racer"] = racer
+                return original(root, target, commit, message)
+            return publish
+
+        self.patch("_publish_checkpoint", interleaved)
+        self.record(612, token)
+        stdout, stderr = finished(observed["racer"])
+        self.assertEqual(observed["racer"].returncode, 0, stderr)
+        raced = self.claimed(stdout)
+        self.assertTrue(observed["waiting"], "a claim ran while record held the lock")
+        self.assertEqual(observed["claim"]["token"], token)
+        # The racer saw a completed, released row: a fresh claim in the refresh
+        # queue, not a takeover of the attempt that was being recorded.
+        self.assertEqual(raced["status"], "claimed")
+        self.assertIsNone(raced["takeover"])
+        self.assertEqual(raced["selected"]["row_status"], "clean")
+        self.assertEqual([entry["token"] for entry in self.attempts(612)], [token])
+
+
+class AttemptSchemaTests(LedgerTestCase):
+    TOKEN = "a" * 32
+    OTHER = "b" * 32
+
+    def allocation(self, report="docs/project_review/612.md", token=TOKEN):
+        return {"kind": "allocation", "at": "2026-09-05T10:00:00.000000Z", "token": token, "report": report}
+
+    def attempt(self, **fields):
+        return dict(
+            {
+                "kind": "attempt",
+                "token": self.TOKEN,
+                "outcome": "findings",
+                "commit": FULL_SHA,
+                "completed_at": "2026-09-05T11:22:33Z",
+                "report": "docs/project_review/612.md",
+                "repeats": [],
+                "recurrences": [],
+                "fixes": [],
+            },
+            **fields,
+        )
+
+    def test_a_recorded_history_round_trips(self):
+        history = [
+            self.allocation(),
+            self.attempt(
+                repeats=[{"report": LEGACY_REPORT, "key": "PRR-1"}],
+                recurrences=[{"report": LEGACY_REPORT, "key": "PRR-2"}],
+                fixes=[{"report": LEGACY_REPORT, "key": "PRR-3", "pr": 700, "merge_commit": OTHER_SHA}],
+            ),
+        ]
+        row_value = dict(completed_row("findings", report="docs/project_review/612.md"), history=history)
+        parsed = self.parse(valid_payload({"612": row_value}))
+        self.assertEqual(LEDGER.state_for(parsed, REPO)["rows"]["612"]["history"], history)
+
+    def test_every_malformed_attempt_or_allocation_is_refused(self):
+        link = {"report": LEGACY_REPORT, "key": "PRR-1"}
+        cases = {
+            "an allocation for another pull request": (
+                [self.allocation("docs/project_review/611.md")], "not a report name for #612"
+            ),
+            "an allocation of a name no allocation returns": (
+                [self.allocation("docs/project_review/612_1.md")], "not a name an allocation returns"
+            ),
+            "one name allocated twice": ([self.allocation(), self.allocation()], "second time"),
+            "an attempt report its token never allocated": (
+                [self.allocation(token=self.OTHER), self.attempt()], "did not allocate"
+            ),
+            "an attempt before its allocation": (
+                [self.attempt(), self.allocation()], "did not allocate"
+            ),
+            "two attempts for one token": (
+                [self.allocation(), self.attempt(), self.attempt(report=None, repeats=[link])],
+                "second attempt",
+            ),
+            "an attempt with no commit": ([self.allocation(), self.attempt(commit=None)], "not self-contained"),
+            "an abbreviated commit": ([self.allocation(), self.attempt(commit="abc123")], "40-character"),
+            "findings with no evidence": ([self.attempt(report=None)], "names no evidence"),
+            "clean naming a repeat": (
+                [self.attempt(outcome="clean", report=None, repeats=[link])], "found nothing"
+            ),
+            "a key that is not PRR-k": (
+                [self.attempt(report=None, repeats=[{"report": LEGACY_REPORT, "key": "PRR-0"}])], "PRR-k"
+            ),
+            "a fix with no merge commit": (
+                [self.attempt(report=None, repeats=[link], fixes=[dict(link, pr=700, merge_commit=None)])],
+                "no merge commit",
+            ),
+            "a link with an unknown field": (
+                [self.attempt(report=None, repeats=[dict(link, anchor="#prr-1")])], "unrecognized"
+            ),
+        }
+        for name, (history, message) in cases.items():
+            with self.subTest(case=name):
+                row_value = dict(completed_row("findings", report=LEGACY_REPORT), history=history)
+                with self.assertRaises(LEDGER.LedgerError) as raised:
+                    self.parse(valid_payload({"612": row_value}))
+                self.assertIn(message, str(raised.exception))
 
 
 class BundledLedgerHelperTests(unittest.TestCase):

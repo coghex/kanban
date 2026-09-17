@@ -3564,8 +3564,9 @@ runs) parses the manifest in §4 and:
   (`claude-plugin/plugins/kanban/scripts/project_review_ledger.py` or
   `codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py`,
   issue #682) spawns a program this manifest does not declare. The literal
-  extractor reconciles its `git` calls, which resolve the Git common directory
-  and hold the lease's lock reference; the renewer `claim` starts is the helper
+  extractor reconciles its `git` calls, which resolve the Git common directory,
+  hold the lease's lock reference, and build and publish `record`'s checkpoint
+  commit (issue #683); the renewer `claim` starts is the helper
   itself run through `sys.executable`, which that extractor cannot see. So the
   non-literal spellings in each copy are pinned by name and required to be
   present at all, the command they resolve to must carry an `executable` row,
