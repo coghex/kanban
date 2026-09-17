@@ -2330,9 +2330,12 @@ installed registers an attempt.
   feature state), `python3` through `sys.executable` (the keeper), and the
   caller's own command under `run`.
 - **Durable state:** `<git common dir>/kanban-project-review/liveness/`, beside
-  the ledger's `leases/` and `checkpoints/`: `handshakes/<nonce>.json` and
-  `attempts/<attempt>/` (`attempt.json`, `progress.json`, `ended.json`,
-  `launches/`, `discarded.jsonl`). Nothing is written to a working tree or
+  the ledger's `leases/` and `checkpoints/`: `handshakes/<nonce>/` — one record
+  per responding bundle copy, named for that copy's own path, which is what
+  makes a second enabled copy detectable — and `attempts/<attempt>/`
+  (`attempt.json`, `progress.json`, `ended.json`, `launches/`,
+  `discarded.jsonl`). Registration removes a nonce's directory once it has read
+  every record in it. Nothing is written to a working tree or
   `docs/`. Registration prunes ended attempts after seven days.
 - **Evidence:** `tools/project-review-liveness-evidence.md` records the probes,
   the smoke-test procedure, and the observed timings on both installed runtimes.
