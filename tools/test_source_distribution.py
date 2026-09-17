@@ -328,13 +328,19 @@ BUNDLED_MECHANISM_MODULES = (
 # a sweep that refuses to start. Issue #680's ledger ships beside it under the
 # same rule looked at one release ahead -- nothing invokes it until LEDGER-6
 # switches the command over, and a release that dropped it would then install
-# that switched-over command with no state mechanism at all. Two copies each,
-# one per bundle, beside the command that will call them.
+# that switched-over command with no state mechanism at all. Issue #687's
+# session liveness adapter is the lease's owner signal under the same rule, and
+# it is inert without the lifecycle hooks file that runs it, so each bundle's
+# hooks file ships beside it. Two copies of each, one per bundle.
 BUNDLED_PROJECT_REVIEW_MODULES = (
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
+    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
+    "claude-plugin/plugins/kanban/hooks/hooks.json",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
+    "codex-plugin/plugins/kanban/hooks/hooks.json",
 )
 
 # What each `tools/setup_workflows.py` component installs from. Keyed to that
@@ -875,10 +881,11 @@ class SourceDistributionTest(unittest.TestCase):
         self.assert_present(
             BUNDLED_PROJECT_REVIEW_MODULES,
             "Both provider bundles must carry the project-review cursor "
-            "helper their sweep resolves before its first read, and the "
-            "ledger helper that supersedes it; a bundle that ships the "
-            "command without one installs a sweep that stops at its own "
-            "helper lookup in every repository.",
+            "helper their sweep resolves before its first read, the ledger "
+            "helper that supersedes it, and the session liveness adapter with "
+            "the hooks file that runs it; a bundle that ships the command "
+            "without one installs a sweep that stops at its own helper lookup, "
+            "or a lease no session can keep, in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

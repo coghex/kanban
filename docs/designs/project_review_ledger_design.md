@@ -563,6 +563,10 @@ long-running command not started through the wrapper can let the claim lapse
 mid-review; the late record is then refused, losing that review's work and
 nothing else.
 
+The session adapter is a prerequisite outside the delivery slices: issue #687
+consumes LEDGER-4's lease (#682) and blocks LEDGER-6 (#684), which wires the
+workflow to it. It adds no slice and changes none of D-19's ordering.
+
 ### D-18. Ledger-era documents live under one publishable directory
 
 Approved 2026-09-12. The ledger and every new ledger-era report live under
