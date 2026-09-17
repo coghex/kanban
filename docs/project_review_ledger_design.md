@@ -14,14 +14,15 @@ concrete precondition
 
 ## Processing status
 
-- [ ] EPIC. Establish a repository-local rolling project-review ledger
-- [ ] LEDGER-1. Enroll the design document in §7 and its sibling registries
-- [ ] LEDGER-2. Add the ledger document, its rendering, and its migration
-- [ ] LEDGER-3. Select one PR from a complete inventory
-- [ ] LEDGER-4. Take, renew, release, and take over a session-bound lease
-- [ ] LEDGER-5. Record a completed attempt, allocate reports, link fixes, checkpoint
-- [ ] LEDGER-6. Rebuild the project-review workflow on the ledger
-- [ ] LEDGER-7. Add auto-project-review
+- [x] EPIC. Establish a repository-local rolling project-review ledger — [#678]
+- [x] LEDGER-1. Enroll the design document in §7 and its sibling registries — [#679]
+- [x] LEDGER-2. Add the ledger document, its rendering, and its migration — [#680]
+- [x] LEDGER-3. Select one PR from a complete inventory — [#681]
+- [x] LEDGER-4. Take, renew, release, and take over a session-bound lease — [#682]
+- [x] LEDGER-5. Record a completed attempt, allocate reports, link fixes, checkpoint — [#683]
+- [x] LEDGER-6. Rebuild the project-review workflow on the ledger — [#684]
+- [x] LEDGER-7. Add auto-project-review — [#685]
+- [x] LEDGER-8. Port direct-commit mode onto the ledger and retire the cursor — [#686]
 
 ## Epic contract
 
@@ -227,9 +228,12 @@ outside `docs/`, so a heartbeat never rewrites the ledger or any other
 publishable document. `claim` starts a renewer that rewrites that record's
 deadline every `renewal` seconds while the review session's liveness signal
 — an inherited descriptor the session holds open, or an owner process the
-invocation names explicitly — is held; cancellation, session termination, or
-loss of that signal stops renewal, and the lease lapses after `expiry`. When
-the heartbeat record is absent the deadline is the claim's start plus its
+invocation names explicitly — is held; loss of that signal stops renewal,
+and the lease lapses after `expiry`. A session adapter ends the signal at
+once on turn completion, session termination, or an interruption the
+runtime reports, and after a bounded silence window for a cancellation it
+does not report (D-17's 2026-09-17 amendment). When the heartbeat record
+is absent the deadline is the claim's start plus its
 expiry; when it is present but unreadable, or names another claim, every
 decision that needs the deadline refuses. Both intervals default to 60
 seconds and 15 minutes, may be given per-repository defaults in the ledger,
@@ -519,6 +523,37 @@ resolves its targets from the attempt's own record, never from the row's
 current owner. The settings block, the takeover entry, and the liveness
 mechanism belong to LEDGER-4.
 
+Amended 2026-09-17 with the owner's approval (issue #687). The renewer's own
+contract stands: it renews only while its liveness signal is held and stops
+as soon as that signal is lost. What changes is how quickly a cancelled
+session must lose the signal. A probe of the installed Claude Code 2.1.274
+found that no hook event fires when the user interrupts a turn. That held
+during a foreground tool, whose process the runtime kills, and between tool
+calls, where background processes survive with the application still open.
+The runtime documents no interrupt event, and its transcript's interruption
+marker is not a documented interface. Codex 0.154.0 documents an `Interrupt`
+hook. Rather than depend on an undocumented format or change the review
+execution model, the session adapters supply progress-bound liveness:
+
+- a session keeper process, named as the claim's owner process, stays alive
+  while the registered review invocation shows progress: a runtime lifecycle
+  event within a silence window, or a long-running command started through
+  the adapter's wrapper whose process is still running;
+- turn completion and session termination end the keeper at once, and so
+  does interruption where the runtime documents an event for it;
+- a cancellation the runtime does not report ends the keeper once the silence
+  window passes with no event and no wrapped command running, and the lease
+  then lapses at expiry.
+
+A cancelled session's claim is therefore held for at most the silence window
+plus the expiry, rather than one renewal interval. This is inactivity
+detection, accepted deliberately. D-17's hazard is an orphan extending a dead
+claim forever, which the bound still excludes. The fencing guarantees above
+make a slow lapse cost a delayed takeover, never a stale-owner write. A
+long-running command not started through the wrapper can let the claim lapse
+mid-review; the late record is then refused, losing that review's work and
+nothing else.
+
 ### D-18. Ledger-era documents live under one publishable directory
 
 Approved 2026-09-12. The ledger and every new ledger-era report live under
@@ -567,6 +602,12 @@ installed command keeps reading the v2 cursor through LEDGER-5; migration
 of a live ledger happens on the first post-LEDGER-6 invocation, never
 during delivery; the end-to-end test lands with LEDGER-6 for every proof
 but the automation count, which LEDGER-7 adds.
+
+Amended 2026-09-12 with the owner's approval: LEDGER-6 leaves direct-commit
+mode on the existing cursor module, unchanged and explicit-only, and a new
+LEDGER-8 ports direct-mode selection and recording onto the ledger's
+`direct` key and retires the cursor module from both bundles. Eight slices;
+LEDGER-8 depends on LEDGER-6 and is not on the critical path.
 
 ## Proposal history
 
@@ -886,8 +927,8 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   assets run one review end to end — inventory, select and claim, pin a
   detached temporary worktree at the fetched remote head, review, report
   only new findings, record, checkpoint, clean up and report a retained
-  path on failure — with an explicit legacy-handling section, explicit-only
-  direct mode, no self-continuation, and the workflow's documents
+  path on failure — with an explicit legacy-handling section, direct mode left on the
+  cursor module and explicit-only until LEDGER-8, no self-continuation, and the workflow's documents
   classified so it can maintain them: the `docs/project_review/` directory
   row and its seed in Kanban's three registries, and the consumer-side
   `direct_publication_paths` guidance in the contract. Runtime artifacts
@@ -913,7 +954,8 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   timestamp, interruption and takeover cannot produce a false completion
   or a stale-owner write, and both packaged workflows carry the required
   helpers and behave consistently.
-- **Out of scope:** serial automation.
+- **Out of scope:** serial automation (LEDGER-7); porting direct mode and
+  retiring the cursor (LEDGER-8).
 - **Open questions:** `None`
 
 ### LEDGER-7. Add auto-project-review
@@ -935,6 +977,29 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   proof, that automation counts completed records and stops correctly on
   `N` and on the first unrecoverable refusal.
 - **Out of scope:** any scheduler or service integration.
+- **Open questions:** `None`
+
+### LEDGER-8. Port direct-commit mode onto the ledger and retire the cursor
+
+- **Outcome:** direct-commit selection and recording run against the
+  ledger's `direct` key with the cursor's frontier semantics, the workflow's
+  explicit direct invocation calls the ledger module, and
+  `project_review_cursor.py` and its registry entries leave both bundles;
+  `docs/project_review_boundaries.md` is read only by migration, through
+  parsers the ledger module carries itself.
+- **Scope:** the direct-mode port, its tests, the workflow's direct section,
+  the cursor's removal from both bundles and every enumeration naming it,
+  and the contract prose that described the sweep cursor.
+- **Phase:** 4
+- **Depends on:** LEDGER-6
+- **Ordering:** `not on the critical path`
+- **Relevant decisions:** D-16, D-18, D-19
+- **Acceptance signals:** the cursor's direct-mode tests pass against the
+  ledger module; the migrated `direct` state of a fixture is what the
+  first direct selection walks from; no asset, test, or contract row names
+  the cursor module; the bundle gates pass.
+- **Out of scope:** any change to PR-mode selection, recording, or the
+  lease.
 - **Open questions:** `None`
 
 ## Source notes
