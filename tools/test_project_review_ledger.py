@@ -3594,13 +3594,36 @@ class LeaseTestCase(SelectionTestCase):
         return LEDGER.document_path(self.root).read_bytes()
 
     def expire(self, claimed, session):
-        """Take a claim's session away and wait out its lease."""
+        """Take a claim's session away and wait out its lease.
+
+        The renewer retires its heartbeat record only once the last renewal's
+        deadline has passed, so its exit is the lease having lapsed.
+        """
         token = claimed["claim"]["token"]
         renewer = claimed["claim"]["renewer"]["pid"]
         self.end_session(session)
-        wait_until(lambda: not process_running(renewer), "the renewer outlived its session")
-        deadline = instant(self.heartbeat(token)["deadline"])
-        wait_until(lambda: time.time() > deadline + 0.05, "the lease did not lapse")
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its lease")
+        self.assertIsNone(self.heartbeat(token))
+        deadline = instant(claimed["claim"]["started_at"]) + claimed["claim"]["expiry_seconds"]
+        self.assertGreater(time.time(), deadline)
+
+    def holder(self):
+        """A process holding the repository lock through the module's own code."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", HOLD_LOCK_PROGRAM, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), str(self.root)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.kill_holder, process)
+        self.assertEqual(process.stdout.readline().strip(), "held")
+        return process
+
+    def kill_holder(self, process):
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        process.wait(timeout=SETTLE_SECONDS)
+        process.stdout.close()
 
     def refused(self, completed, reason):
         self.assertEqual(completed.returncode, 2, completed.stdout)
@@ -3695,12 +3718,17 @@ class LivenessSignalTests(LeaseTestCase):
         wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
         lost_at = time.time()
         lose_signal()
-        wait_until(lambda: not process_running(renewer), "the renewer outlived its signal")
+        time.sleep(3 * LEASE_RENEWAL)
         record = self.heartbeat(token)
         last_renewal = instant(record["deadline"]) - LEASE_EXPIRY
         self.assertLessEqual(last_renewal, lost_at + LEASE_RENEWAL)
-        time.sleep(3 * LEASE_RENEWAL)
-        self.assertEqual(self.heartbeat(token), record)
+        # The record stays until its deadline, so the lease lapses after its
+        # expiry rather than when renewal stopped, and is then retired by the
+        # renewer that wrote it.
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its lease")
+        self.assertGreaterEqual(time.time(), instant(record["deadline"]))
+        self.assertIsNone(self.heartbeat(token))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
 
     def test_closing_the_descriptor_stops_renewal_within_one_interval(self):
         read_end, write_end = self.liveness_pipe()
@@ -3769,29 +3797,121 @@ class HeartbeatRemovalTests(LeaseTestCase):
         self.assertEqual(self.claim_on_disk(612)["token"], token)
 
 
+class LockContentionTests(LeaseTestCase):
+    """A signal lost while the lock is awaited stops the write it was awaited for."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def test_a_claim_whose_signal_is_lost_while_it_waits_for_the_lock_records_nothing(self):
+        before = self.ledger_bytes()
+        holder = self.holder()
+        session = self.session()
+        claimant = subprocess.Popen(
+            [
+                sys.executable,
+                str(REPO_ROOT / CLAUDE_LEDGER_HELPER),
+                *self.claim_arguments(),
+                "--owner-pid",
+                str(session.pid),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        claimant.stdin.write(json.dumps(listing([merged(612)])))
+        claimant.stdin.close()
+        # Long enough for the claim to pass its first liveness check and
+        # reach the lock, well short of its wait for it.
+        time.sleep(1.0)
+        self.assertIsNone(claimant.poll())
+        self.end_session(session)
+        self.kill_holder(holder)
+        stdout, stderr = claimant.communicate(timeout=60)
+        self.assertEqual(claimant.returncode, 2, stdout)
+        self.assertIn("refused (liveness-lost)", stderr)
+        self.assertEqual(self.ledger_bytes(), before)
+        leases = self.common() / LEDGER.RUNTIME_DIRECTORY / "leases"
+        self.assertEqual(list(leases.glob("*.json")) if leases.exists() else [], [])
+
+    def test_a_renewal_whose_signal_is_lost_while_it_waits_for_the_lock_writes_nothing(self):
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        holder = self.holder()
+        record = self.heartbeat(token)
+        lost_at = time.time()
+        self.end_session(session)
+        time.sleep(3 * LEASE_RENEWAL)
+        self.kill_holder(holder)
+        time.sleep(3 * LEASE_RENEWAL)
+        current = self.heartbeat(token)
+        if current is not None:
+            self.assertLessEqual(
+                instant(current["deadline"]) - LEASE_EXPIRY, lost_at + LEASE_RENEWAL
+            )
+            self.assertEqual(current, record)
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its lease")
+        self.assertIsNone(self.heartbeat(token))
+
+    def test_a_renewer_that_finds_its_lease_expired_retires_its_record_and_stops(self):
+        # The session is alive throughout; the lease expires because the lock
+        # was held past it. The renewer's next look refuses the expired token
+        # and removes the record it wrote, and the claim stays for takeover.
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        holder = self.holder()
+        deadline = instant(self.heartbeat(token)["deadline"])
+        wait_until(lambda: time.time() > deadline + LEASE_RENEWAL, "the lease did not lapse")
+        self.kill_holder(holder)
+        wait_until(lambda: not process_running(renewer), "the renewer outlived its lease")
+        self.assertIsNone(self.heartbeat(token))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+        self.assertIsNone(session.poll())
+
+
+class OrphanedHeartbeatTests(LeaseTestCase):
+    def test_a_renewer_whose_claim_was_never_published_removes_its_record(self):
+        # The state a claim leaves when it dies between writing the heartbeat
+        # and publishing the ledger, built with the claim's own writer and
+        # spawner: a record for a token the ledger never names, and the
+        # renewer that was started for it.
+        self.establish({})
+        token = "c" * 32
+        LEDGER.write_heartbeat(
+            self.common(),
+            {
+                "token": token,
+                "repo": REPO,
+                "pr": 612,
+                "deadline": LEDGER.precise_timestamp(time.time() + 60),
+                "renewals": 0,
+                "renewer": None,
+            },
+        )
+        session = self.session()
+        renewer = LEDGER._start_renewer(
+            self.root, REPO, 612, token, {"kind": "process", "pid": session.pid}
+        )
+        self.addCleanup(lambda: renewer.poll() is None and renewer.kill())
+        self.assertEqual(renewer.wait(timeout=SETTLE_SECONDS), 0)
+        self.assertIsNone(self.heartbeat(token))
+        self.assertIsNone(LEDGER.observed_lock(self.root))
+
+
 class RepositoryLockTests(LeaseTestCase):
     """The helper's own mutex recovers from a dead holder and from nothing else."""
 
     def setUp(self):
         super().setUp()
         self.establish({})
-
-    def holder(self):
-        process = subprocess.Popen(
-            [sys.executable, "-c", HOLD_LOCK_PROGRAM, str(REPO_ROOT / CLAUDE_LEDGER_HELPER), str(self.root)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        self.addCleanup(self.kill_holder, process)
-        self.assertEqual(process.stdout.readline().strip(), "held")
-        return process
-
-    def kill_holder(self, process):
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        process.wait(timeout=SETTLE_SECONDS)
-        process.stdout.close()
 
     def test_a_holder_killed_inside_the_lock_is_recovered_by_the_next_invocation(self):
         holder = self.holder()

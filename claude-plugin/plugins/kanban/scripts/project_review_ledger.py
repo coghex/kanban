@@ -3096,7 +3096,13 @@ def fence(root, repo: str, number: int, token: str, lock_wait: float = None) -> 
 
 
 def renew(
-    root, repo: str, number: int, token: str, lock_wait: float = None, renewer=None
+    root,
+    repo: str,
+    number: int,
+    token: str,
+    lock_wait: float = None,
+    renewer=None,
+    signal_held=None,
 ) -> dict:
     """Extend the current owner's deadline by its own expiry, and nothing else.
 
@@ -3104,8 +3110,20 @@ def renew(
     record, and the claim's settings are the ones it was taken with. A record
     that has gone missing is written afresh, naming `renewer` when the
     renewer itself is the caller.
+
+    `signal_held`, when given, is asked once the lock is held and immediately
+    before the write. The renewer passes its liveness signal here, because
+    the lock can take longer to arrive than the signal takes to be lost, and
+    a renewal decided before the wait is not one the session still stands
+    behind after it.
     """
     with fenced(root, repo, number, token, lock_wait) as held:
+        if signal_held is not None and not signal_held():
+            raise LeaseRefused(
+                "liveness-lost",
+                f"the liveness signal for {token} was lost while the renewal "
+                "waited for the lock; nothing was renewed.",
+            )
         previous = held["heartbeat"]
         deadline = held["now"] + held["claim"]["expiry_seconds"]
         write_heartbeat(
@@ -3344,6 +3362,15 @@ def claim(
             )
         row["claim"] = {"token": token, "started_at": precise_timestamp(now), **settings}
         deadline = now + settings["expiry_seconds"]
+        # Asked again here, under the lock and before the first write: the
+        # check before the lock was taken says nothing about a session that
+        # ended while this invocation waited for it.
+        if _signal_lost(source, 0):
+            raise LeaseRefused(
+                "liveness-lost",
+                "the liveness signal was lost while this claim waited for the "
+                "repository lock; nothing was claimed.",
+            )
         renewer = _start_renewer(root, repo, number, token, source)
         try:
             write_heartbeat(
@@ -3437,13 +3464,21 @@ def _stop_on_signal(signum, frame):
 
 
 def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
-    """Renew `token`'s claim until the signal is lost or the claim is not its own.
+    """Renew `token`'s claim while its signal is held, then retire its record.
 
-    Returns why it stopped. Every stop writes nothing: a lost signal leaves the
-    last heartbeat to lapse on its own, an expired claim is left for takeover,
-    and a claim released or taken over has had its heartbeat removed by the
-    invocation that did so. A renewer removes no ledger claim, no lock it
-    does not hold, and no heartbeat record at all.
+    Returns why it stopped. Renewal stops within one renewal interval of the
+    signal's loss, because the signal is looked at between waits and again
+    under the lock before every write, and the lock is never waited on for
+    longer than one look.
+
+    What a renewer created is its heartbeat record, and every stop but an
+    unreadable record or an outside signal ends with that record retired
+    through `retire_heartbeat`, which removes it only once it describes
+    nothing: the token no longer owns the row, or the lease has expired. So a
+    lost signal stops renewal at once and the record is removed when the
+    last renewal's deadline passes -- the lease lapses after its expiry, as
+    D-17 says, rather than the moment cleanup runs. A renewer removes no
+    ledger claim and no lock it does not hold.
 
     A heartbeat record that disappears is not taken as a release on its own
     say-so: it brings the next renewal forward, and that renewal's fencing
@@ -3453,36 +3488,141 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     """
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, _stop_on_signal)
+    identity = {"host": socket.gethostname(), "pid": os.getpid()}
+
+    def signal_held():
+        return not _signal_lost(source, 0)
+
     try:
-        with repository_lock(root) as common:
-            document = load_document(root)
-            row = state_for(document, repo)["rows"].get(str(number))
-            if _refusal_for(row, number, token, repo) is not None:
-                return "not-owner"
-            renewal = row["claim"]["renewal_seconds"]
-        record = heartbeat_path(common, token)
-        identity = {"host": socket.gethostname(), "pid": os.getpid()}
+        try:
+            renewal = _renewer_settings(root, repo, number, token, source)
+        except LeaseRefused as refusal:
+            if refusal.reason != "liveness-lost":
+                raise
+            return _retired(root, repo, number, token, RENEWER_POLL_SECONDS, "signal-lost")
+        if renewal is None:
+            return _retired(root, repo, number, token, LOCK_POLL_SECONDS, "not-owner")
         poll = min(renewal, RENEWER_POLL_SECONDS)
+        record = heartbeat_path(git_common_directory(root), token)
         due = time.monotonic() + renewal
         while True:
             if _signal_lost(source, max(0.0, min(poll, due - time.monotonic()))):
-                return "signal-lost"
+                return _retired(root, repo, number, token, poll, "signal-lost")
             if time.monotonic() < due and os.path.lexists(record):
                 continue
             try:
-                renew(root, repo, number, token, renewer=identity)
+                renew(
+                    root,
+                    repo,
+                    number,
+                    token,
+                    lock_wait=poll,
+                    renewer=identity,
+                    signal_held=signal_held,
+                )
             except LeaseRefused as refusal:
                 if refusal.reason.startswith("lock-"):
-                    # Not this claim's fate: try again at the next look, and
-                    # let the claim lapse if the lock never comes back.
+                    # Not this claim's fate: look at the signal again and try
+                    # at the next look; a lock that never comes back lets the
+                    # claim lapse.
                     due = time.monotonic() + poll
                     continue
-                return refusal.reason
+                if refusal.reason.startswith("heartbeat-"):
+                    # A record this helper cannot read is not one it may
+                    # judge to be its own.
+                    return refusal.reason
+                reason = "signal-lost" if refusal.reason == "liveness-lost" else refusal.reason
+                return _retired(root, repo, number, token, poll, reason)
             due = time.monotonic() + renewal
     except _Stopped:
         return "signalled"
     except LedgerError:
         return "refused"
+
+
+def _renewer_settings(root, repo: str, number: int, token: str, source: dict):
+    """The claim's renewal interval, or None when the ledger names no such claim.
+
+    None is what a renewer sees when the claim that started it never
+    published -- the invocation died between writing the heartbeat and
+    publishing the ledger -- or was released or taken over before the renewer
+    first looked. The lock is retried rather than waited on, so a lost
+    signal is still noticed while it is busy.
+    """
+    while True:
+        if _signal_lost(source, 0):
+            raise LeaseRefused("liveness-lost", "the signal was lost before the first renewal.")
+        try:
+            with repository_lock(root, LOCK_POLL_SECONDS):
+                row = state_for(load_document(root), repo)["rows"].get(str(number))
+                if _refusal_for(row, number, token, repo) is not None:
+                    return None
+                return row["claim"]["renewal_seconds"]
+        except LeaseRefused as refusal:
+            if not refusal.reason.startswith("lock-"):
+                raise
+            time.sleep(LOCK_POLL_SECONDS)
+
+
+def _retired(root, repo: str, number: int, token: str, poll: float, reason: str) -> str:
+    """Wait until this attempt's heartbeat record describes nothing, then remove it.
+
+    Asleep until the recorded deadline rather than polling towards it: nothing
+    but a renewal can make a live record removable sooner than its deadline,
+    and a renewal only moves the deadline later, which the next look sees.
+    """
+    while True:
+        try:
+            outcome = retire_heartbeat(root, repo, number, token, lock_wait=poll)
+        except LeaseRefused as refusal:
+            if not refusal.reason.startswith("lock-"):
+                return reason
+            outcome = "live"
+        if outcome != "live":
+            return reason
+        wake = time.time() + poll
+        with contextlib.suppress(LedgerError):
+            record = read_heartbeat(git_common_directory(root), token)
+            if record is not None:
+                wake = max(wake, _precise_instant(record["deadline"], "the heartbeat deadline"))
+        time.sleep(max(0.0, wake - time.time()) + LOCK_POLL_SECONDS)
+
+
+def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float = None) -> str:
+    """Remove `token`'s heartbeat record once it no longer describes a live lease.
+
+    Under the lock, and decided from the ledger and the record together:
+
+    * `absent` -- there is no record, because a release or a takeover removed it.
+    * `removed` -- the row's claim is not this token's (released, replaced, or
+      never published), or it is and its deadline has passed. Either way the
+      record decides nothing any more: an expired lease stays expired with
+      its record gone, because the deadline an absent record falls back to,
+      the claim's start plus its expiry, is never later than one a renewal
+      wrote.
+    * `live` -- the token still owns an unexpired lease, which somebody may
+      yet renew, so the record stays.
+
+    A record that cannot be read, or that names another claim, is refused
+    rather than removed: it is not one this attempt can show it created.
+    """
+    _validated_token(token, "the presented token")
+    with repository_lock(root, lock_wait) as common:
+        record = read_heartbeat(common, token)
+        if record is None:
+            return "absent"
+        if (record["token"], record["repo"], record["pr"]) != (token, repo, number):
+            raise LeaseRefused(
+                "heartbeat-mismatch",
+                f"the heartbeat record for {token} names "
+                f"{record['repo']}#{record['pr']}, so it is left in place.",
+            )
+        row = state_for(load_document(root), repo)["rows"].get(str(number))
+        owns = _refusal_for(row, number, token, repo) is None
+        if owns and time.time() < _precise_instant(record["deadline"], "the heartbeat deadline"):
+            return "live"
+        remove_heartbeat(common, token)
+        return "removed"
 
 
 # --------------------------------------------------------------------------
@@ -3697,13 +3837,16 @@ def main(argv=None) -> int:
         return _emit(set_lease_defaults(args.root, args.repo, args.renewal, args.expiry))
 
     if args.command == "renewer":
-        run_renewer(
-            args.root,
-            args.repo,
-            args.pr,
-            args.token,
-            liveness_source(args.liveness_fd, args.owner_pid),
+        # The signal's shape, not its state: a renewer whose signal is already
+        # lost still has a heartbeat record to retire.
+        if (args.liveness_fd is None) == (args.owner_pid is None):
+            raise LeaseRefused("liveness-required", "a renewer follows exactly one signal.")
+        source = (
+            {"kind": "descriptor", "fd": args.liveness_fd}
+            if args.liveness_fd is not None
+            else {"kind": "process", "pid": args.owner_pid}
         )
+        run_renewer(args.root, args.repo, args.pr, args.token, source)
         return 0
 
     confirmations = {}
