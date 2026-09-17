@@ -164,7 +164,7 @@ DOCUMENT_COMMAND_NAMES = {
 CODEX_ONLY_DOCUMENT_WORKFLOWS = ()
 
 # The roadmap workflows vendored by issues #393 and #427, slices VEND-1 and
-# VEND-2 of docs/workflow_command_vendoring_design.md. Unlike every set above
+# VEND-2 of docs/designs/workflow_command_vendoring_design.md. Unlike every set above
 # neither is a hand-edited file: each is rendered from its own source under
 # tools/command_sources/ by tools/render_command_sources.py, and
 # tools/test_render_command_sources.py byte-compares the tracked outputs

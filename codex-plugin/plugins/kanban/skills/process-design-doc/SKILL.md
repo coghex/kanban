@@ -174,7 +174,8 @@ the corresponding approved external action succeeds.
 
 1. Resolve an explicit or conversation-linked path under `$DOCS_WT`, never
    relative to the working directory. If none was supplied, search
-   `$DOCS_WT/docs/` and `$DOCS_WT` itself for `*_design.md`; use the sole ready
+   `$DOCS_WT/docs/designs/`, `$DOCS_WT/docs/`, and `$DOCS_WT` itself for
+   `*_design.md`; use the sole ready
    candidate when exactly one exists, and ask for the path when multiple
    candidates remain plausible. Require a Markdown file, announce the resolved
    path together with `$DOC_REPO` and `$DOC_BRANCH`, and read applicable

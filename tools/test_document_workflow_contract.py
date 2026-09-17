@@ -1966,6 +1966,87 @@ class DesignDecisionAuthorityTests(unittest.TestCase):
                     )
 
 
+class DesignDocumentLocationTests(unittest.TestCase):
+    """Issue #700: design documents are classified through one §7 directory
+    row, so both halves of the design pair have to agree on where they live.
+
+    Creation and discovery are asserted separately because they fail
+    differently. An asset that creates in the wrong place lands an
+    unclassified document a pull request then has to enroll -- the very cost
+    this row removes. An asset that creates correctly but searches the old
+    location cannot resume or process a document it just wrote, which reads as
+    a missing document rather than a misplaced one.
+    """
+
+    DESIGN_DIRECTORY = "docs/designs/"
+
+    def asset_text(self, path):
+        # normalized() rather than canonical(): `$DOCS_WT` is a case-sensitive
+        # shell variable, not prose whose capitalization legitimately varies,
+        # and case-folding it would let `$docs_wt` satisfy these assertions.
+        return normalized((REPO_ROOT / path).read_text(encoding="utf-8"))
+
+    def test_both_design_epic_variants_create_in_the_design_directory(self):
+        for path in DESIGN_EPIC_ASSETS:
+            with self.subTest(path=path):
+                text = self.asset_text(path)
+                self.assertIn(
+                    f"$DOCS_WT/{self.DESIGN_DIRECTORY}<subject>_design.md",
+                    text,
+                    f"{path} must create a new arc document under "
+                    f"{self.DESIGN_DIRECTORY}, which §7 classifies through one "
+                    "directory row; creating it beside docs/ leaves it "
+                    "unclassified and therefore unlandable",
+                )
+
+    def test_both_design_epic_variants_resume_from_the_design_directory(self):
+        for path in DESIGN_EPIC_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    f"$DOCS_WT/{self.DESIGN_DIRECTORY}",
+                    self.asset_text(path),
+                    f"{path} must look in {self.DESIGN_DIRECTORY} before "
+                    "creating a new document, or it will start a second "
+                    "document beside an existing arc",
+                )
+
+    def test_both_processing_variants_discover_the_design_directory(self):
+        for path in DESIGN_PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    f"$DOCS_WT/{self.DESIGN_DIRECTORY}",
+                    self.asset_text(path),
+                    f"{path} must search {self.DESIGN_DIRECTORY} when no path "
+                    "is supplied, or a document design-epic just created is "
+                    "undiscoverable without an explicit path",
+                )
+
+    def test_the_old_bare_docs_location_is_still_searched(self):
+        # The migration moves the ordinary location; it does not narrow
+        # discovery. A consuming repository that never adopted docs/designs/,
+        # and the documented no-docs-directory fallback, both still resolve.
+        for path in DESIGN_PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                text = self.asset_text(path)
+                self.assertIn("$DOCS_WT/docs/", text)
+                self.assertIn("$DOCS_WT itself", text)
+
+    def test_assets_owing_no_design_location_do_not_name_it(self):
+        # The negative control: without it a rule matching every declared asset
+        # would pass while asserting nothing about the design pair.
+        owing = set(DESIGN_EPIC_ASSETS) | set(DESIGN_PROCESSING_ASSETS)
+        controls = sorted(EXPECTED_DECLARED_PATHS - owing)
+        self.assertTrue(controls, "no negative control remains")
+        for path in controls:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    f"$DOCS_WT/{self.DESIGN_DIRECTORY}",
+                    self.asset_text(path),
+                    f"{path} handles reports rather than arc documents and "
+                    "owes no design-directory rule",
+                )
+
+
 class ArcApparatusRemovalTests(unittest.TestCase):
     """Issue #458: §3.1 gives the design state machine one transition and no
     third value, so every arc that ends leaves its processing apparatus exactly

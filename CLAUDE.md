@@ -29,10 +29,11 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   `docs/workflow-setup.md` cover the optional local components.
 - Every tracked Markdown file takes one of two publication lanes, classified in
   `docs/agent-workflow-contract.md` section 7. The coordination
-  documents publish straight to master, bypassing the PR lane: the findings,
-  code-health, and design documents section 7's `coordination` rows name by
-  exact path, plus every tracked Markdown file under `docs/coordination/` —
-  that directory's row covers new notes as they are added, with no
+  documents publish straight to master, bypassing the PR lane: the findings
+  and code-health documents section 7's `coordination` rows name by exact
+  path, plus every tracked Markdown file under `docs/coordination/` and
+  every design document under `docs/designs/` — those two directory rows
+  cover new notes and new design documents as they are added, with no
   classification edit anywhere. Everything else is pr-atomic and
   lands with its implementation through a pull request. Anything unclassified is
   pr-atomic too — that default fails closed, so a new document never publishes directly

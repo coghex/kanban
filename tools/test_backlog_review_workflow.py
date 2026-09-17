@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_backlog_review_workflow.py
 
-Issue #430, slice VEND-3 of `docs/workflow_command_vendoring_design.md`. Every
+Issue #430, slice VEND-3 of `docs/designs/workflow_command_vendoring_design.md`. Every
 other vendored slice so far reads the tracker; this one **writes** to it — it
 closes issues, rewrites their bodies, adds a label, and posts a comment. Two
 consequences follow, and both are asserted here rather than left to review.

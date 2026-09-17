@@ -321,7 +321,7 @@ and the only implementation is personal-layer (WF-6).
 > while draft-report adapts from the tracked Codex skill per #240's
 > precedent. note-problem/backlog stay personal per WF-6's disposition.
 >
-> **Superseded in part 2026-08-11:** `docs/claude_document_workflows_design.md`
+> **Superseded in part 2026-08-11:** `docs/designs/claude_document_workflows_design.md`
 > now carries this finding as a four-slice epic arc, and two statements above
 > no longer hold. Its D-1 carves `note-problem` out of WF-6's disposition — it
 > becomes a tracked cross-brand pair in both plugins — while `backlog` stays

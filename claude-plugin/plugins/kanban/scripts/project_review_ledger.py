@@ -4,7 +4,7 @@
 Run with: python3 project_review_ledger.py
           {read,migrate,select,claim,renew,release,fence,allocate-report,record,lease-defaults} --help
 
-Issue #680, slice LEDGER-2 of `docs/project_review_ledger_design.md`. The
+Issue #680, slice LEDGER-2 of `docs/designs/project_review_ledger_design.md`. The
 sweep cursor this module supersedes records which pull requests a batch
 covered and nothing else: not whether the batch found anything, not the commit
 it was verified against, not when. `project_review_cursor.py` is deliberately

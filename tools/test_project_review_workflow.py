@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_project_review_workflow.py
 
-Issue #462, slice VEND-4 of `docs/workflow_command_vendoring_design.md` — the
+Issue #462, slice VEND-4 of `docs/designs/workflow_command_vendoring_design.md` — the
 heaviest reconciliation in the arc. The two personal copies implemented
 *opposite* terminal acts over 223 differing lines: the Claude copy drafted issue
 bodies, stopped for approval, and filed them, while the Codex copy forbade

@@ -101,7 +101,7 @@ concrete precondition
   or `docs/`. The tracker has no overlapping arc: #348 (the `f` filter
   panel) is closed, and epic #354 (multi-repo boards) is adjacent, not
   overlapping.
-- Multi-repo interplay: `docs/multi_repo_boards_design.md` D-1/D-14 put a
+- Multi-repo interplay: `docs/designs/multi_repo_boards_design.md` D-1/D-14 put a
   single full-width tab row at the very top, above the existing frame,
   rendered only with two or more repositories; D-13 records that arc
   avoided `f` for tab cycling because "open issue #348 claims it for the
@@ -145,7 +145,7 @@ the letter `f` becomes typable in a search query.
 - Making the base footer the single projected, context-aware hotkey row
   and retiring the overlays' in-box hint literals.
 - The design.md §6/§7/§11 amendments those changes require, and the
-  interplay notes owed to `docs/multi_repo_boards_design.md`.
+  interplay notes owed to `docs/designs/multi_repo_boards_design.md`.
 
 ### Out of scope
 

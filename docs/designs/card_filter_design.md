@@ -160,7 +160,7 @@ while ledger position preserves the actual dependency order.
   children without retaining needed headers would orphan cards or make row
   targets unsafe.
 - **Search has already designed the shared safety seam.** The ready
-  `docs/issue_search_design.md` specifies one derived visible-entry authority,
+  `docs/designs/issue_search_design.md` specifies one derived visible-entry authority,
   identity-based selection reconciliation, contextual epic headers, and an
   in-flow search box. Filter must feed that authority rather than layer a
   renderer-only list over raw `(column,row)` targets. SRCH-1 is therefore an

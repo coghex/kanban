@@ -146,11 +146,14 @@ Accept invocations such as:
 Treat an explicit `.md` token in `$ARGUMENTS` as the document path, and feed it
 to the ownership resolution above as the explicit path input. Otherwise infer a
 concise subject from `$ARGUMENTS`
-and use `$DOCS_WT/docs/<subject>_design.md` when `$DOCS_WT/docs/` exists, or
+and use `$DOCS_WT/docs/designs/<subject>_design.md` when `$DOCS_WT/docs/`
+exists, creating `docs/designs/` when it does not yet exist, or
 `$DOCS_WT/<subject>_design.md`; a bare `docs/` prefix names nothing until
 `$DOC_ROOT` is resolved, and a document whose owner stays unresolved is asked
-about rather than created. Before creating a new file, search `$DOCS_WT` for a
-clearly matching `*_design.md`; resume it when the subject and arc match. Tell
+about rather than created. Before creating a new file, search `$DOCS_WT/docs/designs/`,
+`$DOCS_WT/docs/`, and `$DOCS_WT` itself for a clearly matching
+`*_design.md`; resume it when the subject and arc match, wherever it
+already lives. Tell
 the user the resolved path, `$DOC_REPO`, and `$DOC_BRANCH` before substantial
 investigation so they can redirect any of the three without pausing the work.
 

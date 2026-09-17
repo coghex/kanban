@@ -1191,8 +1191,10 @@ The removal applies to one kind of document and never to the other.
 An **arc document** is one whose whole subject is the arc: the document
 `/design-epic` or `$design-epic` created and `/process-design-doc` or
 `$process-design-doc` processed. An arc document is identified by role rather
-than by path. `docs/<subject>_design.md` is its ordinary location, but the
-design pair also creates `<subject>_design.md` at the repository root when no
+than by path. `docs/designs/<subject>_design.md` is its ordinary location —
+the directory `docs/agent-workflow-contract.md` §7 classifies through one
+row, so a new arc document needs no classification edit — but the design
+pair also creates `<subject>_design.md` at the repository root when no
 `docs/` directory exists and accepts an explicit Markdown host named in its
 arguments, so the path is evidence of the role and never the definition of it.
 

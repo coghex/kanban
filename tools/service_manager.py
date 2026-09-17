@@ -113,7 +113,7 @@ LABEL_PREFIX = "com.coghex.drain-prs"
 LEGACY_LABEL = LABEL_PREFIX
 # The issue approval service's own prefix. Distinct from the drainer's by
 # construction, so neither service can name the other's job however similarly
-# two repositories are spelled (`docs/issue_approval_queue_design.md` D-11).
+# two repositories are spelled (`docs/designs/issue_approval_queue_design.md` D-11).
 # There has never been a machine-wide approval job, so this namespace has no
 # singleton to retire; the untracked personal daemon that predates the service
 # is a conflict the controller refuses beside, never a job this module manages.

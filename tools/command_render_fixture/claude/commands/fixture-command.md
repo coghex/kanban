@@ -9,7 +9,7 @@ This file is not a workflow. It is the authored source
 `tools/render_command_sources.py` renders into both plugin bundle layouts, so
 that mechanism has something to prove itself against without vendoring a
 command — issue #375, slice VEND-0 of
-`docs/workflow_command_vendoring_design.md`.
+`docs/designs/workflow_command_vendoring_design.md`.
 
 Its two rendered outputs deliberately land under `tools/`, outside
 `claude-plugin/plugins/kanban/commands/` and
@@ -56,7 +56,7 @@ Deliberate per-brand body text stays authored here, in one source, rather than
 diverging across two files. Both variants below are drawn from the shipped
 `solve` pair, whose argument convention and installed-helper resolution really
 do differ by provider — the adaptations
-`docs/workflow_command_vendoring_design.md` D-2 and D-7 require to survive
+`docs/designs/workflow_command_vendoring_design.md` D-2 and D-7 require to survive
 reconciliation.
 
 1. Take the issue number from `$ARGUMENTS`, which Claude Code substitutes

@@ -75,7 +75,7 @@ Visually identical accented text can fail to match because the query and display
 
 ### [no-issue] BQ-4. Focused search reserves ordinary letters as commands
 
-> **Disposition:** No issue — `s`, `q`, and uppercase `F` are reserved by an explicit signed-off decision (`docs/issue_search_design.md` D-5, 2026-08-11), which considered and rejected moving quit off `q`; #513 later revisited the reserved set on purpose and freed only lowercase `f`. Matching is case-insensitive, so every query remains typeable via the other case, and the footer, help overlay, and user guide state the three exceptions. Reopening D-5 is a product decision, not a defect.
+> **Disposition:** No issue — `s`, `q`, and uppercase `F` are reserved by an explicit signed-off decision (`docs/designs/issue_search_design.md` D-5, 2026-08-11), which considered and rejected moving quit off `q`; #513 later revisited the reserved set on purpose and freed only lowercase `f`. Matching is case-insensitive, so every query remains typeable via the other case, and the footer, help overlay, and user guide state the three exceptions. Reopening D-5 is a product decision, not a defect.
 
 **Priority: after correctness fixes. Estimated effort: easy–medium.**
 
@@ -85,7 +85,7 @@ Typing lowercase `s` closes search, lowercase `q` reaches guarded dashboard quit
 
 - `src/Kanban/UI/Search.hs:438` explicitly reserves those three printable characters.
 - Probes confirmed those mappings and that uppercase `S`/`Q` and lowercase `f` insert text.
-- `docs/issue_search_design.md:308` records explicit prior approval of `s` toggling search and `q` remaining quit.
+- `docs/designs/issue_search_design.md:308` records explicit prior approval of `s` toggling search and `q` remaining quit.
 
 **Handoff context:** This is a proposed revision of an intentional design, not an implementation defect. Consider allowing every printable letter while the search field owns keyboard focus, with Escape closing search and dedicated commands handling quit and filter focus. Case-swapping currently provides a workaround because matching ignores case.
 
