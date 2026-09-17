@@ -3455,12 +3455,29 @@ def _stop_started_renewer(renewer) -> None:
             renewer.kill()
 
 
-class _Stopped(Exception):
-    pass
+# How many stop signals this process has received. The handler only counts:
+# an exception raised from a signal handler lands at whatever bytecode happens
+# to be running, and between `update-ref` creating the lock and the `finally`
+# that releases it -- or inside that release -- it leaves this live process
+# holding a lock it will then wait on forever. So the renewer looks at the
+# count between waits, where nothing is held, and every wait it makes is
+# short enough for that look to come round within a second.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+_stop_requests = 0
 
 
 def _stop_on_signal(signum, frame):
-    raise _Stopped()
+    global _stop_requests
+    _stop_requests += 1
+
+
+def install_stop_handlers() -> None:
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, _stop_on_signal)
+
+
+def stop_requests() -> int:
+    return _stop_requests
 
 
 def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
@@ -3478,11 +3495,13 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     lost signal stops renewal at once and the record is removed when the
     last renewal's deadline passes -- the lease lapses after its expiry, as
     D-17 says, rather than the moment cleanup runs. SIGTERM, SIGHUP and
-    SIGINT are a stop like a lost signal: renewal ends at once and the record
-    is retired the same way. A second one while it waits abandons the wait
-    and leaves the record for a release or a takeover to remove, as a
-    renewer that was killed outright does. A renewer removes no ledger claim
-    and no lock it does not hold.
+    SIGINT are a stop like a lost signal: renewal ends within a second and the
+    record is retired the same way. A second one while it waits abandons the
+    wait and leaves the record for a release or a takeover to remove, as a
+    renewer that was killed outright does. A signal is only counted when it
+    arrives and acted on between waits, so no signal can interrupt the
+    renewer while it holds the lock. A renewer removes no ledger claim and no
+    lock it does not hold.
 
     A heartbeat record that disappears is not taken as a release on its own
     say-so: it brings the next renewal forward, and that renewal's fencing
@@ -3490,14 +3509,12 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     at once; a record removed from under a claim its token still owns is
     written again.
     """
-    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(signum, _stop_on_signal)
+    install_stop_handlers()
     identity = {"host": socket.gethostname(), "pid": os.getpid()}
 
     def signal_held():
         return not _signal_lost(source, 0)
 
-    poll = RENEWER_POLL_SECONDS
     try:
         try:
             renewal = _renewer_settings(root, repo, number, token, source)
@@ -3508,11 +3525,15 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
         if renewal is None:
             return _retired(root, repo, number, token, LOCK_POLL_SECONDS, "not-owner")
         poll = min(renewal, RENEWER_POLL_SECONDS)
+        if stop_requests():
+            return _retired(root, repo, number, token, poll, "signalled")
         record = heartbeat_path(git_common_directory(root), token)
         due = time.monotonic() + renewal
         while True:
             if _signal_lost(source, max(0.0, min(poll, due - time.monotonic()))):
                 return _retired(root, repo, number, token, poll, "signal-lost")
+            if stop_requests():
+                return _retired(root, repo, number, token, poll, "signalled")
             if time.monotonic() < due and os.path.lexists(record):
                 continue
             try:
@@ -3539,11 +3560,6 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
                 reason = "signal-lost" if refusal.reason == "liveness-lost" else refusal.reason
                 return _retired(root, repo, number, token, poll, reason)
             due = time.monotonic() + renewal
-    except _Stopped:
-        try:
-            return _retired(root, repo, number, token, poll, "signalled")
-        except (_Stopped, LedgerError):
-            return "signalled"
     except LedgerError:
         return "refused"
 
@@ -3575,10 +3591,14 @@ def _renewer_settings(root, repo: str, number: int, token: str, source: dict):
 def _retired(root, repo: str, number: int, token: str, poll: float, reason: str) -> str:
     """Wait until this attempt's heartbeat record describes nothing, then remove it.
 
-    Asleep until the recorded deadline rather than polling towards it: nothing
-    but a renewal can make a live record removable sooner than its deadline,
-    and a renewal only moves the deadline later, which the next look sees.
+    It looks again at the recorded deadline rather than polling the lock
+    towards it: nothing but a renewal can make a live record removable sooner
+    than its deadline, and a renewal only moves the deadline later, which the
+    next look sees. The wait is taken a second at a time, so a stop signal
+    that arrives during it -- one more than there were when retirement began
+    -- abandons it promptly.
     """
+    baseline = stop_requests()
     while True:
         try:
             outcome = retire_heartbeat(root, repo, number, token, lock_wait=poll)
@@ -3586,6 +3606,8 @@ def _retired(root, repo: str, number: int, token: str, poll: float, reason: str)
             if not refusal.reason.startswith("lock-"):
                 return reason
             outcome = "live"
+        except LedgerError:
+            return reason
         if outcome != "live":
             return reason
         wake = time.time() + poll
@@ -3593,7 +3615,11 @@ def _retired(root, repo: str, number: int, token: str, poll: float, reason: str)
             record = read_heartbeat(git_common_directory(root), token)
             if record is not None:
                 wake = max(wake, _precise_instant(record["deadline"], "the heartbeat deadline"))
-        time.sleep(max(0.0, wake - time.time()) + LOCK_POLL_SECONDS)
+        wake += LOCK_POLL_SECONDS
+        while time.time() < wake:
+            if stop_requests() > baseline:
+                return reason
+            time.sleep(min(RENEWER_POLL_SECONDS, max(0.0, wake - time.time())))
 
 
 def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float = None) -> str:

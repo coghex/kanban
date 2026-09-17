@@ -3901,6 +3901,86 @@ class SignalledRenewerTests(LeaseTestCase):
         self.assertIsNone(session.poll())
 
 
+# A stop signal delivered inside each of the lock's two unguarded windows: just
+# after `update-ref` has created the reference and before the body's `finally`
+# is armed, and just before the release's `update-ref -d` runs. `_git` is
+# wrapped so the signal lands at exactly those points rather than whenever a
+# timer happens to fire.
+SIGNAL_INSIDE_LOCK_PROGRAM = """
+import importlib.util, json, os, signal, sys
+spec = importlib.util.spec_from_file_location("signalled_ledger", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules["signalled_ledger"] = module
+spec.loader.exec_module(module)
+module.install_stop_handlers()
+window = sys.argv[3]
+real_git = module._git
+
+def git(root, arguments, input_bytes=None):
+    releasing = arguments[:2] == ["update-ref", "-d"]
+    if window == "release" and releasing:
+        os.kill(os.getpid(), signal.SIGTERM)
+    proc = real_git(root, arguments, input_bytes)
+    if window == "acquire" and arguments[:1] == ["update-ref"] and not releasing:
+        os.kill(os.getpid(), signal.SIGTERM)
+    return proc
+
+module._git = git
+with module.repository_lock(sys.argv[2], wait=5):
+    held = module.observed_lock(sys.argv[2])
+module._git = real_git
+print(json.dumps({
+    "held": held is not None,
+    "after": module.observed_lock(sys.argv[2]),
+    "stops": module.stop_requests(),
+}), flush=True)
+"""
+
+
+class SignalSafeLockTests(LeaseTestCase):
+    def test_a_stop_signal_inside_either_lock_window_leaves_no_lock_behind(self):
+        self.establish({})
+        for window in ("acquire", "release"):
+            with self.subTest(window=window):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        SIGNAL_INSIDE_LOCK_PROGRAM,
+                        str(REPO_ROOT / CLAUDE_LEDGER_HELPER),
+                        str(self.root),
+                        window,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    stdin=subprocess.DEVNULL,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                outcome = json.loads(completed.stdout)
+                self.assertTrue(outcome["held"])
+                self.assertIsNone(outcome["after"])
+                self.assertEqual(outcome["stops"], 1)
+                self.assertIsNone(LEDGER.observed_lock(self.root))
+
+    def test_a_burst_of_stop_signals_still_ends_the_renewer_without_holding_the_lock(self):
+        self.establish({})
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        give_up = time.monotonic() + 3 * LEASE_RENEWAL
+        with contextlib.suppress(ProcessLookupError):
+            while time.monotonic() < give_up:
+                os.kill(renewer, signal.SIGTERM)
+                time.sleep(0.003)
+        wait_until(lambda: not process_running(renewer), "the signalled renewer never exited")
+        held = LEDGER.observed_lock(self.root)
+        if held is not None:
+            self.assertNotEqual(LEDGER.lock_holder(self.root, held)["pid"], renewer)
+
+
 class OrphanedHeartbeatTests(LeaseTestCase):
     def test_a_renewer_whose_claim_was_never_published_removes_its_record(self):
         # The state a claim leaves when it dies between writing the heartbeat
