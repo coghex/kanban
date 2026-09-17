@@ -537,13 +537,22 @@ execution model, the session adapters supply progress-bound liveness:
 
 - a session keeper process, named as the claim's owner process, stays alive
   while the registered review invocation shows progress: a runtime lifecycle
-  event within a silence window, or a long-running command started through
-  the adapter's wrapper whose process is still running;
+  event bound to that invocation (the prompt or turn that registered it)
+  within a silence window, or a command started through the adapter's
+  wrapper while both the wrapper process and the tool call that launched it
+  are still running;
 - turn completion and session termination end the keeper at once, and so
   does interruption where the runtime documents an event for it;
 - a cancellation the runtime does not report ends the keeper once the silence
-  window passes with no event and no wrapped command running, and the lease
+  window passes with no event and no exempt wrapped command, and the lease
   then lapses at expiry.
+
+A wrapped command's exemption ends when its launching tool call completes.
+A command the runtime runs in the background returns from its tool call at
+once, so it gets no exemption and cannot hold a claim past the silence
+window even when it survives an interruption. A foreground command that the
+runtime kills on interruption ends its exemption at once. Both behaviours are
+verified against each installed runtime, not assumed.
 
 A cancelled session's claim is therefore held for at most the silence window
 plus the expiry, rather than one renewal interval. This is inactivity
