@@ -271,7 +271,10 @@ unreported — Claude Code reports none. A session that registers no attempt is
 untouched: the hook exits 0, prints nothing, and writes nothing. Nothing
 installed registers an attempt until #684 moves `/project-review` onto the
 ledger. The only setup is the plugin being enabled with `disableAllHooks`
-unset; Claude Code 2.1.274 is the minimum verified version, and
+unset — Claude Code loads a plugin's hooks file as a unit, with no per-hook
+trust or enablement, and registration still checks that the running bundle's own
+`hooks.json` declares every required event. Claude Code 2.1.274 is the minimum
+verified version, and
 [tools/project-review-liveness-evidence.md](../tools/project-review-liveness-evidence.md)
 records the runtime evidence.
 

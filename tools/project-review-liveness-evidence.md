@@ -71,7 +71,10 @@ trusted_hash = "sha256:…"
 ```
 
 The hash covers the hook's normalized definition (event, matcher and handler),
-not the bundle version or path. A probe plugin bumped from 0.0.1 to 0.0.2 with
+not the bundle version or path. The adapter recomputes it for every required
+hook at registration and compares it with the recorded one; the five hashes
+codex-cli recorded for this bundle are pinned in
+`tools/test_project_review_liveness.py`. A probe plugin bumped from 0.0.1 to 0.0.2 with
 an unchanged `hooks.json` kept running without a new review. A bundle upgrade
 therefore needs re-trusting only when `hooks.json` itself changes. The
 `[features] hooks` flag must be on (`codex features list` reports its effective
@@ -480,6 +483,12 @@ Some detail on four of these:
   and the `SessionEnd` that followed was discarded and logged against the ended
   attempt. `SessionEnd` ending an active attempt is covered by the automated
   suite.
+
+After the round-1 review added the complete-hook and per-hook trust checks, the
+completion scenario was re-run on both installed runtimes with the same setup.
+Registration still succeeded, with Codex validating its real recorded trust
+hashes for all five hooks: `Stop` ended the attempt at 32.35 s (Codex) and
+33.81 s (Claude), and both keepers exited within half a second.
 
 ## Limitations
 

@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -105,6 +106,9 @@ RUNTIMES = {
         "invocation_field": "prompt_id",
         "progress_events": ("PreToolUse", "PostToolUse", "PostToolUseFailure"),
         "invocation_terminal_events": ("Stop", "StopFailure"),
+        # scripts/project_review_liveness.py below the bundle root
+        "bundle_depth": 1,
+        "hook_command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py" hook --runtime claude',
     },
     "codex": {
         "executable": "codex",
@@ -113,6 +117,9 @@ RUNTIMES = {
         "invocation_field": "turn_id",
         "progress_events": ("PreToolUse", "PostToolUse"),
         "invocation_terminal_events": ("Stop", "Interrupt"),
+        # skills/project-review/scripts/project_review_liveness.py below the bundle root
+        "bundle_depth": 3,
+        "hook_command": 'python3 "$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py" hook --runtime codex',
     },
 }
 SESSION_TERMINAL_EVENTS = ("SessionEnd",)
@@ -371,8 +378,10 @@ def handle_hook(runtime: str, payload: dict) -> None:
     ):
         nonce = NONCE_FLAG_RE.search(command)
         if nonce is not None:
+            # One record per responding bundle copy, so a second enabled copy
+            # is seen rather than losing a race to the first.
             _create_json_exclusively(
-                handshakes_directory(common) / f"{nonce.group(1)}.json",
+                handshakes_directory(common) / nonce.group(1) / f"{_script_key(HELPER_PATH)}.json",
                 {
                     "nonce": nonce.group(1),
                     "runtime": runtime,
@@ -429,6 +438,10 @@ def handle_hook(runtime: str, payload: dict) -> None:
                 _record_launch_start(common, attempt, label.group(1), tool_use_id)
         elif event != "PreToolUse":
             _record_launch_finish(common, attempt, tool_use_id, event)
+
+
+def _script_key(path: Path) -> str:
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:32]
 
 
 def _tool_command(payload: dict):
@@ -698,20 +711,7 @@ def hooks_diagnostic(runtime: str) -> str:
             "that the session's working directory is inside the repository."
         )
     parts = []
-    try:
-        completed = subprocess.run(
-            ["codex", "features", "list"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=VERSION_TIMEOUT_SECONDS,
-        )
-        flag = next(
-            (line.split()[-1] for line in completed.stdout.splitlines() if line.split()[:1] == ["hooks"]),
-            "unreported",
-        )
-    except (OSError, subprocess.SubprocessError):
-        flag = "unreadable"
+    flag = _codex_hooks_flag()
     parts.append(f"the `[features] hooks` flag is {flag}")
     # Trust is recorded in `$CODEX_HOME/config.toml` (default `~/.codex`) as
     # `[hooks.state."kanban@<marketplace>:hooks/hooks.json:<event>:..."]`.
@@ -748,6 +748,178 @@ def hooks_diagnostic(runtime: str) -> str:
     )
 
 
+# The events whose hooks the keeper's contract depends on, per runtime. One
+# PreToolUse handshake proves hooks run; it does not prove these do.
+def required_events(runtime: str) -> tuple:
+    spec = RUNTIMES[runtime]
+    return (*spec["progress_events"], *spec["invocation_terminal_events"], *SESSION_TERMINAL_EVENTS)
+
+
+def bundle_root(runtime: str) -> Path:
+    return HELPER_PATH.parents[RUNTIMES[runtime]["bundle_depth"]]
+
+
+def require_complete_hooks(runtime: str) -> None:
+    """Refuse unless every required event's hook is declared, enabled and trusted.
+
+    Declared: the bundle's own `hooks/hooks.json` runs this adapter on every
+    required event. Claude Code loads a plugin's hooks file as a unit and has
+    no per-hook enablement or trust, so for it that is the whole check. Codex
+    enables and trusts each hook separately, so for it every required hook must
+    also be enabled and carry a recorded trust hash equal to the hash Codex
+    computes for its current definition.
+    """
+    spec = RUNTIMES[runtime]
+    path = bundle_root(runtime) / "hooks" / "hooks.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        hooks = document["hooks"]
+        if not isinstance(hooks, dict):
+            raise ValueError("`hooks` is not an object")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise LivenessError("hooks-incomplete", f"{path} cannot be read ({error}).")
+    handlers = {}
+    for event in required_events(runtime):
+        for group_index, group in enumerate(hooks.get(event) or []):
+            for handler_index, handler in enumerate((group or {}).get("hooks") or []):
+                if (
+                    isinstance(handler, dict)
+                    and handler.get("type") == "command"
+                    and handler.get("command") == spec["hook_command"]
+                ):
+                    handlers.setdefault(event, (group_index, group, handler_index, handler))
+    missing = [event for event in required_events(runtime) if event not in handlers]
+    if missing:
+        raise LivenessError(
+            "hooks-incomplete",
+            f"{path} does not run this adapter on {', '.join(missing)}; every one of "
+            f"{', '.join(required_events(runtime))} is required.",
+        )
+    if runtime == "codex":
+        _require_codex_hooks_trusted(handlers)
+
+
+CODEX_EVENT_LABELS = {
+    "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use",
+    "Stop": "stop",
+    "Interrupt": "interrupt",
+    "SessionEnd": "session_end",
+}
+# Events whose `additionalContextLimit` Codex keeps, and its default, which it
+# drops from the hashed definition.
+CODEX_CONTEXT_EVENTS = ("PreToolUse", "PostToolUse", "SessionStart", "UserPromptSubmit", "SubagentStart")
+CODEX_DEFAULT_CONTEXT_LIMIT = 2500
+
+
+def codex_hook_hash(event: str, group: dict, handler: dict) -> str:
+    """The trust hash codex-cli records for one command hook.
+
+    codex-rs `hooks/src/engine/discovery.rs::hook_hash` at rust-v0.154.0: the
+    event's key label, the group's matcher, and the normalized handler --
+    timeout defaulted and clamped per event, `async` explicit, unset options
+    omitted -- serialized as key-sorted compact JSON and hashed with SHA-256
+    (`config/src/fingerprint.rs::version_for_toml`).
+    """
+    timeout = handler.get("timeout")
+    if event in ("SessionEnd", "Interrupt"):
+        timeout = min(max(1 if timeout is None else int(timeout), 1), 3)
+    else:
+        timeout = max(600 if timeout is None else int(timeout), 1)
+    normalized = {
+        "type": "command",
+        "command": handler["command"],
+        "timeout": timeout,
+        "async": bool(handler.get("async", False)),
+    }
+    if handler.get("statusMessage") is not None:
+        normalized["statusMessage"] = handler["statusMessage"]
+    limit = handler.get("additionalContextLimit")
+    if event in CODEX_CONTEXT_EVENTS and limit is not None and limit != CODEX_DEFAULT_CONTEXT_LIMIT:
+        normalized["additionalContextLimit"] = limit
+    identity = {"event_name": CODEX_EVENT_LABELS[event], "hooks": [normalized]}
+    if group.get("matcher") is not None:
+        identity["matcher"] = group["matcher"]
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _codex_hooks_flag() -> str:
+    try:
+        completed = subprocess.run(
+            ["codex", "features", "list"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unreadable"
+    return next(
+        (line.split()[-1] for line in completed.stdout.splitlines() if line.split()[:1] == ["hooks"]),
+        "unreported",
+    )
+
+
+def _require_codex_hooks_trusted(handlers: dict) -> None:
+    flag = _codex_hooks_flag()
+    if flag != "true":
+        raise LivenessError(
+            "hooks-disabled",
+            f"`codex features list` reports the `[features] hooks` flag as {flag}; "
+            "every required hook needs it on.",
+        )
+    root = bundle_root("codex")
+    # An installed plugin lives at plugins/cache/<marketplace>/<plugin>/<version>.
+    if root.parent.parent.parent.name != "cache":
+        raise LivenessError(
+            "plugin-unresolved",
+            f"{root} is not an installed Codex plugin under a plugins/cache "
+            "directory, so the hooks' trust records cannot be named.",
+        )
+    plugin_id = f"{root.parent.name}@{root.parent.parent.name}"
+    # Trust is recorded in `$CODEX_HOME/config.toml` (default `~/.codex`).
+    config_path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        import tomllib
+
+        with open(config_path, "rb") as handle:
+            states = tomllib.load(handle).get("hooks", {}).get("state", {})
+    except FileNotFoundError:
+        states = {}
+    except (OSError, ValueError, ImportError) as error:
+        raise LivenessError("hooks-untrusted", f"{config_path} cannot be read ({error}).")
+    disabled, untrusted, modified = [], [], []
+    for event, (group_index, group, handler_index, handler) in handlers.items():
+        key = f"{plugin_id}:hooks/hooks.json:{CODEX_EVENT_LABELS[event]}:{group_index}:{handler_index}"
+        state = states.get(key) if isinstance(states, dict) else None
+        state = state if isinstance(state, dict) else {}
+        if state.get("enabled") is False:
+            disabled.append(event)
+        recorded = state.get("trusted_hash")
+        if recorded is None:
+            untrusted.append(event)
+        elif recorded != codex_hook_hash(event, group, handler):
+            modified.append(event)
+    if disabled:
+        raise LivenessError(
+            "hooks-disabled",
+            f"{', '.join(disabled)} {'is' if len(disabled) == 1 else 'are'} disabled for "
+            f"{plugin_id} in {config_path}; enable every required hook in `/hooks`.",
+        )
+    if untrusted or modified:
+        parts = []
+        if untrusted:
+            parts.append(f"{', '.join(untrusted)} not trusted")
+        if modified:
+            parts.append(f"{', '.join(modified)} changed since trusted")
+        raise LivenessError(
+            "hooks-untrusted",
+            f"{'; '.join(parts)} for {plugin_id} in {config_path}; trust every "
+            "required hook in `/hooks`.",
+        )
+
+
 def register(
     runtime: str,
     root,
@@ -778,26 +950,44 @@ def register(
             f"every {interval:g}; the window may not be shorter than the renewal interval.",
         )
     common = common_for_root(root)
-    handshake_path = handshakes_directory(common) / f"{nonce}.json"
+    handshake_directory = handshakes_directory(common) / nonce
     give_up = time.monotonic() + handshake_wait
-    handshake = None
+    handshakes = []
     while True:
         try:
-            handshake = _read_json(handshake_path)
-        except ValueError as error:
-            raise LivenessError("handshake-unreadable", str(error))
-        if handshake is not None or time.monotonic() >= give_up:
+            names = sorted(os.listdir(handshake_directory))
+        except (FileNotFoundError, NotADirectoryError):
+            names = []
+        if names or time.monotonic() >= give_up:
             break
         time.sleep(0.05)
-    if handshake is None:
+    if not names:
         raise LivenessError(
             "hooks-not-observed",
             f"no {runtime} PreToolUse hook recorded this registration's nonce under "
             f"{handshakes_directory(common)}, so the lifecycle hooks this attempt "
             f"depends on are not running: {hooks_diagnostic(runtime)}",
         )
+    # Every PreToolUse hook a runtime runs for a tool call has finished before
+    # the command starts, so the directory now holds every responding copy.
+    for name in names:
+        try:
+            handshake = _read_json(handshake_directory / name)
+        except ValueError as error:
+            raise LivenessError("handshake-unreadable", str(error))
+        if handshake is not None:
+            handshakes.append(handshake)
     with contextlib.suppress(OSError):
-        os.unlink(handshake_path)
+        _remove_tree(handshake_directory)
+    scripts = sorted({str(handshake.get("hook_script")) for handshake in handshakes})
+    if len(handshakes) != 1:
+        raise LivenessError(
+            "bundle-ambiguous",
+            f"{len(handshakes)} installed kanban bundle copies responded to this "
+            f"registration ({', '.join(scripts)}); exactly one may be enabled, or "
+            "an event could reach an attempt through a copy that is not this one.",
+        )
+    handshake = handshakes[0]
     if handshake.get("runtime") != runtime:
         raise LivenessError(
             "runtime-mismatch",
@@ -821,6 +1011,8 @@ def register(
             f"{RUNTIMES[runtime]['invocation_field']}; an attempt cannot be bound "
             "to its invocation.",
         )
+
+    require_complete_hooks(runtime)
 
     _prune(common)
     for record, ended in session_attempts(common, runtime, session_id):
@@ -877,7 +1069,7 @@ def _prune(common: Path) -> None:
             path = handshakes_directory(common) / name
             with contextlib.suppress(OSError):
                 if now - path.stat().st_mtime > HANDSHAKE_MAX_AGE_SECONDS:
-                    path.unlink()
+                    _remove_tree(path) if path.is_dir() else path.unlink()
 
 
 def _remove_tree(path: Path) -> None:

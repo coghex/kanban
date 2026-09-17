@@ -248,8 +248,11 @@ recorded in `$CODEX_HOME/config.toml` under
 `[hooks.state."kanban@<marketplace>:hooks/hooks.json:<event>:…"]` against a hash
 of each hook's definition. An upgrade that leaves `hooks.json` unchanged
 therefore keeps its trust, and one that changes it must be trusted again.
-Registration refuses before any claim when no hook fires, naming the feature
-flag's state and the recorded trust. codex-cli 0.154.0 is the minimum verified
+Registration refuses before any claim unless every required hook is declared by
+the running bundle's own `hooks.json`, enabled, and carrying a trust hash equal
+to the one codex-cli computes for its current definition — one hook firing
+proves hooks run, not that the terminal ones are trusted. Each refusal names the
+events at fault and the feature flag's state. codex-cli 0.154.0 is the minimum verified
 version, and
 [tools/project-review-liveness-evidence.md](../tools/project-review-liveness-evidence.md)
 records the runtime evidence.

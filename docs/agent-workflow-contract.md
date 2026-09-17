@@ -2293,12 +2293,27 @@ installed registers an attempt.
   Each refusal names what it observed:
   - `runtime-unavailable` or `runtime-unsupported`: `claude --version` or
     `codex --version` is missing, unreadable, or older than the minimum.
-  - `hooks-not-observed`: no handshake arrived. The registering tool call's own
-    `PreToolUse` hook records the command's nonce, so a missing, disabled or
-    untrusted hook produces exactly this refusal. For Codex the refusal names
-    the `[features] hooks` state `codex features list` reports and the kanban
-    hook trust entries in `$CODEX_HOME/config.toml`.
-  - `bundle-mismatch`: the hook that fired is a different installed copy.
+  - `hooks-not-observed`: no handshake arrived, so the hooks are not running at
+    all. For Codex the refusal names the `[features] hooks` state
+    `codex features list` reports and the kanban hook trust entries in
+    `$CODEX_HOME/config.toml`.
+  - `hooks-incomplete`: the running bundle's own `hooks/hooks.json` does not run
+    this adapter on every required event. One `PreToolUse` handshake proves
+    hooks run; it does not prove the terminal ones do, so the whole set is
+    checked before a keeper exists.
+  - `hooks-disabled` and `hooks-untrusted` (Codex only): the `[features] hooks`
+    flag is off, or a required hook is disabled, never trusted, or changed since
+    it was trusted. Codex enables and trusts each hook separately, so the
+    adapter recomputes each required hook's trust hash the way codex-cli does —
+    the key label, matcher and normalized handler as key-sorted compact JSON
+    under SHA-256 — and compares it with the recorded one.
+  - `plugin-unresolved` (Codex only): the bundle is not installed under a
+    `plugins/cache/<marketplace>/<plugin>/<version>` directory, so its hooks'
+    trust records cannot be named.
+  - `bundle-mismatch` and `bundle-ambiguous`: the hook that fired is a different
+    installed copy, or more than one enabled copy answered. Each responding copy
+    writes its own handshake record, so a second enabled bundle is detected
+    rather than losing a race to the first.
   - `binding-unavailable`: the payload carried no session or invocation id.
   - `silence-too-short`: the silence window is shorter than the renewal
     interval.
@@ -2307,7 +2322,8 @@ installed registers an attempt.
   needs `[features] hooks = true`, the kanban plugin installed, and its hooks
   trusted through `/hooks` (or the launch-time "Hooks need review" prompt).
   Trust is recorded per hook against a hash of its definition, so a bundle
-  upgrade needs re-trusting only when `hooks.json` changes.
+  upgrade needs re-trusting only when `hooks.json` changes. Registration checks
+  every required hook, not just the one that fired.
 - **Authority:** none over GitHub, any working tree, or the lease. The adapter
   never claims, renews, releases or records; its keeper's exit is the only thing
   the ledger's renewer observes. It spawns `claude` or `codex` (version and

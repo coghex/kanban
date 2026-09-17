@@ -43,6 +43,12 @@ BRANDS = {
         "terminal_events": ("Stop", "StopFailure", "SessionEnd"),
         "version": "2.1.274 (Claude Code)",
         "old_version": "2.1.273 (Claude Code)",
+        "bundle_files": (
+            "scripts/project_review_liveness.py",
+            "scripts/project_review_ledger.py",
+            "scripts/project_review_cursor.py",
+            "hooks/hooks.json",
+        ),
     },
     "codex": {
         "liveness": "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
@@ -55,6 +61,12 @@ BRANDS = {
         "terminal_events": ("Stop", "Interrupt", "SessionEnd"),
         "version": "codex-cli 0.154.0",
         "old_version": "codex-cli 0.153.9",
+        "bundle_files": (
+            "skills/project-review/scripts/project_review_liveness.py",
+            "skills/project-review/scripts/project_review_ledger.py",
+            "skills/project-review/scripts/project_review_cursor.py",
+            "hooks/hooks.json",
+        ),
     },
 }
 
@@ -63,6 +75,19 @@ SILENCE = 1.5
 RENEWAL = 0.25
 EXPIRY = 1.5
 SETTLE = 15.0
+
+# The trust hashes codex-cli 0.154.0 itself recorded for this bundle's
+# hooks.json when its hooks were trusted during the smoke runs
+# (tools/project-review-liveness-evidence.md). A hooks.json edit changes them,
+# and must be trusted again by every Codex user; update these from a real
+# `/hooks` trust, never from the adapter's own hash function.
+CODEX_RECORDED_TRUST = {
+    "kanban@kanban:hooks/hooks.json:pre_tool_use:0:0": "sha256:c09a9f901e7eb20ae2c00046a0fb4a5293658dd53ac29fc707df1d942e7eaa50",
+    "kanban@kanban:hooks/hooks.json:post_tool_use:0:0": "sha256:d90f39d6b63b14c4f7270f7f97f89f05c845c3098707c6f5a102fbf9f145a09a",
+    "kanban@kanban:hooks/hooks.json:stop:0:0": "sha256:546f5ba1b1d282cd7da83fba348cfdfdfb43bd5b8b13fe7d025f11c71d2948a6",
+    "kanban@kanban:hooks/hooks.json:interrupt:0:0": "sha256:327a0fe09a52c33fa91de7585b50701785559d59efe8e3a18577204c3dea3d9c",
+    "kanban@kanban:hooks/hooks.json:session_end:0:0": "sha256:dd818de264b9328c3677496b97cb709bec54b2047c4ab445d2efc72c59d7a454",
+}
 
 
 def load(relative: str, name: str):
@@ -122,11 +147,22 @@ class AdapterCase:
 
     def setUp(self):
         self.spec = BRANDS[self.BRAND]
-        self.liveness = REPO_ROOT / self.spec["liveness"]
-        self.ledger = REPO_ROOT / self.spec["ledger"]
         self.directory = tempfile.TemporaryDirectory(prefix="project-review-liveness-")
         self.addCleanup(self.directory.cleanup)
         base = Path(self.directory.name).resolve()
+        self.codex_home = base / "codex-home"
+        # The bundle as each runtime installs it: Codex under its plugin cache,
+        # Claude under a plugin root of its own.
+        if self.BRAND == "codex":
+            self.bundle = self.codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.52.0"
+        else:
+            self.bundle = base / "claude-plugins" / "kanban" / "1.53.0"
+        for relative in self.spec["bundle_files"]:
+            target = self.bundle / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((REPO_ROOT / self.spec["bundle_root"] / relative).read_bytes())
+        self.liveness = self.bundle / Path(self.spec["liveness"]).relative_to(self.spec["bundle_root"])
+        self.ledger = self.bundle / Path(self.spec["ledger"]).relative_to(self.spec["bundle_root"])
         self.root = base / "repo"
         self.root.mkdir()
         git(self.root, "init", "-q")
@@ -139,8 +175,8 @@ class AdapterCase:
         git(self.root, "commit", "-qm", "ledger")
         self.bin = base / "bin"
         self.bin.mkdir()
-        self.codex_home = base / "codex-home"
-        self.codex_home.mkdir()
+        self.codex_home.mkdir(exist_ok=True)
+        self.trust_codex_hooks()
         self.set_version(self.spec["version"])
         self.env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", CODEX_HOME=str(self.codex_home))
         self.pids = []
@@ -163,6 +199,21 @@ class AdapterCase:
         path = self.bin / self.BRAND
         path.write_text(fake, encoding="utf-8")
         path.chmod(0o755)
+
+    def trust_codex_hooks(self, overrides=None):
+        """A Codex config.toml trusting every kanban hook, as `/hooks` records it."""
+        states = {key: {"trusted_hash": value} for key, value in CODEX_RECORDED_TRUST.items()}
+        for key, value in (overrides or {}).items():
+            if value is None:
+                states.pop(key, None)
+            else:
+                states[key] = value
+        lines = []
+        for key, state in states.items():
+            lines.append(f'[hooks.state."{key}"]')
+            for name, value in state.items():
+                lines.append(f"{name} = {json.dumps(value)}")
+        (self.codex_home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def kill_everything(self):
         for pid in self.pids:
@@ -668,7 +719,79 @@ class RefusalsBeforeClaim(AdapterCase):
         self.assert_nothing_registered()
 
 
+class CompleteHookSet(AdapterCase):
+    def test_every_required_hook_must_be_declared(self):
+        hooks_path = self.bundle / "hooks" / "hooks.json"
+        document = json.loads(hooks_path.read_text(encoding="utf-8"))
+        del document["hooks"]["Stop"]
+        hooks_path.write_text(json.dumps(document), encoding="utf-8")
+        completed = self.register()
+        self.refused(completed, "hooks-incomplete")
+        self.assertIn("Stop", completed.stderr)
+        self.assertEqual(LIVENESS._attempt_ids(self.common), [])
+
+    def test_a_second_responding_bundle_copy_refuses(self):
+        other = REPO_ROOT / BRANDS["codex" if self.BRAND == "claude" else "claude"]["liveness"]
+        nonce = self.helper("nonce").stdout.strip()
+        arguments = ["register", "--runtime", self.BRAND, "--root", str(self.root), "--repo", REPO,
+                     "--nonce", nonce, "--silence", str(SILENCE), "--renewal", str(RENEWAL), "--handshake-wait", "0.3"]
+        command = f"python3 {self.liveness} " + " ".join(arguments)
+        # Both copies receive the same PreToolUse, in either order.
+        self.hook(self.payload("PreToolUse", command=command))
+        self.hook(self.payload("PreToolUse", command=command), liveness=other)
+        completed = self.helper(*arguments)
+        self.refused(completed, "bundle-ambiguous")
+        self.assertIn(str(other), completed.stderr)
+        self.assertIn(str(self.liveness), completed.stderr)
+        self.assertEqual(LIVENESS._attempt_ids(self.common), [])
+
+    def test_codex_partial_trust_or_enablement_refuses(self):
+        if self.BRAND != "codex":
+            self.skipTest("Claude Code loads a plugin's hooks as a unit, with no per-hook trust")
+        prefix = "kanban@kanban:hooks/hooks.json:"
+        cases = (
+            ({prefix + "stop:0:0": None}, "hooks-untrusted", "Stop not trusted"),
+            ({prefix + "session_end:0:0": {"trusted_hash": "sha256:" + "0" * 64}}, "hooks-untrusted", "SessionEnd changed since trusted"),
+            ({prefix + "interrupt:0:0": {"trusted_hash": CODEX_RECORDED_TRUST[prefix + "interrupt:0:0"], "enabled": False}}, "hooks-disabled", "Interrupt is disabled"),
+        )
+        for overrides, reason, text in cases:
+            with self.subTest(reason=reason, text=text):
+                self.trust_codex_hooks(overrides)
+                completed = self.register()
+                self.refused(completed, reason)
+                self.assertIn(text, completed.stderr)
+                self.assertEqual(LIVENESS._attempt_ids(self.common), [])
+        self.trust_codex_hooks()
+        self.set_version(self.spec["version"], codex_hooks_flag="false")
+        completed = self.register()
+        self.refused(completed, "hooks-disabled")
+        self.assertIn("flag as false", completed.stderr)
+        self.set_version(self.spec["version"])
+        self.registered()
+
+
 class Packaging(unittest.TestCase):
+    def test_the_codex_trust_hash_matches_what_codex_recorded(self):
+        spec = BRANDS["codex"]
+        hooks = json.loads((REPO_ROOT / spec["hooks"]).read_text(encoding="utf-8"))["hooks"]
+        computed = {}
+        for event, groups in hooks.items():
+            for group_index, group in enumerate(groups):
+                for handler_index, handler in enumerate(group["hooks"]):
+                    key = f"kanban@kanban:hooks/hooks.json:{LIVENESS.CODEX_EVENT_LABELS[event]}:{group_index}:{handler_index}"
+                    computed[key] = LIVENESS.codex_hook_hash(event, group, handler)
+        self.assertEqual(computed, CODEX_RECORDED_TRUST)
+
+    def test_the_hooks_files_run_the_command_the_adapter_expects(self):
+        for brand, spec in BRANDS.items():
+            with self.subTest(brand=brand):
+                hooks = json.loads((REPO_ROOT / spec["hooks"]).read_text(encoding="utf-8"))["hooks"]
+                self.assertEqual(set(hooks), set(LIVENESS.required_events(brand)))
+                for groups in hooks.values():
+                    for group in groups:
+                        for handler in group["hooks"]:
+                            self.assertEqual(handler["command"], LIVENESS.RUNTIMES[brand]["hook_command"])
+
     def test_both_bundles_ship_the_same_adapter(self):
         self.assertEqual(
             (REPO_ROOT / BRANDS["claude"]["liveness"]).read_bytes(),
@@ -721,7 +844,7 @@ class Packaging(unittest.TestCase):
 
 
 def _brand_cases():
-    for mixin in (RegistrationAndCompletion, WrappedCommands, SilenceAndTakeover, TerminalEvents, EventBinding, RefusalsBeforeClaim):
+    for mixin in (RegistrationAndCompletion, WrappedCommands, SilenceAndTakeover, TerminalEvents, EventBinding, RefusalsBeforeClaim, CompleteHookSet):
         for brand in BRANDS:
             name = f"{brand.capitalize()}{mixin.__name__}Tests"
             globals()[name] = type(name, (mixin, unittest.TestCase), {"BRAND": brand})
