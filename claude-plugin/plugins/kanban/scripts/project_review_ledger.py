@@ -1228,7 +1228,7 @@ def create_document(root, document: dict) -> Path:
     return path
 
 
-def publish_document(root, document: dict) -> Path:
+def publish_document(root, document: dict, before_replace=None) -> Path:
     """Replace the document with this one, atomically.
 
     The same writer as `create_document` and deliberately not the same
@@ -1244,10 +1244,22 @@ def publish_document(root, document: dict) -> Path:
     whole document from the state it read, so every caller that edits an
     established ledger holds `repository_lock` across its read and this
     write (design D-12).
+
+    `before_replace`, when given, is called once the complete document is on
+    disk and immediately before `os.replace`; whatever it raises discards the
+    rendered file and publishes nothing. It is where a fenced mutation asks
+    whether its lease is still unexpired, because rendering and writing take
+    time the deadline does not wait for.
     """
     path = confined(root, document_path(root))
     parent = _prepared_directory(root, path)
     temporary = _rendered_into_temporary(parent, document)
+    try:
+        if before_replace is not None:
+            before_replace()
+    except BaseException:
+        _discard(temporary)
+        raise
     try:
         os.replace(temporary, path)
     except OSError as error:
@@ -3942,11 +3954,15 @@ def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float 
 #   with the same token, which appends the one entry the ledger lacks.
 # * **Nothing is published through a stale token.** The lock is held from the
 #   fencing check through the ledger write, so no takeover can land between
-#   them, and the lease's deadline is checked again immediately before the
-#   branch moves and before an allocation is written, so an attempt whose
-#   lease ran out while its checkpoint was being built never advances the
-#   branch, and one whose lease ran out while a name was being found
-#   reserves nothing.
+#   them, and the lease's deadline is checked again immediately before each
+#   publication: before `update-ref` moves the branch, and once an
+#   allocation's ledger is rendered on disk, before `os.replace` puts it in
+#   place. So an attempt whose lease ran out while its checkpoint was being
+#   built never advances the branch, and one whose lease ran out while a name
+#   was being found or the ledger rendered reserves nothing. A record's
+#   ledger write after the branch has moved is not asked again: the attempt
+#   was published unexpired, and refusing the write that completes it would
+#   only turn a published checkpoint into an incomplete one.
 
 ALLOCATION_KIND = "allocation"
 ALLOCATION_KEYS = ("kind", "at", "token", "report")
@@ -4304,10 +4320,6 @@ def allocate_report(root, repo: str, number: int, token: str, lock_wait: float =
     with fenced(root, repo, number, token, lock_wait) as held:
         document, state = held["document"], held["state"]
         report = _next_report_path(root, document, number)
-        # Asked again after the search and before the write: looking a name
-        # up runs `git`, and a lease that ran out meanwhile has no allocation
-        # left to publish.
-        _require_unexpired(repo, number, token, held, "before the allocation was published")
         state["rows"][str(number)]["history"].append(
             {
                 "kind": ALLOCATION_KIND,
@@ -4319,7 +4331,17 @@ def allocate_report(root, repo: str, number: int, token: str, lock_wait: float =
         document["repositories"][repo] = _validated_repository(
             state, f"the ledger allocated for {repo}"
         )
-        written = publish_document(root, document)
+        # Asked again once the ledger is rendered and immediately before it
+        # replaces the previous one: finding a name runs `git` and rendering
+        # takes time, and a lease that ran out meanwhile has no allocation
+        # left to publish.
+        written = publish_document(
+            root,
+            document,
+            before_replace=lambda: _require_unexpired(
+                repo, number, token, held, "before the allocation was published"
+            ),
+        )
         return {
             "status": "allocated",
             "repo": repo,

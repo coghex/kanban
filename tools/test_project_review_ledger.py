@@ -5272,27 +5272,38 @@ class ReportAllocationTests(RecordTestCase):
                                 "--pr", "612", "--token", stale)
         self.assertIn(replacement["claim"]["token"], self.refused(completed, "replaced"))
 
-    def test_a_lease_that_runs_out_while_a_name_is_found_allocates_nothing(self):
+    def test_a_lease_that_runs_out_before_the_ledger_is_replaced_allocates_nothing(self):
+        # Both stretches of work between the fencing check and `os.replace`:
+        # finding a free name, and rendering the ledger that records it.
         self.migrate_and_commit()
-        claimed = self.claim([merged(612)], pid=self.session().pid)
-        token = claimed["claim"]["token"]
-        original = LEDGER._next_report_path
+        for stage in ("_next_report_path", "_rendered_into_temporary"):
+            with self.subTest(stage=stage):
+                claimed = self.claim([merged(612)], pid=self.session().pid)
+                token = claimed["claim"]["token"]
+                original = getattr(LEDGER, stage)
 
-        def slow(root, document, number):
-            found = original(root, document, number)
-            # The lock is held, so nothing renews meanwhile.
-            time.sleep(LEASE_EXPIRY + 0.5)
-            return found
+                def slow(*arguments, original=original):
+                    produced = original(*arguments)
+                    # The lock is held, so nothing renews meanwhile.
+                    time.sleep(LEASE_EXPIRY + 0.5)
+                    return produced
 
-        LEDGER._next_report_path = slow
-        self.addCleanup(setattr, LEDGER, "_next_report_path", original)
-        self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, token),
-                     "before the allocation was published", reason="expired")
-        self.assertEqual(
-            [entry for entry in self.rows_on_disk()["612"]["history"]
-             if entry["kind"] == LEDGER.ALLOCATION_KIND],
-            [],
-        )
+                setattr(LEDGER, stage, slow)
+                try:
+                    self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, token),
+                                 "before the allocation was published", reason="expired")
+                finally:
+                    setattr(LEDGER, stage, original)
+                self.assertEqual(
+                    [entry for entry in self.rows_on_disk()["612"]["history"]
+                     if entry["kind"] == LEDGER.ALLOCATION_KIND],
+                    [],
+                )
+                self.assertEqual(
+                    sorted(path.name for path in LEDGER.document_path(self.root).parent.iterdir()),
+                    ["ledger.md"],
+                )
+                self.stop_renewer(claimed["claim"]["renewer"]["pid"])
 
 
 class ReferenceTests(RecordTestCase):
