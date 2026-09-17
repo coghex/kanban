@@ -176,8 +176,10 @@ workflow edits a `[legacy]` row by hand.
 
 ## One review, end to end
 
-Steps 1 through 9 are one invocation. Step 9 runs on **every** exit from step 3
-onward, including the ones that stop early.
+Steps 1 through 9 are one invocation. Step 9 runs on **every** exit, including
+the ones that stop early: each of its steps is owed from the moment the resource
+it removes exists, so a run that never reaches step 3 still owes it the scratch
+directory step 1 made.
 
 ### 1. Take a complete inventory of merged pull requests
 
@@ -199,8 +201,9 @@ gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F curs
 Repeat that call until a page comes back with fewer than 100 pull requests on
 it. That short page is the last one; `next` is what positions the call after it,
 and nothing else does. Then assemble the pages into the one listing the helper
-reads, writing it to a scratch file outside both worktrees — `mktemp -d` gives
-you a directory step 9 removes:
+reads, writing it to `$INVENTORY` inside a scratch directory outside both
+worktrees — `SCRATCH="$(mktemp -d)"` and `INVENTORY="$SCRATCH/inventory.json"`,
+which step 9 removes by that name:
 
 ```json
 {"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
@@ -213,10 +216,9 @@ walk, nothing after the first short page. Those are what make a listing with an
 interior page dropped detectable, so never renumber around a page you skipped.
 
 **A page that fails stops the run.** Say which page failed and stop. Nothing has
-been claimed yet, so this stop needs no cleanup beyond removing the scratch
-directory. Never hand the helper the pages that did arrive: a listing with a
-page missing from it records every pull request on that page as one this
-repository does not have.
+been claimed yet, so this stop owes step 9 only `$SCRATCH`. Never hand the
+helper the pages that did arrive: a listing with a page missing from it records
+every pull request on that page as one this repository does not have.
 
 The last page is short because a page returned at its own limit may be a page of
 a longer history and nothing in the page itself can tell the two apart. When the
@@ -311,7 +313,7 @@ request, and an exhausted or unavailable PR queue is not one.
 
 An expired claim is taken over automatically and recorded as an ownership
 transition; that is ordinary recovery from a crashed run and needs nothing from
-you. From this point on step 9's cleanup runs on every exit.
+you. From this point on step 9 owes a release as well.
 
 ### 4. Pin the review tree
 
@@ -322,19 +324,31 @@ where it is:
 
 ```bash
 git -C "$ROOT" fetch --quiet origin
-DEFAULT_BRANCH="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's#^origin/##')"
+DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD$#\1#p')"
 PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
-REVIEW_WT="$(mktemp -d)/tree"
+REVIEW_ROOT="$(mktemp -d)"
+REVIEW_WT="$REVIEW_ROOT/tree"
 git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"
 ```
+
+**The default branch is read from the remote, not from
+`refs/remotes/origin/HEAD`.** That local symref is written once, by `clone` or
+by an explicit `remote set-head`, and a fetch does not refresh it: a repository
+whose remote moved from `master` to `main` keeps answering `master` for as long
+as the old branch still exists, and the review would then be recorded against a
+branch nobody's default is. `ls-remote --symref` asks the remote itself on every
+invocation. An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref
+at all: stop there, through step 9, rather than pinning a branch nobody named.
 
 **A failed fetch stops the run**: release the claim through step 9 and say the
 fetch failed. Never substitute an older local ref — a review recorded against a
 SHA the remote never had says nothing about the code anybody else can see.
 
-`$REVIEW_WT` lives under `mktemp -d`, outside both `$ROOT` and `$DOCS_WT`. No
-worktree, lock, or liveness record ever lives under `docs/project_review/`: that
-directory publishes, and a runtime artifact in it would publish with it.
+`$REVIEW_ROOT` is this invocation's own `mktemp -d`, outside both `$ROOT` and
+`$DOCS_WT`, and `$REVIEW_WT` is the worktree inside it. Step 9 removes both by
+those names. No worktree, lock, or liveness record ever lives under
+`docs/project_review/`: that directory publishes, and a runtime artifact in it
+would publish with it.
 
 `$PIN` is the full SHA recorded as the verification commit in step 8.
 
@@ -548,23 +562,54 @@ and says so; report it as it came and let step 9 clean up.
 
 ### 9. Clean up, on every exit
 
-Every exit from step 3 onward runs this, in this order — a completed record, a
-refusal, a failed fetch, a takeover, and a cancellation alike:
+Every exit runs this — a completed record, a refusal, a failed fetch, a
+takeover, and a cancellation alike. **Each resource is owed its cleanup from the
+moment it exists**, not from step 3: a registration that refused still leaves
+`$SCRATCH` behind, and a claim that was never taken leaves nothing to release.
 
-```bash
-python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"
-python3 "$LEDGER" release --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$TOKEN"
-git -C "$ROOT" worktree remove --force "$REVIEW_WT"
-rm -rf "$(dirname "$REVIEW_WT")" "$(dirname "$INVENTORY")"
-```
+So the steps are conditional, in this order, and each runs **only when this
+invocation created what it names**. A step whose resource was never created is
+not run, and not running it is not a failure.
 
-1. **Stop every process this attempt started.** `complete` ends the keeper and
-   so the claim's renewal; stop anything else this review launched beside it.
-2. **Release the claim, unless `record` already did.** A completed `record`
-   released it already, and a second release is refused rather than harmful, so
-   run this whenever step 8 did not report `"status": "recorded"`.
-3. **Remove the temporary worktree**, then its `mktemp -d` parent and the
-   inventory's scratch directory.
+1. **Stop every process this attempt started** — when step 2 registered one:
+
+   ```bash
+   python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"
+   ```
+
+   That ends the keeper, and so the claim's renewal. Stop anything else this
+   review launched beside it. A registration that refused started nothing.
+
+2. **Release the claim, unless `record` already did** — when step 3 reported
+   `"status": "claimed"` and step 8 did not report `"status": "recorded"`:
+
+   ```bash
+   python3 "$LEDGER" release --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$TOKEN"
+   ```
+
+   `no-selectable-row`, `all-claimed`, and a claim refusal leave no `$PR` and no
+   `$TOKEN`, so there is nothing to release and this step does not run. A
+   completed `record` released it already; a second release is refused rather
+   than harmful, which is why the condition is the cheaper one to get wrong.
+
+3. **Remove the temporary worktree** — when step 4 created it:
+
+   ```bash
+   git -C "$ROOT" worktree remove --force "$REVIEW_WT"
+   ```
+
+4. **Remove the scratch directories this invocation made**, naming only the
+   variables it actually set — `$REVIEW_ROOT` from step 4, `$SCRATCH` from
+   step 1:
+
+   ```bash
+   rm -rf "$REVIEW_ROOT" "$SCRATCH"
+   ```
+
+   Both are `mktemp -d` results held in variables of their own. **Never derive a
+   removal target from another path**: `dirname` of a variable that was never
+   set is `.`, and a recursive removal of the working directory is the one
+   mistake this workflow could make that nothing later could repair.
 
 **A cleanup step that fails is reported with the path it retained, never as
 removed.** Name the worktree still on disk, or the claim still held, so a human
@@ -746,7 +791,11 @@ endpoint only ever moves older.
 The cursor and any direct-mode report are left in the docs worktree as
 uncommitted working files; the cursor is durable because it is on disk, not
 because it was landed. Do not publish or land either unless the user separately
-requests it — this workflow writes to no branch in either mode.
+requests it — **direct mode writes to no branch at all**. The one branch write
+this workflow ever makes is PR mode's, and it is the helper's: `record`'s
+path-scoped checkpoint commit, which touches the ledger and the report it
+allocated and nothing else. Direct mode calls `record` on the cursor module,
+which commits nothing.
 
 In the completion message, link the report, state its unprocessed finding count,
 list fixed-later and already-tracked findings briefly, and name the durable

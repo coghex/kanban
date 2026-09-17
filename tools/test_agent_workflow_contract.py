@@ -676,7 +676,6 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "awk",
         "python3",
         "mktemp",
-        "dirname",
         "rm",
     },
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {

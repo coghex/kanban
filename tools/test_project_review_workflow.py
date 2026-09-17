@@ -472,6 +472,28 @@ PINNED_WORKTREE = {
         "Fetch, resolve the remote default branch's head to a full SHA, and "
         "create a detached temporary worktree at it."
     ),
+    "the default branch comes from the remote": (
+        "**The default branch is read from the remote, not from "
+        "`refs/remotes/origin/HEAD`.** That local symref is written once, by "
+        "`clone` or by an explicit `remote set-head`, and a fetch does not "
+        "refresh it"
+    ),
+    "a stale symref names the wrong branch": (
+        "a repository whose remote moved from `master` to `main` keeps "
+        "answering `master` for as long as the old branch still exists, and "
+        "the review would then be recorded against a branch nobody's default "
+        "is."
+    ),
+    "no symref at all stops the run": (
+        "An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref "
+        "at all: stop there, through step 9, rather than pinning a branch "
+        "nobody named."
+    ),
+    "the scratch directories have names of their own": (
+        "`$REVIEW_ROOT` is this invocation's own `mktemp -d`, outside both "
+        "`$ROOT` and `$DOCS_WT`, and `$REVIEW_WT` is the worktree inside it. "
+        "Step 9 removes both by those names."
+    ),
     "it never depends on the primary checkout": (
         "The review is verified against that exact tree and nothing else, so it "
         "never depends on the primary checkout staying where it is"
@@ -483,10 +505,6 @@ PINNED_WORKTREE = {
     "no older local ref": (
         "Never substitute an older local ref — a review recorded against a SHA "
         "the remote never had says nothing about the code anybody else can see."
-    ),
-    "outside both worktrees": (
-        "`$REVIEW_WT` lives under `mktemp -d`, outside both `$ROOT` and "
-        "`$DOCS_WT`."
     ),
     "no runtime artifact publishes": (
         "No worktree, lock, or liveness record ever lives under "
@@ -506,32 +524,71 @@ PINNED_WORKTREE = {
 }
 PINNED_WORKTREE_COMMANDS = (
     'git -C "$ROOT" fetch --quiet origin',
+    'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD',
     'PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"',
-    'REVIEW_WT="$(mktemp -d)/tree"',
+    'REVIEW_ROOT="$(mktemp -d)"',
+    'REVIEW_WT="$REVIEW_ROOT/tree"',
     'git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"',
 )
+
+# The read a fetch does not refresh. `git fetch` leaves
+# `refs/remotes/origin/HEAD` exactly as `clone` or an explicit `remote set-head`
+# wrote it, so an asset resolving the default branch through it pins whatever
+# the remote's default was when the checkout was made -- and records the review
+# against a branch that may no longer be anybody's default.
+#
+# Refused inside the bash fences alone, because the prose beside the correct
+# command names the local symref in order to warn about it: an absence over the
+# whole body would forbid the explanation as well as the mistake.
+REFUSED_STALE_SYMREF_READS = ("refs/remotes/origin/HEAD", "origin/HEAD")
 
 # Requirement 5: cleanup on every exit, in order, attempt-scoped, and honest
 # about what it failed to remove.
 CLEANUP = {
     "every exit runs it": (
-        "Every exit from step 3 onward runs this, in this order — a completed "
-        "record, a refusal, a failed fetch, a takeover, and a cancellation "
-        "alike"
+        "Every exit runs this — a completed record, a refusal, a failed fetch, "
+        "a takeover, and a cancellation alike."
+    ),
+    "owed from the moment the resource exists": (
+        "**Each resource is owed its cleanup from the moment it exists**, not "
+        "from step 3: a registration that refused still leaves `$SCRATCH` "
+        "behind, and a claim that was never taken leaves nothing to release."
+    ),
+    "each step is conditional on what this invocation created": (
+        "So the steps are conditional, in this order, and each runs **only "
+        "when this invocation created what it names**. A step whose resource "
+        "was never created is not run, and not running it is not a failure."
     ),
     "stop the processes": (
-        "**Stop every process this attempt started.** `complete` ends the "
-        "keeper and so the claim's renewal; stop anything else this review "
-        "launched beside it."
+        "**Stop every process this attempt started** — when step 2 registered "
+        "one:"
+    ),
+    "a refused registration started nothing": (
+        "A registration that refused started nothing."
     ),
     "release unless recorded": (
-        "**Release the claim, unless `record` already did.** A completed "
-        "`record` released it already, and a second release is refused rather "
-        "than harmful"
+        "**Release the claim, unless `record` already did** — when step 3 "
+        'reported `"status": "claimed"` and step 8 did not report `"status": '
+        '"recorded"`:'
+    ),
+    "an unclaimed exit has nothing to release": (
+        "`no-selectable-row`, `all-claimed`, and a claim refusal leave no "
+        "`$PR` and no `$TOKEN`, so there is nothing to release and this step "
+        "does not run."
     ),
     "remove the worktree": (
-        "**Remove the temporary worktree**, then its `mktemp -d` parent and the "
-        "inventory's scratch directory."
+        "**Remove the temporary worktree** — when step 4 created it:"
+    ),
+    "remove only the scratch directories this run made": (
+        "**Remove the scratch directories this invocation made**, naming only "
+        "the variables it actually set — `$REVIEW_ROOT` from step 4, "
+        "`$SCRATCH` from step 1:"
+    ),
+    "never derive a removal target": (
+        "**Never derive a removal target from another path**: `dirname` of a "
+        "variable that was never set is `.`, and a recursive removal of the "
+        "working directory is the one mistake this workflow could make that "
+        "nothing later could repair."
     ),
     "a failed step reports its retained path": (
         "**A cleanup step that fails is reported with the path it retained, "
@@ -565,7 +622,15 @@ CLEANUP_COMMANDS = (
     'python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"',
     'python3 "$LEDGER" release --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$TOKEN"',
     'git -C "$ROOT" worktree remove --force "$REVIEW_WT"',
+    'rm -rf "$REVIEW_ROOT" "$SCRATCH"',
 )
+
+# A removal target built out of another path. `dirname` of an unset variable is
+# `.`, so a cleanup that derived its scratch parents this way would recursively
+# remove the working directory on exactly the early exits -- a refused
+# registration, an unavailable claim, a failed fetch -- that requirement 5 says
+# must clean up. Refused by spelling, over the whole rendered body.
+REFUSED_DERIVED_REMOVAL = 'rm -rf "$(dirname'
 
 # Requirement 3: the migration runs once, and a flag is a stop rather than a
 # judgement call.
@@ -814,7 +879,7 @@ CHECKOUT_SCOPED_GIT = (
     'git -C "$ROOT" remote get-url origin',
     'git -C "$ROOT" worktree list --porcelain',
     'git -C "$ROOT" fetch --quiet origin',
-    'git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD',
+    'git -C "$ROOT" ls-remote --symref origin HEAD',
     'git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH"',
     'git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"',
     'git -C "$ROOT" worktree remove --force "$REVIEW_WT"',
@@ -991,9 +1056,15 @@ DIRECT_MODE = {
     "a clean direct batch writes no report": (
         "A clean batch writes no report unless the user explicitly asks for one."
     ),
-    "neither mode publishes": (
-        "Do not publish or land either unless the user separately requests it — "
-        "this workflow writes to no branch in either mode."
+    "direct mode publishes nothing": (
+        "Do not publish or land either unless the user separately requests it "
+        "— **direct mode writes to no branch at all**."
+    ),
+    "the one branch write is the pr-mode checkpoint": (
+        "The one branch write this workflow ever makes is PR mode's, and it is "
+        "the helper's: `record`'s path-scoped checkpoint commit, which touches "
+        "the ledger and the report it allocated and nothing else. Direct mode "
+        "calls `record` on the cursor module, which commits nothing."
     ),
 }
 
@@ -1495,6 +1566,31 @@ class LedgerWorkflowTests(unittest.TestCase):
             for name, phrase in PINNED_WORKTREE.items():
                 with self.subTest(asset=relative_path, rule=name):
                     self.assertIn(flat(phrase), flattened)
+
+    def test_the_default_branch_is_never_read_from_the_local_symref(self):
+        # The round-1 blocker: `git fetch` does not refresh
+        # `refs/remotes/origin/HEAD`, so an asset resolving the default branch
+        # through it pins whatever the remote's default was when the checkout
+        # was made. Asserted as an absence beside the live-remote read, because
+        # the two spellings look alike and only one of them asks the remote.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            executable = "\n".join(asset_fences(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn("ls-remote --symref origin HEAD", executable)
+                for spelling in REFUSED_STALE_SYMREF_READS:
+                    self.assertNotIn(spelling, executable, spelling)
+                # And the prose says why, so the next author does not read the
+                # local symref back in as a simplification.
+                self.assertIn("refs/remotes/origin/HEAD", content)
+
+    def test_no_removal_target_is_derived_from_another_path(self):
+        # The other half of the round-1 cleanup blocker: `dirname` of a
+        # variable an early exit never set is `.`, so a derived scratch parent
+        # turns cleanup into a recursive removal of the working directory.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.assertNotIn(REFUSED_DERIVED_REMOVAL, read(relative_path))
 
     def test_the_fetch_precedes_the_worktree_it_pins(self):
         for relative_path in RENDERED_ASSETS:
@@ -3223,6 +3319,23 @@ class WorkflowRun:
         path.write_text(json.dumps({"pages": pages}), encoding="utf-8")
         return path, pages
 
+    def move_the_remote_default_branch(self, name="main"):
+        """Move the remote's HEAD to a new branch, leaving the local symref
+        pointing at the old one -- which is what a fetch does not fix."""
+        before = self.sh(
+            'git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD'
+        ).stdout.strip()
+        e2e_git(self.root, "branch", name, "master")
+        (self.root / "MOVED.md").write_text("after the move\n", encoding="utf-8")
+        e2e_git(self.root, "add", "-A")
+        e2e_git(self.root, "commit", "-qm", "on the new default branch")
+        e2e_git(self.root, "branch", "-f", name, "HEAD")
+        e2e_git(self.root, "reset", "--hard", "-q", "HEAD~1")
+        e2e_git(self.root, "push", "-q", "origin", f"{name}:{name}")
+        e2e_git(self.origin, "symbolic-ref", "HEAD", f"refs/heads/{name}")
+        head = e2e_git(self.origin, "rev-parse", f"refs/heads/{name}").strip()
+        return before, name, head
+
     def gh_calls(self):
         if not self.gh_log.exists():
             return []
@@ -3338,16 +3451,28 @@ class WorkflowRun:
             (completed.returncode, completed.stdout), (0, ""), completed.stderr
         )
 
-    def register(self, session="session-a", invocation="invocation-1", silence=E2E_SILENCE):
+    def registration_attempt(
+        self, session="session-a", invocation="invocation-1",
+        silence=E2E_SILENCE, handshake=True,
+    ):
         """Register exactly as the asset says: a nonce, then a second call
-        carrying that nonce's literal digits in its own command text."""
+        carrying that nonce's literal digits in its own command text.
+
+        `handshake=False` withholds the hook event, which is what a disabled,
+        untrusted or absent lifecycle hook looks like to the adapter.
+        """
         nonce = self.helper('python3 "$LIVENESS" nonce').stdout.strip()
+        self.case.assertRegex(nonce, r"\A[0-9a-f]{32}\Z")
         template = asset_command(self.asset, REGISTRATION[self.brand].split(" register ")[0] + " register")
         command = re.sub(r"--nonce [0-9a-f]{32}", f"--nonce {nonce}", template)
         self.case.assertIn(nonce, command)
-        command += f" --silence {silence} --handshake-wait 5"
-        self.hook("PreToolUse", session, invocation, command=command)
-        completed = self.sh(command, check=False)
+        command += f" --silence {silence} --handshake-wait {'5' if handshake else '0.5'}"
+        if handshake:
+            self.hook("PreToolUse", session, invocation, command=command)
+        return self.sh(command, check=False)
+
+    def register(self, **kwargs):
+        completed = self.registration_attempt(**kwargs)
         self.case.assertEqual(completed.returncode, 0, completed.stderr)
         registration = json.loads(completed.stdout)
         self.pids.append(registration["keeper_pid"])
@@ -3375,19 +3500,27 @@ class WorkflowRun:
     # -- the pinned review tree
 
     def pin(self):
-        """Fetch, resolve, detach -- through the asset's own four commands."""
+        """Fetch, resolve and detach -- through the asset's own commands.
+
+        The default branch and the pinned SHA are both produced by running the
+        lines the asset spells, so a resolution that stopped asking the remote
+        stops working here.
+        """
         self.helper('git -C "$ROOT" fetch')
         default = self.sh(
-            asset_command(self.asset, 'DEFAULT_BRANCH="$(git -C "$ROOT" symbolic-ref')
+            asset_command(self.asset, 'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote')
             + ' && printf %s "$DEFAULT_BRANCH"'
         ).stdout.strip()
         pin = self.sh(
-            f'git -C "$ROOT" rev-parse "refs/remotes/origin/{default}"'
+            asset_command(self.asset, 'PIN="$(git -C "$ROOT" rev-parse')
+            + ' && printf %s "$PIN"',
+            DEFAULT_BRANCH=default,
         ).stdout.strip()
-        asset_command(self.asset, 'PIN="$(git -C "$ROOT" rev-parse')
-        asset_command(self.asset, 'REVIEW_WT="$(mktemp -d)/tree"')
-        review_wt = self.base / "review" / "tree"
-        review_wt.parent.mkdir(exist_ok=True)
+        asset_command(self.asset, 'REVIEW_ROOT="$(mktemp -d)"')
+        asset_command(self.asset, 'REVIEW_WT="$REVIEW_ROOT/tree"')
+        review_root = self.base / f"review-{time.monotonic_ns()}"
+        review_wt = review_root / "tree"
+        review_root.mkdir()
         self.sh(
             asset_command(self.asset, 'git -C "$ROOT" worktree add'),
             REVIEW_WT=str(review_wt),
@@ -3621,6 +3754,108 @@ class FreshRepository(WorkflowRunCase):
             e2e_git(self.workflow.docs, "status", "--porcelain", "--untracked-files=all"),
             "",
         )
+
+
+class PinnedTree(WorkflowRunCase):
+    """Round 1's first blocker: the pin follows the remote, not a local symref."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+
+    def test_the_pin_follows_a_remote_that_changed_its_default_branch(self):
+        # `git fetch` does not refresh `refs/remotes/origin/HEAD`: after the
+        # remote moves from `master` to `main`, the local symref still answers
+        # `master` and the old branch still exists, so a resolution through it
+        # pins a branch that is nobody's default any more and records the
+        # review against it. The asset's own commands are what run here, so a
+        # resolution that stopped asking the remote fails this.
+        stale, moved_to, remote_head = self.workflow.move_the_remote_default_branch()
+        self.assertEqual(stale, "origin/master")
+        pin, review_wt = self.workflow.pin()
+        # The local symref is still stale afterwards, which is the whole point:
+        # nothing here repaired it, the resolution simply never read it.
+        self.assertEqual(
+            self.workflow.sh(
+                'git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD'
+            ).stdout.strip(),
+            stale,
+        )
+        self.assertEqual(pin, remote_head)
+        self.assertNotEqual(
+            pin, e2e_git(self.workflow.root, "rev-parse", "refs/remotes/origin/master").strip()
+        )
+        # And the tree really is the new default branch's.
+        self.assertTrue((review_wt / "MOVED.md").is_file())
+        self.workflow.remove_pin(review_wt)
+
+
+class EarlyExits(WorkflowRunCase):
+    """Round 1's second blocker: cleanup on the exits that claim nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+        # The ledger and this repository's sub-second lease defaults, committed,
+        # so what an early exit leaves behind is this exit's and not the
+        # fixture's.
+        self.workflow.lease_defaults()
+        e2e_git(self.workflow.docs, "add", "-A")
+        e2e_git(self.workflow.docs, "commit", "-qm", "ledger and lease defaults")
+
+    def test_a_registration_refusal_claims_nothing_and_writes_nothing(self):
+        inventory, _ = self.workflow.inventory()
+        before = self.workflow.ledger_bytes()
+        completed = self.workflow.registration_attempt(handshake=False)
+        self.assertEqual(completed.returncode, 2, completed.stdout)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("hooks-not-observed", completed.stderr)
+        # Nothing was claimed and nothing was written, so the only thing this
+        # exit owes cleanup is the inventory's scratch directory -- which is
+        # exactly the case the unconditional cleanup recipe could not express.
+        self.assertEqual(self.workflow.ledger_bytes(), before)
+        self.assertEqual(
+            e2e_git(self.workflow.docs, "status", "--porcelain", "--untracked-files=all"),
+            "",
+        )
+        self.assertTrue(inventory.is_file())
+
+    def test_an_empty_inventory_selects_nothing_and_leaves_no_claim(self):
+        self.workflow.merged([])
+        inventory, pages = self.workflow.inventory()
+        self.assertEqual(pages, [{"page": 1, "limit": 100, "prs": []}])
+        registration = self.workflow.register()
+        result = self.workflow.claim(inventory, registration["keeper_pid"])
+        self.assertEqual(result["status"], "no-selectable-row")
+        self.assertIsNone(result["selected"])
+        self.assertEqual(self.workflow.rows(), {})
+
+    def test_the_scratch_removal_cannot_reach_the_working_directory(self):
+        # The sharp edge of the round-1 blocker, run rather than described.
+        # `$REVIEW_ROOT` is unset on every exit before step 4 -- a registration
+        # refusal, an unavailable claim, a failed fetch -- and the cleanup line
+        # is executed with it unset, from a working directory holding files.
+        # Under the previous `rm -rf "$(dirname "$REVIEW_WT")"` spelling that
+        # `dirname` produced `.` and this removed the working directory.
+        scratch = self.workflow.base / "scratch-to-remove"
+        scratch.mkdir()
+        (scratch / "inventory.json").write_text("{}", encoding="utf-8")
+        cwd = self.workflow.base / "working-directory"
+        cwd.mkdir()
+        (cwd / "keep.md").write_text("not this\n", encoding="utf-8")
+        command = asset_command(self.workflow.asset, "rm -rf")
+        self.assertNotIn("dirname", command)
+        completed = subprocess.run(
+            ["sh", "-c", command],
+            cwd=str(cwd),
+            env=dict(self.workflow.env, SCRATCH=str(scratch), REVIEW_ROOT=""),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(scratch.exists())
+        self.assertTrue((cwd / "keep.md").is_file())
 
 
 class LegacyMigration(WorkflowRunCase):
@@ -4071,6 +4306,8 @@ def _end_to_end_cases():
     for mixin in (
         HelperResolution,
         FreshRepository,
+        PinnedTree,
+        EarlyExits,
         LegacyMigration,
         QueueOrder,
         CompletedReviews,

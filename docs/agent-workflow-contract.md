@@ -2552,7 +2552,7 @@ tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
-dirname-cli | executable | dirname | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+dirname-cli | executable | dirname | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/project-review/SKILL.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -2977,10 +2977,13 @@ search step and nothing else, which is what `mandatory: no` records.
 
 `tr-cli` is the documentation-landing helper's own utility (issue #410):
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
-`dirname-cli` started there too and gained a second consumer with #684: both
-`project-review` assets take the parent of a path they built — the Codex bundle's
-sibling helper lookup, and the `mktemp -d` directory the pinned review worktree
-sits under, which cleanup removes. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
+`dirname-cli` started there too and gained a second consumer with #684: the
+Codex `project-review` skill takes the directory of the ledger helper its
+`find` located, to resolve the session liveness adapter and the sweep cursor
+beside it. The Claude asset needs no such step — `${CLAUDE_PLUGIN_ROOT}` names
+all three directly — and neither asset derives a *removal* target that way: each
+scratch directory cleanup removes is held in a variable of its own, because
+`dirname` of a variable an early exit never set is the working directory. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
 user-invoked action, and every supported macOS/Linux shell already provides
