@@ -2,7 +2,7 @@
 """The project-review ledger: per-PR review state, and the migration into it.
 
 Run with: python3 project_review_ledger.py
-          {read,migrate,select,claim,renew,release,fence,lease-defaults} --help
+          {read,migrate,select,claim,renew,release,fence,allocate-report,record,lease-defaults} --help
 
 Issue #680, slice LEDGER-2 of `docs/project_review_ledger_design.md`. The
 sweep cursor this module supersedes records which pull requests a batch
@@ -123,12 +123,22 @@ one repository lock held as a Git reference in the Git common directory, which
 every linked worktree of the repository shares. The section headed "The
 lease" below carries the rules.
 
+`allocate-report` and `record` complete what a claim was taken for (issue
+#683, slice LEDGER-5): a report name reserved in the ledger before the report
+is written, and one completed attempt -- its outcome, the pinned review
+tree's commit, its UTC completion time, its new report, and its verified
+repeated-finding, recurrence and fix links -- written into the row and its
+history and checkpointed as one local commit on the docs worktree's branch
+before the claim is released. Both are fenced by the owner token under the
+same lock. The section headed "Completing an attempt" carries the rules.
+
 Its reach is pinned in `tools/test_agent_workflow_contract.py`. Every
 repository document it opens is under the `--root` it was given; the lease's
-process-control records -- the lock reference and the heartbeat records --
-are under that root's Git common directory, never under `docs/`. It spawns
-exactly two things: `git`, for the common directory and the lock reference,
-and the renewer, which is this same file run through `sys.executable`. The one
+process-control records -- the lock reference, the heartbeat records, and a
+checkpoint's private index -- are under that root's Git common directory,
+never under `docs/`. It spawns exactly two things: `git`, for the common
+directory, the lock reference and the checkpoint commit, and the renewer,
+which is this same file run through `sys.executable`. The one
 file it reads from anywhere else is `project_review_cursor.py` beside itself,
 which is the parser this migration is required to read the existing record
 through rather than a second implementation of. The merged-pull-request
@@ -711,6 +721,7 @@ def _validated_repository(state, source: str) -> dict:
     for key, row in rows.items():
         number = _validated_row_key(key, source)
         validated["rows"][str(number)] = _validated_row(row, f"{source}: #{number}")
+        _require_own_allocations(number, validated["rows"][str(number)], f"{source}: #{number}")
     for key, expected in (("direct", DIRECT_KEYS), ("excluded", EXCLUDED_KEYS)):
         if not isinstance(state[key], dict):
             raise LedgerError(f"{source}: {key} is not an object.")
@@ -950,6 +961,10 @@ def _validated_history_entry(entry, source: str) -> dict:
         raise LedgerError(f"{source} is not an object.")
     if entry.get("kind") == TAKEOVER_KIND:
         return _validated_takeover_entry(entry, source)
+    if entry.get("kind") == ALLOCATION_KIND:
+        return _validated_allocation_entry(entry, source)
+    if entry.get("kind") == ATTEMPT_KIND:
+        return _validated_attempt_entry(entry, source)
     _require_keys(entry, HISTORY_KEYS, source)
     kind = entry["kind"]
     if not isinstance(kind, str) or not re.match(r"\A[a-z][a-z0-9-]*\Z", kind):
@@ -2728,12 +2743,21 @@ def effective_lease_settings(state: dict, renewal=None, expiry=None) -> dict:
 # ---- Git and the runtime directory
 
 
-def _git(root, arguments, input_bytes=None):
+def _git(root, arguments, input_bytes=None, index_file=None):
+    """`git` in `root`, pointed at nothing the caller's environment chose.
+
+    `index_file` is the one location a caller may name, and only `record`
+    names one: the private index its checkpoint commit is built in, so the
+    worktree's own index -- and whatever an operator staged there -- is never
+    the tree that commit is written from.
+    """
     environment = {
         name: value
         for name, value in os.environ.items()
         if name not in GIT_LOCATION_VARIABLES
     }
+    if index_file is not None:
+        environment["GIT_INDEX_FILE"] = str(index_file)
     try:
         return subprocess.run(
             ["git", *arguments],
@@ -2749,8 +2773,8 @@ def _git(root, arguments, input_bytes=None):
         ) from error
 
 
-def _git_output(root, arguments, input_bytes=None) -> str:
-    proc = _git(root, arguments, input_bytes)
+def _git_output(root, arguments, input_bytes=None, index_file=None) -> str:
+    proc = _git(root, arguments, input_bytes, index_file)
     if proc.returncode != 0:
         detail = os.fsdecode(proc.stderr or proc.stdout).strip()
         raise LedgerError(f"git {' '.join(arguments)} failed in {root}: {detail}")
@@ -3877,6 +3901,765 @@ def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float 
 
 
 # --------------------------------------------------------------------------
+# Completing an attempt
+#
+# Design D-4, D-5, D-7, D-10, D-14, D-15, D-17 and D-18, issue #683. `record`
+# completes the one attempt a claim was taken for, and `allocate-report`
+# reserves the name of the report that attempt writes. Both present the owner
+# token through `fenced`, so everything below happens under the repository
+# lock with the token proven current and unexpired. Five rules shape them.
+#
+# * **A report name is reserved in the ledger before it is written.** The
+#   first report for PR N is `docs/project_review/N.md` and each later one
+#   `docs/project_review/N_k.md`, with `k` one past every sequence the ledger
+#   already names for N. The allocation is a history entry naming the token
+#   that took it, so the name stays reserved whether or not the attempt ever
+#   completes, and a name that exists on disk, in the index or at HEAD, or
+#   anywhere in the ledger at all, is passed over rather than returned. Time
+#   never enters a name.
+# * **A reference is verified, not assumed.** A repeated finding, a recurrence
+#   and a fix link each name a report under `--root` and a `PRR-k` key, and
+#   the key must head exactly one finding in that report -- unprocessed, or
+#   carrying the `[#N]`, `[no-issue]` or `[deferred]` marker `process-report`
+#   writes into the heading -- outside every fenced block. A Markdown heading
+#   is not assumed to produce an anchor, so the ledger stores the path and the
+#   key and the table links the file.
+# * **Fix evidence is retained, not verified.** A fix link carries the fix
+#   PR's merge commit as the caller supplied it; that the PR merged in this
+#   repository and that its correction is in the pinned revision is the
+#   reviewer's to establish before recording (LEDGER-6), because this helper
+#   runs `git` and nothing that can ask GitHub. A fix link changes neither the
+#   row's status nor its checkmark (D-7).
+# * **The checkpoint is published before the ledger is.** The commit is built
+#   in a private index from HEAD's tree plus exactly the ledger this attempt
+#   renders and the report it allocated, published by a compare-and-swap of
+#   the branch, and only then are those two index entries and the ledger file
+#   updated. So an operator's staged, modified and untracked files are never
+#   part of it, and there is no moment at which the ledger says an attempt
+#   completed that no checkpoint holds: a failure before the branch moves
+#   leaves the ledger byte for byte as it was, and a failure after it leaves
+#   the row still claimed and not completed -- recoverable by recording again
+#   with the same token, which appends the one entry the ledger lacks.
+# * **Nothing is published through a stale token.** The lock is held from the
+#   fencing check through the ledger write, so no takeover can land between
+#   them, and the lease's deadline is checked again immediately before the
+#   branch moves, so an attempt whose lease ran out while its checkpoint was
+#   being built never advances the branch.
+
+ALLOCATION_KIND = "allocation"
+ALLOCATION_KEYS = ("kind", "at", "token", "report")
+ATTEMPT_KIND = "attempt"
+ATTEMPT_KEYS = (
+    "kind",
+    "token",
+    "outcome",
+    "commit",
+    "completed_at",
+    "report",
+    "repeats",
+    "recurrences",
+    "fixes",
+)
+LINK_KEYS = ("report", "key")
+FIX_KEYS = ("report", "key", "pr", "merge_commit")
+
+# The two names an allocation can return: sequence 1 is the bare number and
+# every later sequence is suffixed, so `N_1.md` is never a name.
+ALLOCATED_REPORT_RE = re.compile(
+    rf"\A{re.escape(LEDGER_DIRECTORY)}/"
+    rf"([1-9][0-9]{{0,{DIGIT_LIMIT - 1}}})"
+    rf"(?:_([2-9]|[1-9][0-9]{{1,{DIGIT_LIMIT - 1}}}))?\.md\Z"
+)
+
+FINDING_KEY_RE = re.compile(rf"\APRR-[1-9][0-9]{{0,{DIGIT_LIMIT - 1}}}\Z")
+
+# A finding heading as the project-review report format writes it, and as
+# `process-report` rewrites it once the finding is dispositioned. Indented up
+# to three spaces because Markdown still reads that as a heading, and a
+# duplicate a reader sees is one this count has to see.
+FINDING_HEADING_RE = re.compile(
+    r"\A {0,3}### (?:\[(?:#[1-9][0-9]*|no-issue|deferred)\] )?"
+    rf"(PRR-[1-9][0-9]{{0,{DIGIT_LIMIT - 1}}})\.[ \t]+\S"
+)
+FENCE_OPEN_RE = re.compile(r"\A {0,3}(`{3,}|~{3,})(.*)\Z")
+MARKDOWN_LINE_RE = re.compile(r"\r\n|\r|\n")
+
+CHECKPOINT_FILE_MODE = "100644"
+
+
+class CheckpointFailed(LedgerError):
+    """A record that did not complete, and what it left behind.
+
+    Always a failed record, never a completed review: `published` is the
+    checkpoint commit when the branch already holds it, and None when
+    nothing was published and the ledger is unchanged.
+    """
+
+    def __init__(self, message: str, published=None):
+        super().__init__(f"record failed, attempt not completed: {message}")
+        self.published = published
+
+
+def report_path_for(number: int, sequence: int) -> str:
+    suffix = "" if sequence == 1 else f"_{sequence}"
+    return f"{LEDGER_DIRECTORY}/{number}{suffix}.md"
+
+
+def _report_sequence(value: str, number: int):
+    match = ALLOCATED_REPORT_RE.match(value)
+    if match is None or int(match.group(1)) != number:
+        return None
+    return 1 if match.group(2) is None else int(match.group(2))
+
+
+def finding_headings(text: str) -> dict:
+    """How many times each `PRR-k` key heads a finding, outside fenced blocks.
+
+    A fence closes only on the character that opened it, repeated at least as
+    often, with nothing after it; an unclosed fence runs to the end of the
+    document. Both as Markdown defines them, so an example heading inside a
+    fenced block is never counted and a heading after a mismatched closer is
+    never counted either.
+    """
+    counts = {}
+    fence = None
+    for line in MARKDOWN_LINE_RE.split(text):
+        opened = FENCE_OPEN_RE.match(line)
+        if fence is not None:
+            if (
+                opened
+                and opened.group(1)[0] == fence[0]
+                and len(opened.group(1)) >= len(fence)
+                and not opened.group(2).strip()
+            ):
+                fence = None
+            continue
+        if opened and not (opened.group(1)[0] == "`" and "`" in opened.group(2)):
+            fence = opened.group(1)
+            continue
+        heading = FINDING_HEADING_RE.match(line)
+        if heading:
+            counts[heading.group(1)] = counts.get(heading.group(1), 0) + 1
+    return counts
+
+
+def _validated_report_path(value, source: str) -> str:
+    path = _validated_optional_path(value, source)
+    if path is None or not path.endswith(".md") or path == LEDGER_RELATIVE_PATH:
+        raise LedgerError(f"{source} holds {value!r}, which is not a report path.")
+    return path
+
+
+def _validated_key(value, source: str) -> str:
+    if not isinstance(value, str) or not FINDING_KEY_RE.match(value):
+        raise LedgerError(f"{source} holds {value!r}, which is not a PRR-k finding key.")
+    return value
+
+
+def _validated_link(value, source: str) -> dict:
+    if not isinstance(value, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(value, LINK_KEYS, source)
+    return {
+        "report": _validated_report_path(value["report"], f"{source}: report"),
+        "key": _validated_key(value["key"], f"{source}: key"),
+    }
+
+
+def _validated_fix(value, source: str) -> dict:
+    if not isinstance(value, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(value, FIX_KEYS, source)
+    link = _validated_link({key: value[key] for key in LINK_KEYS}, source)
+    number = value["pr"]
+    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+        raise LedgerError(f"{source}: pr holds {number!r}, which is not a pull-request number.")
+    merge = _validated_optional_sha(value["merge_commit"], f"{source}: merge_commit")
+    if merge is None:
+        raise LedgerError(
+            f"{source} names fix #{number} with no merge commit; a fix link is "
+            "recorded only with the merge commit it rests on."
+        )
+    return dict(link, pr=number, merge_commit=merge)
+
+
+def _validated_allocation_entry(entry, source: str) -> dict:
+    _require_keys(entry, ALLOCATION_KEYS, source)
+    _precise_instant(entry["at"], f"{source}: at")
+    report = entry["report"]
+    if not isinstance(report, str) or not ALLOCATED_REPORT_RE.match(report):
+        raise LedgerError(
+            f"{source} allocates {report!r}, which is not a name an allocation returns."
+        )
+    return {
+        "kind": ALLOCATION_KIND,
+        "at": entry["at"],
+        "token": _validated_token(entry["token"], f"{source}: token"),
+        "report": report,
+    }
+
+
+def _validated_attempt_entry(entry, source: str) -> dict:
+    """One completed attempt, with every link it recorded, readable on its own."""
+    _require_keys(entry, ATTEMPT_KEYS, source)
+    for field in ("repeats", "recurrences", "fixes"):
+        if not isinstance(entry[field], list):
+            raise LedgerError(f"{source}: {field} is not a list.")
+    validated = {
+        "kind": ATTEMPT_KIND,
+        "token": _validated_token(entry["token"], f"{source}: token"),
+        "outcome": entry["outcome"],
+        "commit": _validated_optional_sha(entry["commit"], f"{source}: commit"),
+        "completed_at": _validated_optional_timestamp(
+            entry["completed_at"], f"{source}: completed_at"
+        ),
+        "report": (
+            None
+            if entry["report"] is None
+            else _validated_report_path(entry["report"], f"{source}: report")
+        ),
+        "repeats": [
+            _validated_link(link, f"{source}: repeats[{index}]")
+            for index, link in enumerate(entry["repeats"])
+        ],
+        "recurrences": [
+            _validated_link(link, f"{source}: recurrences[{index}]")
+            for index, link in enumerate(entry["recurrences"])
+        ],
+        "fixes": [
+            _validated_fix(fix, f"{source}: fixes[{index}]")
+            for index, fix in enumerate(entry["fixes"])
+        ],
+    }
+    if validated["commit"] is None or validated["completed_at"] is None:
+        raise LedgerError(
+            f"{source} records an attempt without both its verification commit "
+            "and its completed-review time; an attempt is not self-contained "
+            "without them."
+        )
+    _require_attempt_shape(validated, source)
+    return validated
+
+
+def _require_attempt_shape(attempt: dict, source: str) -> None:
+    """The rules an attempt holds to, whether it is being requested or read back."""
+    outcome = attempt["outcome"]
+    if outcome not in COMPLETED_STATUSES:
+        raise LedgerError(
+            f"{source} declares outcome {outcome!r}, which is not one of "
+            f"{', '.join(COMPLETED_STATUSES)}."
+        )
+    if attempt["report"] is not None and not ALLOCATED_REPORT_RE.match(attempt["report"]):
+        raise LedgerError(
+            f"{source} names report {attempt['report']!r}, which is not a name "
+            "an allocation returns; a new report is always an allocated one."
+        )
+    seen = set()
+    for field in ("repeats", "recurrences"):
+        for link in attempt[field]:
+            identity = (link["report"], link["key"])
+            if identity in seen:
+                raise LedgerError(
+                    f"{source} names {link['report']}#{link['key']} twice across "
+                    "its repeated findings and recurrences; a finding either "
+                    "persisted or returned, never both."
+                )
+            seen.add(identity)
+            if link["report"] == attempt["report"]:
+                raise LedgerError(
+                    f"{source} links {link['report']}#{link['key']}, which is in "
+                    "the report this attempt wrote; a repeat or a recurrence "
+                    "names a finding filed before it."
+                )
+    fixed = set()
+    for fix in attempt["fixes"]:
+        identity = (fix["report"], fix["key"])
+        if identity in fixed:
+            raise LedgerError(f"{source} names a fix for {fix['report']}#{fix['key']} twice.")
+        fixed.add(identity)
+        if fix["report"] == attempt["report"]:
+            raise LedgerError(
+                f"{source} links a fix to {fix['report']}#{fix['key']}, which is "
+                "in the report this attempt wrote; a fix closes an earlier finding."
+            )
+    if outcome == "clean" and (
+        attempt["report"] is not None or attempt["repeats"] or attempt["recurrences"]
+    ):
+        raise LedgerError(
+            f"{source} is clean and still names a report, a repeated finding or "
+            "a recurrence; a clean review found nothing."
+        )
+    if outcome == "findings" and attempt["report"] is None and not attempt["repeats"]:
+        raise LedgerError(
+            f"{source} is findings and names no evidence: neither a new report "
+            "this attempt allocated nor a repeated finding. A findings row "
+            "without one links nothing."
+        )
+
+
+def _require_own_allocations(number: int, row: dict, source: str) -> None:
+    """A row's allocations are its own, and each attempt's report is one of them.
+
+    Every allocated name is this pull request's and is allocated once; every
+    attempt is its token's only one, and a report an attempt names was
+    allocated earlier in this history to that same token. Read in order,
+    because an allocation after the attempt that names it is not one the
+    attempt could have presented.
+    """
+    allocated = {}
+    recorded = set()
+    for index, entry in enumerate(row["history"]):
+        if entry["kind"] == ALLOCATION_KIND:
+            if _report_sequence(entry["report"], number) is None:
+                raise LedgerError(
+                    f"{source}: history[{index}] allocates {entry['report']}, "
+                    f"which is not a report name for #{number}."
+                )
+            if entry["report"] in allocated:
+                raise LedgerError(
+                    f"{source}: history[{index}] allocates {entry['report']} a "
+                    "second time; an allocated name is never returned again."
+                )
+            allocated[entry["report"]] = entry["token"]
+        elif entry["kind"] == ATTEMPT_KIND:
+            if entry["token"] in recorded:
+                raise LedgerError(
+                    f"{source}: history[{index}] records a second attempt for "
+                    f"{entry['token']}; a claim completes one attempt."
+                )
+            recorded.add(entry["token"])
+            if entry["report"] is not None and allocated.get(entry["report"]) != entry["token"]:
+                raise LedgerError(
+                    f"{source}: history[{index}] names {entry['report']}, which "
+                    f"{entry['token']} did not allocate before recording."
+                )
+
+
+def _strings_in(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings_in(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings_in(item)
+
+
+def _path_is_tracked(root, relative: str) -> bool:
+    """Whether the index or HEAD holds `relative`, which the disk may not show."""
+    listed = _git(root, ["ls-files", "--cached", "--", relative])
+    if listed.returncode != 0:
+        raise LedgerError(
+            f"git ls-files could not look up {relative} in {root} "
+            f"({os.fsdecode(listed.stderr).strip()})."
+        )
+    if os.fsdecode(listed.stdout).strip():
+        return True
+    return _git(root, ["cat-file", "-e", f"HEAD:{relative}"]).returncode == 0
+
+
+def _next_report_path(root, document: dict, number: int) -> str:
+    named = list(_strings_in(document))
+    sequences = [
+        sequence
+        for sequence in (_report_sequence(value, number) for value in named)
+        if sequence is not None
+    ]
+    sequence = max(sequences, default=0) + 1
+    while True:
+        candidate = report_path_for(number, sequence)
+        location = confined(root, Path(root) / candidate)
+        require_reachable(root, location)
+        if (
+            not any(candidate in value for value in named)
+            and not _name_is_taken(location)
+            and not _path_is_tracked(root, candidate)
+        ):
+            return candidate
+        sequence += 1
+
+
+def allocate_report(root, repo: str, number: int, token: str, lock_wait: float = None) -> dict:
+    """Reserve the next report name for the claimed pull request, and return it."""
+    with fenced(root, repo, number, token, lock_wait) as held:
+        document, state = held["document"], held["state"]
+        report = _next_report_path(root, document, number)
+        state["rows"][str(number)]["history"].append(
+            {
+                "kind": ALLOCATION_KIND,
+                "at": precise_timestamp(time.time()),
+                "token": token,
+                "report": report,
+            }
+        )
+        document["repositories"][repo] = _validated_repository(
+            state, f"the ledger allocated for {repo}"
+        )
+        written = publish_document(root, document)
+        return {
+            "status": "allocated",
+            "repo": repo,
+            "pr": number,
+            "token": token,
+            "report": report,
+            "document": str(written),
+        }
+
+
+def _parsed_reference(raw, source: str) -> dict:
+    if not isinstance(raw, str) or raw.count("#") != 1:
+        raise LedgerError(f"{source} {raw!r} is not spelled '<report path>#PRR-k'.")
+    path, _, key = raw.partition("#")
+    return {
+        "report": _validated_report_path(path, f"{source} {raw!r}"),
+        "key": _validated_key(key, f"{source} {raw!r}"),
+    }
+
+
+def _parsed_assignment(raw, source: str) -> tuple:
+    if not isinstance(raw, str) or "=" not in raw:
+        raise LedgerError(f"{source} {raw!r} is not spelled '<report path>#PRR-k=<value>'.")
+    reference, _, value = raw.rpartition("=")
+    return _parsed_reference(reference, source), value
+
+
+def requested_attempt(outcome, commit, report=None, repeats=(), recurrences=(), fixed=(), fixed_merges=()) -> dict:
+    """The attempt a `record` invocation asks for, refused before any lock is taken.
+
+    Every fix names its merge commit exactly once and every merge commit
+    names a fix, because a fix link is only accepted with the evidence it
+    rests on and evidence for no link is a typo that would otherwise vanish.
+    """
+    merges = {}
+    for raw in fixed_merges:
+        link, value = _parsed_assignment(raw, "--fixed-merge")
+        identity = (link["report"], link["key"])
+        if identity in merges:
+            raise LedgerError(f"--fixed-merge names {link['report']}#{link['key']} twice.")
+        if not FULL_SHA_RE.match(value):
+            raise LedgerError(
+                f"--fixed-merge {raw!r} does not name a full 40-character merge commit SHA."
+            )
+        merges[identity] = value
+    fixes = []
+    for raw in fixed:
+        link, value = _parsed_assignment(raw, "--fixed")
+        if not DECIMAL_RE.fullmatch(value.lstrip("#")) or int(value.lstrip("#")) <= 0:
+            raise LedgerError(f"--fixed {raw!r} does not name a fix pull-request number.")
+        identity = (link["report"], link["key"])
+        if identity not in merges:
+            raise LedgerError(
+                f"--fixed {raw!r} carries no --fixed-merge for "
+                f"{link['report']}#{link['key']}; a fix link is recorded only "
+                "with the fix pull request's merge commit as its evidence."
+            )
+        fixes.append(dict(link, pr=int(value.lstrip("#")), merge_commit=merges.pop(identity)))
+    if merges:
+        stray = ", ".join(f"{path}#{key}" for path, key in sorted(merges))
+        raise LedgerError(f"--fixed-merge names {stray}, which no --fixed link names.")
+    if not isinstance(commit, str) or not FULL_SHA_RE.match(commit):
+        raise LedgerError(
+            f"--commit {commit!r} is not the full 40-character SHA of the pinned review tree."
+        )
+    attempt = {
+        "outcome": outcome,
+        "commit": commit,
+        "report": None if report is None else _validated_report_path(report, "--report"),
+        "repeats": [_parsed_reference(raw, "--repeat") for raw in repeats],
+        "recurrences": [_parsed_reference(raw, "--recurrence") for raw in recurrences],
+        "fixes": fixes,
+    }
+    _require_attempt_shape(attempt, "the requested attempt")
+    return attempt
+
+
+def verify_reference(root, link: dict, source: str) -> None:
+    """The report exists under `root` and `link`'s key heads exactly one finding in it."""
+    target = f"{link['report']}#{link['key']}"
+    path = confined(root, Path(root) / link["report"])
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise LedgerError(f"{source} {target} names a report that does not exist.") from error
+    except (OSError, UnicodeDecodeError) as error:
+        raise LedgerError(f"{source} {target} names a report that cannot be read ({error}).") from error
+    count = finding_headings(text).get(link["key"], 0)
+    if count == 0:
+        raise LedgerError(
+            f"{source} {target}: no finding in {link['report']} is headed "
+            f"{link['key']}, so the reference names nothing."
+        )
+    if count > 1:
+        raise LedgerError(
+            f"{source} {target}: {count} findings in {link['report']} are headed "
+            f"{link['key']}, so the reference names no one of them."
+        )
+
+
+def _allocated_report_bytes(root, row: dict, number: int, token: str, report: str) -> bytes:
+    """The new report's bytes, once it is proven this token's own allocation."""
+    owners = [
+        entry["token"]
+        for entry in row["history"]
+        if entry["kind"] == ALLOCATION_KIND and entry["report"] == report
+    ]
+    if not owners:
+        raise LedgerError(
+            f"--report {report} was never allocated for #{number}; a new report "
+            "takes the name allocate-report returned."
+        )
+    if owners != [token]:
+        raise LedgerError(
+            f"--report {report} was allocated by {owners[0]}, not {token}; an "
+            "attempt records only a report its own token allocated."
+        )
+    path = confined(root, Path(root) / report)
+    require_reachable(root, path)
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as error:
+        raise LedgerError(
+            f"--report {report} was allocated and never written; record names a "
+            "report that exists."
+        ) from error
+    except OSError as error:
+        raise LedgerError(f"--report {report} could not be looked up ({error}).") from error
+    if not stat.S_ISREG(mode):
+        raise LedgerError(
+            f"--report {report} is not a regular file; the checkpoint commits "
+            "the bytes the report holds, and a link or a directory holds none."
+        )
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise LedgerError(f"--report {report} could not be read ({error}).") from error
+
+
+def _checkpoint_target(root) -> dict:
+    """The branch the checkpoint goes on, its current head, and a usable identity.
+
+    Every refusal here comes before anything is written: a root that is not
+    its worktree's top level (the ledger's path in the commit would be wrong),
+    a detached HEAD (there is no branch to checkpoint on), and a worktree with
+    no configured commit identity (`user.useConfigOnly`, so a guessed
+    hostname address is not mistaken for one).
+    """
+    toplevel = _git(root, ["rev-parse", "--show-toplevel"])
+    if toplevel.returncode != 0:
+        raise LedgerError(
+            f"{root} is not inside a Git worktree "
+            f"({os.fsdecode(toplevel.stderr).strip()}); record checkpoints on "
+            "the docs worktree's branch."
+        )
+    if Path(os.fsdecode(toplevel.stdout).strip()).resolve() != Path(root).resolve():
+        raise LedgerError(
+            f"{root} is not the top level of its worktree; record commits "
+            f"{LEDGER_RELATIVE_PATH} relative to the root it was given, so the "
+            "root must be the worktree itself."
+        )
+    branch = _git(root, ["symbolic-ref", "-q", "HEAD"])
+    if branch.returncode != 0:
+        raise LedgerError(
+            f"{root} has a detached HEAD; the checkpoint is a commit on the docs "
+            "worktree's current branch, and there is none."
+        )
+    for variable in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        identity = _git(root, ["-c", "user.useConfigOnly=true", "var", variable])
+        if identity.returncode != 0:
+            raise LedgerError(
+                f"{root} has no commit identity configured ({variable}); the "
+                "checkpoint commit needs one, and nothing was written."
+            )
+    head = _git(root, ["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+    return {
+        "branch": os.fsdecode(branch.stdout).strip(),
+        "parent": os.fsdecode(head.stdout).strip() if head.returncode == 0 else None,
+    }
+
+
+def _checkpoint_commit(root, common: Path, target: dict, files: dict, message: str, token: str) -> tuple:
+    """The checkpoint commit object and the blob each path was written as.
+
+    Built in a private index read from the parent's tree, so the only changes
+    the commit carries are `files`. Writing objects publishes nothing: until
+    the branch is moved, the commit is unreachable.
+    """
+    directory = Path(common) / RUNTIME_DIRECTORY / "checkpoints"
+    index = directory / f"{token}.index"
+    blobs = {}
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            index.unlink()
+    except OSError as error:
+        raise LedgerError(f"the checkpoint index {index} could not be prepared ({error}).") from error
+    try:
+        if target["parent"] is None:
+            _git_output(root, ["read-tree", "--empty"], index_file=index)
+        else:
+            _git_output(root, ["read-tree", target["parent"]], index_file=index)
+        for relative, data in sorted(files.items()):
+            blob = _git_output(root, ["hash-object", "-w", "--stdin"], data)
+            _git_output(
+                root,
+                ["update-index", "--add", "--cacheinfo", f"{CHECKPOINT_FILE_MODE},{blob},{relative}"],
+                index_file=index,
+            )
+            blobs[relative] = blob
+        tree = _git_output(root, ["write-tree"], index_file=index)
+        parents = [] if target["parent"] is None else ["-p", target["parent"]]
+        commit = _git_output(
+            root, ["-c", "user.useConfigOnly=true", "commit-tree", tree, *parents, "-m", message]
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            index.unlink()
+    return commit, blobs
+
+
+def _publish_checkpoint(root, target: dict, commit: str, message: str) -> None:
+    """Move the branch to `commit`, only if it still points at the parent."""
+    expected = "" if target["parent"] is None else target["parent"]
+    proc = _git(root, ["update-ref", "-m", message, target["branch"], commit, expected])
+    if proc.returncode != 0:
+        raise LedgerError(
+            f"git update-ref {target['branch']} failed "
+            f"({os.fsdecode(proc.stderr).strip()})"
+        )
+
+
+def _stage_checkpoint(root, blobs: dict) -> None:
+    """Point the worktree's own index at what the checkpoint committed, for its paths only.
+
+    Without this the index still holds the parent's entries for those paths,
+    and the operator's next commit of anything else would revert them.
+    """
+    for relative, blob in sorted(blobs.items()):
+        _git_output(
+            root,
+            ["update-index", "--add", "--cacheinfo", f"{CHECKPOINT_FILE_MODE},{blob},{relative}"],
+        )
+
+
+def record(
+    root,
+    repo: str,
+    number: int,
+    token: str,
+    outcome: str,
+    commit: str,
+    report=None,
+    repeats=(),
+    recurrences=(),
+    fixed=(),
+    fixed_merges=(),
+    lock_wait: float = None,
+) -> dict:
+    """Complete the claimed attempt, checkpoint it, and release the claim.
+
+    Refused before anything is written for a malformed request, a stale or
+    expired token, a report this token did not allocate or never wrote, an
+    unverifiable reference, a root that cannot take a checkpoint, and a lease
+    that runs out before the branch moves. Every one of those leaves the
+    ledger and the branch exactly as they were.
+
+    A failure once the checkpoint is being published is a `CheckpointFailed`:
+    the attempt is not completed, the row still carries its claim, and the
+    ledger is still the one it was. When the branch already holds the
+    checkpoint the refusal names it, and recording again with the same token
+    completes the attempt with one history entry.
+    """
+    attempt = requested_attempt(outcome, commit, report, repeats, recurrences, fixed, fixed_merges)
+    with fenced(root, repo, number, token, lock_wait) as held:
+        target = _checkpoint_target(root)
+        document, state = held["document"], held["state"]
+        row = state["rows"][str(number)]
+        files = {}
+        if attempt["report"] is not None:
+            files[attempt["report"]] = _allocated_report_bytes(
+                root, row, number, token, attempt["report"]
+            )
+        for field, flag in (("repeats", "--repeat"), ("recurrences", "--recurrence"), ("fixes", "--fixed")):
+            for link in attempt[field]:
+                verify_reference(root, link, flag)
+        completed_at = datetime.fromtimestamp(time.time(), timezone.utc).strftime(TIMESTAMP_FORMAT)
+        row["history"].append(dict(kind=ATTEMPT_KIND, token=token, completed_at=completed_at, **attempt))
+        row["status"] = outcome
+        row["commit"] = commit
+        row["completed_at"] = completed_at
+        row["report"] = attempt["report"] or (
+            attempt["repeats"][0]["report"] if attempt["repeats"] else None
+        )
+        row["claim"] = None
+        document["repositories"][repo] = _validated_repository(
+            state, f"the ledger recorded for {repo}"
+        )
+        files[LEDGER_RELATIVE_PATH] = render_document(document).encode("utf-8")
+        message = f"project-review: record {repo}#{number} {outcome}"
+        ledger_path = confined(root, document_path(root))
+        try:
+            checkpoint, blobs = _checkpoint_commit(
+                root, held["common"], target, files, message, token
+            )
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the checkpoint commit could not be built ({error}); nothing was "
+                f"published and the ledger at {ledger_path} was not written."
+            ) from error
+        if time.time() >= held["deadline"]:
+            raise LeaseRefused(
+                "expired",
+                f"the claim on {repo}#{number} expired at "
+                f"{precise_timestamp(held['deadline'])} before its checkpoint was "
+                "published; the branch was not moved and the ledger was not written.",
+                owner={"token": token, "deadline": precise_timestamp(held["deadline"])},
+            )
+        try:
+            _publish_checkpoint(root, target, checkpoint, message)
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the checkpoint could not be published ({error}); the branch was "
+                f"not moved and the ledger at {ledger_path} was not written, so "
+                "the claim is still held."
+            ) from error
+        try:
+            _stage_checkpoint(root, blobs)
+            written = publish_document(root, document)
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the checkpoint {checkpoint} is on {target['branch']}, but the "
+                f"ledger at {ledger_path} was not written ({error}); the row still "
+                "carries the claim. Record again with the same token to complete it.",
+                published=checkpoint,
+            ) from error
+        with contextlib.suppress(LedgerError):
+            remove_heartbeat(held["common"], token)
+        return {
+            "status": "recorded",
+            "repo": repo,
+            "pr": number,
+            "token": token,
+            "outcome": outcome,
+            "commit": commit,
+            "completed_at": completed_at,
+            "report": attempt["report"],
+            "repeats": attempt["repeats"],
+            "recurrences": attempt["recurrences"],
+            "fixes": attempt["fixes"],
+            "document": str(written),
+            "checkpoint": {
+                "commit": checkpoint,
+                "branch": target["branch"],
+                "parent": target["parent"],
+                "paths": sorted(blobs),
+            },
+            "renewer": None if held["heartbeat"] is None else held["heartbeat"]["renewer"],
+        }
+
+
+# --------------------------------------------------------------------------
 # Command line
 
 
@@ -3996,6 +4779,54 @@ def build_parser() -> argparse.ArgumentParser:
         command = subparsers.add_parser(name, help=text)
         _add_claim_identity_arguments(command)
 
+    allocator = subparsers.add_parser(
+        "allocate-report",
+        help="reserve the next report name for the current owner's pull request",
+    )
+    _add_claim_identity_arguments(allocator)
+
+    recorder = subparsers.add_parser(
+        "record",
+        help=(
+            "complete the current owner's attempt, checkpoint the ledger and its "
+            "report as one local commit, and release the claim"
+        ),
+    )
+    _add_claim_identity_arguments(recorder)
+    recorder.add_argument("--outcome", required=True, choices=COMPLETED_STATUSES)
+    recorder.add_argument(
+        "--commit", required=True, help="the full SHA of the pinned review tree"
+    )
+    recorder.add_argument("--report", help="the new report this token allocated")
+    recorder.add_argument(
+        "--repeat",
+        action="append",
+        default=[],
+        metavar="REPORT#PRR-K",
+        help="an earlier finding still present; repeatable",
+    )
+    recorder.add_argument(
+        "--recurrence",
+        action="append",
+        default=[],
+        metavar="REPORT#PRR-K",
+        help="an earlier resolved finding that returned; repeatable",
+    )
+    recorder.add_argument(
+        "--fixed",
+        action="append",
+        default=[],
+        metavar="REPORT#PRR-K=PR",
+        help="the pull request that fixed one finding; needs --fixed-merge",
+    )
+    recorder.add_argument(
+        "--fixed-merge",
+        action="append",
+        default=[],
+        metavar="REPORT#PRR-K=SHA",
+        help="the merge commit of the fix named by --fixed for that finding",
+    )
+
     defaults = subparsers.add_parser(
         "lease-defaults", help="set this repository's lease defaults for later claims"
     )
@@ -4032,7 +4863,8 @@ def _add_liveness_arguments(command) -> None:
 
 
 def main(argv=None) -> int:
-    """0 migrated, read, selected or a lease operation done, 3 flagged, 2 refused.
+    """0 migrated, read, selected, a lease operation done, a report allocated or an
+    attempt recorded; 3 flagged; 2 refused.
 
     Three outcomes rather than two because a flagged migration is neither: it
     read every report successfully and is waiting for a decision only the
@@ -4051,7 +4883,12 @@ def main(argv=None) -> int:
     A lease refusal -- an expired, replaced or unknown token, a liveness
     signal that is missing or already lost, an unreadable heartbeat, a lock
     held by a live or unverifiable holder -- is a refusal like any other: exit
-    2, with its reason word and the recorded owner on standard error.
+    2, with its reason word and the recorded owner on standard error. So is a
+    `record` that did not complete: a refused reference, an unallocated
+    report, a worktree that cannot take a checkpoint, and a checkpoint that
+    failed are all exit 2 with nothing on standard output, because a caller
+    that counts completed reviews counts exit-0 `recorded` payloads and
+    nothing else.
     """
     args = build_parser().parse_args(argv)
     if args.command == "read":
@@ -4084,6 +4921,26 @@ def main(argv=None) -> int:
     if args.command in ("renew", "release", "fence"):
         operation = {"renew": renew, "release": release, "fence": fence}[args.command]
         return _emit(operation(args.root, args.repo, args.pr, args.token))
+
+    if args.command == "allocate-report":
+        return _emit(allocate_report(args.root, args.repo, args.pr, args.token))
+
+    if args.command == "record":
+        return _emit(
+            record(
+                args.root,
+                args.repo,
+                args.pr,
+                args.token,
+                args.outcome,
+                args.commit,
+                report=args.report,
+                repeats=args.repeat,
+                recurrences=args.recurrence,
+                fixed=args.fixed,
+                fixed_merges=args.fixed_merge,
+            )
+        )
 
     if args.command == "lease-defaults":
         return _emit(set_lease_defaults(args.root, args.repo, args.renewal, args.expiry))

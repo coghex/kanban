@@ -460,9 +460,12 @@ otherwise completed review. Fix links are provenance: they grant no
 checkmark and never imply that every finding on the original PR is
 resolved (D-7).
 
-Consequences: the helper validates the report path, the key, and that the
-named PR is merged in `$REPO` before accepting the link; the row displays
-per-finding links only.
+Consequences: the helper validates the report path and the key, and accepts
+the link only with the fix PR's merge commit supplied as evidence, which it
+retains with that one finding; the reviewer verifies that the PR merged in
+`$REPO` and that its correction is present in the pinned revision before
+recording (LEDGER-6), because the helper runs only `git` and never asks
+GitHub (refined by issue #683); the row displays per-finding links only.
 
 ### D-16. Direct-commit mode is explicit-only and kept separate
 
@@ -858,8 +861,9 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   every reference is verified against the report's heading; each of these
   presents the owner token and is refused for an expired or replaced one.
 - **Scope:** record, report allocation, reference verification, fix-link
-  validation (merged in `$REPO`), the checkpoint commit, and the
-  late-completion refusal.
+  validation (report, key, and the retained merge-commit evidence; the
+  merge itself is verified by the reviewer in LEDGER-6), the checkpoint
+  commit, and the late-completion refusal.
 - **Phase:** 2
 - **Depends on:** LEDGER-3, LEDGER-4
 - **Ordering:** `critical path`
@@ -869,7 +873,8 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   ledger and report paths beside an unrelated dirty file left alone; a
   second report for the same PR gets the next sequence and never an
   existing name; a reference to a missing heading is refused; a fix link
-  for an unmerged PR is refused while the review still records; a late
+  without its merge-commit evidence is refused while a record with no fix
+  link still completes; a late
   `record` by the former owner is refused and its cleanup touches only its
   own paths.
 - **Out of scope:** the workflow text that calls these.
