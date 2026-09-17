@@ -3673,15 +3673,8 @@ never direct-master eligible: the table below is an allowlist for the
 check failure rather than a document that publishes directly.
 
 The `coordination` documents are
-`docs/card_filter_design.md`, `docs/claude_document_workflows_design.md`,
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
-`docs/drainer-bugs.md`, `docs/gh_record_authority_design.md`,
-`docs/issue_approval_queue_design.md`, `docs/issue_search_design.md`,
-`docs/linux_portability_design.md`, `docs/managed_paths_design.md`,
-`docs/mission_runner_design.md`, `docs/model_settings_design.md`,
-`docs/multi_repo_boards_design.md`,
-`docs/overlay_focus_fullscreen_design.md`,
-`docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
+`docs/drainer-bugs.md`, `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
 `docs/project_review_183-170.md`, `docs/project_review_195-185.md`,
 `docs/project_review_218-196.md`, `docs/project_review_244-219.md`,
 `docs/project_review_271-251.md`,
@@ -3694,15 +3687,10 @@ The `coordination` documents are
 `docs/project_review_561-545.md`,
 `docs/project_review_600-573.md`,
 `docs/project_review_602-562.md`,
-`docs/project_review_ledger_design.md`,
-`docs/public_release_design.md`,
-`docs/release_maintenance_design.md`, `docs/superagent_design.md`,
-`docs/text_selection_design.md`,
-`docs/ui-bugs.md`, `docs/usage_awareness_design.md`,
-`docs/workflow_audit_findings.md`,
-`docs/workflow_command_vendoring_design.md`, and — through its directory row,
+`docs/ui-bugs.md`, `docs/workflow_audit_findings.md`,
+and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
-`docs/coordination/`. **Every other tracked
+`docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -3787,27 +3775,17 @@ codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
 docs/agent-workflow-contract.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/bugs.md | pr-atomic | release-document
-docs/card_filter_design.md | coordination | audit-report
-docs/claude_document_workflows_design.md | coordination | audit-report
 docs/code-health-report.md | coordination | audit-report
 docs/coordination/ | coordination | coordination-note
+docs/designs/ | coordination | audit-report
 docs/design.md | pr-atomic | test-parsed;release-document;implementation-coupled
 docs/development.md | pr-atomic | release-document
 docs/document-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/document_workflow_findings.md | coordination | audit-report
 docs/drafting-workflow-contract.md | pr-atomic | test-parsed;release-document
 docs/drainer-bugs.md | coordination | audit-report
-docs/gh_record_authority_design.md | coordination | audit-report
 docs/issue-approval.md | pr-atomic | release-document
-docs/issue_approval_queue_design.md | coordination | audit-report
-docs/issue_search_design.md | coordination | audit-report
-docs/linux_portability_design.md | coordination | audit-report
-docs/managed_paths_design.md | coordination | audit-report
-docs/mission_runner_design.md | coordination | audit-report
 docs/media/README.md | pr-atomic | test-parsed;release-document
-docs/model_settings_design.md | coordination | audit-report
-docs/multi_repo_boards_design.md | coordination | audit-report
-docs/overlay_focus_fullscreen_design.md | coordination | audit-report
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
 docs/product_readiness_findings.md | coordination | audit-report
@@ -3830,18 +3808,11 @@ docs/project_review_533-517.md | coordination | audit-report
 docs/project_review_561-545.md | coordination | audit-report
 docs/project_review_600-573.md | coordination | audit-report
 docs/project_review_602-562.md | coordination | audit-report
-docs/project_review_ledger_design.md | coordination | audit-report
-docs/public_release_design.md | coordination | audit-report
-docs/release_maintenance_design.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
-docs/superagent_design.md | coordination | audit-report
-docs/text_selection_design.md | coordination | audit-report
 docs/ui-bugs.md | coordination | audit-report
-docs/usage_awareness_design.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
-docs/workflow_command_vendoring_design.md | coordination | audit-report
 google-plugin/ | pr-atomic | test-parsed;release-document
 grok-plugin/ | pr-atomic | test-parsed;release-document
 kimi-plugin/ | pr-atomic | test-parsed;release-document

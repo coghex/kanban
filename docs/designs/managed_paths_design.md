@@ -10,7 +10,7 @@ own state already resolves through the XDG roots on both platforms, so the
 makes that surface resolve per platform so the drainer and the agent pipeline
 can run on Linux, while every existing macOS install stays exactly where it is.
 
-Split out of `docs/linux_portability_design.md`'s LNX-4, which underspecified
+Split out of `docs/designs/linux_portability_design.md`'s LNX-4, which underspecified
 the surface: it named one resolver and one component, and the real surface is
 two managed installs, two languages, two vendored bundles, and four contract
 rows with two machine-checked reconciliations.
@@ -222,7 +222,7 @@ The settled design is:
 
 ### D-1. Linux managed paths are idiomatic XDG; macOS keeps `~/Library`
 
-Inherited from `docs/linux_portability_design.md` D-2, user signoff
+Inherited from `docs/designs/linux_portability_design.md` D-2, user signoff
 2026-08-10. Linux installs, discovery records, and logs resolve under the XDG
 homes; macOS keeps `~/Library/…` unchanged; a single resolver every consumer
 that can reach one consults. The same-spelling-everywhere alternative was

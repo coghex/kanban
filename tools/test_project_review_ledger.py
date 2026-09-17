@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_project_review_ledger.py
 
-Issue #680, slice LEDGER-2 of `docs/project_review_ledger_design.md`. The
+Issue #680, slice LEDGER-2 of `docs/designs/project_review_ledger_design.md`. The
 module under test ships in both bundles and nothing invokes it yet: design
 D-19 keeps the installed `project-review` command on the v2 cursor until
 LEDGER-6 switches it over, so until then these tests are the module's only
@@ -1961,6 +1961,9 @@ class MigrationTests(LedgerTestCase):
         self.assertEqual(result["flags"], [])
         self.assertEqual(self.rows_of(result["state"]), {602})
         kinds = {report["path"]: report["kind"] for report in result["reports"]}
+        # write_report() seeds the sandbox's own docs/, so this path is the
+        # fixture's, not the repository's: it stays docs/ even though the real
+        # design documents moved to docs/designs/ (issue #700).
         self.assertEqual(kinds["docs/project_review_ledger_design.md"], "unrecognized")
         self.assertNotIn("docs/project_review_boundaries.md", kinds)
 

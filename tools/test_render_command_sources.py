@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_render_command_sources.py
 
-Issue #375, slice VEND-0 of `docs/workflow_command_vendoring_design.md`. Two
+Issue #375, slice VEND-0 of `docs/designs/workflow_command_vendoring_design.md`. Two
 things are under test and they fail for different reasons:
 
 * **The mechanism.** One authored source renders into a Claude

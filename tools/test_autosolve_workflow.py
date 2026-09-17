@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_autosolve_workflow.py
 
-Issue #576, slice VEND-8 of `docs/workflow_command_vendoring_design.md`, and
+Issue #576, slice VEND-8 of `docs/designs/workflow_command_vendoring_design.md`, and
 the eighth and last of the commands that arc vendors. It follows
 `tools/test_finalize_workflow.py` and `tools/test_drain_prs_workflow.py`: the
 asset is the program an agent executes, so what it claims is pinned as

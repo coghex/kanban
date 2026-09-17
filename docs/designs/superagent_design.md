@@ -114,7 +114,7 @@ concrete precondition
   issue-approval command and is a dependency/integration point, not a duplicate
   of this arc.
 - `docs/agent-workflow-contract.md` section 7 classifies
-  `docs/superagent_design.md` as `coordination | audit-report`, so it publishes
+  `docs/designs/superagent_design.md` as `coordination | audit-report`, so it publishes
   straight to `master` rather than through a pull request. Commit `2e2003e`
   added that row together with the matching `config.toml.example` and
   source-distribution exclusion entries when it landed this document.
@@ -1804,14 +1804,14 @@ unless their typed contract exposes an override.
   dashboard replays the complete durable session tree and follows its live
   tail.
 > **Delivered by its own arc.** This slice outgrew one reviewable pull request
-> and is designed in `docs/mission_runner_design.md`. Processing this entry
+> and is designed in `docs/designs/mission_runner_design.md`. Processing this entry
 > links it to that arc's umbrella epic rather than to a child issue; the
 > outcome and acceptance signals below remain the contract that arc must meet.
 > The evidence is recorded under "Why the runner became its own arc" above.
 >
 > **Processing order across the two documents.** This entry cannot be linked
 > until the runner arc's own umbrella epic exists, so process
-> `docs/mission_runner_design.md`'s `EPIC` entry first and link this entry to
+> `docs/designs/mission_runner_design.md`'s `EPIC` entry first and link this entry to
 > the issue that creates. Every `RUN-N` below names a slice of that document,
 > not of this one; no `RUN-N` appears in this document's ledger, and none
 > should.

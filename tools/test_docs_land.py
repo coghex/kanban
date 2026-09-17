@@ -2299,6 +2299,61 @@ def canonical(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("*", "").replace("`", "")).lower()
 
 
+class DesignDirectoryRowTests(DocsLandCase):
+    """Issue #700's observable outcome, proved hermetically.
+
+    The gate reads classification from the publication tip (`origin/master`)
+    via tools/docs_land_paths.py, and tools/docs_land.sh fetches origin even
+    for a dry run, so a probe against the live repository could not pass
+    before this change merged. Seeding the sandbox's own origin with the
+    proposed row asks the same question the real gate asks, at the same
+    authority, without depending on what master currently declares.
+    """
+
+    def seed_contract_with_designs_row(self):
+        """Publish a §7 fence carrying the directory row, to origin/master."""
+        sb = self.sb
+        contract = SANDBOX_CONTRACT.replace(
+            "docs/coordination/ | coordination | coordination-note\n",
+            "docs/coordination/ | coordination | coordination-note\n"
+            "docs/designs/ | coordination | audit-report\n",
+        )
+        self.assertIn("docs/designs/ |", contract)
+        sb.write(sb.main, "docs/agent-workflow-contract.md", contract)
+        sb.git("add", "docs/agent-workflow-contract.md")
+        sb.git("commit", "-q", "-m", "classify docs/designs/")
+        sb.git("push", "-q", "origin", "master")
+        return sb
+
+    def test_a_fresh_design_document_needs_no_further_classification_edit(self):
+        sb = self.seed_contract_with_designs_row()
+        sb.write(sb.docs, "docs/designs/scratch_design.md", "# Scratch design\n")
+        before = sb.snapshot()
+
+        planned = sb.run_script(
+            "-n", "-m", "Land a design", "docs/designs/scratch_design.md"
+        )
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertIn("docs/designs/scratch_design.md", planned.stdout)
+        self.assertNotIn("refused", planned.stdout + planned.stderr)
+        self.assertEqual(sb.snapshot(), before, "a dry run moved something")
+
+    def test_a_similarly_prefixed_sibling_is_still_refused(self):
+        # The whole-component boundary, at the gate rather than in the matcher:
+        # `docs/designs/` classifies one directory, not every name that starts
+        # the same way, so the fail-closed default still covers the sibling.
+        sb = self.seed_contract_with_designs_row()
+        sb.write(sb.docs, "docs/designs-old/stray_design.md", "# Stray\n")
+        before = sb.snapshot()
+
+        refused = sb.run_script(
+            "-n", "-m", "Land a stray", "docs/designs-old/stray_design.md"
+        )
+        self.assertEqual(refused.returncode, 6, refused.stdout + refused.stderr)
+        self.assertIn("no \u00a77 row", refused.stderr)
+        self.assertEqual(sb.snapshot(), before, "a refusal moved something")
+
+
 class PushDocsWorkflowAssetTests(unittest.TestCase):
     def setUp(self):
         self.assets = {

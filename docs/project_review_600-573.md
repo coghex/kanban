@@ -64,7 +64,7 @@ activating the backend as specified would expose this latent launch defect.
 - `test/Spec/Agent/ClaudeReview.hs:441-458` — the decoder accepts a
   `SessionStart` `hook_started` event but does not prove that configured hooks
   are excluded from the real child.
-- `docs/model_settings_design.md:672-676` — D-15 requires a hermetic session
+- `docs/designs/model_settings_design.md:672-676` — D-15 requires a hermetic session
   that does not inherit the machine's Claude Code configuration.
 - Installed `claude --help` for Claude Code 2.1.252 — `--setting-sources`
   controls user/project/local settings; `--strict-mcp-config` controls only MCP

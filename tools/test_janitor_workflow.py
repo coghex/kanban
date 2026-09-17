@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_janitor_workflow.py
 
-Issue #575, slice VEND-9 of `docs/workflow_command_vendoring_design.md`, and
+Issue #575, slice VEND-9 of `docs/designs/workflow_command_vendoring_design.md`, and
 the seventh of the eight commands the arc vendors. It is the only one split
 across two pull requests: issue #574 shipped `scripts/census.py` into both
 bundles with nothing invokable, and this slice ships the body that reasons over

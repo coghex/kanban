@@ -69,7 +69,7 @@ acceptance reproducible.
 
 **Evidence:**
 
-- `docs/overlay_focus_fullscreen_design.md:469-478` — the live check requires a
+- `docs/designs/overlay_focus_fullscreen_design.md:469-478` — the live check requires a
   real refresh while redirecting `HOME` to a scratch directory, without
   preserving or provisioning GitHub credentials.
 - `src/Kanban/UI/Refresh.hs:308-320` — the board's live-only foreground refresh

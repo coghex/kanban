@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_drain_prs_workflow.py
 
-Issue #511, slice VEND-5 of `docs/workflow_command_vendoring_design.md`. Unlike
+Issue #511, slice VEND-5 of `docs/designs/workflow_command_vendoring_design.md`. Unlike
 the four slices before it, the reconciliation here was mostly against this
 repository rather than against the other brand: both personal copies described a
 drainer that no longer exists, and both tracked two of the owner's private

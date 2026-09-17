@@ -659,6 +659,44 @@ class ClassificationCoverageTests(unittest.TestCase):
         ):
             self.assertEqual(matching_rows(self.declared, stray), [], stray)
 
+    def test_a_design_document_added_under_its_directory_is_already_covered(self):
+        # Issue #700: adding a design document needs no §7 edit, exactly as
+        # adding a coordination note does not. Before this row, each of the 18
+        # root-level design documents carried its own row, so a nineteenth
+        # could not be landed until a pull request classified it.
+        added = "docs/designs/scratch_design.md"
+        self.assertEqual(matching_rows(self.declared, added), ["docs/designs/"])
+        self.assertEqual(unclassified_paths(self.declared, self.markdown + [added]), [])
+
+    def test_the_design_directory_covers_every_tracked_design_document(self):
+        # The migration's own postcondition: no design document is left behind
+        # at the old location, and none is covered twice by a surviving
+        # per-file row beside the directory row.
+        covered = [p for p in self.markdown if p.startswith("docs/designs/")]
+        self.assertTrue(covered, "docs/designs/ is empty")
+        for path in covered:
+            self.assertEqual(matching_rows(self.declared, path), ["docs/designs/"], path)
+            self.assertNotIn(path, self.declared, f"{path} is covered twice")
+        stranded = [
+            p
+            for p in self.markdown
+            if p.startswith("docs/")
+            and p.endswith("_design.md")
+            and not p.startswith(("docs/designs/", "docs/coordination/"))
+        ]
+        self.assertEqual(stranded, [], "design documents left outside docs/designs/")
+
+    def test_a_design_directory_sibling_is_not_covered(self):
+        # The whole-component boundary on the new row. `docs/design.md` is the
+        # separate pr-atomic behavior contract and must not be swept in by a
+        # string-prefix reading of `docs/designs/`.
+        for stray in (
+            "docs/designs-old/scratch_design.md",
+            "docs/designs2/scratch_design.md",
+        ):
+            self.assertEqual(matching_rows(self.declared, stray), [], stray)
+        self.assertNotIn("docs/designs/", matching_rows(self.declared, "docs/design.md"))
+
     def test_an_overlapping_directory_and_file_declaration_is_a_conflict(self):
         # Requirement 10's example: `docs/` plus `docs/ui-bugs.md` covers one
         # document twice, which is two lanes and therefore no lane.

@@ -1,6 +1,6 @@
 # Mission runner service design
 
-Mission Control (`docs/superagent_design.md`, epic #591) gives Kanban durable
+Mission Control (`docs/designs/superagent_design.md`, epic #591) gives Kanban durable
 missions, a typed action registry, durable issue workers, and a controller that
 can advance one mission step and recover it. What it cannot do is keep going
 once the operator closes the dashboard. This design adds the per-repository
@@ -50,7 +50,7 @@ concrete precondition
 
 ## Relationship to the Mission Control arc
 
-This arc exists because `SAG-9` in `docs/superagent_design.md` outgrew one
+This arc exists because `SAG-9` in `docs/designs/superagent_design.md` outgrew one
 reviewable pull request. That document's `SAG-9` entry stays in its ledger and
 links to **this** arc's umbrella epic rather than to a child issue, so epic
 #591 keeps its "keeps advancing while the dashboard is closed" done-condition
@@ -247,7 +247,7 @@ exit, which stops nothing.
 
 ## Decisions
 
-Each decision below was signed off in `docs/superagent_design.md` and is
+Each decision below was signed off in `docs/designs/superagent_design.md` and is
 restated here, with its source, so this document is readable on its own. The
 source document keeps its own numbering unchanged.
 

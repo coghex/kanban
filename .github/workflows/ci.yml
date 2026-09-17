@@ -184,7 +184,7 @@ jobs:
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
   # The evidence for the drainer's Linux support, per
-  # docs/linux_portability_design.md decision D-1: no Linux host is known to
+  # docs/designs/linux_portability_design.md decision D-1: no Linux host is known to
   # exist for this project, so the claim is container-verified against a real
   # systemd user session rather than asserted from generated files. The whole
   # lifecycle runs — install, start (which is what exercises the backend's

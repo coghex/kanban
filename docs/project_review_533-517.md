@@ -282,7 +282,7 @@ construction, and census, liveness, and signaling remain identity-pinned.
 > hand-written instance the document repeatedly says landed.
 
 **Verification:** Direct documentation commit `7da7081` reconciled
-`docs/gh_record_authority_design.md` after PR #518 delivered GHA-2. The current
+`docs/designs/gh_record_authority_design.md` after PR #518 delivered GHA-2. The current
 document still says `OwnedProcessGroup` would gain, did gain, and was delivered
 behind a hand-written `FromJSON` decoder using `.:?` and `.!=`.
 
@@ -298,11 +298,11 @@ merely an old proposal.
 
 **Evidence:**
 
-- `docs/gh_record_authority_design.md:421-438` — Entry attribution says the
+- `docs/designs/gh_record_authority_design.md:421-438` — Entry attribution says the
   derived instance is replaced by a hand-written decoder using `.:?` and `.!=`.
-- `docs/gh_record_authority_design.md:519-545` — signed-off D-3 consequences
+- `docs/designs/gh_record_authority_design.md:519-545` — signed-off D-3 consequences
   repeat that `OwnedProcessGroup` gains a hand-written `FromJSON` instance.
-- `docs/gh_record_authority_design.md:883-900` — the reconciled, completed GHA-2
+- `docs/designs/gh_record_authority_design.md:883-900` — the reconciled, completed GHA-2
   scope says the optional owner landed behind a hand-written backward-compatible
   decoder.
 - `src/Kanban/Process.hs:69-104` — `OwnedProcessGroup` still derives both JSON

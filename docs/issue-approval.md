@@ -750,7 +750,7 @@ The sidebar reports that the service is on, off, barriered, or failed; it does
 not report `reviewing issue #N`, which reviewer is running, or which model. The
 persistent service was scoped without it, and a separate extension design for a
 progress protocol and a richer in-flight UI is still to be written.
-`docs/issue_approval_queue_design.md` records that decision as D-6. Read a
+`docs/designs/issue_approval_queue_design.md` records that decision as D-6. Read a
 sidebar with no per-issue detail as the current design rather than as a defect.
 
 For the behavior itself — how the dashboard discovers, decodes, polls, and
