@@ -5272,6 +5272,28 @@ class ReportAllocationTests(RecordTestCase):
                                 "--pr", "612", "--token", stale)
         self.assertIn(replacement["claim"]["token"], self.refused(completed, "replaced"))
 
+    def test_a_lease_that_runs_out_while_a_name_is_found_allocates_nothing(self):
+        self.migrate_and_commit()
+        claimed = self.claim([merged(612)], pid=self.session().pid)
+        token = claimed["claim"]["token"]
+        original = LEDGER._next_report_path
+
+        def slow(root, document, number):
+            found = original(root, document, number)
+            # The lock is held, so nothing renews meanwhile.
+            time.sleep(LEASE_EXPIRY + 0.5)
+            return found
+
+        LEDGER._next_report_path = slow
+        self.addCleanup(setattr, LEDGER, "_next_report_path", original)
+        self.refuses(lambda: LEDGER.allocate_report(self.root, REPO, 612, token),
+                     "before the allocation was published", reason="expired")
+        self.assertEqual(
+            [entry for entry in self.rows_on_disk()["612"]["history"]
+             if entry["kind"] == LEDGER.ALLOCATION_KIND],
+            [],
+        )
+
 
 class ReferenceTests(RecordTestCase):
     def setUp(self):

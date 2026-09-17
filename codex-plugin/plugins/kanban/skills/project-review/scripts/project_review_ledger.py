@@ -3943,8 +3943,10 @@ def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float 
 # * **Nothing is published through a stale token.** The lock is held from the
 #   fencing check through the ledger write, so no takeover can land between
 #   them, and the lease's deadline is checked again immediately before the
-#   branch moves, so an attempt whose lease ran out while its checkpoint was
-#   being built never advances the branch.
+#   branch moves and before an allocation is written, so an attempt whose
+#   lease ran out while its checkpoint was being built never advances the
+#   branch, and one whose lease ran out while a name was being found
+#   reserves nothing.
 
 ALLOCATION_KIND = "allocation"
 ALLOCATION_KEYS = ("kind", "at", "token", "report")
@@ -4281,11 +4283,31 @@ def _next_report_path(root, document: dict, number: int) -> str:
         sequence += 1
 
 
+def _require_unexpired(repo: str, number: int, token: str, held: dict, moment: str) -> None:
+    """The fenced lease is still unexpired now, immediately before a publication.
+
+    `fenced` proves it on entry, and the lock keeps anyone from renewing or
+    taking it over while it is held -- but the work between entry and the
+    write takes time, and the deadline does not wait for it.
+    """
+    if time.time() >= held["deadline"]:
+        deadline = precise_timestamp(held["deadline"])
+        raise LeaseRefused(
+            "expired",
+            f"the claim on {repo}#{number} expired at {deadline} {moment}.",
+            owner={"token": token, "deadline": deadline},
+        )
+
+
 def allocate_report(root, repo: str, number: int, token: str, lock_wait: float = None) -> dict:
     """Reserve the next report name for the claimed pull request, and return it."""
     with fenced(root, repo, number, token, lock_wait) as held:
         document, state = held["document"], held["state"]
         report = _next_report_path(root, document, number)
+        # Asked again after the search and before the write: looking a name
+        # up runs `git`, and a lease that ran out meanwhile has no allocation
+        # left to publish.
+        _require_unexpired(repo, number, token, held, "before the allocation was published")
         state["rows"][str(number)]["history"].append(
             {
                 "kind": ALLOCATION_KIND,
@@ -4608,14 +4630,14 @@ def record(
                 f"the checkpoint commit could not be built ({error}); nothing was "
                 f"published and the ledger at {ledger_path} was not written."
             ) from error
-        if time.time() >= held["deadline"]:
-            raise LeaseRefused(
-                "expired",
-                f"the claim on {repo}#{number} expired at "
-                f"{precise_timestamp(held['deadline'])} before its checkpoint was "
-                "published; the branch was not moved and the ledger was not written.",
-                owner={"token": token, "deadline": precise_timestamp(held["deadline"])},
-            )
+        _require_unexpired(
+            repo,
+            number,
+            token,
+            held,
+            "before its checkpoint was published; the branch was not moved and "
+            "the ledger was not written",
+        )
         try:
             _publish_checkpoint(root, target, checkpoint, message)
         except LedgerError as error:
