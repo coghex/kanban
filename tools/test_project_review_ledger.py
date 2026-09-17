@@ -3471,6 +3471,20 @@ def wait_until(predicate, message, timeout=SETTLE_SECONDS, interval=0.02):
         time.sleep(interval)
 
 
+def finished(process, timeout=60):
+    """A helper process's output once it exits, when its stdin is already closed.
+
+    Not `communicate()`: that flushes standard input first, and some Python
+    versions raise on a stream the test closed itself to start two racers at
+    once. The outputs are a few kilobytes of JSON, well inside a pipe buffer.
+    """
+    process.wait(timeout=timeout)
+    stdout, stderr = process.stdout.read(), process.stderr.read()
+    process.stdout.close()
+    process.stderr.close()
+    return stdout, stderr
+
+
 def process_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -3892,7 +3906,7 @@ class LockContentionTests(LeaseTestCase):
         self.assertIsNone(claimant.poll())
         self.end_session(session)
         self.kill_holder(holder)
-        stdout, stderr = claimant.communicate(timeout=60)
+        stdout, stderr = finished(claimant)
         self.assertEqual(claimant.returncode, 2, stdout)
         self.assertIn("refused (liveness-lost)", stderr)
         self.assertEqual(self.ledger_bytes(), before)
@@ -4131,6 +4145,149 @@ class PartialFailureTests(LeaseTestCase):
         self.assertEqual(result["status"], "claimed")
         self.assertEqual(result["takeover"], {"previous_token": stale})
         self.assertEqual(self.claim_on_disk(612)["token"], result["claim"]["token"])
+
+
+class RenewerStartupTests(LeaseTestCase):
+    """A stop signal as the renewer starts never leaves a claim nothing renews."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def patch(self, name, replacement):
+        original = getattr(LEDGER, name)
+        setattr(LEDGER, name, replacement(original))
+        self.addCleanup(setattr, LEDGER, name, original)
+
+    def reaping(self, started):
+        def reap():
+            for renewer in started:
+                with contextlib.suppress(OSError):
+                    renewer.kill()
+                renewer.wait(timeout=SETTLE_SECONDS)
+
+        self.addCleanup(reap)
+
+    def in_process_claim(self, **settings):
+        return LEDGER.claim(
+            self.root,
+            REPO,
+            listing([merged(612)]),
+            owner_pid=self.session().pid,
+            **settings,
+        )
+
+    def test_a_stop_signal_before_the_renewer_is_ready_refuses_the_claim(self):
+        started = []
+
+        def signalling(original):
+            def spawn(*arguments):
+                renewer = original(*arguments)
+                started.append(renewer)
+                os.kill(renewer.pid, signal.SIGTERM)
+                return renewer
+
+            return spawn
+
+        self.patch("_spawn_renewer_process", signalling)
+        self.reaping(started)
+        before = self.ledger_bytes()
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            self.in_process_claim(renewal=LEASE_RENEWAL, expiry=LEASE_EXPIRY)
+        self.assertEqual(raised.exception.reason, "renewer-not-ready")
+        self.assertIsNotNone(started[0].poll())
+        self.assertEqual(self.ledger_bytes(), before)
+        leases = self.common() / LEDGER.RUNTIME_DIRECTORY / "leases"
+        self.assertEqual(list(leases.glob("*.json")) if leases.exists() else [], [])
+
+    def test_a_stop_signal_once_the_renewer_is_ready_is_handled_and_retired(self):
+        started = []
+
+        def signalling(original):
+            def start(*arguments):
+                renewer = original(*arguments)
+                started.append(renewer)
+                os.kill(renewer.pid, signal.SIGTERM)
+                return renewer
+
+            return start
+
+        self.patch("_start_renewer", signalling)
+        self.reaping(started)
+        result = self.in_process_claim(renewal=LEASE_RENEWAL, expiry=LEASE_EXPIRY)
+        self.assertEqual(result["status"], "claimed")
+        self.assertIsNone(started[0].poll())
+        token = result["claim"]["token"]
+        started[0].wait(timeout=SETTLE_SECONDS)
+        self.assertEqual(started[0].returncode, 0)
+        self.assertIsNone(self.heartbeat(token))
+        self.assertGreater(time.time(), instant(result["claim"]["deadline"]))
+
+
+class UnreapedProcessTests(LeaseTestCase):
+    """An exited process is gone whether or not its parent has reaped it."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def zombie(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            stdin=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: (process.poll() is None and process.kill(), process.wait()))
+        return process
+
+    def kill_unreaped(self, process):
+        os.kill(process.pid, signal.SIGKILL)
+        wait_until(
+            lambda: LEDGER.process_exited(process.pid),
+            "the killed process never read as exited",
+        )
+
+    def test_a_running_process_is_not_exited_and_an_unreaped_one_is(self):
+        process = self.zombie()
+        self.assertIs(LEDGER.process_exited(process.pid), False)
+        self.kill_unreaped(process)
+        self.assertTrue(process_running(process.pid))
+        self.assertIs(LEDGER.process_exited(process.pid), True)
+        self.assertEqual(
+            LEDGER.holder_standing({"host": socket.gethostname(), "pid": process.pid}),
+            "gone",
+        )
+
+    def test_an_unreaped_owner_stops_renewal_and_cannot_start_a_claim(self):
+        owner = self.zombie()
+        result = self.claim([merged(612)], pid=owner.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        lost_at = time.time()
+        self.kill_unreaped(owner)
+        time.sleep(3 * LEASE_RENEWAL)
+        record = self.heartbeat(token)
+        self.assertLessEqual(instant(record["deadline"]) - LEASE_EXPIRY, lost_at + LEASE_RENEWAL)
+        wait_until(lambda: not process_running(renewer), "the renewer outlived an unreaped owner")
+        self.assertIsNone(self.heartbeat(token))
+        completed = self.helper(
+            *self.claim_arguments(),
+            "--owner-pid",
+            str(owner.pid),
+            stdin=json.dumps(listing([merged(612)])),
+        )
+        self.refused(completed, "liveness-lost")
+
+    def test_an_unreaped_lock_holder_is_recovered(self):
+        holder = self.holder()
+        stale = LEDGER.observed_lock(self.root)
+        os.kill(holder.pid, signal.SIGKILL)
+        wait_until(lambda: LEDGER.process_exited(holder.pid), "the holder never read as exited")
+        started = time.monotonic()
+        with LEDGER.repository_lock(self.root, wait=SETTLE_SECONDS):
+            self.assertNotEqual(LEDGER.observed_lock(self.root), stale)
+        self.assertLess(time.monotonic() - started, SETTLE_SECONDS / 2)
+        self.assertIsNone(LEDGER.observed_lock(self.root))
 
 
 class SignalledRenewerTests(LeaseTestCase):
@@ -4383,7 +4540,7 @@ class ClaimRaceTests(LeaseTestCase):
             process.stdin.close()
         results = []
         for process in processes:
-            stdout, stderr = process.communicate(timeout=60)
+            stdout, stderr = finished(process)
             self.assertEqual(process.returncode, 0, stderr)
             results.append(self.claimed(stdout))
         return sessions, sorted(results, key=lambda result: result["status"])

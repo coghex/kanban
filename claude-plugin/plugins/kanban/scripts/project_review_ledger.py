@@ -161,6 +161,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import ctypes.util
 import fcntl
 import importlib.util
 import json
@@ -2952,7 +2954,59 @@ def holder_standing(holder: dict) -> str:
         return "unverifiable"
     except OSError:
         return "unverifiable"
+    # `kill(pid, 0)` also succeeds for a process that has exited and not been
+    # reaped, which is exactly what a session whose parent has not waited on
+    # it looks like. An exited process is gone whether or not it is reaped.
+    if process_exited(holder["pid"]) is True:
+        return "gone"
     return "live"
+
+
+# `SZOMB` in <sys/proc.h>, and where `p_stat` sits in the `kinfo_proc` that
+# `sysctl(KERN_PROC_PID)` returns: after the two-pointer `p_un` union, the
+# `p_vmspace` and `p_sigacts` pointers, and the `p_flag` int, on every 64-bit
+# Darwin.
+DARWIN_SZOMB = 5
+DARWIN_P_STAT_OFFSET = 36
+
+
+def process_exited(pid: int):
+    """True when `pid` has exited (a zombie, or gone), False when it is running.
+
+    None when this platform gives no way to tell, which leaves the answer
+    `kill(pid, 0)` already gave standing. Linux reads the state letter from
+    `/proc/<pid>/stat`; Darwin reads `p_stat` through `sysctl`. Neither runs a
+    command.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return None
+        fields = text[text.rfind(")") + 1:].split()
+        return None if not fields else fields[0] in ("Z", "X", "x")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+                return None
+            if size.value == 0:
+                return True
+            buffer = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+                return None
+        except (OSError, AttributeError, TypeError):
+            return None
+        if size.value == 0:
+            return True
+        if size.value <= DARWIN_P_STAT_OFFSET:
+            return None
+        return buffer.raw[DARWIN_P_STAT_OFFSET] == DARWIN_SZOMB
+    return None
 
 
 def clear_dead_lock(root, observed: str) -> bool:
@@ -3449,6 +3503,12 @@ def claim(
                 },
             )
             _require_signal_held(source)
+            if renewer.poll() is not None:
+                raise LeaseRefused(
+                    "renewer-exited",
+                    f"the renewer (pid {renewer.pid}) exited before the claim "
+                    "was recorded; nothing was claimed.",
+                )
             if time.time() >= deadline:
                 raise LeaseRefused(
                     "lease-lapsed",
@@ -3489,20 +3549,75 @@ def _require_signal_held(source: dict) -> None:
         )
 
 
+# How long `claim` waits for a started renewer to say it is ready. An
+# interpreter starts in well under a second; this bounds a stalled one.
+RENEWER_READY_SECONDS = 30.0
+RENEWER_READY_BYTE = b"R"
+
+
 def _start_renewer(root, repo: str, number: int, token: str, source: dict):
-    """The renewer, detached from everything but the signal it follows.
+    """The renewer, started and ready, or a refusal with nothing left running.
+
+    Ready means it has installed its stop-signal handlers and said so through
+    a pipe. Until then a SIGTERM, SIGHUP or SIGINT still has its default
+    effect and would end the renewer without its retiring anything, so a
+    renewer that dies before saying it is ready -- or never says so -- is
+    killed and refused here, and the claim is never published with a
+    renewer that cannot renew it.
+    """
+    ready_read, ready_write = os.pipe()
+    try:
+        renewer = _spawn_renewer_process(root, repo, number, token, source, ready_write)
+    finally:
+        os.close(ready_write)
+    try:
+        ready = _await_renewer_ready(ready_read)
+    finally:
+        os.close(ready_read)
+    if not ready:
+        _stop_started_renewer(renewer)
+        raise LeaseRefused(
+            "renewer-not-ready",
+            f"the renewer (pid {renewer.pid}) exited or stalled before it was "
+            "ready to handle a stop; nothing was claimed.",
+        )
+    return renewer
+
+
+def _await_renewer_ready(descriptor: int) -> bool:
+    end = time.monotonic() + RENEWER_READY_SECONDS
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            ready, _, _ = wait_readable([descriptor], [], [], remaining)
+            if not ready:
+                return False
+            return os.read(descriptor, 1) == RENEWER_READY_BYTE
+        except InterruptedError:
+            continue
+        except OSError:
+            return False
+
+
+def _spawn_renewer_process(
+    root, repo: str, number: int, token: str, source: dict, ready_fd: int
+):
+    """The renewer process, detached from everything but what it follows.
 
     A session of its own, so the terminal's signals to this invocation's
     process group do not reach it; the null device for all three standard
     streams, so a caller capturing this invocation's output sees it end when
-    this invocation does; and no inherited descriptor but the liveness one.
+    this invocation does; and no inherited descriptor but the liveness one
+    and the pipe it says it is ready through.
     """
     if source["kind"] == "descriptor":
         signal_arguments = ["--liveness-fd", str(source["fd"])]
-        inherited = (source["fd"],)
+        inherited = (source["fd"], ready_fd)
     else:
         signal_arguments = ["--owner-pid", str(source["pid"])]
-        inherited = ()
+        inherited = (ready_fd,)
     try:
         return subprocess.Popen(
             [
@@ -3517,6 +3632,8 @@ def _start_renewer(root, repo: str, number: int, token: str, source: dict):
                 str(number),
                 "--token",
                 token,
+                "--ready-fd",
+                str(ready_fd),
                 *signal_arguments,
             ],
             stdin=subprocess.DEVNULL,
@@ -3569,7 +3686,9 @@ def stop_requests() -> int:
     return _stop_requests
 
 
-def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
+def run_renewer(
+    root, repo: str, number: int, token: str, source: dict, ready_fd=None
+) -> str:
     """Renew `token`'s claim while its signal is held, then retire its record.
 
     Returns why it stopped. Renewal stops within one renewal interval of the
@@ -3599,6 +3718,13 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     written again.
     """
     install_stop_handlers()
+    if ready_fd is not None:
+        # Only now, with the handlers in place, may the claim treat a stop
+        # signal to this process as one it will retire after.
+        with contextlib.suppress(OSError):
+            os.write(ready_fd, RENEWER_READY_BYTE)
+        with contextlib.suppress(OSError):
+            os.close(ready_fd)
     identity = {"host": socket.gethostname(), "pid": os.getpid()}
 
     def signal_held():
@@ -3881,6 +4007,7 @@ def build_parser() -> argparse.ArgumentParser:
     renewer = subparsers.add_parser("renewer", help=argparse.SUPPRESS)
     _add_claim_identity_arguments(renewer)
     _add_liveness_arguments(renewer)
+    renewer.add_argument("--ready-fd", type=int)
     return parser
 
 
@@ -3971,7 +4098,7 @@ def main(argv=None) -> int:
             if args.liveness_fd is not None
             else {"kind": "process", "pid": args.owner_pid}
         )
-        run_renewer(args.root, args.repo, args.pr, args.token, source)
+        run_renewer(args.root, args.repo, args.pr, args.token, source, args.ready_fd)
         return 0
 
     confirmations = {}
