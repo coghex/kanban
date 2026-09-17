@@ -3555,14 +3555,15 @@ class LeaseTestCase(SelectionTestCase):
         return result
 
     def stop_renewer(self, pid):
+        """Kill a renewer outright, as a crash would.
+
+        SIGKILL rather than SIGTERM, because a gracefully stopped renewer
+        waits out its lease before retiring its record, and a cleanup that
+        waited for that would wait out every test's expiry.
+        """
         with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-        try:
-            wait_until(lambda: not process_running(pid), f"renewer {pid} did not stop")
-        except AssertionError:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
-            raise
+            os.kill(pid, signal.SIGKILL)
+        wait_until(lambda: not process_running(pid), f"renewer {pid} did not stop")
 
     def lease_command(self, command, number, token, root=None):
         return self.helper(
@@ -3877,6 +3878,29 @@ class LockContentionTests(LeaseTestCase):
         self.assertIsNone(session.poll())
 
 
+class SignalledRenewerTests(LeaseTestCase):
+    def test_a_renewer_stopped_by_a_signal_stops_renewing_and_retires_its_record(self):
+        self.establish({})
+        session = self.session()
+        result = self.claim([merged(612)], pid=session.pid)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        signalled_at = time.time()
+        os.kill(renewer, signal.SIGTERM)
+        time.sleep(3 * LEASE_RENEWAL)
+        record = self.heartbeat(token)
+        self.assertIsNotNone(record)
+        self.assertLessEqual(
+            instant(record["deadline"]) - LEASE_EXPIRY, signalled_at + LEASE_RENEWAL
+        )
+        wait_until(lambda: not process_running(renewer), "the signalled renewer never exited")
+        self.assertGreaterEqual(time.time(), instant(record["deadline"]))
+        self.assertIsNone(self.heartbeat(token))
+        self.assertEqual(self.claim_on_disk(612)["token"], token)
+        self.assertIsNone(session.poll())
+
+
 class OrphanedHeartbeatTests(LeaseTestCase):
     def test_a_renewer_whose_claim_was_never_published_removes_its_record(self):
         # The state a claim leaves when it dies between writing the heartbeat
@@ -4127,7 +4151,11 @@ class FencingTests(LeaseTestCase):
         self.assertTrue(replacement_record.exists())
 
     def stopped_claim(self):
-        """A live claim whose renewer is gone, so the heartbeat holds still."""
+        """A live claim whose renewer crashed, so the heartbeat holds still.
+
+        Killed outright: a crash is the one stop a renewer cannot clean up
+        after, and it is the state these tests need to examine.
+        """
         session = self.session()
         result = self.claim([merged(612)], pid=session.pid, renewal=0.25, expiry=30)
         self.stop_renewer(result["claim"]["renewer"]["pid"])

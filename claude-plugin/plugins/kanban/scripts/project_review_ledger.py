@@ -3472,13 +3472,17 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     longer than one look.
 
     What a renewer created is its heartbeat record, and every stop but an
-    unreadable record or an outside signal ends with that record retired
+    unreadable record ends with that record retired
     through `retire_heartbeat`, which removes it only once it describes
     nothing: the token no longer owns the row, or the lease has expired. So a
     lost signal stops renewal at once and the record is removed when the
     last renewal's deadline passes -- the lease lapses after its expiry, as
-    D-17 says, rather than the moment cleanup runs. A renewer removes no
-    ledger claim and no lock it does not hold.
+    D-17 says, rather than the moment cleanup runs. SIGTERM, SIGHUP and
+    SIGINT are a stop like a lost signal: renewal ends at once and the record
+    is retired the same way. A second one while it waits abandons the wait
+    and leaves the record for a release or a takeover to remove, as a
+    renewer that was killed outright does. A renewer removes no ledger claim
+    and no lock it does not hold.
 
     A heartbeat record that disappears is not taken as a release on its own
     say-so: it brings the next renewal forward, and that renewal's fencing
@@ -3493,6 +3497,7 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
     def signal_held():
         return not _signal_lost(source, 0)
 
+    poll = RENEWER_POLL_SECONDS
     try:
         try:
             renewal = _renewer_settings(root, repo, number, token, source)
@@ -3535,7 +3540,10 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
                 return _retired(root, repo, number, token, poll, reason)
             due = time.monotonic() + renewal
     except _Stopped:
-        return "signalled"
+        try:
+            return _retired(root, repo, number, token, poll, "signalled")
+        except (_Stopped, LedgerError):
+            return "signalled"
     except LedgerError:
         return "refused"
 
