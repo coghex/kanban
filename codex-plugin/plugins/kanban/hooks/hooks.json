@@ -1,0 +1,60 @@
+{
+  "description": "Project-review session liveness (issue #687): lifecycle events that keep or end a registered review attempt's keeper. No effect on a session with no registered attempt.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py\" hook --runtime codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py\" hook --runtime codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py\" hook --runtime codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py\" hook --runtime codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py\" hook --runtime codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

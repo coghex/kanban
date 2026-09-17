@@ -433,6 +433,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
 ]
@@ -476,6 +477,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
+    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
 ]
 
@@ -694,12 +696,17 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
 # does not have. The ledger's is `git` since issue #682, which put the lease's
 # lock reference and heartbeat records in the Git common directory; its one
 # other spawn, the renewer, runs through `sys.executable` and is pinned by
-# LEDGER_DYNAMIC_EXECUTABLES below.
+# LEDGER_DYNAMIC_EXECUTABLES below. Issue #687's session liveness adapter reads
+# the installed runtime's version through `claude` and `codex`; its keeper runs
+# through `sys.executable` and its wrapper runs the caller's own command, both
+# pinned by the LIVENESS_* sets below.
 PROJECT_REVIEW_HELPER_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py": set(),
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": {"git"},
+    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py": {"claude", "codex"},
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py": set(),
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": {"git"},
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py": {"claude", "codex"},
 }
 
 # Both shipped copies of the ledger helper, and the one non-literal spawn
@@ -711,6 +718,21 @@ LEDGER_SURFACE_FILES = (
 )
 LEDGER_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
 LEDGER_DECLARING_ROWS = ("git-cli", "python3-cli")
+
+# Both shipped copies of issue #687's liveness adapter. Its keeper is the
+# adapter's own file run through `sys.executable`, pinned like the ledger's
+# renewer. Its wrapper runs the command its caller names, which is not an
+# executable the adapter chooses and owes no row; that spawn's spelling is
+# pinned so a second non-literal spawn cannot hide behind it. The rows it
+# owes: the two runtimes whose versions it reads, `python3` for the keeper,
+# and Codex's home, whose `config.toml` its refusal reads for hook trust.
+LIVENESS_SURFACE_FILES = (
+    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
+)
+LIVENESS_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
+LIVENESS_CALLER_COMMAND_SPELLINGS = {"list(command)"}
+LIVENESS_DECLARING_ROWS = ("claude-cli", "codex-cli", "python3-cli", "codex-plugin-cache-root")
 
 # Issue #511's drainer control surface, pinned the same way and for the
 # inverted reason: this is the one vendored workflow that makes no GitHub call
@@ -4730,6 +4752,61 @@ class LedgerDynamicExecutableTests(unittest.TestCase):
                         f"{row_id} must declare {relative_path}; the ledger "
                         "helper spawns what that row names",
                     )
+
+
+class LivenessDynamicExecutableTests(unittest.TestCase):
+    """Issue #687. The liveness adapter's keeper and wrapper spawns reach no
+    literal extractor, so these pin them the way LedgerDynamicExecutableTests
+    pins the renewer: the dynamic spellings are exactly the pinned ones, the
+    keeper's resolves to a declared executable, the caller's command is the
+    one spawn whose argument is not a list at all, and every row the adapter
+    owes names both shipped copies."""
+
+    def setUp(self):
+        self.manifest = parse_manifest()
+
+    @staticmethod
+    def non_list_spawn_spellings(content):
+        spellings = set()
+        for node in ast.walk(ast.parse(content)):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            function = node.func
+            name = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", None)
+            if name not in {"Popen", "run", "check_call", "check_output", "call"}:
+                continue
+            if not isinstance(node.args[0], (ast.List, ast.Tuple)):
+                spellings.add(ast.unparse(node.args[0]))
+        return spellings
+
+    def test_the_liveness_spawns_are_exactly_the_pinned_spellings(self):
+        for relative_path in LIVENESS_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                spellings = CensusDynamicExecutableTests.dynamic_spawn_spellings(content)
+                self.assertTrue(spellings, f"{relative_path}: the keeper launch is invisible")
+                self.assertEqual(spellings, set(LIVENESS_DYNAMIC_EXECUTABLES))
+                self.assertEqual(
+                    self.non_list_spawn_spellings(content), LIVENESS_CALLER_COMMAND_SPELLINGS
+                )
+                self.assertEqual(
+                    discovered_python_commands(content),
+                    PROJECT_REVIEW_HELPER_SURFACE_FILES[relative_path],
+                )
+
+    def test_the_keeper_spawn_resolves_to_a_declared_executable(self):
+        executable_rows = {
+            row["token"]: row for row in self.manifest if row["kind"] == "executable"
+        }
+        for command in LIVENESS_DYNAMIC_EXECUTABLES.values():
+            self.assertIn(command, executable_rows)
+
+    def test_every_row_the_adapter_owes_names_both_shipped_copies(self):
+        rows = {row["id"]: row for row in self.manifest}
+        for row_id in LIVENESS_DECLARING_ROWS:
+            for relative_path in LIVENESS_SURFACE_FILES:
+                with self.subTest(row=row_id, surface=relative_path):
+                    self.assertIn(relative_path, rows[row_id]["files"])
 
 
 def strip_docstrings(tree):

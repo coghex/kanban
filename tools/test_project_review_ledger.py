@@ -5795,7 +5795,15 @@ class BundledLedgerHelperTests(unittest.TestCase):
         # than over the two rendered assets alone, because a manifest, a
         # skill, or a sibling script naming it would make it invokable just as
         # surely as a command file would.
+        #
+        # The one other name allowed is issue #687's session liveness adapter,
+        # shipped beside each copy. It loads its sibling for the ledger's own
+        # process-standing test and lease settings, and it is a prerequisite
+        # of the same switch-over: no installed workflow registers an attempt
+        # until LEDGER-6 either, so naming the ledger there makes nothing
+        # invokable that was not already.
         shipped = {Path(path).name for path in LEDGER_HELPERS.values()}
+        shipped.add("project_review_liveness.py")
         naming = []
         for bundle in BUNDLE_ROOTS:
             for path in sorted((REPO_ROOT / bundle).rglob("*")):

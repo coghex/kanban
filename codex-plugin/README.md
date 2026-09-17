@@ -227,6 +227,33 @@ is still applied to the document, and the repository lands it through the
 pull-request lane it already has. The drainer's separate
 `workflow.coordination_paths` declaration grants no publication lane.
 
+The bundle also ships lifecycle hooks, in `hooks/hooks.json`, for the
+project-review session liveness adapter (issue #687,
+[docs/agent-workflow-contract.md §2.13](../docs/agent-workflow-contract.md#213-project-review-session-liveness-lifecycle-hooks)).
+codex-cli 0.154.0 loads a plugin's `hooks/hooks.json` with the plugin; the
+hooks run `skills/project-review/scripts/project_review_liveness.py hook
+--runtime codex` through `$PLUGIN_ROOT` on `PreToolUse`, `PostToolUse`, `Stop`,
+`Interrupt`, and `SessionEnd`. That adapter supplies the keeper process whose
+lifetime the project-review lease follows: it stays alive while the registered
+review invocation shows progress, and ends at once on turn completion,
+interruption, or session end. A session that registers no attempt is untouched:
+the hook exits 0, prints nothing, and writes nothing. Nothing installed
+registers an attempt until #684 moves `$project-review` onto the ledger.
+
+Codex runs a plugin hook only when two things hold. `[features] hooks = true`
+must be on (`codex features list` shows the effective state), and the hook
+definitions must be trusted — through `/hooks`, or the "Hooks need review"
+prompt at the next launch after installing or upgrading the plugin. Trust is
+recorded in `$CODEX_HOME/config.toml` under
+`[hooks.state."kanban@<marketplace>:hooks/hooks.json:<event>:…"]` against a hash
+of each hook's definition. An upgrade that leaves `hooks.json` unchanged
+therefore keeps its trust, and one that changes it must be trusted again.
+Registration refuses before any claim when no hook fires, naming the feature
+flag's state and the recorded trust. codex-cli 0.154.0 is the minimum verified
+version, and
+[tools/project-review-liveness-evidence.md](../tools/project-review-liveness-evidence.md)
+records the runtime evidence.
+
 `$issue-review` — and `$autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, probing the same two discovery
 record locations in the same order on every platform —
@@ -309,10 +336,10 @@ issue-rereview skills name, the `$CODEX_HOME` cache root `$issue-rereview`
 searches for its vendored helper,
 the `git`/`awk`/`gh` commands the document skills resolve their
 docs worktree and tracker state with, and the external-command surface of all
-nine bundled Python assets — the review coordinator and its model-roster
+eleven bundled Python assets — the review coordinator and its model-roster
 reader, `$solve`'s trusted-comment helper, the three document-workflow
-modules, `$project-review`'s sweep cursor, and the janitor census with the
-configuration module beside it.
+modules, `$project-review`'s sweep cursor, ledger helper, and session liveness
+adapter, and the janitor census with the configuration module beside it.
 
 `tools/test_repair_workflow_contract.py` pins `$repair`'s own behavioral
 contract — the ordered diagnosis branches, worktree selection and safe push,

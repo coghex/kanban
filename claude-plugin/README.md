@@ -257,6 +257,24 @@ is still applied to the document, and the repository lands it through the
 pull-request lane it already has. The drainer's separate
 `workflow.coordination_paths` declaration grants no publication lane.
 
+The bundle also ships lifecycle hooks, in `hooks/hooks.json`, for the
+project-review session liveness adapter (issue #687,
+[docs/agent-workflow-contract.md §2.13](../docs/agent-workflow-contract.md#213-project-review-session-liveness-lifecycle-hooks)).
+Claude Code loads a plugin's hooks with the plugin itself; they run
+`scripts/project_review_liveness.py hook --runtime claude` through
+`${CLAUDE_PLUGIN_ROOT}` on `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+`Stop`, `StopFailure`, and `SessionEnd`. That adapter supplies the keeper
+process whose lifetime the project-review lease follows: it stays alive while
+the registered review invocation shows progress, ends at once when the turn or
+session ends, and ends after a silence window when a cancellation goes
+unreported — Claude Code reports none. A session that registers no attempt is
+untouched: the hook exits 0, prints nothing, and writes nothing. Nothing
+installed registers an attempt until #684 moves `/project-review` onto the
+ledger. The only setup is the plugin being enabled with `disableAllHooks`
+unset; Claude Code 2.1.274 is the minimum verified version, and
+[tools/project-review-liveness-evidence.md](../tools/project-review-liveness-evidence.md)
+records the runtime evidence.
+
 `/issue-review` — and `/autoissue`'s immediate review handoff — resolve the
 same canonical backend the same portable way, probing the same two discovery
 record locations in the same order on every platform —
@@ -367,10 +385,10 @@ the issue-vs-pull-request number guard went eight days Codex-side only.
 surface (all twenty-five commands under
 `claude-plugin/plugins/kanban/commands/`)
 and
-all eight bundled Python assets — the review coordinator and its
+all ten bundled Python assets — the review coordinator and its
 model-roster reader, `/solve`'s trusted-comment helper, the three
-document-workflow modules, `/project-review`'s sweep cursor, and the janitor
-census — against the same manifest in
+document-workflow modules, `/project-review`'s sweep cursor, ledger helper, and
+session liveness adapter, and the janitor census — against the same manifest in
 [docs/agent-workflow-contract.md §4](../docs/agent-workflow-contract.md#4-dependency-manifest)
 that the Codex plugin and Kanban's Haskell source are reconciled against,
 including the user-scoped backend install path the drafting, issue-review, and
