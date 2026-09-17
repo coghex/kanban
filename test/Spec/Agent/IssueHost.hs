@@ -10,10 +10,10 @@ module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Exception (IOException, bracket, try)
-import Control.Monad (forM_, join, void, when)
+import Control.Monad (forM_, join, unless, void, when)
 import Data.IORef (atomicModifyIORef', newIORef)
-import Data.List (find, findIndex, isInfixOf, nub)
-import Data.Maybe (isJust)
+import Data.List (find, findIndex, intercalate, isInfixOf, nub)
+import Data.Maybe (catMaybes, isJust)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, tryReadMVar, tryTakeMVar)
 import Data.Aeson (FromJSON, ToJSON, Value (..), decode, eitherDecode, eitherDecodeFileStrict', encode, toJSON)
 import qualified Data.Map.Strict as Map
@@ -449,6 +449,14 @@ lifecycleSpec = describe "one running host" $ do
       filter isBeginCall calls `shouldBe` []
       untouched <- decodeChildState child
       fmap (.workerStateStatus) untouched `shouldBe` Just WorkerStarting
+      -- The assertion above is the whole point of the example, and it holds
+      -- precisely because nothing ends this child: its named host is a record,
+      -- not a process, so no one is listening for the termination the shared
+      -- teardown appends. Settle the synthetic fixture here, after the
+      -- ownership assertion has been made, so teardown's checked postcondition
+      -- is met by the fixture rather than by weakening what it proves.
+      forM_ untouched $ \state ->
+        writeChildState child state {workerStateStatus = WorkerTerminal SolveCompleted}
 
   -- Round 2's fifth blocker. A shared-process backend writes every thread's
   -- traffic to one client-wide transcript, so a child had no raw evidence of
@@ -728,6 +736,70 @@ lifecycleSpec = describe "one running host" $ do
       -- And re-applies nothing: the provider never sees this message.
       calls <- providerCalls host
       filter isSendCall calls `shouldBe` []
+
+  -- Issue #702. The teardown used to discard whether its own children ended,
+  -- so an unsettled child produced a failure blaming the host for not
+  -- exiting -- a sentence that is false in exactly the case that printed it.
+  -- These four pin what it reports instead. They call endEveryChildWithin
+  -- with a one-attempt bound so the failure path is observed in milliseconds;
+  -- ordinary teardown still uses defaultPollAttempts.
+  describe "the teardown's report for children that did not settle" $ do
+    let seedChild identifier status = do
+          descriptor <-
+            descriptorForSpec
+              ( specFor
+                  (WorkerId identifier)
+                  (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-that-died") IssueOriginClaude))
+              )
+          createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+          LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+          now <- getCurrentTime
+          forM_ status $ \recorded ->
+            writeChildState descriptor (runningChildState descriptor now) {workerStateStatus = recorded}
+          pure descriptor
+
+    it "names the child and the state it was last seen in" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          _ <- seedChild "unsettled-action" (Just WorkerRunning)
+          unsettled <- endEveryChildWithin 1 testRepository
+          map (.unsettledChildId) unsettled `shouldBe` [WorkerId "unsettled-action"]
+          map (.unsettledChildObservation) unsettled `shouldBe` [ChildLastSeen WorkerRunning]
+          let reported = describeUnsettled unsettled
+          ("unsettled-action" `isInfixOf` reported) `shouldBe` True
+          ("WorkerRunning" `isInfixOf` reported) `shouldBe` True
+
+    it "does not blame the host it never waited on" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          _ <- seedChild "unsettled-action" (Just WorkerStarting)
+          unsettled <- endEveryChildWithin 1 testRepository
+          -- The old message, which this path must never reach: the host is
+          -- not waited on when a child did not settle, so reporting it as
+          -- having failed to exit would be a claim nothing here established.
+          ("the host never exited" `isInfixOf` describeUnsettled unsettled) `shouldBe` False
+
+    it "reads absent or undecodable state as unavailable, never as terminal" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          -- No state file at all, then one that will not parse. Both used to
+          -- satisfy the settle probe through `maybe True`, which is how a
+          -- child nobody could read passed for a child that ended.
+          absent <- seedChild "absent-state-action" Nothing
+          LazyByteString.writeFile absent.workerDescriptorStatePath "{ not json"
+          unreadable <- seedChild "undecodable-state-action" Nothing
+          LazyByteString.writeFile unreadable.workerDescriptorStatePath "{ not json"
+          unsettled <- endEveryChildWithin 1 testRepository
+          map (.unsettledChildObservation) unsettled
+            `shouldBe` [ChildStateUnavailable, ChildStateUnavailable]
+          ("state absent or undecodable" `isInfixOf` describeUnsettled unsettled) `shouldBe` True
+
+    it "reports nothing when every child recorded a terminal state" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          _ <- seedChild "settled-action" (Just (WorkerTerminal SolveCompleted))
+          unsettled <- endEveryChildWithin 1 testRepository
+          unsettled `shouldBe` []
 
   -- Round 20's first blocker. Closing the journal and recording the terminal
   -- state are two writes, and a host dying between them leaves whichever
@@ -2346,7 +2418,13 @@ withRunningHostUsing overrideProvider body =
       -- running would wait forever. Ending them is done the way anything ends
       -- one — a durable termination command — rather than by reaching into
       -- the host, so the teardown exercises the same path the tests do.
-      endEveryChild repository
+      unsettled <- endEveryChild repository
+      -- Checked, not discarded. A child that never reached a terminal state
+      -- means the host still holds one and cannot exit, so waiting on it below
+      -- would time out and report the host for a condition the children
+      -- caused. Failing here keeps the two apart, and keeps the message below
+      -- true whenever it is the one that prints.
+      unless (null unsettled) (fail (describeUnsettled unsettled))
       -- Bounded, because a host that will not exit is a defect this suite has
       -- to report rather than hang on: an unbounded wait here turns any
       -- lifecycle bug into a suite that never finishes, which is the least
@@ -2426,8 +2504,42 @@ publishTerminalHost host identifier = publishHostRecord host identifier (WorkerT
 publishRunningHost :: HostUnderTest -> WorkerId -> IO ()
 publishRunningHost host identifier = publishHostRecord host identifier WorkerRunning
 
-endEveryChild :: Repository -> IO ()
-endEveryChild repository = do
+-- | What one poll saw of a child's recorded state.
+--
+-- Three cases rather than two, because absent and undecodable state is not
+-- evidence that a child ended: 'decodeChildState' returns 'Nothing' both for a
+-- file that is not there yet and for one that will not parse, and reading
+-- either as terminal is how an unsettled child used to pass for a settled one.
+data ChildObservation
+  = ChildSettled
+  | ChildLastSeen WorkerStatus
+  | ChildStateUnavailable
+  deriving stock (Eq, Show)
+
+-- | A child the teardown asked to terminate that never recorded a terminal
+-- state, with the last thing observed about it.
+data UnsettledChild = UnsettledChild
+  { unsettledChildId :: WorkerId,
+    unsettledChildObservation :: ChildObservation
+  }
+  deriving stock (Eq, Show)
+
+endEveryChild :: Repository -> IO [UnsettledChild]
+endEveryChild = endEveryChildWithin defaultPollAttempts
+
+-- | Terminate every discovered issue action and report the ones that never
+-- reached a terminal state.
+--
+-- The result is returned rather than discarded. An unmet postcondition here
+-- is not a claim about the host: 'issueActionsIn' selects every issue action
+-- in the repository, while production's own @childCandidate@
+-- (src\/Kanban\/Worker\/IssueHost.hs) excludes children another live host owns,
+-- so a child this reports may never have been the running host's to end. What
+-- it establishes is that the teardown's own precondition did not hold, which
+-- is exactly what the caller must not go on to describe as the host failing
+-- to exit.
+endEveryChildWithin :: Int -> Repository -> IO [UnsettledChild]
+endEveryChildWithin attempts repository = do
   history <- discoverWorkerHistory repository
   let children = issueActionsIn history
   sequence_
@@ -2436,11 +2548,51 @@ endEveryChild repository = do
         void (appendReviewCommand descriptor termination)
       | (ordinal, descriptor) <- zip [0 ..] children
     ]
-  mapM_ (\descriptor -> void (awaitMaybe (settledOrGone descriptor))) children
+  catMaybes <$> mapM settleOrReport children
   where
-    settledOrGone descriptor = do
+    settleOrReport descriptor = do
+      settled <- awaitMaybeWithin attempts (settledOnly descriptor)
+      case settled of
+        Just () -> pure Nothing
+        Nothing -> do
+          -- The bound is spent; read once more so the report names what the
+          -- child was last seen as rather than only that it was not terminal.
+          final <- observeChild descriptor
+          pure
+            ( Just
+                UnsettledChild
+                  { unsettledChildId = descriptor.workerDescriptorSpec.workerId,
+                    unsettledChildObservation = final
+                  }
+            )
+    settledOnly descriptor = do
+      observed <- observeChild descriptor
+      pure (if observed == ChildSettled then Just () else Nothing)
+    observeChild descriptor = do
       recorded <- decodeChildState descriptor
-      pure (if maybe True (terminalState . (.workerStateStatus)) recorded then Just () else Nothing)
+      pure $ case recorded of
+        Nothing -> ChildStateUnavailable
+        Just state
+          | terminalState state.workerStateStatus -> ChildSettled
+          | otherwise -> ChildLastSeen state.workerStateStatus
+
+-- | The teardown's report for children that never settled.
+describeUnsettled :: [UnsettledChild] -> String
+describeUnsettled children =
+  "the teardown terminated every discovered issue action, but "
+    <> show (length children)
+    <> " never recorded a terminal state: "
+    <> intercalate ", " (map describeOne children)
+    <> ". The host was not waited on, so this says nothing about whether it "
+    <> "would have exited."
+  where
+    describeOne child =
+      let WorkerId identifier = child.unsettledChildId
+       in Text.unpack identifier <> " (" <> describeObservation child.unsettledChildObservation <> ")"
+    describeObservation = \case
+      ChildSettled -> "terminal"
+      ChildLastSeen status -> "last seen " <> show status
+      ChildStateUnavailable -> "state absent or undecodable"
 
 -- | A process group the fixture hands to the host, which the host may then
 -- signal without consequence.
@@ -2652,7 +2804,21 @@ awaitBriefly probe = go (40 :: Int)
           | otherwise -> threadDelay 25000 >> go (remaining - 1)
 
 awaitMaybe :: IO (Maybe result) -> IO (Maybe result)
-awaitMaybe probe = go (1200 :: Int)
+awaitMaybe = awaitMaybeWithin defaultPollAttempts
+
+-- | The attempt count 'awaitMaybe' uses, named so a test can state the
+-- ordinary bound rather than restate the literal beside a shortened one.
+defaultPollAttempts :: Int
+defaultPollAttempts = 1200
+
+-- | 'awaitMaybe' with an explicit attempt count.
+--
+-- The parameter exists for one reason: a test that asserts what the teardown
+-- reports when a child never settles would otherwise pay the full bound to
+-- observe it, thirty seconds per example. Ordinary teardown keeps
+-- 'defaultPollAttempts', so the suite's real waits are unchanged.
+awaitMaybeWithin :: Int -> IO (Maybe result) -> IO (Maybe result)
+awaitMaybeWithin attempts probe = go attempts
   where
     go remaining = do
       found <- probe
