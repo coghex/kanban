@@ -1,8 +1,10 @@
 # Project-review session liveness: runtime evidence
 
-Issue #687. This document holds the runtime evidence behind the session liveness
-adapter (`project_review_liveness.py`, shipped in both bundles) and its
-lifecycle hooks (`hooks/hooks.json` in each bundle). The automated suite,
+Issues #687 and #684. This document holds the runtime evidence behind the
+session liveness adapter (`project_review_liveness.py`, shipped in both bundles)
+and its lifecycle hooks (`hooks/hooks.json` in each bundle), and — in "The
+installed workflow's entry path" below — behind the installed `project-review`
+workflow that became its caller. The automated suite,
 `tools/test_project_review_liveness.py`, pins the adapter's contract with
 deterministic hook payloads. This document shows that the installed runtimes
 actually deliver those payloads, with the lifetimes the contract assumes. Design
@@ -489,6 +491,113 @@ completion scenario was re-run on both installed runtimes with the same setup.
 Registration still succeeded, with Codex validating its real recorded trust
 hashes for all five hooks: `Stop` ended the attempt at 32.35 s (Codex) and
 33.81 s (Claude), and both keepers exited within half a second.
+
+## The installed workflow's entry path (issue #684)
+
+Everything above was collected while nothing installed registered an attempt:
+the adapter shipped in both bundles and its tests were its only caller. Issue
+#684 made the installed `project-review` workflow that caller. Its PR mode
+takes a nonce, registers this adapter in a tool call of its own, and hands the
+keeper's pid to `project_review_ledger.py claim --owner-pid` before it claims a
+pull request; nothing else in either bundle registers anything.
+
+Two things about the registration changed with that slice, and both are visible
+in the command text rather than in the adapter:
+
+- **`--root` is the docs worktree, not the primary checkout.** The adapter reads
+  the renewal interval a claim would record out of the ledger under that root,
+  to refuse a silence window shorter than it. Pointed at the primary checkout it
+  would read a repository with no ledger and validate the window against the
+  60-second default instead of this repository's own. Both are worktrees of one
+  repository, so the attempt's records land in the same Git common directory
+  either way.
+- **The register and `run` commands spell the helper's path out.** The hook fires
+  before the command runs and reads the text the tool call was given, so it sees
+  `$LIVENESS` unexpanded. It recognizes a registration by
+  `project_review_liveness.py` followed by `register`; a shell variable in that
+  position leaves it nothing to recognize, and the registration then refuses with
+  `hooks-not-observed`.
+
+### Setup
+
+The same as above, with the reviewed repository given a `docs-wip` worktree
+holding an empty ledger and this repository's lease defaults, and the Claude
+bundle's version bumped to 1.55.0 and the Codex bundle's to 1.54.0 by that
+slice. `hooks/hooks.json` is unchanged in both, so the Codex trust hashes above
+still apply and were reused unmodified.
+
+| Item | Value |
+|---|---|
+| Date | 2026-09-17 |
+| Host | macOS 26.6 (Darwin 25.6.0), arm64 |
+| Python | 3.14.6 |
+| Claude Code | 2.1.274, bundle loaded with `--plugin-dir` |
+| codex-cli | 0.154.0, bundle installed from this branch into an isolated `CODEX_HOME` |
+| Claude model | Haiku 4.5 |
+| Codex model | `gpt-5.6-luna` |
+| Intervals | silence window 20 s, lease renewal 2 s, lease expiry 10 s |
+
+Each run is one non-interactive invocation, so every step below belongs to one
+`prompt_id` or `turn_id`:
+
+```console
+claude -p "<the three steps>" --plugin-dir <bundle> --dangerously-skip-permissions --model haiku
+CODEX_HOME=<scratch> codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-luna "<the three steps>"
+```
+
+The prompt is the workflow's own steps 2 and 3 and nothing else: run
+`project_review_liveness.py nonce`; run `project_review_liveness.py register
+--runtime <runtime> --root <docs worktree> --repo coghex/kanban --nonce <the
+digits, substituted literally> --silence 20`; run `project_review_ledger.py
+claim --root <docs worktree> --repo coghex/kanban --owner-pid <the keeper pid>`
+with a one-page merged-pull-request listing on standard input. No run reviewed a
+pull request, reached GitHub, or published anything: the listing is a file the
+driver wrote, and the repository is a scratch one.
+
+A watcher polled the attempt records and the lease heartbeat throughout and
+wrote the timeline. Times are seconds since the driver started.
+
+### Results
+
+| Runtime | Scenario | Registered | Claimed | Attempt ended | Lease retired |
+|---|---|---|---|---|---|
+| Claude Code 2.1.274 | completion | 11.57 | 14.86 | 17.90, `Stop` | 26.76 |
+| Claude Code 2.1.274 | cancellation between tool calls | 10.06 | 13.11 | 33.14, `silence` | 41.51 |
+| codex-cli 0.154.0 | completion | 14.08 | 21.17 | 23.71, `Stop` | 33.09 |
+| codex-cli 0.154.0 | cancellation between tool calls | 13.10 | 19.44 | 40.21, `silence` | 49.82 |
+
+- **Both runtimes substituted the nonce literally**, unprompted, and the
+  handshake was found: Claude's session reported `Generated nonce
+  11e959e640b6e30d933432130461f551` and then registered with those digits;
+  Codex's transcript shows the same line with `NONCE` replaced by
+  `61347199c673442776c472ff434dcabc`. Every registration bound the attempt to
+  its own session and invocation id, and every claim that followed named the
+  keeper that registration had reported.
+- **The cancellation runs kill the whole session process group** once the claim
+  is on disk — no `Stop`, no `Interrupt`, no `SessionEnd`, and no descriptor
+  closed by hand. Nothing but the keeper's own silence window ends the attempt,
+  and the observed ends are 20.03 s (Claude) and 20.77 s (Codex) after the kill:
+  the silence window plus at most one keeper poll. The lease then lapsed 8.4 s
+  and 9.6 s later, which is the renewer noticing its owner gone and retiring the
+  heartbeat within one expiry. Both claims were left on an unreviewed row, so
+  the next invocation takes them over rather than finding a completion that
+  never happened.
+- **A cancellation Codex *does* report is faster**, and the retained runs above
+  measure it: `Interrupt` ended the keeper within a second of Esc. The kill here
+  is the worse case for both runtimes deliberately.
+
+### What is retained rather than re-run
+
+The scenarios above this section — Esc during a foreground tool call, Esc
+between tool calls, a wrapped command holding the exemption open, a backgrounded
+command getting none, and `/exit` — were collected on the same two runtime
+versions against the same `hooks.json`, and they are the evidence for the
+keeper's rules themselves. #684 changed nothing the keeper observes: it changed
+which root the registration reads its lease settings from and how the command
+text spells the helper, both of them before a keeper exists. The runs in this
+section re-establish the two ends of the range on the entry path as installed —
+a reported terminal event, and a cancellation nothing reports — and the retained
+runs remain the evidence for everything between them.
 
 ## Limitations
 

@@ -261,7 +261,9 @@ enabled = false
 # below are exactly the `coordination` rows of docs/agent-workflow-contract.md
 # section 7 -- the findings, code-health, and design documents whose content no
 # runtime, installer, or test reads, plus the docs/coordination/ directory of
-# free-form notes, declared once rather than per file -- so the drainer may
+# free-form notes and the docs/project_review/ directory holding the
+# project-review ledger and its reports, each declared once rather than per
+# file -- so the drainer may
 # merge past an advance that only touches them instead of requesting a branch
 # update that cannot change the result. tools/test_document_classification.py
 # reconciles this list against those rows by effective coverage, so the two
@@ -278,6 +280,7 @@ coordination_paths = [
   "docs/drainer-bugs.md",
   "docs/pipeline-hardening.md",
   "docs/product_readiness_findings.md",
+  "docs/project_review/",
   "docs/project_review_183-170.md",
   "docs/project_review_195-185.md",
   "docs/project_review_218-196.md",

@@ -244,6 +244,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/drainer-bugs.md",
     "docs/pipeline-hardening.md",
     "docs/product_readiness_findings.md",
+    "docs/project_review/",
     "docs/project_review_183-170.md",
     "docs/project_review_195-185.md",
     "docs/project_review_218-196.md",

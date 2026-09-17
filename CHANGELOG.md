@@ -15,6 +15,22 @@ created above it.
 
 ### Unreleased
 
+- `project-review` reviews exactly one merged pull request per successful
+  invocation, chosen and claimed through the new `project_review_ledger.py` the
+  bundles ship: a complete paginated merged-pull-request inventory, a lease
+  whose liveness is the session adapter's keeper, verification against a
+  detached worktree pinned to the fetched remote default-branch head, a report
+  name the helper allocates, and one checkpoint commit it makes on the docs
+  worktree's branch. The twelve-unit batch, the sweep against the primary
+  checkout's HEAD, the `continue` action, and the automatic fall-through into
+  direct-commit review are all gone; repetition belongs to a later
+  `auto-project-review`, and direct-commit review of pre-pull-request history is
+  a separate mode each invocation of which needs an explicit request. The ledger
+  and every report it names live under `docs/project_review/`, classified by one
+  directory row, so a consuming repository enrols the whole directory with a
+  single `workflow.direct_publication_paths` entry and never a declaration per
+  report.
+
 - `w` opens the selected card's own GitHub page in a browser, from the board and
   from a card's details overlay; a collapsed epic's row opens the epic's issue.
   The URL is the one the board already retains, so no GitHub request is made,

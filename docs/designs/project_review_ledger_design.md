@@ -194,9 +194,11 @@ governs it.
 
 1. **Inventory.** Page the complete merged-PR history; stop on failure or
    an incomplete listing (D-11).
-2. **Select.** Apply D-8's order to the ledger and inventory; take an
-   expiring owner-token claim on the chosen PR under the helper's lock
-   (D-12); start the session-bound heartbeat (D-17).
+2. **Select.** Register the session liveness adapter for this invocation
+   (D-17) before anything is claimed, then apply D-8's order to the ledger and
+   inventory and take an expiring owner-token claim on the chosen PR under the
+   helper's lock (D-12), naming the adapter's keeper as the claim's liveness
+   signal so its heartbeat renews only while this invocation does.
 3. **Pin.** Fetch, resolve the remote default-branch head to a full SHA,
    and create a detached temporary worktree at it; stop if the fetch fails
    (D-13).
@@ -567,6 +569,21 @@ The session adapter is a prerequisite outside the delivery slices: issue #687
 consumes LEDGER-4's lease (#682) and blocks LEDGER-6 (#684), which wires the
 workflow to it. It adds no slice and changes none of D-19's ordering.
 
+Delivered by #687 as `project_review_liveness.py`, shipped in both bundles and
+driven by each bundle's own `hooks/hooks.json`. Its keeper process is the
+`--owner-pid` the claim names. The callable interface is `nonce`, then
+`register --runtime <claude|codex> --root --repo --nonce` in a tool call whose
+own command text carries the literal nonce, then `run`, `complete` and `status`;
+every refusal happens before a keeper exists, so a registration that fails
+leaves nothing for a claim to be taken against. The minimum verified runtimes
+are Claude Code 2.1.274 and codex-cli 0.154.0. `docs/agent-workflow-contract.md`
+§2.13 is the contract, and `tools/project-review-liveness-evidence.md` the
+native evidence — including the cancellation and session-termination timings
+this amendment's bound is measured against. LEDGER-6 consumes exactly that
+interface: it registers before it claims, it stops on any registration refusal,
+and it substitutes neither an application pid nor a descriptor that closes with
+one tool call.
+
 ### D-18. Ledger-era documents live under one publishable directory
 
 Approved 2026-09-12. The ledger and every new ledger-era report live under
@@ -621,6 +638,18 @@ mode on the existing cursor module, unchanged and explicit-only, and a new
 LEDGER-8 ports direct-mode selection and recording onto the ledger's
 `direct` key and retires the cursor module from both bundles. Eight slices;
 LEDGER-8 depends on LEDGER-6 and is not on the critical path.
+
+LEDGER-6 (#684) performed the switch-over. Both rendered assets now take the
+complete inventory, register the #687 adapter, claim, pin, review, allocate,
+record and clean up as "One review, end to end" above sets out; PR mode no
+longer reads or writes `docs/project_review_boundaries.md`, and the cursor
+module and its invocations survive in the explicit-only direct section alone
+until LEDGER-8 retires them. `docs/project_review/` gained its §7 directory row,
+its `EXCLUDED_TRACKED_PATHS` and `coordination_paths` entries, and a tracked
+`README.md` seed, so a report written there publishes with no registry edit.
+The arc's end-to-end proof landed with it in
+`tools/test_project_review_workflow.py`; the automation count remains
+LEDGER-7's.
 
 ## Proposal history
 

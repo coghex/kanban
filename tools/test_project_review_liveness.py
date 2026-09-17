@@ -830,8 +830,17 @@ class Packaging(unittest.TestCase):
                     )
                     self.assertEqual((completed.returncode, completed.stdout), (0, ""))
 
-    def test_the_installed_project_review_workflow_is_unchanged(self):
-        # #684 performs the switch-over; until then the workflow keeps its cursor.
+    def test_the_installed_project_review_workflow_registers_before_it_claims(self):
+        # #684 performed the switch-over: the installed workflow's PR mode
+        # registers an attempt through this adapter and hands its keeper to the
+        # ledger's `claim`, so this module is no longer a mechanism nothing
+        # calls. The cursor survives in the explicit-only direct section until
+        # LEDGER-8 retires it, which is why its presence is asserted too.
+        #
+        # What each asset *says* about the adapter is
+        # tools/test_project_review_workflow.py's contract; what is pinned here
+        # is the coupling itself -- that the caller names this module and the
+        # flag its keeper is passed through.
         for asset in (
             "claude-plugin/plugins/kanban/commands/project-review.md",
             "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
@@ -840,7 +849,9 @@ class Packaging(unittest.TestCase):
             with self.subTest(asset=asset):
                 text = (REPO_ROOT / asset).read_text(encoding="utf-8")
                 self.assertIn("project_review_cursor.py", text)
-                self.assertNotIn("project_review_liveness", text)
+                self.assertIn("project_review_liveness.py", text)
+                self.assertIn("--owner-pid", text)
+                self.assertNotIn("--liveness-fd", text)
 
 
 def _brand_cases():

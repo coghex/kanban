@@ -675,6 +675,9 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "sed",
         "awk",
         "python3",
+        "mktemp",
+        "dirname",
+        "rm",
     },
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {
         "gh",
@@ -682,6 +685,9 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "sed",
         "awk",
         "python3",
+        "mktemp",
+        "dirname",
+        "rm",
         "find",
         "head",
     },
@@ -2926,7 +2932,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
             # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the seven rows named below
+            # is not the same as being declared, and the ten rows named below
             # are where a reader looks to find out which assets speak each tool.
             for name in sorted(expected):
                 row = next(
@@ -2944,6 +2950,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "python3-cli",
                         "find-cli",
                         "head-cli",
+                        "mktemp-cli",
+                        "rm-cli",
+                        "dirname-cli",
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")

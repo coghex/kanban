@@ -5791,22 +5791,27 @@ class BundledLedgerHelperTests(unittest.TestCase):
             sorted(set(spawns)), [("Popen", "sys.executable"), ("run", '"git"')]
         )
 
-    def test_no_bundled_asset_resolves_the_new_module(self):
-        # Design D-19: the installed command keeps reading the v2 cursor until
-        # LEDGER-6 switches it over, so nothing but the two copies themselves
-        # may name this module. Asserted over the whole of both bundles rather
-        # than over the two rendered assets alone, because a manifest, a
-        # skill, or a sibling script naming it would make it invokable just as
-        # surely as a command file would.
+    def test_only_the_project_review_workflow_resolves_this_module(self):
+        # Design D-19, after LEDGER-6 (#684) performed the switch-over: the
+        # installed `project-review` command is now this module's caller, and
+        # it is the only one. Asserted over the whole of both bundles rather
+        # than over the two rendered assets alone, because a manifest, another
+        # skill, or a sibling script naming it would make it reachable from a
+        # workflow that was never given this authority.
         #
-        # The one other name allowed is issue #687's session liveness adapter,
-        # shipped beside each copy. It loads its sibling for the ledger's own
-        # process-standing test and lease settings, and it is a prerequisite
-        # of the same switch-over: no installed workflow registers an attempt
-        # until LEDGER-6 either, so naming the ledger there makes nothing
-        # invokable that was not already.
+        # Four files may name it, and each for its own reason: the two
+        # rendered `project-review` assets, which resolve and invoke it, and
+        # the two bundle READMEs, which describe what those assets do. Issue
+        # #687's liveness adapter is excluded with the module's own copies
+        # because it loads its sibling for the ledger's process-standing test
+        # and lease settings rather than invoking the workflow.
         shipped = {Path(path).name for path in LEDGER_HELPERS.values()}
         shipped.add("project_review_liveness.py")
+        allowed = {
+            "claude-plugin/README.md",
+            "codex-plugin/README.md",
+            *RENDERED_ASSETS,
+        }
         naming = []
         for bundle in BUNDLE_ROOTS:
             for path in sorted((REPO_ROOT / bundle).rglob("*")):
@@ -5818,17 +5823,19 @@ class BundledLedgerHelperTests(unittest.TestCase):
                     continue
                 if "project_review_ledger" in content:
                     naming.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(naming, [])
+        self.assertEqual(sorted(naming), sorted(allowed))
 
-    def test_the_rendered_assets_still_resolve_only_the_cursor(self):
-        # The non-vacuity control for the scan above: the same bundles do name
-        # the cursor, in both rendered assets, so "nothing names the ledger" is
-        # a property of this slice rather than of a search that finds nothing.
+    def test_each_rendered_asset_resolves_the_ledger_and_keeps_the_cursor(self):
+        # The non-vacuity control for the scan above, and the record of what
+        # LEDGER-6 did and did not change: PR mode runs on this module, and
+        # direct-commit mode keeps the cursor until LEDGER-8 retires it. An
+        # asset that named neither would pass the scan above by naming
+        # nothing.
         for relative_path in RENDERED_ASSETS:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             with self.subTest(asset=relative_path):
+                self.assertIn("project_review_ledger.py", content)
                 self.assertIn("project_review_cursor.py", content)
-                self.assertNotIn("project_review_ledger", content)
 
 
 if __name__ == "__main__":

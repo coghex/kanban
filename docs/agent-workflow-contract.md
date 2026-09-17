@@ -2237,9 +2237,10 @@ report did not name.
 ### 2.13 Project-review session liveness (lifecycle hooks)
 
 The prerequisite design D-17's 2026-09-17 amendment names (issue #687). It
-consumes #682's lease and blocks #684, which switches `project-review` onto the
-ledger. Until then the installed workflow keeps its cursor, and nothing
-installed registers an attempt.
+consumes #682's lease, and since #684 the installed `project-review` workflow is
+its caller: that workflow registers an attempt, and passes the keeper's pid to
+`project_review_ledger.py claim --owner-pid`, before it claims a pull request.
+A registration refusal stops that run before any claim.
 
 - **Owning source:** `project_review_liveness.py`, shipped identically as
   `claude-plugin/plugins/kanban/scripts/project_review_liveness.py` and
@@ -2339,9 +2340,10 @@ installed registers an attempt.
   `docs/`. Registration prunes ended attempts after seven days.
 - **Evidence:** `tools/project-review-liveness-evidence.md` records the probes,
   the smoke-test procedure, and the observed timings on both installed runtimes.
-- **Mandatory/optional:** optional. Nothing installed invokes it until #684. A
-  session that never registers an attempt pays a short hook process on each
-  tool event and writes nothing.
+- **Mandatory/optional:** optional. The only caller is `project-review`'s PR
+  mode, which is a user-invoked action; its explicit-only direct-commit mode
+  registers nothing. A session that never registers an attempt pays a short hook
+  process on each tool event and writes nothing.
 
 ## 3. Migration boundary
 
@@ -2548,9 +2550,9 @@ rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKI
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+dirname-cli | executable | dirname | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -2866,8 +2868,10 @@ which is why it is `mandatory: no`.
 declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
-script that way is a consumer and appears in the row, `$project-review`'s sweep
-cursor included. So is each copy of the project-review liveness adapter
+script that way is a consumer and appears in the row, `$project-review`'s ledger
+helper included — that one lookup locates `project_review_ledger.py`, and the
+sweep cursor its explicit-only direct mode still uses and the session liveness
+adapter its PR mode registers are taken from the same directory beside it. So is each copy of the project-review liveness adapter
 (§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
 refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
 It is `external`/`mandatory: no` for that
@@ -2902,6 +2906,10 @@ still declares no `personal-path` row of its own, for the reason the
 `find-cli`/`head-cli` paragraph below gives.
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
+`project-review` (issue #684) creates its pinned review worktree and its
+merged-pull-request inventory under `mktemp -d`, OUTSIDE the reviewed checkout
+and the docs worktree — a review artifact under `docs/project_review/` would
+publish with the report beside it — and removes both on every exit,
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
 worked checkout and deletes it, `janitor` (issue #575) does the same with the
 `worktree prune --dry-run` listing its metadata-prune gate subtracts the
@@ -2924,7 +2932,8 @@ install location — the shared review coordinator for `$pr-review`,
 `$pr-rereview`, `$pr-revise`, `$repair`, and `$fix`, the trusted-comment issue-spec
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
-`$note-problem`, the sweep-cursor module for `$project-review`, and the census
+`$note-problem`, the project-review ledger module for `$project-review` — with
+its sibling sweep cursor and session liveness adapter — and the census
 program for `$janitor` (issue #575) — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
@@ -2935,7 +2944,9 @@ coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`,
 workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py`, `/project-review`
-its bundled sweep cursor at
+its bundled ledger, session liveness adapter and sweep cursor at
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py`,
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py`, and `/janitor` its
 bundled census at `${CLAUDE_PLUGIN_ROOT}/scripts/census.py`, without a
 filesystem search. That plugin bundles its own copy of each, so it never depends on the
@@ -2964,9 +2975,12 @@ observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
 
-`tr-cli` and `dirname-cli` are the documentation-landing helper's own utilities
-(issue #410): `tools/docs_land.sh` reaches both and nothing else in this
-repository does. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
+`tr-cli` is the documentation-landing helper's own utility (issue #410):
+`tools/docs_land.sh` reaches it and nothing else in this repository does.
+`dirname-cli` started there too and gained a second consumer with #684: both
+`project-review` assets take the parent of a path they built — the Codex bundle's
+sibling helper lookup, and the `mktemp -d` directory the pinned review worktree
+sits under, which cleanup removes. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
 user-invoked action, and every supported macOS/Linux shell already provides
@@ -2981,8 +2995,10 @@ fast-forward advances it, so `grep -Fx "$BASE"` over
 on empty for every other branch and for a detached HEAD.
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
-records it: `retriage`, `backlog-review`, and `project-review` rewrite roadmap
-and report text with it, `drain-prs` reduces a remote URL to one `owner/name`
+records it: `retriage` and `backlog-review` rewrite roadmap and report text with
+it, `project-review` reduces a remote URL to one `owner/name` with it and strips
+the `origin/` prefix off the remote default branch it pins its review worktree
+to, `drain-prs` reduces a remote URL to one `owner/name`
 with it, and `finalize` does both — the same remote reduction, plus the
 `git worktree list --porcelain` reads that name the primary checkout and the
 merged pull request's own worktree. It stays `mandatory: no` for the reason the
@@ -3812,7 +3828,9 @@ The `coordination` documents are
 `docs/ui-bugs.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
-`docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
+`docs/coordination/`, every design document under `docs/designs/`, and the
+project-review ledger and every ledger-era findings report under
+`docs/project_review/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -3822,7 +3840,17 @@ This classification is Kanban's own. It describes this repository and nothing
 else. A consuming repository declares its own direct-publication lane through
 `workflow.direct_publication_paths`, which ships empty — exact file paths, or
 whole directories through a trailing-slash entry matched by the same
-whole-component rule the rows below use. The drainer's separate
+whole-component rule the rows below use. `docs/project_review/` is what that
+mechanism is for: a consuming repository enrols the project-review ledger and
+every report the workflow will ever write there through **one**
+`workflow.direct_publication_paths` entry naming that directory, and never a
+declaration per report — which is the whole point of a one-pull-request-per-review
+cadence being publishable at all. Nothing that is not a document belongs under
+it: the lease's lock reference and heartbeat records, the liveness adapter's
+handshake and attempt records, and the temporary worktree each review is
+verified against all live under the repository's Git common directory or under
+`mktemp -d`, outside every working tree, because a directory that publishes
+publishes whatever is left in it. The drainer's separate
 `workflow.coordination_paths` key
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
 grants only its base-advance exception and never a publication lane. Kanban
@@ -3911,6 +3939,7 @@ docs/media/README.md | pr-atomic | test-parsed;release-document
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
 docs/product_readiness_findings.md | coordination | audit-report
+docs/project_review/ | coordination | audit-report
 docs/project_review_183-170.md | coordination | audit-report
 docs/project_review_195-185.md | coordination | audit-report
 docs/project_review_218-196.md | coordination | audit-report
