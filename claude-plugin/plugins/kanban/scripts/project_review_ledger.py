@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The project-review ledger: per-PR review state, and the migration into it.
 
-Run with: python3 project_review_ledger.py {read,migrate,select} --help
+Run with: python3 project_review_ledger.py
+          {read,migrate,select,claim,renew,release,fence,lease-defaults} --help
 
 Issue #680, slice LEDGER-2 of `docs/project_review_ledger_design.md`. The
 sweep cursor this module supersedes records which pull requests a batch
@@ -105,13 +106,29 @@ and reported rather than deleted -- a shrunken listing is a thing to notice,
 not a thing to act on. Selection then walks D-8's three queues over the rows
 the listing named: never-reviewed newest-merged first, then `[legacy]`
 highest number first, then completed reviews oldest first, clean and
-findings-bearing alike (D-4). It is a pure function of the ledger and the
-inventory, so two runs over the same two inputs choose the same pull
-request, and the choice it does not make -- claiming it -- is LEDGER-4's.
+findings-bearing alike (D-4), passing over any row somebody holds a live
+claim on. It is a function of the ledger, the inventory, and which of those
+claims are live, so two runs over the same inputs choose the same pull
+request; `select` reports that choice, and `claim` makes the same one and
+takes it.
 
-Its reach is as narrow as the cursor's, and pinned as such in
-`tools/test_agent_workflow_contract.py`: it spawns no external command, and
-every repository file it opens is under the `--root` it was given. The one
+`claim`, `renew`, `release` and `fence` are the lease on top of selection
+(issue #682, slice LEDGER-4): an expiring owner-token claim taken on the pull
+request selection chose, before any review effort is spent on it (design D-12
+and D-17). The ledger row holds the claim's token, its start and its effective
+renewal and expiry settings; the renewable expiry lives in a heartbeat record
+outside the reviewed tree, so a renewal never rewrites a publishable document.
+Every ledger write, and every validation a mutation depends on, happens under
+one repository lock held as a Git reference in the Git common directory, which
+every linked worktree of the repository shares. The section headed "The
+lease" below carries the rules.
+
+Its reach is pinned in `tools/test_agent_workflow_contract.py`. Every
+repository document it opens is under the `--root` it was given; the lease's
+process-control records -- the lock reference and the heartbeat records --
+are under that root's Git common directory, never under `docs/`. It spawns
+exactly two things: `git`, for the common directory and the lock reference,
+and the renewer, which is this same file run through `sys.executable`. The one
 file it reads from anywhere else is `project_review_cursor.py` beside itself,
 which is the parser this migration is required to read the existing record
 through rather than a second implementation of. The merged-pull-request
@@ -130,27 +147,40 @@ one that read the evidence, and a second would overwrite completed reviews
 with legacy rows.
 
 The versions it reads are a closed set too, and a wider one than the version
-it writes: a repository migrated by the previous release holds a schema
-version 1 ledger, whose rows predate the `title` and `merged_at` version 2
-adds, and refusing it would strand that repository's only record of its
-coverage behind the helper that is meant to carry it forward. So version 1 is
-read and upgraded on the way in -- by naming the fields that version
-introduced, never by defaulting whatever a row happens to be missing -- and
-every write publishes version 2.
+it writes: a repository migrated by an earlier release holds a schema version
+1 ledger, whose rows predate the `title` and `merged_at` version 2 adds, or a
+version 2 one, whose rows and repositories predate the `claim` and
+`lease_defaults` version 3 adds. Refusing either would strand that
+repository's only record of its coverage behind the helper that is meant to
+carry it forward. So both are read and upgraded on the way in -- by naming the
+fields each version introduced, never by defaulting whatever a row happens to
+be missing -- and every write publishes version 3.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
+import ctypes.util
+import fcntl
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import re
+import secrets
+import signal
+import socket
+import stat
+import subprocess
 import sys
 import tempfile
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from select import select as wait_readable
 
 # Where the ledger lives inside the reviewed repository's docs worktree. One
 # directory for every ledger-era document (design D-18), so a consumer enrolls
@@ -159,14 +189,15 @@ LEDGER_RELATIVE_PATH = "docs/project_review/ledger.md"
 LEDGER_DIRECTORY = posixpath.dirname(LEDGER_RELATIVE_PATH)
 
 # Version 2 adds a row's `title` and `merged_at`, which the merged-pull-request
-# listing supplies (issue #681). Version 1 is still read, because a repository
-# migrated by the previous release has a ledger in that shape and a reader that
-# refused it would strand the only record of that repository's coverage behind
-# a helper that cannot open it. It is read and never written: a version 1
-# document parses into the current shape with both fields absent, and the next
-# write publishes it as version 2.
-SCHEMA_VERSION = 2
-READABLE_SCHEMA_VERSIONS = (1, 2)
+# listing supplies (issue #681). Version 3 adds a row's `claim` and a
+# repository's `lease_defaults` (issue #682). Versions 1 and 2 are still read,
+# because a repository migrated by an earlier release has a ledger in one of
+# those shapes and a reader that refused it would strand the only record of
+# that repository's coverage behind a helper that cannot open it. They are read
+# and never written: an older document parses into the current shape with the
+# fields it predates absent, and the next write publishes it as version 3.
+SCHEMA_VERSION = 3
+READABLE_SCHEMA_VERSIONS = (1, 2, 3)
 
 # Distinct from `<!-- project-review:cursor:v2 -->` on purpose: the two
 # documents coexist until LEDGER-6, and a parser that anchored on the other
@@ -239,6 +270,8 @@ PATH_RE = re.compile(r"\A[A-Za-z0-9._/-]+\Z")
 # dates: a row imported from a report predates any listing, so it carries
 # neither until a complete inventory names its pull request, and neither is
 # ever paired with a status.
+#
+# `claim` is the lease's half, and is null whenever nobody holds the row.
 ROW_KEYS = (
     "status",
     "title",
@@ -248,6 +281,7 @@ ROW_KEYS = (
     "report",
     "evidence",
     "history",
+    "claim",
 )
 HISTORY_KEYS = ("kind", "outcome", "commit", "completed_at", "report")
 
@@ -370,6 +404,7 @@ def empty_repository() -> dict:
         "direct": {"endpoint": None, "reviewed": []},
         "excluded": {"prs": [], "commits": []},
         "migration": {"source": None, "boundary": None, "withheld_boundary": None},
+        "lease_defaults": None,
     }
 
 
@@ -383,6 +418,7 @@ def empty_row(status: str = "never-reviewed") -> dict:
         "report": None,
         "evidence": [],
         "history": [],
+        "claim": None,
     }
 
 
@@ -511,28 +547,38 @@ def parse_document(text: str, source: str) -> dict:
 # good reason: it is how a truncated edit erases rows. An upgrade keyed on the
 # declared version is the opposite -- the document says which shape it is in,
 # and only the fields that shape genuinely predates are supplied.
-ROW_FIELDS_ADDED_IN = {2: ("title", "merged_at")}
+ROW_FIELDS_ADDED_IN = {2: ("title", "merged_at"), 3: ("claim",)}
+REPOSITORY_FIELDS_ADDED_IN = {3: ("lease_defaults",)}
+
+
+def _added_since(table: dict, version: int) -> list:
+    return [
+        field
+        for introduced, fields in sorted(table.items())
+        if introduced > version
+        for field in fields
+    ]
 
 
 def _upgraded_repository(state, version: int):
     """One repository's entry read out of an older schema into the current one.
 
-    Only rows change between 1 and 2, and only by gaining two fields the older
-    writer could not have known about. Everything else is passed through
-    untouched so the validation below sees exactly what the document said.
+    Rows gain the fields versions 2 and 3 added and the repository gains the
+    field version 3 added, each a field the older writer could not have known
+    about and each null in the shape that predates it. Everything else is
+    passed through untouched so the validation below sees exactly what the
+    document said.
     """
     if not isinstance(state, dict):
         return state
+    upgraded = dict(
+        {field: None for field in _added_since(REPOSITORY_FIELDS_ADDED_IN, version) if field not in state},
+        **state,
+    )
     rows = state.get("rows")
     if not isinstance(rows, dict):
-        return state
-    added = [
-        field
-        for introduced, fields in sorted(ROW_FIELDS_ADDED_IN.items())
-        if introduced > version
-        for field in fields
-    ]
-    upgraded = dict(state)
+        return upgraded
+    added = _added_since(ROW_FIELDS_ADDED_IN, version)
     upgraded["rows"] = {
         key: (
             dict({field: None for field in added if field not in row}, **row)
@@ -594,7 +640,7 @@ def state_for(document: dict, repo: str) -> dict:
 # Validation
 
 
-REPOSITORY_KEYS = ("rows", "direct", "excluded", "migration")
+REPOSITORY_KEYS = ("rows", "direct", "excluded", "migration", "lease_defaults")
 DIRECT_KEYS = ("endpoint", "reviewed")
 EXCLUDED_KEYS = ("prs", "commits")
 MIGRATION_KEYS = ("source", "boundary", "withheld_boundary")
@@ -678,6 +724,10 @@ def _validated_repository(state, source: str) -> dict:
     validated["direct"] = carried["direct"]
     validated["excluded"] = carried["excluded"]
     validated["migration"] = _validated_migration(state["migration"], source)
+    if state["lease_defaults"] is not None:
+        validated["lease_defaults"] = _validated_lease_settings(
+            state["lease_defaults"], f"{source}: lease_defaults"
+        )
     return validated
 
 
@@ -737,6 +787,8 @@ def _validated_row(row, source: str) -> dict:
     validated["report"] = _validated_optional_path(row["report"], f"{source}: report")
     validated["evidence"] = _validated_evidence(row["evidence"], f"{source}: evidence")
     validated["history"] = _validated_history(row["history"], f"{source}: history")
+    if row["claim"] is not None:
+        validated["claim"] = _validated_claim(row["claim"], f"{source}: claim")
     _require_completion_pairing(status, validated, source)
     return validated
 
@@ -896,6 +948,8 @@ def _validated_history_entry(entry, source: str) -> dict:
     """
     if not isinstance(entry, dict):
         raise LedgerError(f"{source} is not an object.")
+    if entry.get("kind") == TAKEOVER_KIND:
+        return _validated_takeover_entry(entry, source)
     _require_keys(entry, HISTORY_KEYS, source)
     kind = entry["kind"]
     if not isinstance(kind, str) or not re.match(r"\A[a-z][a-z0-9-]*\Z", kind):
@@ -1171,10 +1225,10 @@ def publish_document(root, document: dict) -> Path:
     intact.
 
     What it does not do is sequence two writers. Two selections racing each
-    other still lose one of their reconciliations, because each rendered the
-    whole document from the state it read; the lock that closes that is
-    D-12's, and it arrives with the claim in LEDGER-4. Until then the caller
-    is one invocation at a time.
+    other would lose one of their reconciliations, because each rendered the
+    whole document from the state it read, so every caller that edits an
+    established ledger holds `repository_lock` across its read and this
+    write (design D-12).
     """
     path = confined(root, document_path(root))
     parent = _prepared_directory(root, path)
@@ -2285,12 +2339,14 @@ def queues(state: dict, inventory: dict) -> list:
     ]
 
 
-def select(root, repo: str, inventory) -> dict:
+def select(root, repo: str, inventory, lock_wait: float = None) -> dict:
     """Record one complete listing and choose the one pull request to review.
 
     The listing is parsed before the ledger is read and the choice is made
     before anything is written, so a refusal at any point leaves the document
-    byte for byte as it was.
+    byte for byte as it was. The read, the choice and the write happen under
+    `repository_lock`, so a claim another invocation records meanwhile is not
+    overwritten by this one's reconciliation.
 
     A ledger has to exist first, and this is not a formality. `migrate` is
     what reads the old cursor and the sibling reports into `[legacy]` rows,
@@ -2299,10 +2355,35 @@ def select(root, repo: str, inventory) -> dict:
     as never-reviewed and close the only door legacy coverage comes through.
     A repository with no history to import still starts with `migrate`, which
     writes it an empty ledger.
+
+    A pull request somebody holds a live claim on is skipped and reported, and
+    selection continues in queue order. A choice that is an expired claim is
+    reported as one; taking it over is `claim`'s, not this function's.
     """
+    listing = _listing_for(repo, inventory)
+    with repository_lock(root, lock_wait) as common:
+        chosen = _choose(root, repo, listing, common, time.time())
+        if chosen["pick"] is None and chosen["skipped"]:
+            return _selection_result("all-claimed", chosen, repo, None)
+        written = _publish_reconciled(root, repo, chosen)
+        return _selection_result(
+            "selected" if chosen["pick"] else "no-selectable-row", chosen, repo, written
+        )
+
+
+def _listing_for(repo: str, inventory) -> dict:
     if not REPO_RE.match(str(repo)):
         raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
-    listing = parse_inventory(inventory, "the merged-pull-request inventory")
+    return parse_inventory(inventory, "the merged-pull-request inventory")
+
+
+def _choose(root, repo: str, listing: dict, common: Path, now: float) -> dict:
+    """The ledger reconciled with the listing, and D-8's first unheld row.
+
+    Read here, under the caller's lock, and never from anything computed
+    before it was taken: a candidate chosen from an earlier read is not
+    authority to claim a pull request somebody has claimed since.
+    """
     path = confined(root, document_path(root))
     document = load_document(root)
     if not document["repositories"]:
@@ -2326,7 +2407,6 @@ def select(root, repo: str, inventory) -> dict:
     validated = _validated_repository(state, f"the ledger reconciled for {repo}")
     rows = validated["rows"]
     listed = {entry["number"] for entry in listing["listed"]}
-    excluded = sorted(listed & set(validated["excluded"]["prs"]))
     # Over every listed pull request and only those, excluded ones included:
     # the counts describe the universe this listing established, while the
     # queue size below describes what could have been selected out of it.
@@ -2334,35 +2414,91 @@ def select(root, repo: str, inventory) -> dict:
     for key, row in rows.items():
         if int(key) in listed:
             counts[row["status"]] += 1
-    chosen = None
+    pick = None
+    skipped = []
     for name, queue in queues(validated, listing):
-        if queue:
-            number, row = queue[0]
-            chosen = {
-                "selected": {
-                    "number": number,
-                    "title": row["title"],
-                    "merged_at": row["merged_at"],
-                    "row_status": row["status"],
-                },
+        for number, row in queue:
+            deadline = None
+            if row["claim"] is not None:
+                deadline = lease_deadline(common, repo, number, row["claim"])
+                if now < deadline:
+                    skipped.append(
+                        {
+                            "number": number,
+                            "token": row["claim"]["token"],
+                            "deadline": precise_timestamp(deadline),
+                        }
+                    )
+                    continue
+            pick = {
+                "number": number,
+                "row": row,
                 "queue": {"name": name, "size": len(queue)},
+                "expired_claim": (
+                    None
+                    if row["claim"] is None
+                    else {
+                        "token": row["claim"]["token"],
+                        "deadline": precise_timestamp(deadline),
+                    }
+                ),
             }
             break
-    document["repositories"][repo] = validated
-    written = publish_document(root, document)
-    result = {
-        "status": "selected" if chosen else "no-selectable-row",
+        if pick is not None:
+            break
+    return {
+        "document": document,
+        "state": validated,
+        "listing": listing,
+        "reconciliation": reconciliation,
+        "excluded": sorted(listed & set(validated["excluded"]["prs"])),
+        "counts": counts,
+        "pick": pick,
+        "skipped": skipped,
+    }
+
+
+def _publish_reconciled(root, repo: str, chosen: dict) -> Path:
+    document = chosen["document"]
+    document["repositories"][repo] = _validated_repository(
+        chosen["state"], f"the ledger written for {repo}"
+    )
+    return publish_document(root, document)
+
+
+def _selection_result(status: str, chosen: dict, repo: str, written) -> dict:
+    """What `select` and `claim` both report, in one shape.
+
+    `document` is null exactly when nothing was written: every candidate was
+    held by a live claim, so the invocation recorded neither the listing nor a
+    claim (`all-claimed`), and `skipped_claims` says who holds each of them.
+    """
+    rows = chosen["state"]["rows"]
+    pick = chosen["pick"]
+    return {
+        "status": status,
         "repo": repo,
-        "document": str(written),
-        "selected": chosen["selected"] if chosen else None,
-        "queue": chosen["queue"] if chosen else None,
+        "document": None if written is None else str(written),
+        "selected": (
+            None
+            if pick is None
+            else {
+                "number": pick["number"],
+                "title": pick["row"]["title"],
+                "merged_at": pick["row"]["merged_at"],
+                "row_status": pick["row"]["status"],
+                "expired_claim": pick["expired_claim"],
+            }
+        ),
+        "queue": None if pick is None else pick["queue"],
+        "skipped_claims": chosen["skipped"],
         "inventory": {
-            "pages": listing["pages"],
-            "listed": len(listing["listed"]),
-            "added": reconciliation["added"],
-            "refreshed": reconciliation["refreshed"],
-            "excluded": excluded,
-            "counts": counts,
+            "pages": chosen["listing"]["pages"],
+            "listed": len(chosen["listing"]["listed"]),
+            "added": chosen["reconciliation"]["added"],
+            "refreshed": chosen["reconciliation"]["refreshed"],
+            "excluded": chosen["excluded"],
+            "counts": chosen["counts"],
             # The rows this listing did not name, with whatever the ledger
             # knows about them and nothing else. A row imported from a report
             # has no title and no merge time, and inventing either here would
@@ -2374,11 +2510,1370 @@ def select(root, repo: str, inventory) -> dict:
                     "merged_at": rows[str(number)]["merged_at"],
                     "row_status": rows[str(number)]["status"],
                 }
-                for number in reconciliation["absent"]
+                for number in chosen["reconciliation"]["absent"]
             ],
         },
     }
-    return result
+
+
+# --------------------------------------------------------------------------
+# The lease
+#
+# Design D-12 and D-17, issue #682. A claim is an expiring owner token on one
+# row, taken before review effort is spent and renewed while the session that
+# took it is alive. Four rules shape it, and each closes a way two owners, or
+# no owner, could come out of an ordinary crash.
+#
+# * **One lock sequences every ledger write and the check it depends on.** The
+#   lock is a Git reference created with `update-ref <ref> <new> ""`, which
+#   refuses a reference that already exists, so exactly one invocation holds
+#   it. It lives in the Git common directory, so every linked worktree of the
+#   repository -- the docs worktree the ledger is in, and whichever worktree
+#   the session runs from -- takes the same one. A fencing check made outside
+#   it could be overtaken by a takeover before the mutation it approved.
+# * **A dead lock holder is recovered, a live or unverifiable one never is.**
+#   The lock records its holder's host and pid, which is what makes "gone"
+#   decidable at all. A holder on this host whose pid no longer exists is
+#   cleared by `update-ref -d <ref> <observed>`, which deletes only the exact
+#   lock that was inspected, so a delayed recovery cannot remove the lock a
+#   later invocation took meanwhile. A holder on another host, or a pid this
+#   process may not signal, is refused naming the holder, and a live one is
+#   waited on for a bounded time and then refused. A lease's expiry never
+#   breaks a lock: the two are different resources.
+# * **The ledger records the claim; a heartbeat record carries its expiry.**
+#   The row's `claim` holds the token, the start and the effective settings,
+#   written once when the claim is taken. The deadline a renewal extends is in
+#   `<common dir>/kanban-project-review/leases/<token>.json`, replaced whole on
+#   every renewal, so a heartbeat never rewrites the ledger or any other
+#   publishable document. When that record is absent the deadline is the
+#   claim's start plus its expiry; when it is present and unreadable, or names
+#   another claim, every decision that needs the deadline refuses rather than
+#   treating the claim as either live or expired.
+# * **Renewal follows the session, not the application.** `claim` starts a
+#   renewer -- this file, run again through `sys.executable` in a session of
+#   its own with its standard streams on the null device -- that renews only
+#   while a liveness signal the caller names is held: an inherited descriptor
+#   whose writers the session holds open, or an owner process the invocation
+#   names by pid. Neither is defaulted, and the inherited parent pid is never
+#   one, because that is the long-lived application rather than the review
+#   session (D-17). The renewer checks the signal at least once per renewal
+#   interval, and exits without writing when it has been lost, when the claim
+#   has expired, and when its token no longer owns the row.
+
+DEFAULT_RENEWAL_SECONDS = 60
+DEFAULT_EXPIRY_SECONDS = 15 * 60
+LEASE_SETTING_KEYS = ("renewal_seconds", "expiry_seconds")
+CLAIM_KEYS = ("token", "started_at", "renewal_seconds", "expiry_seconds")
+
+TAKEOVER_KIND = "takeover"
+TAKEOVER_KEYS = ("kind", "at", "previous_token", "token")
+
+TOKEN_RE = re.compile(r"\A[0-9a-f]{32}\Z")
+
+# A lease is timed below the second: a test runs one with a fraction of a
+# second between renewals, and a start truncated to the second would move the
+# deadline an absent heartbeat record falls back to by up to a second.
+PRECISE_TIMESTAMP_RE = re.compile(
+    r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z"
+)
+PRECISE_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+LOCK_REF = "refs/kanban/project-review-lock"
+LOCK_RECORD_KEYS = ("host", "pid", "nonce")
+LOCK_WAIT_SECONDS = 10.0
+LOCK_POLL_SECONDS = 0.02
+
+RUNTIME_DIRECTORY = "kanban-project-review"
+HEARTBEAT_KEYS = ("token", "repo", "pr", "deadline", "renewals", "renewer")
+RENEWER_KEYS = ("host", "pid")
+
+# The longest the renewer waits between two looks at its liveness signal. A
+# production renewal interval is a minute; a released claim should not keep
+# its renewer that long.
+RENEWER_POLL_SECONDS = 1.0
+
+# The environment variables that would point `git` at some repository other
+# than the one `--root` is in.
+GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+
+
+class LeaseRefused(LedgerError):
+    """A lease operation this invocation may not perform, and who holds it.
+
+    `reason` is one short word a caller can branch on; `owner` is what the
+    refusal found in the way -- the claim's current token, or a lock holder's
+    record -- and is part of the message too.
+    """
+
+    def __init__(self, reason: str, message: str, owner=None):
+        suffix = "" if owner is None else f" Recorded owner: {json.dumps(owner, sort_keys=True)}."
+        super().__init__(f"refused ({reason}): {message}{suffix}")
+        self.reason = reason
+        self.owner = owner
+
+
+def precise_timestamp(instant: float) -> str:
+    return datetime.fromtimestamp(instant, timezone.utc).strftime(PRECISE_TIMESTAMP_FORMAT)
+
+
+def _precise_instant(value, source: str) -> float:
+    if not isinstance(value, str) or not PRECISE_TIMESTAMP_RE.match(value):
+        raise LedgerError(
+            f"{source} holds {value!r}, which is not a UTC "
+            "YYYY-MM-DDTHH:MM:SS.ffffffZ timestamp."
+        )
+    try:
+        parsed = datetime.strptime(value, PRECISE_TIMESTAMP_FORMAT)
+    except ValueError as error:
+        raise LedgerError(f"{source} holds {value!r}, which is not a real date ({error}).") from error
+    return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _validated_token(value, source: str) -> str:
+    if not isinstance(value, str) or not TOKEN_RE.match(value):
+        raise LedgerError(f"{source} holds {value!r}, which is not an owner token.")
+    return value
+
+
+def _validated_seconds(value, source: str):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise LedgerError(
+            f"{source} holds {value!r}, which is not a positive number of seconds."
+        )
+    return value
+
+
+def _validated_lease_settings(settings, source: str) -> dict:
+    """A renewal interval and an expiry, and a pair that can actually renew.
+
+    An expiry no longer than the renewal interval lapses between two
+    renewals of a perfectly healthy session, so that pair is refused rather
+    than recorded.
+    """
+    if not isinstance(settings, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(settings, LEASE_SETTING_KEYS, source)
+    renewal = _validated_seconds(settings["renewal_seconds"], f"{source}: renewal_seconds")
+    expiry = _validated_seconds(settings["expiry_seconds"], f"{source}: expiry_seconds")
+    if expiry <= renewal:
+        raise LedgerError(
+            f"{source} renews every {renewal} seconds and expires after {expiry}; "
+            "a lease that expires before its next renewal lapses while its "
+            "session is alive."
+        )
+    return {"renewal_seconds": renewal, "expiry_seconds": expiry}
+
+
+def _validated_claim(claim, source: str) -> dict:
+    if not isinstance(claim, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(claim, CLAIM_KEYS, source)
+    settings = _validated_lease_settings(
+        {key: claim[key] for key in LEASE_SETTING_KEYS}, source
+    )
+    started = claim["started_at"]
+    _precise_instant(started, f"{source}: started_at")
+    return {
+        "token": _validated_token(claim["token"], f"{source}: token"),
+        "started_at": started,
+        **settings,
+    }
+
+
+def _validated_takeover_entry(entry, source: str) -> dict:
+    """A recorded change of owner: both tokens and the time, and nothing else.
+
+    Self-contained like every other history entry: it names the token that
+    lost the row as well as the one that took it, so it can be read after the
+    claim it describes has been released and the row claimed again.
+    """
+    _require_keys(entry, TAKEOVER_KEYS, source)
+    at = entry["at"]
+    _precise_instant(at, f"{source}: at")
+    previous = _validated_token(entry["previous_token"], f"{source}: previous_token")
+    token = _validated_token(entry["token"], f"{source}: token")
+    if previous == token:
+        raise LedgerError(
+            f"{source} records a takeover by the token it took over from; a "
+            "takeover is a change of owner."
+        )
+    return {"kind": TAKEOVER_KIND, "at": at, "previous_token": previous, "token": token}
+
+
+def effective_lease_settings(state: dict, renewal=None, expiry=None) -> dict:
+    """The settings a new claim records: overrides, then the ledger, then D-17.
+
+    Resolved once, when the claim is taken, and written into it. Nothing reads
+    the defaults again for that claim, so a later change to them -- or a later
+    invocation's overrides -- cannot reach a claim that already exists.
+    """
+    defaults = state["lease_defaults"] or {
+        "renewal_seconds": DEFAULT_RENEWAL_SECONDS,
+        "expiry_seconds": DEFAULT_EXPIRY_SECONDS,
+    }
+    return _validated_lease_settings(
+        {
+            "renewal_seconds": defaults["renewal_seconds"] if renewal is None else renewal,
+            "expiry_seconds": defaults["expiry_seconds"] if expiry is None else expiry,
+        },
+        "the lease settings",
+    )
+
+
+# ---- Git and the runtime directory
+
+
+def _git(root, arguments, input_bytes=None):
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in GIT_LOCATION_VARIABLES
+    }
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(root),
+            capture_output=True,
+            input=input_bytes,
+            env=environment,
+        )
+    except OSError as error:
+        raise LedgerError(
+            f"git could not be run in {root} ({error}); the lease's lock and "
+            "heartbeat records live in that repository's Git common directory."
+        ) from error
+
+
+def _git_output(root, arguments, input_bytes=None) -> str:
+    proc = _git(root, arguments, input_bytes)
+    if proc.returncode != 0:
+        detail = os.fsdecode(proc.stderr or proc.stdout).strip()
+        raise LedgerError(f"git {' '.join(arguments)} failed in {root}: {detail}")
+    return os.fsdecode(proc.stdout).strip()
+
+
+def git_common_directory(root) -> Path:
+    """Where this repository keeps what all of its worktrees share."""
+    proc = _git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if proc.returncode != 0:
+        raise LedgerError(
+            f"{root} is not inside a Git repository "
+            f"({os.fsdecode(proc.stderr).strip()}); the lease's lock and "
+            "heartbeat records live in that repository's Git common directory, "
+            "so a root outside one cannot be claimed or selected under the lock."
+        )
+    return Path(os.fsdecode(proc.stdout).strip())
+
+
+def heartbeat_path(common: Path, token: str) -> Path:
+    return Path(common) / RUNTIME_DIRECTORY / "leases" / f"{token}.json"
+
+
+def read_heartbeat(common: Path, token: str):
+    """The heartbeat record for `token`, None when there is none, or a refusal."""
+    path = heartbeat_path(common, token)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise LeaseRefused(
+            "heartbeat-unreadable",
+            f"the heartbeat record {path} could not be read ({error}), so this "
+            "claim's deadline is unknown.",
+        ) from error
+    try:
+        record = json.loads(raw, object_pairs_hook=_no_duplicate_keys)
+        if not isinstance(record, dict):
+            raise LedgerError(f"{path} is not an object.")
+        _require_keys(record, HEARTBEAT_KEYS, str(path), "a heartbeat record")
+        _validated_token(record["token"], f"{path}: token")
+        if not REPO_RE.match(str(record["repo"])):
+            raise LedgerError(f"{path}: repo is not an owner/name.")
+        number = record["pr"]
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise LedgerError(f"{path}: pr is not a pull-request number.")
+        _precise_instant(record["deadline"], f"{path}: deadline")
+        renewals = record["renewals"]
+        if isinstance(renewals, bool) or not isinstance(renewals, int) or renewals < 0:
+            raise LedgerError(f"{path}: renewals is not a count.")
+        renewer = record["renewer"]
+        if renewer is not None:
+            if not isinstance(renewer, dict):
+                raise LedgerError(f"{path}: renewer is not an object.")
+            _require_keys(renewer, RENEWER_KEYS, f"{path}: renewer", "a renewer record")
+            pid = renewer["pid"]
+            if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+                raise LedgerError(f"{path}: renewer.pid is not a process id.")
+    except (_DuplicateKey, ValueError, LedgerError) as error:
+        raise LeaseRefused(
+            "heartbeat-unreadable",
+            f"the heartbeat record {path} is not one this helper can read "
+            f"({error}), so this claim's deadline is unknown.",
+        ) from error
+    return record
+
+
+def write_heartbeat(common: Path, record: dict) -> None:
+    """Replace the record whole, so a reader never sees half of one."""
+    path = heartbeat_path(common, record["token"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=".heartbeat-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                json.dump(record, stream, indent=2, sort_keys=True)
+            os.replace(temporary, path)
+        except BaseException:
+            _discard(temporary)
+            raise
+    except OSError as error:
+        raise LedgerError(
+            f"the heartbeat record {path} could not be written ({error})."
+        ) from error
+
+
+def remove_heartbeat(common: Path, token: str) -> None:
+    try:
+        heartbeat_path(common, token).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise LedgerError(
+            f"the heartbeat record for {token} could not be removed ({error})."
+        ) from error
+
+
+def lease_deadline(common: Path, repo: str, number: int, claim: dict) -> float:
+    """When `claim` expires, from the heartbeat record or from the claim itself.
+
+    The record is authoritative when it exists, because it is what renewal
+    extends. When it does not, the deadline is the one the claim was taken
+    with: the start plus the claim's own expiry. A record that names another
+    claim is refused rather than read, because a deadline taken from the wrong
+    claim decides this one's fate on somebody else's heartbeat.
+    """
+    record = read_heartbeat(common, claim["token"])
+    if record is None:
+        return _precise_instant(claim["started_at"], "the claim's started_at") + claim["expiry_seconds"]
+    if (record["token"], record["repo"], record["pr"]) != (claim["token"], repo, number):
+        raise LeaseRefused(
+            "heartbeat-mismatch",
+            f"the heartbeat record for {claim['token']} names "
+            f"{record['repo']}#{record['pr']} and token {record['token']}, not "
+            f"{repo}#{number}, so this claim's deadline is unknown.",
+            owner={"token": claim["token"]},
+        )
+    return _precise_instant(record["deadline"], "the heartbeat record's deadline")
+
+
+# ---- The repository lock
+
+
+_LOCK_BLOBS = {}
+
+
+def _lock_blob(root) -> tuple:
+    """This process's lock record, stored once as a Git blob.
+
+    One record per process rather than per acquisition: the host, the pid and
+    a nonce identify the process, and a process that is gone never takes the
+    lock again, so the blob a recovery observed cannot come back as somebody
+    else's lock. Writing it once also keeps a renewer from adding a loose
+    object to the repository every renewal.
+    """
+    common = git_common_directory(root)
+    key = str(common)
+    if key not in _LOCK_BLOBS:
+        record = {"host": socket.gethostname(), "pid": os.getpid(), "nonce": secrets.token_hex(16)}
+        blob = _git_output(
+            root,
+            ["hash-object", "-w", "--stdin"],
+            json.dumps(record, sort_keys=True).encode("utf-8"),
+        )
+        _LOCK_BLOBS[key] = (os.getpid(), blob, record)
+    pid, blob, record = _LOCK_BLOBS[key]
+    if pid != os.getpid():
+        del _LOCK_BLOBS[key]
+        return _lock_blob(root)
+    return common, blob, record
+
+
+def observed_lock(root):
+    """The object the lock reference holds right now, or None when unheld."""
+    proc = _git(root, ["rev-parse", "--verify", "--quiet", LOCK_REF])
+    value = os.fsdecode(proc.stdout).strip()
+    return value if proc.returncode == 0 and value else None
+
+
+def lock_holder(root, observed: str) -> dict:
+    """The holder the observed lock records, or a refusal naming what is there."""
+    proc = _git(root, ["cat-file", "blob", observed])
+    raw = os.fsdecode(proc.stdout)
+    try:
+        if proc.returncode != 0:
+            raise ValueError(os.fsdecode(proc.stderr).strip())
+        holder = json.loads(raw, object_pairs_hook=_no_duplicate_keys)
+        if not isinstance(holder, dict) or set(holder) != set(LOCK_RECORD_KEYS):
+            raise ValueError("not a lock record")
+        pid = holder["pid"]
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+            raise ValueError("no process id")
+        if not isinstance(holder["host"], str):
+            raise ValueError("no host")
+    except (_DuplicateKey, ValueError) as error:
+        raise LeaseRefused(
+            "lock-unreadable",
+            f"{LOCK_REF} holds {observed}, whose holder record cannot be read "
+            f"({error}); a holder nothing can identify is never cleared.",
+            owner={"object": observed, "record": raw[:200]},
+        ) from error
+    return holder
+
+
+def holder_standing(holder: dict) -> str:
+    """`gone`, `live`, or `unverifiable`, and only `gone` may be cleared.
+
+    A holder on another host cannot be looked up from here, and a pid this
+    process may not signal exists but cannot be examined; both are
+    unverifiable rather than dead (the rule `clear_stale_lock` in
+    `publish_coordination_doc.py` applies).
+    """
+    if holder["host"] != socket.gethostname():
+        return "unverifiable"
+    try:
+        os.kill(holder["pid"], 0)
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        return "unverifiable"
+    except OSError:
+        return "unverifiable"
+    # `kill(pid, 0)` also succeeds for a process that has exited and not been
+    # reaped, which is exactly what a session whose parent has not waited on
+    # it looks like. An exited process is gone whether or not it is reaped.
+    if process_exited(holder["pid"]) is True:
+        return "gone"
+    return "live"
+
+
+# `SZOMB` in <sys/proc.h>, and where `p_stat` sits in the `kinfo_proc` that
+# `sysctl(KERN_PROC_PID)` returns: after the two-pointer `p_un` union, the
+# `p_vmspace` and `p_sigacts` pointers, and the `p_flag` int, on every 64-bit
+# Darwin.
+DARWIN_SZOMB = 5
+DARWIN_P_STAT_OFFSET = 36
+
+
+def process_exited(pid: int):
+    """True when `pid` has exited (a zombie, or gone), False when it is running.
+
+    None when this platform gives no way to tell, which leaves the answer
+    `kill(pid, 0)` already gave standing. Linux reads the state letter from
+    `/proc/<pid>/stat`; Darwin reads `p_stat` through `sysctl`. Neither runs a
+    command.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return None
+        fields = text[text.rfind(")") + 1:].split()
+        return None if not fields else fields[0] in ("Z", "X", "x")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+                return None
+            if size.value == 0:
+                return True
+            buffer = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+                return None
+        except (OSError, AttributeError, TypeError):
+            return None
+        if size.value == 0:
+            return True
+        if size.value <= DARWIN_P_STAT_OFFSET:
+            return None
+        return buffer.raw[DARWIN_P_STAT_OFFSET] == DARWIN_SZOMB
+    return None
+
+
+def clear_dead_lock(root, observed: str) -> bool:
+    """Delete the lock only if it is still exactly the one that was inspected.
+
+    A recovery that decided a holder was gone and then stalled must not
+    delete whatever lock exists when it resumes; `update-ref -d <ref> <old>`
+    deletes nothing unless the reference still holds `<old>`.
+    """
+    return _git(root, ["update-ref", "-d", LOCK_REF, observed]).returncode == 0
+
+
+@contextlib.contextmanager
+def repository_lock(root, wait: float = None):
+    """Hold the repository's helper lock for the body, yielding the common dir."""
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    common, blob, _ = _lock_blob(root)
+    give_up = time.monotonic() + wait
+    while True:
+        proc = _git(root, ["update-ref", LOCK_REF, blob, ""])
+        if proc.returncode == 0:
+            break
+        observed = observed_lock(root)
+        if observed == blob:
+            # This process's own record, which only a release that failed to
+            # delete it can have left: nothing here takes the lock while
+            # already holding it. Waiting on it would be waiting on itself.
+            clear_dead_lock(root, observed)
+            continue
+        if observed is None:
+            if time.monotonic() >= give_up:
+                raise LedgerError(
+                    f"{LOCK_REF} could not be created and is not held "
+                    f"({os.fsdecode(proc.stderr).strip()})."
+                )
+            time.sleep(LOCK_POLL_SECONDS)
+            continue
+        holder = lock_holder(root, observed)
+        standing = holder_standing(holder)
+        if standing == "gone":
+            clear_dead_lock(root, observed)
+            continue
+        if standing == "unverifiable":
+            raise LeaseRefused(
+                "lock-unverifiable",
+                f"{LOCK_REF} is held by pid {holder['pid']} on "
+                f"{holder['host']!r}, which cannot be checked from here; it is "
+                "left in place.",
+                owner=holder,
+            )
+        if time.monotonic() >= give_up:
+            raise LeaseRefused(
+                "lock-busy",
+                f"{LOCK_REF} is held by live pid {holder['pid']} and was not "
+                f"released within {wait} seconds.",
+                owner=holder,
+            )
+        time.sleep(LOCK_POLL_SECONDS)
+    try:
+        yield common
+    finally:
+        clear_dead_lock(root, blob)
+
+
+# ---- Fencing
+
+
+def _refusal_for(row, number: int, token: str, repo: str):
+    """Why `token` does not own row `number`, or None when it does."""
+    claim = None if row is None else row["claim"]
+    if claim is not None and claim["token"] == token:
+        return None
+    current = None if claim is None else {"token": claim["token"]}
+    replaced = row is not None and any(
+        entry["kind"] == TAKEOVER_KIND and entry["previous_token"] == token
+        for entry in row["history"]
+    )
+    if replaced:
+        return LeaseRefused(
+            "replaced",
+            f"{token} was taken over on {repo}#{number} and no longer owns it.",
+            owner=current,
+        )
+    if claim is None:
+        return LeaseRefused(
+            "unclaimed", f"{repo}#{number} carries no claim for {token} to present."
+        )
+    return LeaseRefused(
+        "not-owner", f"{token} does not own the claim on {repo}#{number}.", owner=current
+    )
+
+
+@contextlib.contextmanager
+def fenced(root, repo: str, number: int, token: str, lock_wait: float = None):
+    """Hold the lock and prove `token` is the current, unexpired owner.
+
+    The one fencing check every protected mutation goes through. It yields
+    only while the lock is held, so the mutation the body performs and the
+    ownership it was approved on cannot be separated by a takeover: nothing
+    can change the owner until the body has finished.
+
+    It yields the parsed document, that repository's state, the row, the
+    claim, its deadline and its heartbeat record, so the body mutates exactly
+    what was validated rather than something it read again.
+    """
+    if not REPO_RE.match(str(repo)):
+        raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
+    _validated_token(token, "the presented token")
+    with repository_lock(root, lock_wait) as common:
+        document = load_document(root)
+        state = state_for(document, repo)
+        row = state["rows"].get(str(number))
+        refusal = _refusal_for(row, number, token, repo)
+        if refusal is not None:
+            raise refusal
+        claim = row["claim"]
+        deadline = lease_deadline(common, repo, number, claim)
+        now = time.time()
+        if now >= deadline:
+            raise LeaseRefused(
+                "expired",
+                f"the claim on {repo}#{number} expired at "
+                f"{precise_timestamp(deadline)} and may only be taken over.",
+                owner={"token": claim["token"], "deadline": precise_timestamp(deadline)},
+            )
+        yield {
+            "common": common,
+            "document": document,
+            "state": state,
+            "row": row,
+            "claim": claim,
+            "deadline": deadline,
+            "heartbeat": read_heartbeat(common, token),
+            "now": now,
+        }
+
+
+def fence(root, repo: str, number: int, token: str, lock_wait: float = None) -> dict:
+    with fenced(root, repo, number, token, lock_wait) as held:
+        return {
+            "status": "owner",
+            "repo": repo,
+            "pr": number,
+            "token": token,
+            "deadline": precise_timestamp(held["deadline"]),
+        }
+
+
+def renew(
+    root,
+    repo: str,
+    number: int,
+    token: str,
+    lock_wait: float = None,
+    renewer=None,
+    signal_held=None,
+) -> dict:
+    """Extend the current owner's deadline by its own expiry, and nothing else.
+
+    The ledger is not written: the new deadline goes into the heartbeat
+    record, and the claim's settings are the ones it was taken with. A record
+    that has gone missing is written afresh, naming `renewer` when the
+    renewer itself is the caller.
+
+    `signal_held`, when given, is asked once the lock is held and immediately
+    before the write. The renewer passes its liveness signal here, because
+    the lock can take longer to arrive than the signal takes to be lost, and
+    a renewal decided before the wait is not one the session still stands
+    behind after it.
+    """
+    with fenced(root, repo, number, token, lock_wait) as held:
+        if signal_held is not None and not signal_held():
+            raise LeaseRefused(
+                "liveness-lost",
+                f"the liveness signal for {token} was lost while the renewal "
+                "waited for the lock; nothing was renewed.",
+            )
+        previous = held["heartbeat"]
+        deadline = held["now"] + held["claim"]["expiry_seconds"]
+        write_heartbeat(
+            held["common"],
+            {
+                "token": token,
+                "repo": repo,
+                "pr": number,
+                "deadline": precise_timestamp(deadline),
+                "renewals": 0 if previous is None else previous["renewals"] + 1,
+                "renewer": renewer if previous is None else previous["renewer"],
+            },
+        )
+        return {
+            "status": "renewed",
+            "repo": repo,
+            "pr": number,
+            "token": token,
+            "deadline": precise_timestamp(deadline),
+        }
+
+
+def release(root, repo: str, number: int, token: str, lock_wait: float = None) -> dict:
+    """End the current owner's claim: the row's claim and its heartbeat go.
+
+    Its renewer stops because the heartbeat record it renews has gone, which
+    it looks for between renewals and answers with a renewal the fencing
+    check now refuses; it is never signalled by pid, because a pid this
+    invocation did not start may by now be somebody else's process.
+    """
+    with fenced(root, repo, number, token, lock_wait) as held:
+        document, state = held["document"], held["state"]
+        state["rows"][str(number)]["claim"] = None
+        document["repositories"][repo] = _validated_repository(
+            state, f"the ledger released for {repo}"
+        )
+        written = publish_document(root, document)
+        # Released once published; a record that will not go names a token
+        # the ledger no longer does, and the renewer's retirement removes it.
+        with contextlib.suppress(LedgerError):
+            remove_heartbeat(held["common"], token)
+        renewer = None if held["heartbeat"] is None else held["heartbeat"]["renewer"]
+        return {
+            "status": "released",
+            "repo": repo,
+            "pr": number,
+            "token": token,
+            "document": str(written),
+            "renewer": renewer,
+        }
+
+
+def set_lease_defaults(root, repo: str, renewal, expiry, lock_wait: float = None) -> dict:
+    """Record this repository's lease defaults for claims taken from now on."""
+    settings = _validated_lease_settings(
+        {"renewal_seconds": renewal, "expiry_seconds": expiry}, "the lease defaults"
+    )
+    if not REPO_RE.match(str(repo)):
+        raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
+    with repository_lock(root, lock_wait):
+        document = load_document(root)
+        if repo not in document["repositories"]:
+            raise LedgerError(
+                f"{document_path(root)} holds no entry for {repo}; migrate it first."
+            )
+        state = state_for(document, repo)
+        state["lease_defaults"] = settings
+        document["repositories"][repo] = _validated_repository(
+            state, f"the ledger written for {repo}"
+        )
+        written = publish_document(root, document)
+    return {"status": "defaults-set", "repo": repo, "document": str(written), **settings}
+
+
+# ---- Liveness
+
+
+def liveness_source(liveness_fd=None, owner_pid=None) -> dict:
+    """The one signal a claim's renewal follows, checked before anything is written.
+
+    Exactly one is required. A claim with neither would be renewed by nothing
+    the session controls, and the parent pid is not a fallback: that is the
+    application process, which outlives every review it runs (D-17).
+    """
+    if (liveness_fd is None) == (owner_pid is None):
+        raise LeaseRefused(
+            "liveness-required",
+            "a claim names exactly one liveness signal, --liveness-fd or "
+            "--owner-pid; renewal follows the review session's own lifetime and "
+            "is never inferred from the invoking process.",
+        )
+    if liveness_fd is not None:
+        _require_live_descriptor(liveness_fd)
+        return {"kind": "descriptor", "fd": liveness_fd}
+    if isinstance(owner_pid, bool) or not isinstance(owner_pid, int) or owner_pid <= 1:
+        raise LeaseRefused("liveness-invalid", f"{owner_pid!r} is not an owner process id.")
+    if owner_pid == os.getpid():
+        raise LeaseRefused(
+            "liveness-invalid",
+            "the owner process is this short-lived helper invocation, which "
+            "exits as soon as the claim is recorded.",
+        )
+    standing = holder_standing({"host": socket.gethostname(), "pid": owner_pid})
+    if standing == "gone":
+        raise LeaseRefused("liveness-lost", f"owner process {owner_pid} is not running.")
+    if standing == "unverifiable":
+        raise LeaseRefused(
+            "liveness-unverifiable",
+            f"owner process {owner_pid} cannot be examined from here, so its "
+            "exit could never be observed.",
+        )
+    return {"kind": "process", "pid": owner_pid}
+
+
+def _require_live_descriptor(fd) -> None:
+    """A descriptor whose closure is observable: a pipe's read side, or a
+    connected stream socket.
+
+    Readable end-of-file is the signal. A regular file never reaches it by
+    anyone closing anything, and a pipe's write end is never readable at all,
+    so either would renew forever; both are refused. The standard streams are
+    refused too, because the renewer's are the null device.
+    """
+    if isinstance(fd, bool) or not isinstance(fd, int) or fd < 3:
+        raise LeaseRefused(
+            "liveness-invalid",
+            f"{fd!r} is not a descriptor a renewer can inherit; the standard "
+            "streams are not liveness signals.",
+        )
+    try:
+        mode = os.fstat(fd).st_mode
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    except OSError as error:
+        raise LeaseRefused("liveness-invalid", f"descriptor {fd} is not open ({error}).") from error
+    if stat.S_ISFIFO(mode):
+        if flags & os.O_ACCMODE != os.O_RDONLY:
+            raise LeaseRefused(
+                "liveness-invalid",
+                f"descriptor {fd} is not the read side of a pipe, so its "
+                "writers closing it would never be seen.",
+            )
+    elif stat.S_ISSOCK(mode):
+        _require_connected_stream(fd)
+    else:
+        raise LeaseRefused(
+            "liveness-invalid",
+            f"descriptor {fd} is neither a pipe nor a socket, so nothing closing "
+            "it can be observed.",
+        )
+    if _descriptor_closed(fd, 0):
+        raise LeaseRefused(
+            "liveness-lost", f"descriptor {fd} is already closed by every writer."
+        )
+
+
+def _require_connected_stream(fd: int) -> None:
+    """A socket whose peer closing it reads as end-of-file, or a refusal.
+
+    Only a connected stream socket has one. A datagram socket has no peer
+    close to read, and a listening or unconnected socket has no peer at all,
+    so either would renew forever or stop on unrelated traffic. The check
+    runs on a duplicate, so the caller's descriptor is left exactly as it was.
+    """
+    try:
+        probe = socket.socket(fileno=os.dup(fd))
+    except OSError as error:
+        raise LeaseRefused("liveness-invalid", f"descriptor {fd} is not a usable socket ({error}).") from error
+    try:
+        if probe.type != socket.SOCK_STREAM:
+            raise LeaseRefused(
+                "liveness-invalid",
+                f"descriptor {fd} is not a stream socket, so its peer closing it "
+                "cannot be observed.",
+            )
+        try:
+            probe.getpeername()
+        except OSError as error:
+            raise LeaseRefused(
+                "liveness-invalid",
+                f"descriptor {fd} is a socket with no connected peer ({error}), "
+                "so nothing closing it can be observed.",
+            ) from error
+    finally:
+        probe.close()
+
+
+def _descriptor_closed(fd: int, timeout: float) -> bool:
+    """True once every writer has closed `fd`; bytes written into it are ignored.
+
+    Ignored without cutting the wait short: bytes arriving are drained and the
+    wait goes on for the rest of `timeout`, so a session that writes into its
+    handle does not turn the renewer's waits into a busy loop.
+    """
+    end = time.monotonic() + timeout
+    try:
+        while True:
+            ready, _, _ = wait_readable([fd], [], [], max(0.0, end - time.monotonic()))
+            if not ready:
+                return False
+            if os.read(fd, 65536) == b"":
+                return True
+            if time.monotonic() >= end:
+                return False
+    except OSError:
+        return True
+
+
+def _signal_lost(source: dict, timeout: float) -> bool:
+    """Wait up to `timeout` for the signal to be lost, and say whether it was."""
+    if source["kind"] == "descriptor":
+        return _descriptor_closed(source["fd"], timeout)
+    time.sleep(timeout)
+    return holder_standing({"host": socket.gethostname(), "pid": source["pid"]}) != "live"
+
+
+# ---- Claiming and the renewer
+
+
+HELPER_PATH = Path(__file__).resolve()
+
+
+def claim(
+    root,
+    repo: str,
+    inventory,
+    liveness_fd=None,
+    owner_pid=None,
+    renewal=None,
+    expiry=None,
+    lock_wait: float = None,
+) -> dict:
+    """Select under the lock, claim or take over the pick, and start its renewer.
+
+    The liveness signal and the listing are checked before the lock is taken,
+    so an invocation that could never renew records nothing. Under the lock
+    the ledger is read afresh, live claims are skipped in queue order, and the
+    first unheld row is claimed; when that row's claim has expired it is taken
+    over, and the row's history gains one entry naming both tokens and the
+    time.
+
+    The renewer is started before the claim is published, and is stopped
+    again when publishing fails. The claim's start and deadline are taken
+    after the renewer has started, and a claim whose lease has run out before
+    it could be published is refused rather than published expired. It needs no ordering beyond that: it waits
+    for the lock this invocation holds, and when it gets it, it renews only a
+    claim the ledger says its token owns.
+    """
+    source = liveness_source(liveness_fd, owner_pid)
+    for value, name in ((renewal, "--renewal"), (expiry, "--expiry")):
+        if value is not None:
+            _validated_seconds(value, name)
+    listing = _listing_for(repo, inventory)
+    if not sys.executable:
+        raise LedgerError(
+            "this Python cannot name its own interpreter, so it cannot start the "
+            "renewer a claim needs."
+        )
+    with repository_lock(root, lock_wait) as common:
+        now = time.time()
+        chosen = _choose(root, repo, listing, common, now)
+        pick = chosen["pick"]
+        if pick is None:
+            if chosen["skipped"]:
+                return dict(_selection_result("all-claimed", chosen, repo, None), claim=None, takeover=None)
+            written = _publish_reconciled(root, repo, chosen)
+            return dict(
+                _selection_result("no-selectable-row", chosen, repo, written),
+                claim=None,
+                takeover=None,
+            )
+        number = pick["number"]
+        state = chosen["state"]
+        settings = effective_lease_settings(state, renewal, expiry)
+        token = secrets.token_hex(16)
+        row = state["rows"][str(number)]
+        previous = row["claim"]
+        # Asked again here, under the lock: the check before the lock was
+        # taken says nothing about a session that ended while this invocation
+        # waited for it.
+        _require_signal_held(source)
+        renewer = _start_renewer(root, repo, number, token, source)
+        try:
+            # And again once the renewer exists, immediately before each of
+            # the two writes: the signal can go while the renewer is being
+            # started, and a claim published after that is one no session
+            # stands behind.
+            _require_signal_held(source)
+            # The claim starts now, after the renewer has, and not when the
+            # selection began: starting a process can take longer than a
+            # short lease lasts, and a start taken before it would publish a
+            # claim whose deadline had already gone by.
+            started = time.time()
+            deadline = started + settings["expiry_seconds"]
+            if previous is not None:
+                row["history"].append(
+                    {
+                        "kind": TAKEOVER_KIND,
+                        "at": precise_timestamp(started),
+                        "previous_token": previous["token"],
+                        "token": token,
+                    }
+                )
+            row["claim"] = {
+                "token": token,
+                "started_at": precise_timestamp(started),
+                **settings,
+            }
+            write_heartbeat(
+                common,
+                {
+                    "token": token,
+                    "repo": repo,
+                    "pr": number,
+                    "deadline": precise_timestamp(deadline),
+                    "renewals": 0,
+                    "renewer": {"host": socket.gethostname(), "pid": renewer.pid},
+                },
+            )
+            _require_signal_held(source)
+            if renewer.poll() is not None:
+                raise LeaseRefused(
+                    "renewer-exited",
+                    f"the renewer (pid {renewer.pid}) exited before the claim "
+                    "was recorded; nothing was claimed.",
+                )
+            if time.time() >= deadline:
+                raise LeaseRefused(
+                    "lease-lapsed",
+                    f"the claim's {settings['expiry_seconds']}-second lease ran "
+                    "out while it was being recorded; nothing was claimed.",
+                )
+            written = _publish_reconciled(root, repo, chosen)
+        except BaseException:
+            _stop_started_renewer(renewer)
+            remove_heartbeat(common, token)
+            raise
+        if previous is not None:
+            # The claim is published by now, so a record that will not go is
+            # not a failed claim: a caller told otherwise would never learn
+            # the token its renewer is keeping alive. The record belongs to a
+            # token the ledger no longer names, which retirement removes.
+            with contextlib.suppress(LedgerError):
+                remove_heartbeat(common, previous["token"])
+        result = _selection_result("claimed", chosen, repo, written)
+        result["claim"] = dict(
+            row["claim"],
+            deadline=precise_timestamp(deadline),
+            renewer={"host": socket.gethostname(), "pid": renewer.pid},
+            liveness=source["kind"],
+        )
+        result["takeover"] = (
+            None if previous is None else {"previous_token": previous["token"]}
+        )
+        return result
+
+
+def _require_signal_held(source: dict) -> None:
+    if _signal_lost(source, 0):
+        raise LeaseRefused(
+            "liveness-lost",
+            "the liveness signal was lost before this claim was recorded; "
+            "nothing was claimed.",
+        )
+
+
+# How long `claim` waits for a started renewer to say it is ready. An
+# interpreter starts in well under a second; this bounds a stalled one.
+RENEWER_READY_SECONDS = 30.0
+RENEWER_READY_BYTE = b"R"
+
+
+def _start_renewer(root, repo: str, number: int, token: str, source: dict):
+    """The renewer, started and ready, or a refusal with nothing left running.
+
+    Ready means it has installed its stop-signal handlers and said so through
+    a pipe. Until then a SIGTERM, SIGHUP or SIGINT still has its default
+    effect and would end the renewer without its retiring anything, so a
+    renewer that dies before saying it is ready -- or never says so -- is
+    killed and refused here, and the claim is never published with a
+    renewer that cannot renew it.
+    """
+    ready_read, ready_write = os.pipe()
+    try:
+        renewer = _spawn_renewer_process(root, repo, number, token, source, ready_write)
+    finally:
+        os.close(ready_write)
+    try:
+        ready = _await_renewer_ready(ready_read)
+    finally:
+        os.close(ready_read)
+    if not ready:
+        _stop_started_renewer(renewer)
+        raise LeaseRefused(
+            "renewer-not-ready",
+            f"the renewer (pid {renewer.pid}) exited or stalled before it was "
+            "ready to handle a stop; nothing was claimed.",
+        )
+    return renewer
+
+
+def _await_renewer_ready(descriptor: int) -> bool:
+    end = time.monotonic() + RENEWER_READY_SECONDS
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            ready, _, _ = wait_readable([descriptor], [], [], remaining)
+            if not ready:
+                return False
+            return os.read(descriptor, 1) == RENEWER_READY_BYTE
+        except InterruptedError:
+            continue
+        except OSError:
+            return False
+
+
+def _spawn_renewer_process(
+    root, repo: str, number: int, token: str, source: dict, ready_fd: int
+):
+    """The renewer process, detached from everything but what it follows.
+
+    A session of its own, so the terminal's signals to this invocation's
+    process group do not reach it; the null device for all three standard
+    streams, so a caller capturing this invocation's output sees it end when
+    this invocation does; and no inherited descriptor but the liveness one
+    and the pipe it says it is ready through.
+    """
+    if source["kind"] == "descriptor":
+        signal_arguments = ["--liveness-fd", str(source["fd"])]
+        inherited = (source["fd"], ready_fd)
+    else:
+        signal_arguments = ["--owner-pid", str(source["pid"])]
+        inherited = (ready_fd,)
+    try:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                str(HELPER_PATH),
+                "renewer",
+                "--root",
+                str(Path(root).resolve()),
+                "--repo",
+                repo,
+                "--pr",
+                str(number),
+                "--token",
+                token,
+                "--ready-fd",
+                str(ready_fd),
+                *signal_arguments,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=inherited,
+            close_fds=True,
+            start_new_session=True,
+            cwd="/",
+        )
+    except OSError as error:
+        raise LedgerError(f"the renewer could not be started ({error}).") from error
+
+
+def _stop_started_renewer(renewer) -> None:
+    """Kill a renewer whose claim was never recorded, and reap it.
+
+    Outright rather than by a stop signal: a signalled renewer retires its
+    heartbeat record under the lock, and this invocation still holds that lock
+    and removes the record itself.
+    """
+    with contextlib.suppress(OSError):
+        renewer.kill()
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        renewer.wait(timeout=30)
+
+
+# How many stop signals this process has received. The handler only counts:
+# an exception raised from a signal handler lands at whatever bytecode happens
+# to be running, and between `update-ref` creating the lock and the `finally`
+# that releases it -- or inside that release -- it leaves this live process
+# holding a lock it will then wait on forever. So the renewer looks at the
+# count between waits, where nothing is held, and every wait it makes is
+# short enough for that look to come round within a second.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+_stop_requests = 0
+
+
+def _stop_on_signal(signum, frame):
+    global _stop_requests
+    _stop_requests += 1
+
+
+def install_stop_handlers() -> None:
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, _stop_on_signal)
+
+
+def stop_requests() -> int:
+    return _stop_requests
+
+
+def run_renewer(
+    root, repo: str, number: int, token: str, source: dict, ready_fd=None
+) -> str:
+    """Renew `token`'s claim while its signal is held, then retire its record.
+
+    Returns why it stopped. Renewal stops within one renewal interval of the
+    signal's loss, because the signal is looked at between waits and again
+    under the lock before every write, and the lock is never waited on for
+    longer than one look.
+
+    What a renewer created is its heartbeat record, and every stop but an
+    unreadable record ends with that record retired
+    through `retire_heartbeat`, which removes it only once it describes
+    nothing: the token no longer owns the row, or the lease has expired. So a
+    lost signal stops renewal at once and the record is removed when the
+    last renewal's deadline passes -- the lease lapses after its expiry, as
+    D-17 says, rather than the moment cleanup runs. SIGTERM, SIGHUP and
+    SIGINT are a stop like a lost signal: renewal ends within a second and the
+    record is retired the same way, however many of them arrive; only a
+    renewer killed outright leaves its record for a release or a takeover to
+    remove. A signal is only counted when it
+    arrives and acted on between waits, so no signal can interrupt the
+    renewer while it holds the lock. A renewer removes no ledger claim and no
+    lock it does not hold.
+
+    A heartbeat record that disappears is not taken as a release on its own
+    say-so: it brings the next renewal forward, and that renewal's fencing
+    check decides. A release or a takeover refuses it, and the renewer stops
+    at once; a record removed from under a claim its token still owns is
+    written again.
+    """
+    install_stop_handlers()
+    if ready_fd is not None:
+        # Only now, with the handlers in place, may the claim treat a stop
+        # signal to this process as one it will retire after.
+        with contextlib.suppress(OSError):
+            os.write(ready_fd, RENEWER_READY_BYTE)
+        with contextlib.suppress(OSError):
+            os.close(ready_fd)
+    identity = {"host": socket.gethostname(), "pid": os.getpid()}
+
+    def signal_held():
+        return not _signal_lost(source, 0)
+
+    try:
+        try:
+            renewal = _renewer_settings(root, repo, number, token, source)
+        except LeaseRefused as refusal:
+            if refusal.reason != "liveness-lost":
+                raise
+            return _retired(root, repo, number, token, RENEWER_POLL_SECONDS, "signal-lost")
+        if renewal is None:
+            return _retired(root, repo, number, token, LOCK_POLL_SECONDS, "not-owner")
+        poll = min(renewal, RENEWER_POLL_SECONDS)
+        if stop_requests():
+            return _retired(root, repo, number, token, poll, "signalled")
+        record = heartbeat_path(git_common_directory(root), token)
+        # The first renewal is due at once: however long this process took to
+        # start and to get the lock, the lease it renews was stamped before
+        # either, and a short one may have little of its expiry left.
+        due = time.monotonic()
+        while True:
+            if _signal_lost(source, max(0.0, min(poll, due - time.monotonic()))):
+                return _retired(root, repo, number, token, poll, "signal-lost")
+            if stop_requests():
+                return _retired(root, repo, number, token, poll, "signalled")
+            if time.monotonic() < due and os.path.lexists(record):
+                continue
+            try:
+                renew(
+                    root,
+                    repo,
+                    number,
+                    token,
+                    lock_wait=poll,
+                    renewer=identity,
+                    signal_held=signal_held,
+                )
+            except LeaseRefused as refusal:
+                if refusal.reason.startswith("lock-"):
+                    # Not this claim's fate: look at the signal again and try
+                    # at the next look; a lock that never comes back lets the
+                    # claim lapse.
+                    due = time.monotonic() + poll
+                    continue
+                if refusal.reason.startswith("heartbeat-"):
+                    # A record this helper cannot read is not one it may
+                    # judge to be its own.
+                    return refusal.reason
+                reason = "signal-lost" if refusal.reason == "liveness-lost" else refusal.reason
+                return _retired(root, repo, number, token, poll, reason)
+            due = time.monotonic() + renewal
+    except LedgerError:
+        return "refused"
+
+
+def _renewer_settings(root, repo: str, number: int, token: str, source: dict):
+    """The claim's renewal interval, or None when the ledger names no such claim.
+
+    None is what a renewer sees when the claim that started it never
+    published -- the invocation died between writing the heartbeat and
+    publishing the ledger -- or was released or taken over before the renewer
+    first looked. The lock is retried rather than waited on, so a lost
+    signal is still noticed while it is busy.
+    """
+    while True:
+        if _signal_lost(source, 0):
+            raise LeaseRefused("liveness-lost", "the signal was lost before the first renewal.")
+        try:
+            with repository_lock(root, LOCK_POLL_SECONDS):
+                row = state_for(load_document(root), repo)["rows"].get(str(number))
+                if _refusal_for(row, number, token, repo) is not None:
+                    return None
+                return row["claim"]["renewal_seconds"]
+        except LeaseRefused as refusal:
+            if not refusal.reason.startswith("lock-"):
+                raise
+            time.sleep(LOCK_POLL_SECONDS)
+
+
+def _retired(root, repo: str, number: int, token: str, poll: float, reason: str) -> str:
+    """Wait until this attempt's heartbeat record describes nothing, then remove it.
+
+    Between looks under the lock it waits for the recorded deadline, and
+    checks at least once a second whether the record is still there: a
+    release or a takeover removes it, and a renewer must not outlive the claim
+    it was renewing by the rest of that claim's lease. A renewal only moves
+    the deadline later, which the next look sees. Further stop signals do not
+    cut the wait short: retiring the record is what a stop is for.
+    """
+    common = git_common_directory(root)
+    record_path = heartbeat_path(common, token)
+    while True:
+        try:
+            outcome = retire_heartbeat(root, repo, number, token, lock_wait=poll)
+        except LeaseRefused as refusal:
+            if not refusal.reason.startswith("lock-"):
+                return reason
+            outcome = "live"
+        except LedgerError:
+            return reason
+        if outcome != "live":
+            return reason
+        wake = time.time() + poll
+        with contextlib.suppress(LedgerError):
+            record = read_heartbeat(common, token)
+            if record is not None:
+                wake = max(wake, _precise_instant(record["deadline"], "the heartbeat deadline"))
+        wake += LOCK_POLL_SECONDS
+        while time.time() < wake and os.path.lexists(record_path):
+            time.sleep(min(RENEWER_POLL_SECONDS, max(0.0, wake - time.time())))
+
+
+def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float = None) -> str:
+    """Remove `token`'s heartbeat record once it no longer describes a live lease.
+
+    Under the lock, and decided from the ledger and the record together:
+
+    * `absent` -- there is no record, because a release or a takeover removed it.
+    * `removed` -- the row's claim is not this token's (released, replaced, or
+      never published), or it is and its deadline has passed. Either way the
+      record decides nothing any more: an expired lease stays expired with
+      its record gone, because the deadline an absent record falls back to,
+      the claim's start plus its expiry, is never later than one a renewal
+      wrote.
+    * `live` -- the token still owns an unexpired lease, which somebody may
+      yet renew, so the record stays.
+
+    A record that cannot be read, or that names another claim, is refused
+    rather than removed: it is not one this attempt can show it created.
+    """
+    _validated_token(token, "the presented token")
+    with repository_lock(root, lock_wait) as common:
+        record = read_heartbeat(common, token)
+        if record is None:
+            return "absent"
+        if (record["token"], record["repo"], record["pr"]) != (token, repo, number):
+            raise LeaseRefused(
+                "heartbeat-mismatch",
+                f"the heartbeat record for {token} names "
+                f"{record['repo']}#{record['pr']}, so it is left in place.",
+            )
+        row = state_for(load_document(root), repo)["rows"].get(str(number))
+        owns = _refusal_for(row, number, token, repo) is None
+        if owns and time.time() < _precise_instant(record["deadline"], "the heartbeat deadline"):
+            return "live"
+        remove_heartbeat(common, token)
+        return "removed"
 
 
 # --------------------------------------------------------------------------
@@ -2410,8 +3905,8 @@ def read_inventory(stream=None) -> dict:
 
     Standard input and nothing else. A `--inventory <path>` would be the
     obvious convenience and it would also be the one thing that takes this
-    module outside the reach it declares: every repository file it opens is
-    under the `--root` it was given, and a path flag is a read of whatever the
+    module outside the reach it declares: every repository document it opens
+    is under the `--root` it was given, and a path flag is a read of whatever the
     caller names. The listing is the caller's own `gh` output, so the caller
     already has it in hand.
     """
@@ -2475,11 +3970,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     selector.add_argument("--root", required=True)
     selector.add_argument("--repo", required=True)
+
+    claimer = subparsers.add_parser(
+        "claim",
+        help=(
+            "select as `select` does, skipping live claims, then claim or take "
+            "over the pick and start its renewer"
+        ),
+    )
+    claimer.add_argument("--root", required=True)
+    claimer.add_argument("--repo", required=True)
+    _add_liveness_arguments(claimer)
+    claimer.add_argument(
+        "--renewal", type=float, help="seconds between renewals, for this claim only"
+    )
+    claimer.add_argument(
+        "--expiry", type=float, help="seconds a renewal extends the lease by, for this claim only"
+    )
+
+    for name, text in (
+        ("renew", "extend the current owner's lease by its own expiry"),
+        ("release", "end the current owner's claim"),
+        ("fence", "succeed only for the current, unexpired owner"),
+    ):
+        command = subparsers.add_parser(name, help=text)
+        _add_claim_identity_arguments(command)
+
+    defaults = subparsers.add_parser(
+        "lease-defaults", help="set this repository's lease defaults for later claims"
+    )
+    defaults.add_argument("--root", required=True)
+    defaults.add_argument("--repo", required=True)
+    defaults.add_argument("--renewal", type=float, required=True)
+    defaults.add_argument("--expiry", type=float, required=True)
+
+    renewer = subparsers.add_parser("renewer", help=argparse.SUPPRESS)
+    _add_claim_identity_arguments(renewer)
+    _add_liveness_arguments(renewer)
+    renewer.add_argument("--ready-fd", type=int)
     return parser
 
 
+def _add_claim_identity_arguments(command) -> None:
+    command.add_argument("--root", required=True)
+    command.add_argument("--repo", required=True)
+    command.add_argument("--pr", type=int, required=True)
+    command.add_argument("--token", required=True)
+
+
+def _add_liveness_arguments(command) -> None:
+    command.add_argument(
+        "--liveness-fd",
+        type=int,
+        help="an inherited pipe or socket descriptor whose closure ends renewal",
+    )
+    command.add_argument(
+        "--owner-pid",
+        type=int,
+        help="a process, named explicitly, whose exit ends renewal",
+    )
+
+
 def main(argv=None) -> int:
-    """0 migrated, read or selected, 3 flagged with nothing written, 2 refused.
+    """0 migrated, read, selected or a lease operation done, 3 flagged, 2 refused.
 
     Three outcomes rather than two because a flagged migration is neither: it
     read every report successfully and is waiting for a decision only the
@@ -2491,7 +4044,14 @@ def main(argv=None) -> int:
     a repository whose every merged pull request is excluded or unlisted, so
     it exits 0 and says so in the payload. A caller parses this command's
     standard output only when it exits 0, and only a refusal writes to
-    standard error.
+    standard error. So is `all-claimed`, a claim or selection over a repository
+    whose every selectable pull request somebody holds a live claim on: it
+    exits 0, writes nothing, and names each holder.
+
+    A lease refusal -- an expired, replaced or unknown token, a liveness
+    signal that is missing or already lost, an unreadable heartbeat, a lock
+    held by a live or unverifiable holder -- is a refusal like any other: exit
+    2, with its reason word and the recorded owner on standard error.
     """
     args = build_parser().parse_args(argv)
     if args.command == "read":
@@ -2504,6 +4064,42 @@ def main(argv=None) -> int:
 
     if args.command == "select":
         return _emit(select(args.root, args.repo, read_inventory()))
+
+    if args.command == "claim":
+        # The signal is checked before standard input is read, so a claim that
+        # could never renew does not first consume the caller's listing.
+        liveness_source(args.liveness_fd, args.owner_pid)
+        return _emit(
+            claim(
+                args.root,
+                args.repo,
+                read_inventory(),
+                liveness_fd=args.liveness_fd,
+                owner_pid=args.owner_pid,
+                renewal=args.renewal,
+                expiry=args.expiry,
+            )
+        )
+
+    if args.command in ("renew", "release", "fence"):
+        operation = {"renew": renew, "release": release, "fence": fence}[args.command]
+        return _emit(operation(args.root, args.repo, args.pr, args.token))
+
+    if args.command == "lease-defaults":
+        return _emit(set_lease_defaults(args.root, args.repo, args.renewal, args.expiry))
+
+    if args.command == "renewer":
+        # The signal's shape, not its state: a renewer whose signal is already
+        # lost still has a heartbeat record to retire.
+        if (args.liveness_fd is None) == (args.owner_pid is None):
+            raise LeaseRefused("liveness-required", "a renewer follows exactly one signal.")
+        source = (
+            {"kind": "descriptor", "fd": args.liveness_fd}
+            if args.liveness_fd is not None
+            else {"kind": "process", "pid": args.owner_pid}
+        )
+        run_renewer(args.root, args.repo, args.pr, args.token, source, args.ready_fd)
+        return 0
 
     confirmations = {}
     for raw in args.confirm:

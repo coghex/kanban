@@ -687,18 +687,30 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
 
 # Issue #548's cursor helper and issue #680's ledger helper, vendored into both
 # bundles and covered the way the trusted-comment helper and the document
-# mechanism above are. Every expectation is an empty set, and that is a pin
-# rather than an omission: the cursor's reconciliation is arithmetic over
-# listings the workflow already took and the ledger reads only documents under
-# the `--root` it was given, so a helper that started shelling out would be
+# mechanism above are. The cursor's expectation is an empty set, and that is a
+# pin rather than an omission: its reconciliation is arithmetic over listings
+# the workflow already took, so a cursor that started shelling out would be
 # reaching a checkout its caller never named -- and would owe a manifest row it
-# does not have.
+# does not have. The ledger's is `git` since issue #682, which put the lease's
+# lock reference and heartbeat records in the Git common directory; its one
+# other spawn, the renewer, runs through `sys.executable` and is pinned by
+# LEDGER_DYNAMIC_EXECUTABLES below.
 PROJECT_REVIEW_HELPER_SURFACE_FILES = {
     "claude-plugin/plugins/kanban/scripts/project_review_cursor.py": set(),
-    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": set(),
+    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": {"git"},
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py": set(),
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": set(),
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": {"git"},
 }
+
+# Both shipped copies of the ledger helper, and the one non-literal spawn
+# spelling each carries: `claim` starts the renewer by running the helper's own
+# file through `sys.executable`, which the literal extractor above cannot see.
+LEDGER_SURFACE_FILES = (
+    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
+    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
+)
+LEDGER_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
+LEDGER_DECLARING_ROWS = ("git-cli", "python3-cli")
 
 # Issue #511's drainer control surface, pinned the same way and for the
 # inverted reason: this is the one vendored workflow that makes no GitHub call
@@ -2938,9 +2950,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 expected,
                 relative_path,
             )
-        # Non-vacuity for the empty sets above: the same extractor recovers
-        # something from a module that does spawn, so "nothing found" is a
-        # property of these four files rather than of the scan.
+        # Non-vacuity for the cursor's empty sets above: the same extractor
+        # recovers something from a module that does spawn, so "nothing found"
+        # is a property of those two files rather than of the scan.
         self.assertEqual(
             discovered_commands_for_plugin_file(
                 "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
@@ -4660,6 +4672,64 @@ class CensusDynamicExecutableTests(unittest.TestCase):
                     f"{relative_path} must resolve the drainer install "
                     "directory through kanban_config.drainer_install_dir()",
                 )
+
+
+class LedgerDynamicExecutableTests(unittest.TestCase):
+    """Issue #682. The ledger helper's renewer is the helper itself, run through
+    `sys.executable`, and `discovered_python_commands` deliberately ignores a
+    non-literal first argument -- so its surface pin above reconciles `git`
+    and says nothing about the renewer, which is the one process the lease's
+    whole liveness contract rests on.
+
+    These hold the same three halves `CensusDynamicExecutableTests` holds for
+    the census: the non-literal spellings in each shipped copy are exactly the
+    pinned one, that spelling resolves to a declared executable, and every row
+    the copy owes names it. The spelling set is asserted non-empty, so a
+    renewer launch the AST walk stopped recognizing fails here rather than
+    passing as "no dynamic spawn".
+    """
+
+    def setUp(self):
+        self.manifest = parse_manifest()
+
+    def test_the_ledger_dynamic_spawns_are_exactly_the_pinned_spelling(self):
+        for relative_path in LEDGER_SURFACE_FILES:
+            with self.subTest(surface=relative_path):
+                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                spellings = CensusDynamicExecutableTests.dynamic_spawn_spellings(content)
+                self.assertTrue(spellings, f"{relative_path}: the renewer launch is invisible")
+                self.assertEqual(
+                    spellings,
+                    set(LEDGER_DYNAMIC_EXECUTABLES),
+                    f"{relative_path} spawns a program through a spelling this "
+                    "contract does not pin; declare the command it resolves to "
+                    "in docs/agent-workflow-contract.md and name it in "
+                    "LEDGER_DYNAMIC_EXECUTABLES",
+                )
+                self.assertEqual(
+                    discovered_python_commands(content),
+                    PROJECT_REVIEW_HELPER_SURFACE_FILES[relative_path],
+                )
+
+    def test_the_dynamic_spawn_resolves_to_a_declared_executable(self):
+        executable_rows = {
+            row["token"]: row for row in self.manifest if row["kind"] == "executable"
+        }
+        for spelling, command in sorted(LEDGER_DYNAMIC_EXECUTABLES.items()):
+            with self.subTest(spelling=spelling):
+                self.assertIn(command, executable_rows)
+
+    def test_every_row_the_ledger_owes_names_both_shipped_copies(self):
+        rows = {row["id"]: row for row in self.manifest}
+        for row_id in LEDGER_DECLARING_ROWS:
+            for relative_path in LEDGER_SURFACE_FILES:
+                with self.subTest(row=row_id, surface=relative_path):
+                    self.assertIn(
+                        relative_path,
+                        rows[row_id]["files"],
+                        f"{row_id} must declare {relative_path}; the ledger "
+                        "helper spawns what that row names",
+                    )
 
 
 def strip_docstrings(tree):
