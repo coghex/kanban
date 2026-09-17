@@ -2976,6 +2976,12 @@ def repository_lock(root, wait: float = None):
         if proc.returncode == 0:
             break
         observed = observed_lock(root)
+        if observed == blob:
+            # This process's own record, which only a release that failed to
+            # delete it can have left: nothing here takes the lock while
+            # already holding it. Waiting on it would be waiting on itself.
+            clear_dead_lock(root, observed)
+            continue
         if observed is None:
             if time.monotonic() >= give_up:
                 raise LedgerError(
@@ -3161,7 +3167,10 @@ def release(root, repo: str, number: int, token: str, lock_wait: float = None) -
             state, f"the ledger released for {repo}"
         )
         written = publish_document(root, document)
-        remove_heartbeat(held["common"], token)
+        # Released once published; a record that will not go names a token
+        # the ledger no longer does, and the renewer's retirement removes it.
+        with contextlib.suppress(LedgerError):
+            remove_heartbeat(held["common"], token)
         renewer = None if held["heartbeat"] is None else held["heartbeat"]["renewer"]
         return {
             "status": "released",
@@ -3308,12 +3317,22 @@ def _require_connected_stream(fd: int) -> None:
 
 
 def _descriptor_closed(fd: int, timeout: float) -> bool:
-    """True once every writer has closed `fd`; bytes written into it are ignored."""
+    """True once every writer has closed `fd`; bytes written into it are ignored.
+
+    Ignored without cutting the wait short: bytes arriving are drained and the
+    wait goes on for the rest of `timeout`, so a session that writes into its
+    handle does not turn the renewer's waits into a busy loop.
+    """
+    end = time.monotonic() + timeout
     try:
-        ready, _, _ = wait_readable([fd], [], [], timeout)
-        if not ready:
-            return False
-        return os.read(fd, 65536) == b""
+        while True:
+            ready, _, _ = wait_readable([fd], [], [], max(0.0, end - time.monotonic()))
+            if not ready:
+                return False
+            if os.read(fd, 65536) == b"":
+                return True
+            if time.monotonic() >= end:
+                return False
     except OSError:
         return True
 
@@ -3352,7 +3371,9 @@ def claim(
     time.
 
     The renewer is started before the claim is published, and is stopped
-    again when publishing fails. It needs no ordering beyond that: it waits
+    again when publishing fails. The claim's start and deadline are taken
+    after the renewer has started, and a claim whose lease has run out before
+    it could be published is refused rather than published expired. It needs no ordering beyond that: it waits
     for the lock this invocation holds, and when it gets it, it renews only a
     claim the ledger says its token owns.
     """
@@ -3385,17 +3406,6 @@ def claim(
         token = secrets.token_hex(16)
         row = state["rows"][str(number)]
         previous = row["claim"]
-        if previous is not None:
-            row["history"].append(
-                {
-                    "kind": TAKEOVER_KIND,
-                    "at": precise_timestamp(now),
-                    "previous_token": previous["token"],
-                    "token": token,
-                }
-            )
-        row["claim"] = {"token": token, "started_at": precise_timestamp(now), **settings}
-        deadline = now + settings["expiry_seconds"]
         # Asked again here, under the lock: the check before the lock was
         # taken says nothing about a session that ended while this invocation
         # waited for it.
@@ -3407,6 +3417,26 @@ def claim(
             # started, and a claim published after that is one no session
             # stands behind.
             _require_signal_held(source)
+            # The claim starts now, after the renewer has, and not when the
+            # selection began: starting a process can take longer than a
+            # short lease lasts, and a start taken before it would publish a
+            # claim whose deadline had already gone by.
+            started = time.time()
+            deadline = started + settings["expiry_seconds"]
+            if previous is not None:
+                row["history"].append(
+                    {
+                        "kind": TAKEOVER_KIND,
+                        "at": precise_timestamp(started),
+                        "previous_token": previous["token"],
+                        "token": token,
+                    }
+                )
+            row["claim"] = {
+                "token": token,
+                "started_at": precise_timestamp(started),
+                **settings,
+            }
             write_heartbeat(
                 common,
                 {
@@ -3419,13 +3449,24 @@ def claim(
                 },
             )
             _require_signal_held(source)
+            if time.time() >= deadline:
+                raise LeaseRefused(
+                    "lease-lapsed",
+                    f"the claim's {settings['expiry_seconds']}-second lease ran "
+                    "out while it was being recorded; nothing was claimed.",
+                )
             written = _publish_reconciled(root, repo, chosen)
         except BaseException:
             _stop_started_renewer(renewer)
             remove_heartbeat(common, token)
             raise
         if previous is not None:
-            remove_heartbeat(common, previous["token"])
+            # The claim is published by now, so a record that will not go is
+            # not a failed claim: a caller told otherwise would never learn
+            # the token its renewer is keeping alive. The record belongs to a
+            # token the ledger no longer names, which retirement removes.
+            with contextlib.suppress(LedgerError):
+                remove_heartbeat(common, previous["token"])
         result = _selection_result("claimed", chosen, repo, written)
         result["claim"] = dict(
             row["claim"],
@@ -3576,7 +3617,10 @@ def run_renewer(root, repo: str, number: int, token: str, source: dict) -> str:
         if stop_requests():
             return _retired(root, repo, number, token, poll, "signalled")
         record = heartbeat_path(git_common_directory(root), token)
-        due = time.monotonic() + renewal
+        # The first renewal is due at once: however long this process took to
+        # start and to get the lock, the lease it renews was stamped before
+        # either, and a short one may have little of its expiry left.
+        due = time.monotonic()
         while True:
             if _signal_lost(source, max(0.0, min(poll, due - time.monotonic()))):
                 return _retired(root, repo, number, token, poll, "signal-lost")
@@ -3639,12 +3683,15 @@ def _renewer_settings(root, repo: str, number: int, token: str, source: dict):
 def _retired(root, repo: str, number: int, token: str, poll: float, reason: str) -> str:
     """Wait until this attempt's heartbeat record describes nothing, then remove it.
 
-    It looks again at the recorded deadline rather than polling the lock
-    towards it: nothing but a renewal can make a live record removable sooner
-    than its deadline, and a renewal only moves the deadline later, which the
-    next look sees. Further stop signals do not cut it short: retiring the
-    record is what a stop is for.
+    Between looks under the lock it waits for the recorded deadline, and
+    checks at least once a second whether the record is still there: a
+    release or a takeover removes it, and a renewer must not outlive the claim
+    it was renewing by the rest of that claim's lease. A renewal only moves
+    the deadline later, which the next look sees. Further stop signals do not
+    cut the wait short: retiring the record is what a stop is for.
     """
+    common = git_common_directory(root)
+    record_path = heartbeat_path(common, token)
     while True:
         try:
             outcome = retire_heartbeat(root, repo, number, token, lock_wait=poll)
@@ -3658,10 +3705,12 @@ def _retired(root, repo: str, number: int, token: str, poll: float, reason: str)
             return reason
         wake = time.time() + poll
         with contextlib.suppress(LedgerError):
-            record = read_heartbeat(git_common_directory(root), token)
+            record = read_heartbeat(common, token)
             if record is not None:
                 wake = max(wake, _precise_instant(record["deadline"], "the heartbeat deadline"))
-        time.sleep(max(0.0, wake - time.time()) + LOCK_POLL_SECONDS)
+        wake += LOCK_POLL_SECONDS
+        while time.time() < wake and os.path.lexists(record_path):
+            time.sleep(min(RENEWER_POLL_SECONDS, max(0.0, wake - time.time())))
 
 
 def retire_heartbeat(root, repo: str, number: int, token: str, lock_wait: float = None) -> str:

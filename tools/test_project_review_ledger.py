@@ -3940,6 +3940,199 @@ class LockContentionTests(LeaseTestCase):
         self.assertIsNone(session.poll())
 
 
+class LeaseTimingTests(LeaseTestCase):
+    """A slow step inside a claim, or a release during retirement, costs nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def test_a_slow_renewer_start_does_not_publish_a_lapsed_claim(self):
+        delay, renewal, expiry = 1.5, 0.25, 1.0
+        started = []
+        original = LEDGER._start_renewer
+
+        def slow_start(*arguments):
+            renewer = original(*arguments)
+            started.append(renewer)
+            time.sleep(delay)
+            return renewer
+
+        LEDGER._start_renewer = slow_start
+        self.addCleanup(setattr, LEDGER, "_start_renewer", original)
+
+        def reap():
+            for renewer in started:
+                with contextlib.suppress(OSError):
+                    renewer.kill()
+                renewer.wait(timeout=SETTLE_SECONDS)
+
+        self.addCleanup(reap)
+        session = self.session()
+        before = time.time()
+        result = LEDGER.claim(
+            self.root,
+            REPO,
+            listing([merged(612)]),
+            owner_pid=session.pid,
+            renewal=renewal,
+            expiry=expiry,
+        )
+        returned_at = time.time()
+        self.assertEqual(result["status"], "claimed")
+        self.assertGreaterEqual(instant(result["claim"]["started_at"]), before + delay)
+        self.assertGreater(instant(result["claim"]["deadline"]), returned_at)
+        fenced = LEDGER.fence(self.root, REPO, 612, result["claim"]["token"])
+        self.assertEqual(fenced["status"], "owner")
+
+    def test_a_lease_that_runs_out_before_publication_is_refused_and_records_nothing(self):
+        started = []
+        original_start, original_write = LEDGER._start_renewer, LEDGER.write_heartbeat
+
+        def recording_start(*arguments):
+            renewer = original_start(*arguments)
+            started.append(renewer)
+            return renewer
+
+        def slow_write(*arguments):
+            original_write(*arguments)
+            time.sleep(0.6)
+
+        LEDGER._start_renewer, LEDGER.write_heartbeat = recording_start, slow_write
+        self.addCleanup(setattr, LEDGER, "_start_renewer", original_start)
+        self.addCleanup(setattr, LEDGER, "write_heartbeat", original_write)
+
+        def reap():
+            for renewer in started:
+                with contextlib.suppress(OSError):
+                    renewer.kill()
+                renewer.wait(timeout=SETTLE_SECONDS)
+
+        self.addCleanup(reap)
+        before = self.ledger_bytes()
+        with self.assertRaises(LEDGER.LeaseRefused) as raised:
+            LEDGER.claim(
+                self.root,
+                REPO,
+                listing([merged(612)]),
+                owner_pid=self.session().pid,
+                renewal=0.1,
+                expiry=0.3,
+            )
+        self.assertEqual(raised.exception.reason, "lease-lapsed")
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll())
+        self.assertEqual(self.ledger_bytes(), before)
+        leases = self.common() / LEDGER.RUNTIME_DIRECTORY / "leases"
+        self.assertEqual(list(leases.glob("*.json")) if leases.exists() else [], [])
+
+    def test_a_release_after_the_signal_is_lost_stops_the_renewer_promptly(self):
+        read_end, write_end = self.liveness_pipe()
+        result = self.claim([merged(612)], fd=read_end, renewal=0.2, expiry=30)
+        token = result["claim"]["token"]
+        renewer = result["claim"]["renewer"]["pid"]
+        wait_until(lambda: (self.renewals(token) or 0) >= 1, "no renewal arrived")
+        os.close(write_end)
+        # Long enough for the renewer to have stopped renewing and settled
+        # into waiting out a deadline almost thirty seconds away.
+        time.sleep(1.0)
+        self.assertTrue(process_running(renewer))
+        released = self.lease_command("release", 612, token)
+        self.assertEqual(released.returncode, 0, released.stderr)
+        wait_until(
+            lambda: not process_running(renewer),
+            "the released claim's renewer waited out the old deadline",
+            timeout=3 * LEDGER.RENEWER_POLL_SECONDS + 2,
+        )
+        self.assertIsNone(self.heartbeat(token))
+
+
+class PartialFailureTests(LeaseTestCase):
+    """A step that fails after the decisive write does not undo the decision."""
+
+    def setUp(self):
+        super().setUp()
+        self.establish({})
+
+    def test_a_lock_a_failed_release_left_behind_does_not_block_its_own_process(self):
+        original = LEDGER.clear_dead_lock
+        LEDGER.clear_dead_lock = lambda root, observed: False
+        try:
+            with LEDGER.repository_lock(self.root, wait=1):
+                pass
+        finally:
+            LEDGER.clear_dead_lock = original
+        self.assertIsNotNone(LEDGER.observed_lock(self.root))
+        started = time.monotonic()
+        with LEDGER.repository_lock(self.root, wait=SETTLE_SECONDS):
+            pass
+        self.assertLess(time.monotonic() - started, SETTLE_SECONDS / 2)
+        self.assertIsNone(LEDGER.observed_lock(self.root))
+
+    def test_bytes_written_into_the_descriptor_do_not_end_its_wait_early(self):
+        read_end, write_end = self.liveness_pipe()
+        os.write(write_end, b"x" * 10)
+        started = time.monotonic()
+        self.assertFalse(LEDGER._descriptor_closed(read_end, 0.3))
+        self.assertGreaterEqual(time.monotonic() - started, 0.29)
+        os.close(write_end)
+        self.assertTrue(LEDGER._descriptor_closed(read_end, 0.3))
+
+    def test_a_takeover_whose_old_record_will_not_go_still_reports_its_claim(self):
+        session = self.session()
+        first = self.claim([merged(612)], pid=session.pid)
+        stale = first["claim"]["token"]
+        self.expire(first, session)
+        # A record for the expired token, written by the module's own writer
+        # the way a renewer that has not yet retired leaves one.
+        LEDGER.write_heartbeat(
+            self.common(),
+            {
+                "token": stale,
+                "repo": REPO,
+                "pr": 612,
+                "deadline": LEDGER.precise_timestamp(time.time() - 1),
+                "renewals": 3,
+                "renewer": None,
+            },
+        )
+        started = []
+        original_start, original_remove = LEDGER._start_renewer, LEDGER.remove_heartbeat
+
+        def recording_start(*arguments):
+            renewer = original_start(*arguments)
+            started.append(renewer)
+            return renewer
+
+        def failing_remove(common, token):
+            if token == stale:
+                raise LEDGER.LedgerError("simulated removal failure")
+            return original_remove(common, token)
+
+        LEDGER._start_renewer, LEDGER.remove_heartbeat = recording_start, failing_remove
+        self.addCleanup(setattr, LEDGER, "_start_renewer", original_start)
+        self.addCleanup(setattr, LEDGER, "remove_heartbeat", original_remove)
+
+        def reap():
+            for renewer in started:
+                with contextlib.suppress(OSError):
+                    renewer.kill()
+                renewer.wait(timeout=SETTLE_SECONDS)
+
+        self.addCleanup(reap)
+        result = LEDGER.claim(
+            self.root,
+            REPO,
+            listing([merged(612)]),
+            owner_pid=self.session().pid,
+            renewal=LEASE_RENEWAL,
+            expiry=LEASE_EXPIRY,
+        )
+        self.assertEqual(result["status"], "claimed")
+        self.assertEqual(result["takeover"], {"previous_token": stale})
+        self.assertEqual(self.claim_on_disk(612)["token"], result["claim"]["token"])
+
+
 class SignalledRenewerTests(LeaseTestCase):
     def test_a_renewer_stopped_by_a_signal_stops_renewing_and_retires_its_record(self):
         self.establish({})
