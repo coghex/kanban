@@ -190,9 +190,15 @@ gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F curs
 Repeat that call until a page comes back with fewer than 100 pull requests on
 it. That short page is the last one; `next` is what positions the call after it,
 and nothing else does. Then assemble the pages into the one listing the helper
-reads, writing it to `$INVENTORY` inside a scratch directory outside both
-worktrees — `SCRATCH="$(mktemp -d)"` and `INVENTORY="$SCRATCH/inventory.json"`,
-which step 9 removes by that name:
+reads, writing it into a scratch directory outside both worktrees, which step 9
+removes by that name:
+
+```bash
+SCRATCH="$(mktemp -d)"
+INVENTORY="$SCRATCH/inventory.json"
+```
+
+The listing itself has this shape:
 
 ```json
 {"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
@@ -309,7 +315,8 @@ where it is:
 git -C "$ROOT" fetch --quiet origin
 DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD$#\1#p')"
 PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
-REVIEW_ROOT="$(mktemp -d)"
+RUNTIME="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/kanban-project-review/worktrees"
+REVIEW_ROOT="$RUNTIME/$ATTEMPT"
 REVIEW_WT="$REVIEW_ROOT/tree"
 git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"
 ```
@@ -327,11 +334,28 @@ at all: stop there, through step 9, rather than pinning a branch nobody named.
 fetch failed. Never substitute an older local ref — a review recorded against a
 SHA the remote never had says nothing about the code anybody else can see.
 
-`$REVIEW_ROOT` is this invocation's own `mktemp -d`, outside both `$ROOT` and
-`$DOCS_WT`, and `$REVIEW_WT` is the worktree inside it. Step 9 removes both by
-those names. No worktree, lock, or liveness record ever lives under
-`docs/project_review/`: that directory publishes, and a runtime artifact in it
-would publish with it.
+`$REVIEW_ROOT` is named for **this attempt**, under the Git common directory
+every worktree of `$ROOT` shares — beside the lease's own heartbeat records and
+the adapter's, and inside no working tree at all. No worktree, lock, or liveness
+record ever lives under `docs/project_review/`: that directory publishes, and a
+runtime artifact in it would publish with it.
+
+Naming it for the attempt is what makes an orphan reclaimable. **Before creating
+this invocation's own, reclaim the ones nobody is using.** Each directory under
+`$RUNTIME` is some attempt's, so ask the adapter about each one by its name:
+
+```bash
+python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"
+```
+
+A sibling whose attempt reports `"status": "ended"` — or whose attempt the
+adapter refuses as unknown, which is what an attempt pruned after seven days
+looks like — belongs to an invocation that is over. Remove its worktree and its
+directory exactly as step 9 does, then run `git -C "$ROOT" worktree prune` to
+clear any record left naming it, and say how many you reclaimed. One reporting
+`"status": "active"` belongs to a live invocation somewhere: leave it alone.
+That is the recovery path for the one exit no model can clean up after, and it
+costs one `status` call per orphan.
 
 `$PIN` is the full SHA recorded as the verification commit in step 8.
 
@@ -392,8 +416,16 @@ For every suspected finding:
    gh issue list -R "$REPO" --search "<words>" --state all --limit 20
    ```
 
-   An already-tracked finding is not a new report entry; name it in the
-   completion message.
+   **An already-tracked finding is still a finding.** The tracker search
+   decides what its entry's `Deduplication` line says, not whether it has one:
+   write the entry, name the open issue that already holds it there, and name it
+   in the completion message too. That line is what stops
+   /process-report filing a second issue for it — the report is the
+   handoff, and filing is that workflow's decision to make with the
+   deduplication in front of it, not one to make here by leaving the defect out.
+   It is also what makes the review recordable at all: a row is `findings` only
+   with a report or an existing-finding link beside it, and a defect this review
+   confirmed at `$PIN` cannot honestly be recorded `clean`.
 4. Read the reports the row's own history links and compare the finding with
    their `PRR-*` entries. **Read the ledger again for that history, now that
    the claim is held:**
@@ -458,8 +490,9 @@ implementation. Preserve enough context for a later autonomous
 ### 7. Write a report only for new findings
 
 Write a report when, and only when, at least one finding is new or a verified
-recurrence. A review whose findings are all unresolved repeats writes none, and
-a clean review writes none. Do not draft tracker issue bodies, ask which
+recurrence — an already-tracked one included, since step 6.3 gives that an entry
+too. A review whose findings are all unresolved repeats writes none, and a clean
+review writes none. Do not draft tracker issue bodies, ask which
 findings to file, open an issue through `gh`, or append any origin-routing
 marker: this workflow never creates or edits a tracker issue, and the user's
 invocation authorizes the report handoff rather than a filing.
@@ -539,8 +572,11 @@ python3 "$LEDGER" record --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$T
 ```
 
 `--outcome clean` for a review with no finding of any kind; `--outcome findings`
-for every other completed review, including one whose only findings are
-unresolved repeats. `--commit` is `$PIN`, the tree the review was actually
+for every other completed review. Every other one has something to link, which
+is what the helper requires of a `findings` row: a new or recurring finding has
+the report step 7 allocated, an unresolved repeat has its `--repeat`, and an
+already-tracked finding has the report entry step 6.3 gives it. `clean` is for
+the review that found nothing, and for nothing else. `--commit` is `$PIN`, the tree the review was actually
 verified against. `--report` is the allocated path and is omitted when step 7
 wrote none. Each `--repeat`, `--recurrence`, `--fixed` and `--fixed-merge` is
 repeatable and is omitted when there is none.
@@ -582,25 +618,36 @@ not run, and not running it is not a failure.
    completed `record` released it already; a second release is refused rather
    than harmful, which is why the condition is the cheaper one to get wrong.
 
-3. **Remove the temporary worktree** — when step 4 created it:
+3. **Remove the temporary worktree** — whenever step 4 *attempted* to create
+   one, whether or not it reported success:
 
    ```bash
    git -C "$ROOT" worktree remove --force "$REVIEW_WT"
    ```
 
-4. **Remove its scratch directory — only once that removal succeeded:**
+   Whether it succeeded is not what decides this. A `worktree add` that failed
+   can have left a directory, an administrative record, or both, so an attempt
+   is the condition and not an outcome. `is not a working tree` is this step
+   finding nothing registered, which is this step done — go on to step 4. Any
+   other failure is a real one: retain and report.
+
+4. **Remove `$REVIEW_ROOT`** — whenever step 4 named one, unless step 3 failed
+   for some reason other than finding nothing to remove:
 
    ```bash
    rm -rf "$REVIEW_ROOT"
    ```
 
-   `$REVIEW_ROOT` *contains* `$REVIEW_WT`, so removing it after a failed
-   `worktree remove` would delete the very worktree the previous step just
-   reported it had retained — and where that failure left Git's administrative
-   record in `$ROOT`'s common directory behind, leave the record naming a
-   directory that is gone. A partial removal can end either way, with the record
-   dropped and the tree still on disk or both still there, so neither is assumed.
-   When step 3 fails, keep `$REVIEW_ROOT`, report it by path, and say that
+   `$REVIEW_ROOT` exists from the moment step 4 named it, so a `worktree add`
+   that never ran or failed outright still owes this — which is the whole
+   difference between a condition on the resource and a condition on the step
+   that was meant to fill it. But `$REVIEW_ROOT` *contains* `$REVIEW_WT`, so
+   removing it after a failed `worktree remove` would delete the very worktree
+   the previous step just reported it had retained — and where that failure left
+   Git's administrative record behind, leave the record naming a directory that
+   is gone. A partial removal can end either way, with the record dropped and
+   the tree still on disk or both still there, so neither is assumed. When
+   step 3 really failed, keep `$REVIEW_ROOT`, report it by path, and say that
    `git -C "$ROOT" worktree prune` is what clears any record still naming it once
    the directory itself is dealt with.
 
@@ -636,6 +683,17 @@ a bounded silence window for a cancellation it does not report; renewal stops
 with it and the lease lapses on its own. Step 9 makes that prompt rather than
 possible, so never treat a final tool call as the thing that prevents a stranded
 claim.
+
+**What a cancellation leaves, and who clears it.** The runtime's own mechanism
+ends the keeper and therefore the lease; it cannot run these steps, so a
+cancellation after step 4 leaves `$REVIEW_WT` and `$REVIEW_ROOT` on disk, and
+one before it may leave `$SCRATCH`. Both are outside every working tree — the
+review worktree under this attempt's directory in the Git common directory, the
+inventory under `mktemp -d` — so nothing an operator would notice is dirtied and
+nothing publishes. Neither is orphaned for good, either: the lease lapses to the
+next invocation, and step 4's reclaim pass removes the worktree directory of
+every attempt that has ended before it makes its own. Say, in the completion
+message, whatever this invocation reclaimed on its way in.
 
 ### 10. Report, and stop
 
@@ -758,9 +816,32 @@ git -C "$ROOT" diff <sha>^1 <sha>
 Use an empty-tree diff for the initial commit, which has no first parent to
 diff against. Read adjacent commits when the change is a partial step. Treat the
 message, historical repository instructions, tests, and subsystem contracts as
-evidence, not necessarily a complete specification. Trace surviving behavior to
-the current code just as in PR mode, and verify every finding the way step 6
-requires.
+evidence, not necessarily a complete specification.
+
+**This mode verifies against `$ROOT`, and owes none of step 6.** Step 6 is PR
+mode's: it needs `$PIN`, `$REVIEW_WT`, a claimed row and that row's history, and
+none of those exists here — there is no claim, no ledger row, and no pinned
+worktree, and a direct batch that went looking for them would find nothing.
+Verify each suspected finding this way instead:
+
+1. Confirm it still exists in `$ROOT`'s checkout as it stands — a later commit
+   may already have fixed it. That checkout is the whole of what a direct
+   finding is verified against, and the completion message names the commit it
+   was on so a reader knows which tree that was.
+2. Trace the failure path there and cite `file:line`, or capture a reproduction
+   command and its result. Never report a hunch.
+3. Search open and closed tracker issues for context and deduplication exactly
+   as PR mode's step 6.3 does, through the same two issue listings. An
+   already-tracked finding still earns an entry whose `Deduplication` names the
+   issue that holds it.
+4. Capture each current finding in the same four sections PR mode uses —
+   `Captured note`, `Verification`, `Evidence`, `Handoff context` — with the
+   verification and the evidence taken from `$ROOT` rather than from `$PIN`.
+
+There is no repeat, recurrence or fix link in this mode: those are ledger
+entries, and direct mode has no row to link them to. A finding an earlier direct
+report already carries is named in the completion message and given no second
+entry.
 
 Record fixed-later mistakes as completion-summary one-liners. Only current
 mistakes become unprocessed report entries.
@@ -772,20 +853,33 @@ message, and current descendants individually.
 ### The direct-mode report and record
 
 A direct batch with at least one confirmed current finding writes one report at
-`docs/project_review_direct_<newest7>-<oldest7>.md`, under `$DOCS_WT/`, with the
-title `# Project Review Findings: direct commits <newest>–<oldest>` and the
-canonical shape above. An explicit destination from the user wins over that
-name. A clean batch writes no report unless the user explicitly asks for one.
+`docs/project_review_direct_<newest7>-<oldest7>.md`, under `$DOCS_WT/`. Its name
+is the reviewer's here — no helper allocates it, because no ledger row owns this
+batch — and an explicit destination from the user wins over it. A clean batch
+writes no report unless the user explicitly asks for one.
+
+Its shape is the one step 7 sets out with two substitutions, and nothing else
+from step 7 applies: the title is
+`# Project Review Findings: direct commits <newest>–<oldest>`, and the opening
+paragraph states the batch's SHA range, the commit the findings were verified
+against, and any excluded commit — a pull-request number and `$PIN` have no
+meaning here. The legend line, the `## Status` checklist, one `PRR-*` key
+appearing once in that checklist and once in a finding heading, and the four
+capture sections are all exactly as they are there.
 
 **Record the cursor last.** Record coverage only after every selected unit has
 been reviewed and any required report has been written and validated, so a
 failed report or a failed cursor write is never reported as a completed batch:
 
 ```bash
-python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode direct --reviewed "$REVIEWED" --exclude "$EXCLUDED"
+git -C "$ROOT" log --first-parent --format=%H \
+  | python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode direct --reviewed "$REVIEWED" --exclude "$EXCLUDED"
 ```
 
-That call records against the same first-parent walk it selected from. A batch
+The walk is piped in here exactly as it is at selection, and for the same
+reason: the helper resolves and orders every reviewed SHA against the candidate
+history it is given, so a `record` handed none refuses the batch it is trying to
+record rather than recording it against nothing. A batch
 that selected nothing records nothing and is not a completed batch: the helper
 refuses an empty `--reviewed` with an empty `--exclude`. `record` merges rather
 than replaces: an earlier exclusion survives a later batch, and the direct

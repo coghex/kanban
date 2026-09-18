@@ -489,10 +489,28 @@ PINNED_WORKTREE = {
         "at all: stop there, through step 9, rather than pinning a branch "
         "nobody named."
     ),
-    "the scratch directories have names of their own": (
-        "`$REVIEW_ROOT` is this invocation's own `mktemp -d`, outside both "
-        "`$ROOT` and `$DOCS_WT`, and `$REVIEW_WT` is the worktree inside it. "
-        "Step 9 removes both by those names."
+    "the review worktree is attempt-scoped runtime state": (
+        "`$REVIEW_ROOT` is named for **this attempt**, under the Git common "
+        "directory every worktree of `$ROOT` shares — beside the lease's own "
+        "heartbeat records and the adapter's, and inside no working tree at "
+        "all."
+    ),
+    "naming it for the attempt is what makes it reclaimable": (
+        "Naming it for the attempt is what makes an orphan reclaimable. "
+        "**Before creating this invocation's own, reclaim the ones nobody is "
+        "using.**"
+    ),
+    "an ended or unknown attempt's directory is an orphan": (
+        'A sibling whose attempt reports `"status": "ended"` — or whose '
+        "attempt the adapter refuses as unknown, which is what an attempt "
+        "pruned after seven days looks like — belongs to an invocation that is "
+        "over."
+    ),
+    "a live attempt's directory is left alone": (
+        'One reporting `"status": "active"` belongs to a live invocation '
+        "somewhere: leave it alone. That is the recovery path for the one exit "
+        "no model can clean up after, and it costs one `status` call per "
+        "orphan."
     ),
     "it never depends on the primary checkout": (
         "The review is verified against that exact tree and nothing else, so it "
@@ -526,8 +544,10 @@ PINNED_WORKTREE_COMMANDS = (
     'git -C "$ROOT" fetch --quiet origin',
     'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD',
     'PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"',
-    'REVIEW_ROOT="$(mktemp -d)"',
+    'RUNTIME="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/kanban-project-review/worktrees"',
+    'REVIEW_ROOT="$RUNTIME/$ATTEMPT"',
     'REVIEW_WT="$REVIEW_ROOT/tree"',
+    'python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"',
     'git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"',
 )
 
@@ -577,10 +597,28 @@ CLEANUP = {
         "does not run."
     ),
     "remove the worktree": (
-        "**Remove the temporary worktree** — when step 4 created it:"
+        "**Remove the temporary worktree** — whenever step 4 *attempted* to "
+        "create one, whether or not it reported success:"
     ),
-    "the worktree's scratch goes only after it does": (
-        "**Remove its scratch directory — only once that removal succeeded:**"
+    "an attempt is the condition, not an outcome": (
+        "Whether it succeeded is not what decides this. A `worktree add` that "
+        "failed can have left a directory, an administrative record, or both, "
+        "so an attempt is the condition and not an outcome."
+    ),
+    "nothing registered is this step done": (
+        "`is not a working tree` is this step finding nothing registered, "
+        "which is this step done — go on to step 4. Any other failure is a "
+        "real one: retain and report."
+    ),
+    "the scratch root is owed whenever it was named": (
+        "**Remove `$REVIEW_ROOT`** — whenever step 4 named one, unless step 3 "
+        "failed for some reason other than finding nothing to remove:"
+    ),
+    "the condition is on the resource, not the step": (
+        "`$REVIEW_ROOT` exists from the moment step 4 named it, so a "
+        "`worktree add` that never ran or failed outright still owes this — "
+        "which is the whole difference between a condition on the resource and "
+        "a condition on the step that was meant to fill it."
     ),
     "why a failed removal keeps its directory": (
         "`$REVIEW_ROOT` *contains* `$REVIEW_WT`, so removing it after a failed "
@@ -592,9 +630,26 @@ CLEANUP = {
         "tree still on disk or both still there, so neither is assumed."
     ),
     "a failed removal reports the repair": (
-        "When step 3 fails, keep `$REVIEW_ROOT`, report it by path, and say "
-        'that `git -C "$ROOT" worktree prune` is what clears any record still '
-        "naming it once the directory itself is dealt with."
+        "When step 3 really failed, keep `$REVIEW_ROOT`, report it by path, "
+        'and say that `git -C "$ROOT" worktree prune` is what clears any '
+        "record still naming it once the directory itself is dealt with."
+    ),
+    "what a cancellation leaves": (
+        "**What a cancellation leaves, and who clears it.** The runtime's own "
+        "mechanism ends the keeper and therefore the lease; it cannot run "
+        "these steps, so a cancellation after step 4 leaves `$REVIEW_WT` and "
+        "`$REVIEW_ROOT` on disk, and one before it may leave `$SCRATCH`."
+    ),
+    "what it leaves is outside every working tree": (
+        "Both are outside every working tree — the review worktree under this "
+        "attempt's directory in the Git common directory, the inventory under "
+        "`mktemp -d` — so nothing an operator would notice is dirtied and "
+        "nothing publishes."
+    ),
+    "the next invocation reclaims it": (
+        "Neither is orphaned for good, either: the lease lapses to the next "
+        "invocation, and step 4's reclaim pass removes the worktree directory "
+        "of every attempt that has ended before it makes its own."
     ),
     "the inventory scratch is independent": (
         "`$SCRATCH` never holds a worktree, so this step is independent of "
@@ -792,7 +847,8 @@ FINDING_HISTORY = {
 REPORT_ALLOCATION = {
     "only for new findings": (
         "Write a report when, and only when, at least one finding is new or a "
-        "verified recurrence. A review whose findings are all unresolved "
+        "verified recurrence — an already-tracked one included, since step 6.3 "
+        "gives that an entry too. A review whose findings are all unresolved "
         "repeats writes none, and a clean review writes none."
     ),
     "the helper allocates the name": (
@@ -827,8 +883,14 @@ RECORD_STEP = {
     ),
     "the two outcomes": (
         "`--outcome clean` for a review with no finding of any kind; "
-        "`--outcome findings` for every other completed review, including one "
-        "whose only findings are unresolved repeats."
+        "`--outcome findings` for every other completed review."
+    ),
+    "every findings row has something to link": (
+        "Every other one has something to link, which is what the helper "
+        "requires of a `findings` row: a new or recurring finding has the "
+        "report step 7 allocated, an unresolved repeat has its `--repeat`, and "
+        "an already-tracked finding has the report entry step 6.3 gives it. "
+        "`clean` is for the review that found nothing, and for nothing else."
     ),
     "the commit is the pinned tree": (
         "`--commit` is `$PIN`, the tree the review was actually verified "
@@ -1089,14 +1151,50 @@ DIRECT_MODE = {
         '`python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"` rather than '
         "from the last completed range or a report name"
     ),
-    "the direct filename and title": (
+    "the direct filename is the reviewer's": (
         "A direct batch with at least one confirmed current finding writes one "
         "report at `docs/project_review_direct_<newest7>-<oldest7>.md`, under "
-        "`$DOCS_WT/`, with the title `# Project Review Findings: direct commits "
-        "<newest>–<oldest>` and the canonical shape above."
+        "`$DOCS_WT/`. Its name is the reviewer's here — no helper allocates "
+        "it, because no ledger row owns this batch — and an explicit "
+        "destination from the user wins over it."
     ),
-    "an explicit destination wins": (
-        "An explicit destination from the user wins over that name."
+    "the direct report shape substitutes two things": (
+        "Its shape is the one step 7 sets out with two substitutions, and "
+        "nothing else from step 7 applies: the title is `# Project Review "
+        "Findings: direct commits <newest>–<oldest>`, and the opening "
+        "paragraph states the batch's SHA range, the commit the findings were "
+        "verified against, and any excluded commit — a pull-request number and "
+        "`$PIN` have no meaning here."
+    ),
+    "the rest of the shape is unchanged": (
+        "The legend line, the `## Status` checklist, one `PRR-*` key appearing "
+        "once in that checklist and once in a finding heading, and the four "
+        "capture sections are all exactly as they are there."
+    ),
+    "direct mode owes none of step 6": (
+        "**This mode verifies against `$ROOT`, and owes none of step 6.** Step "
+        "6 is PR mode's: it needs `$PIN`, `$REVIEW_WT`, a claimed row and that "
+        "row's history, and none of those exists here — there is no claim, no "
+        "ledger row, and no pinned worktree, and a direct batch that went "
+        "looking for them would find nothing."
+    ),
+    "a direct finding is verified in the checkout": (
+        "Confirm it still exists in `$ROOT`'s checkout as it stands — a later "
+        "commit may already have fixed it. That checkout is the whole of what "
+        "a direct finding is verified against, and the completion message "
+        "names the commit it was on so a reader knows which tree that was."
+    ),
+    "direct capture takes the same four sections": (
+        "Capture each current finding in the same four sections PR mode uses "
+        "— `Captured note`, `Verification`, `Evidence`, `Handoff context` — "
+        "with the verification and the evidence taken from `$ROOT` rather than "
+        "from `$PIN`."
+    ),
+    "direct mode has no ledger links": (
+        "There is no repeat, recurrence or fix link in this mode: those are "
+        "ledger entries, and direct mode has no row to link them to. A finding "
+        "an earlier direct report already carries is named in the completion "
+        "message and given no second entry."
     ),
     "a clean direct batch writes no report": (
         "A clean batch writes no report unless the user explicitly asks for one."
@@ -1189,9 +1287,23 @@ PRESERVED_BEHAVIOR = {
         "Record fixed-later mistakes as completion-summary one-liners. Only "
         "current mistakes become unprocessed report entries."
     ),
-    "already-tracked is a one-liner": (
-        "An already-tracked finding is not a new report entry; name it in the "
-        "completion message."
+    "an already-tracked finding still gets an entry": (
+        "**An already-tracked finding is still a finding.** The tracker search "
+        "decides what its entry's `Deduplication` line says, not whether it "
+        "has one: write the entry, name the open issue that already holds it "
+        "there, and name it in the completion message too."
+    ),
+    "the deduplication line is what stops a second filing": (
+        "That line is what stops {{cmd:process-report}} filing a second issue "
+        "for it — the report is the handoff, and filing is that workflow's "
+        "decision to make with the deduplication in front of it, not one to "
+        "make here by leaving the defect out."
+    ),
+    "and it is what makes the review recordable": (
+        "It is also what makes the review recordable at all: a row is "
+        "`findings` only with a report or an existing-finding link beside it, "
+        "and a defect this review confirmed at `$PIN` cannot honestly be "
+        "recorded `clean`."
     ),
     "do not stop the review": (
         "Keep reviewing the rest of the pull request. Do not stop to discuss or "
@@ -1833,11 +1945,11 @@ class PreservedBehaviorTests(unittest.TestCase):
     """Requirement 9: D-2's behavior, vendored as it reads today."""
 
     def test_every_preserved_rule_survives_in_both_renderings(self):
-        for relative_path in RENDERED_ASSETS:
+        for relative_path, brand in BRAND_OF_ASSET.items():
             content = flat(read(relative_path))
             for name, phrase in PRESERVED_BEHAVIOR.items():
                 with self.subTest(asset=relative_path, rule=name):
-                    self.assertIn(flat(phrase), content)
+                    self.assertIn(flat(rendered_phrase(phrase, brand)), content)
             with self.subTest(asset=relative_path, rule="clean review"):
                 self.assertIn(flat(CLEAN_REVIEW), content)
 
@@ -3577,6 +3689,84 @@ class WorkflowRun:
             self.pids.append(result["claim"]["renewer"]["pid"])
         return result
 
+    def attempt_state(self, attempt):
+        """What the asset's own `status` call reports about one attempt."""
+        completed = self.sh(
+            asset_command(self.asset, 'python3 "$LIVENESS" status'),
+            check=False,
+            SIBLING=attempt,
+        )
+        if completed.returncode != 0:
+            # The adapter refuses an attempt it no longer knows -- a pruned
+            # one -- and the asset reads that as an invocation that is over.
+            return "unknown"
+        return json.loads(completed.stdout)["status"]
+
+    def reclaim_orphans(self, keep=None):
+        """Step 4's reclaim pass: every sibling whose attempt is over.
+
+        The asset states this as prose over one `status` call; what is driven
+        here is that call, its two readings, and the removal it gates.
+        """
+        runtime = self.runtime_worktrees()
+        reclaimed = []
+        if not runtime.is_dir():
+            return reclaimed
+        for sibling in sorted(runtime.iterdir()):
+            if sibling.name == keep:
+                continue
+            if self.attempt_state(sibling.name) == "active":
+                continue
+            self.cleanup_worktree(sibling / "tree")
+            reclaimed.append(sibling.name)
+        self.sh('git -C "$ROOT" worktree prune')
+        return reclaimed
+
+    def first_parent_history(self, count):
+        """`count` first-parent commits in `$ROOT`, newest first."""
+        for index in range(count):
+            (self.root / f"history-{index}.md").write_text(
+                f"commit {index}\n", encoding="utf-8"
+            )
+            e2e_git(self.root, "add", "-A")
+            e2e_git(self.root, "commit", "-qm", f"history {index}")
+        walk = e2e_git(
+            self.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        return walk[:count]
+
+    def direct_walk(self, subcommand):
+        """The direct section's walk piped into `select` or `record`.
+
+        Both are the same `git log --first-parent` line with a different
+        helper on the other side of the pipe, so they are told apart by the
+        subcommand rather than by the prefix they share -- and a `record` that
+        stopped being handed the walk stops working here.
+        """
+        commands = [
+            command
+            for command in asset_commands_starting(
+                self.asset, 'git -C "$ROOT" log --first-parent'
+            )
+            if f'"$CURSOR" {subcommand} ' in command
+        ]
+        self.case.assertEqual(len(commands), 1, commands)
+        return commands[0]
+
+    def direct_select(self, count):
+        """The direct section's own `select`, run as it spells it."""
+        completed = self.sh(
+            self.direct_walk("select"), COUNT=str(count), RANGE_START="", RANGE_END=""
+        )
+        return json.loads(completed.stdout)
+
+    def direct_record(self, shas):
+        """The direct section's own `record`, run as it spells it."""
+        completed = self.sh(
+            self.direct_walk("record"), REVIEWED=",".join(shas), EXCLUDED=""
+        )
+        return json.loads(completed.stdout)
+
     def heartbeat_renewals(self, token):
         module = e2e_module("ledger", self.brand)
         record = module.read_heartbeat(module.git_common_directory(self.docs), token)
@@ -3584,13 +3774,24 @@ class WorkflowRun:
 
     # -- the pinned review tree
 
-    def pin(self):
+    def runtime_worktrees(self):
+        """`$RUNTIME` -- the attempt-scoped review-worktree directory."""
+        return Path(
+            self.sh(
+                asset_command(self.asset, 'RUNTIME="$(git -C "$ROOT" rev-parse')
+                + ' && printf %s "$RUNTIME"'
+            ).stdout.strip()
+        )
+
+    def pin(self, attempt=None):
         """Fetch, resolve and detach -- through the asset's own commands.
 
-        The default branch and the pinned SHA are both produced by running the
-        lines the asset spells, so a resolution that stopped asking the remote
-        stops working here.
+        The default branch, the pinned SHA and the attempt-scoped worktree
+        directory are all produced by running the lines the asset spells, so a
+        resolution that stopped asking the remote, or a worktree that moved out
+        of the Git common directory, stops working here.
         """
+        attempt = attempt or f"{time.monotonic_ns():032x}"[:32]
         self.helper('git -C "$ROOT" fetch')
         default = self.sh(
             asset_command(self.asset, 'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote')
@@ -3601,11 +3802,14 @@ class WorkflowRun:
             + ' && printf %s "$PIN"',
             DEFAULT_BRANCH=default,
         ).stdout.strip()
-        asset_command(self.asset, 'REVIEW_ROOT="$(mktemp -d)"')
-        asset_command(self.asset, 'REVIEW_WT="$REVIEW_ROOT/tree"')
-        review_root = self.base / f"review-{time.monotonic_ns()}"
+        review_root = self.runtime_worktrees() / attempt
         review_wt = review_root / "tree"
-        review_root.mkdir()
+        self.case.assertEqual(
+            asset_command(self.asset, 'REVIEW_ROOT='), 'REVIEW_ROOT="$RUNTIME/$ATTEMPT"'
+        )
+        self.case.assertEqual(
+            asset_command(self.asset, 'REVIEW_WT='), 'REVIEW_WT="$REVIEW_ROOT/tree"'
+        )
         self.sh(
             asset_command(self.asset, 'git -C "$ROOT" worktree add'),
             REVIEW_WT=str(review_wt),
@@ -3614,11 +3818,24 @@ class WorkflowRun:
         self.case.assertTrue((review_wt / "README.md").is_file())
         return pin, review_wt
 
-    def remove_pin(self, review_wt):
-        self.sh(
+    def cleanup_worktree(self, review_wt, check=False):
+        """The asset's steps 9.3 and 9.4, in the order and under the conditions
+        it states them."""
+        removal = self.sh(
             asset_command(self.asset, 'git -C "$ROOT" worktree remove'),
+            check=check,
             REVIEW_WT=str(review_wt),
         )
+        nothing_registered = "is not a working tree" in removal.stderr
+        if removal.returncode == 0 or nothing_registered:
+            self.sh(
+                asset_command(self.asset, 'rm -rf "$REVIEW_ROOT"'),
+                REVIEW_ROOT=str(Path(review_wt).parent),
+            )
+        return removal
+
+    def remove_pin(self, review_wt):
+        self.cleanup_worktree(review_wt, check=True)
 
     # -- completing an attempt
 
@@ -3673,7 +3890,7 @@ class WorkflowRun:
         self.case.assertEqual(claimed["status"], "claimed")
         number = claimed["selected"]["number"]
         token = claimed["claim"]["token"]
-        pin, review_wt = self.pin()
+        pin, review_wt = self.pin(attempt=registration["attempt"])
         report = None
         if findings is not None:
             report = self.allocate(number, token)
@@ -4002,6 +4219,150 @@ class CleanupFailure(WorkflowRunCase):
         os.chmod(review_root, mode)
         e2e_git(self.workflow.root, "worktree", "prune")
         shutil.rmtree(review_root)
+
+
+class OrphanReclaim(WorkflowRunCase):
+    """Round 3's blockers: the exits no cleanup step could reach."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+        self.workflow.lease_defaults()
+
+    def test_a_failed_worktree_add_still_gives_up_its_scratch_root(self):
+        # `$REVIEW_ROOT` exists from the moment step 4 names it, so an add that
+        # fails outright leaks it unless the removal is conditioned on the
+        # resource rather than on the step that was meant to fill it. The add
+        # is made to fail for real, with a commit this repository does not
+        # have.
+        runtime = self.workflow.runtime_worktrees()
+        attempt = "0" * 32
+        review_root = runtime / attempt
+        review_wt = review_root / "tree"
+        failed = self.workflow.sh(
+            asset_command(self.workflow.asset, 'git -C "$ROOT" worktree add'),
+            check=False,
+            REVIEW_WT=str(review_wt),
+            PIN="f" * 40,
+        )
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        review_root.mkdir(parents=True, exist_ok=True)
+
+        # Step 3 runs on the *attempt*, finds nothing registered, and says so;
+        # step 4 then follows and the scratch root goes.
+        removal = self.workflow.cleanup_worktree(review_wt)
+        self.assertNotEqual(removal.returncode, 0)
+        self.assertIn("is not a working tree", removal.stderr)
+        self.assertFalse(review_root.exists())
+
+    def test_a_cancellation_after_pinning_is_reclaimed_by_the_next_invocation(self):
+        # The exit no model can clean up after. The session ends with a worktree
+        # pinned, so the lease lapses on its own but `$REVIEW_ROOT` stays --
+        # and the next invocation's step-4 reclaim pass is what removes it.
+        inventory, _ = self.workflow.inventory()
+        cancelled = self.workflow.register(session="session-a", invocation="invocation-1")
+        claimed = self.workflow.claim(inventory, cancelled["keeper_pid"])
+        token = claimed["claim"]["token"]
+        _, orphan_wt = self.workflow.pin(attempt=cancelled["attempt"])
+        orphan_root = orphan_wt.parent
+        self.workflow.hook("SessionEnd", session="session-a", invocation="invocation-1")
+        e2e_wait(
+            lambda: self.workflow.heartbeat_renewals(token) is None,
+            "renewal outlived the cancelled session",
+        )
+        # Nothing ran cleanup, so the worktree is still there -- outside every
+        # working tree, which is the property that makes it harmless.
+        self.assertTrue(orphan_wt.is_dir())
+        # What the cancellation left in the docs worktree is the claim's own
+        # ledger write and nothing else -- no worktree, no scratch directory,
+        # nothing under a path that publishes.
+        dirty = sorted(
+            line.split()[-1]
+            for line in e2e_git(
+                self.workflow.docs, "status", "--porcelain", "--untracked-files=all"
+            ).splitlines()
+        )
+        self.assertEqual(dirty, [self.module.LEDGER_RELATIVE_PATH])
+        # Under the Git common directory, which is inside no working tree: the
+        # primary checkout does not see it either.
+        self.assertTrue(
+            str(orphan_root).startswith(str(self.workflow.runtime_worktrees()))
+        )
+        self.assertEqual(
+            e2e_git(self.workflow.root, "status", "--porcelain", "--untracked-files=all"),
+            "",
+        )
+        self.assertEqual(self.workflow.attempt_state(cancelled["attempt"]), "ended")
+
+        # The next invocation reclaims it before pinning its own, and leaves
+        # its own alone.
+        live = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.attempt_state(live["attempt"]), "active")
+        reclaimed = self.workflow.reclaim_orphans(keep=live["attempt"])
+        self.assertEqual(reclaimed, [cancelled["attempt"]])
+        self.assertFalse(orphan_root.exists())
+
+        _, own_wt = self.workflow.pin(attempt=live["attempt"])
+        self.assertEqual(self.workflow.reclaim_orphans(keep=live["attempt"]), [])
+        self.assertTrue(own_wt.is_dir())
+        self.workflow.remove_pin(own_wt)
+        self.workflow.complete_attempt(live["attempt"])
+
+    def test_an_already_tracked_finding_is_recordable_as_findings(self):
+        # Round 3's other blocker: a review whose only finding is already in the
+        # tracker had no honest outcome -- `clean` is false, and the helper
+        # refuses `findings` with nothing linked. It gets a report entry whose
+        # Deduplication names the issue, so `findings` has its evidence.
+        report = REPORT_FIXTURE.replace(
+            "- **Deduplication:** Nothing open.",
+            "- **Deduplication:** Already tracked as coghex/kanban#4242.",
+        )
+        self.assertIn("Already tracked as", report)
+        result = self.workflow.review_once(outcome="findings", findings=report)
+        row = self.workflow.rows()[str(result["selected"]["number"])]
+        self.assertEqual(row["status"], "findings")
+        self.assertEqual(row["report"], result["report"])
+        self.assertIn(
+            "Already tracked as",
+            (self.workflow.docs / row["report"]).read_text(encoding="utf-8"),
+        )
+
+
+class DirectMode(WorkflowRunCase):
+    """Requirement 7, executed: a direct batch touches no ledger and no claim."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+        self.shas = self.workflow.first_parent_history(6)
+
+    def test_a_direct_batch_records_on_the_cursor_and_leaves_the_ledger_alone(self):
+        before = self.workflow.ledger_bytes()
+        selected = self.workflow.direct_select(count=3)
+        self.assertEqual(
+            [entry["sha"] for entry in selected["selected"]], list(self.shas[:3])
+        )
+        # A direct report is named by the reviewer, not allocated, and it goes
+        # beside the pre-ledger reports rather than under docs/project_review/.
+        report = (
+            f"docs/project_review_direct_{self.shas[0][:7]}-{self.shas[2][:7]}.md"
+        )
+        (self.workflow.docs / report).write_text(
+            f"# Project Review Findings: direct commits {self.shas[0]}–{self.shas[2]}\n",
+            encoding="utf-8",
+        )
+        recorded = self.workflow.direct_record(self.shas[:3])
+        self.assertEqual(
+            recorded["state"]["direct"]["endpoint"]["sha"], self.shas[2]
+        )
+        # No ledger row, no claim, no checkpoint: the ledger is byte-identical.
+        self.assertEqual(self.workflow.ledger_bytes(), before)
+        self.assertEqual(self.workflow.rows(), {})
+        # And the next batch resumes below the recorded frontier.
+        again = self.workflow.direct_select(count=2)
+        self.assertEqual(
+            [entry["sha"] for entry in again["selected"]], list(self.shas[3:5])
+        )
 
 
 class LegacyMigration(WorkflowRunCase):
@@ -4487,6 +4848,8 @@ def _end_to_end_cases():
         PinnedTree,
         EarlyExits,
         CleanupFailure,
+        OrphanReclaim,
+        DirectMode,
         LegacyMigration,
         QueueOrder,
         CompletedReviews,

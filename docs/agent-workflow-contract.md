@@ -2906,10 +2906,15 @@ still declares no `personal-path` row of its own, for the reason the
 `find-cli`/`head-cli` paragraph below gives.
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
-`project-review` (issue #684) creates its pinned review worktree and its
-merged-pull-request inventory under `mktemp -d`, OUTSIDE the reviewed checkout
-and the docs worktree — a review artifact under `docs/project_review/` would
-publish with the report beside it — and removes both on every exit,
+`project-review` (issue #684) assembles its merged-pull-request inventory under
+`mktemp -d`, OUTSIDE the reviewed checkout and the docs worktree — a review
+artifact under `docs/project_review/` would publish with the report beside it —
+and removes it on every exit. Its pinned review worktree needs `mktemp` for
+nothing: that one lives at
+`<git common dir>/kanban-project-review/worktrees/<attempt>/`, named for the
+attempt that made it, so the next invocation can reclaim the directory of any
+attempt the liveness adapter reports as over — which is the recovery path for a
+cancellation no model can clean up after.
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
 worked checkout and deletes it, `janitor` (issue #575) does the same with the
 `worktree prune --dry-run` listing its metadata-prune gate subtracts the
@@ -3866,10 +3871,12 @@ every report the workflow will ever write there through **one**
 declaration per report — which is the whole point of a one-pull-request-per-review
 cadence being publishable at all. Nothing that is not a document belongs under
 it: the lease's lock reference and heartbeat records, the liveness adapter's
-handshake and attempt records, and the temporary worktree each review is
-verified against all live under the repository's Git common directory or under
-`mktemp -d`, outside every working tree, because a directory that publishes
-publishes whatever is left in it. The drainer's separate
+handshake and attempt records, and the worktree each review is pinned to all
+live under `kanban-project-review/` in the repository's Git common directory —
+`leases/`, `checkpoints/`, `liveness/` and `worktrees/<attempt>/` — with only
+the merged-pull-request inventory under `mktemp -d`. All of them are outside
+every working tree, because a directory that publishes publishes whatever is
+left in it. The drainer's separate
 `workflow.coordination_paths` key
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
 grants only its base-advance exception and never a publication lane. Kanban

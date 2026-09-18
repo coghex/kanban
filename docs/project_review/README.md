@@ -26,10 +26,11 @@ This file is that row's tracked seed, so the directory exists before the
 workflow first writes to it.
 
 **Runtime artifacts never live here.** The lease's lock reference, its heartbeat
-records, the liveness adapter's handshakes and attempt records, and the
-temporary worktree a review is verified against all live under the repository's
-Git common directory or under `mktemp -d`, outside every working tree. This
-directory publishes; anything left in it publishes with it.
+records, the liveness adapter's handshakes and attempt records, and the worktree
+a review is pinned to all live under `kanban-project-review/` in the
+repository's Git common directory, and the merged-pull-request inventory under
+`mktemp -d` — all of them outside every working tree. This directory publishes;
+anything left in it publishes with it.
 
 The `docs/project_review_<newest>-<oldest>.md` reports beside `docs/` are the
 pre-ledger sweep's, and they stay where they are with their own §7 rows. The
