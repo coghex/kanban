@@ -166,62 +166,13 @@ workflow edits a `[legacy]` row by hand.
 
 ## One review, end to end
 
-Steps 1 through 9 are one invocation. Step 9 runs on **every** exit, including
-the ones that stop early: each of its steps is owed from the moment the resource
-it removes exists, so a run that never reaches step 3 still owes it the scratch
-directory step 1 made.
+Steps 1 through 9 are one invocation, and step 1 comes first because everything
+the rest create is named for the attempt it registers. Step 9 runs on **every**
+exit, including the ones that stop early: each of its steps is owed from the
+moment the resource it removes exists, so a run that never reaches step 3 still
+owes it the directory step 1 made.
 
-### 1. Take a complete inventory of merged pull requests
-
-Page the repository's merged pull requests until a page comes back short. A
-listing that stopped early is indistinguishable from a repository with fewer
-pull requests in it, and the difference is between "#612 has never been reviewed"
-and "#612 was never listed" — so the helper accepts only a contiguous sequence
-from page 1, taken at one page size, ending in a page shorter than that size:
-
-Take one page per call. `$AFTER` is `null` for the first page and each earlier
-page's own `next` for every page after it:
-
-```bash
-gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F cursor="$AFTER" \
-  -f query='query($owner:String!,$name:String!,$limit:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:MERGED,first:$limit,after:$cursor,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{endCursor} nodes{number title mergedAt}}}}' \
-  --jq '{prs: [.data.repository.pullRequests.nodes[] | {number, title, merged_at: .mergedAt}], next: .data.repository.pullRequests.pageInfo.endCursor}'
-```
-
-Repeat that call until a page comes back with fewer than 100 pull requests on
-it. That short page is the last one; `next` is what positions the call after it,
-and nothing else does. Then assemble the pages into the one listing the helper
-reads, writing it into a scratch directory outside both worktrees, which step 9
-removes by that name:
-
-```bash
-SCRATCH="$(mktemp -d)"
-INVENTORY="$SCRATCH/inventory.json"
-```
-
-The listing itself has this shape:
-
-```json
-{"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
-```
-
-`page` is the page's 1-based position in the order you fetched it and `limit` is
-the 100 every page was asked for. The helper reads the sequence rather than the
-rows: page numbers must be contiguous from 1, one page size across the whole
-walk, nothing after the first short page. Those are what make a listing with an
-interior page dropped detectable, so never renumber around a page you skipped.
-
-**A page that fails stops the run.** Say which page failed and stop. Nothing has
-been claimed yet, so this stop owes step 9 only `$SCRATCH`. Never hand the
-helper the pages that did arrive: a listing with a page missing from it records
-every pull request on that page as one this repository does not have.
-
-The last page is short because a page returned at its own limit may be a page of
-a longer history and nothing in the page itself can tell the two apart. When the
-history ends exactly on a page boundary, the next request comes back with no
-rows at all, and that empty page is the short one.
-
-### 2. Register the session liveness adapter
+### 1. Register the session liveness adapter, and reclaim what earlier attempts left
 
 The claim in step 3 is a lease that renews only while a liveness signal is held,
 and the signal is the keeper process this adapter starts. Register it **before**
@@ -262,6 +213,39 @@ records land in the one Git common directory either way.
 `register` prints the attempt id and the keeper's pid. Record both: `$ATTEMPT`
 and `$KEEPER`.
 
+**Everything this invocation creates goes in one directory named for that
+attempt**, under the Git common directory every worktree of `$ROOT` shares —
+beside the lease's own heartbeat records and the adapter's, and inside no
+working tree at all:
+
+```bash
+RUNTIME="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/kanban-project-review/worktrees"
+ATTEMPT_DIR="$RUNTIME/$ATTEMPT"
+mkdir -p "$ATTEMPT_DIR"
+```
+
+The inventory in step 2 and the pinned worktree in step 4 both live there, and
+step 9 removes the one directory. Nothing this workflow creates is anonymous,
+and nothing of it is left where a `docs/` publication or an operator's own
+working tree could pick it up.
+
+**Then reclaim the directories earlier attempts left.** This is the only cleanup
+a cancellation can get — the runtime ends the keeper, but it cannot run step 9 —
+so it runs here, before anything new is made, and it is what makes that exit
+recoverable rather than merely harmless. Each directory beside yours under
+`$RUNTIME` is some attempt's, so ask the adapter about each one by its name:
+
+```bash
+python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"
+```
+
+A sibling whose attempt reports `"status": "ended"` — or whose attempt the
+adapter refuses as unknown, which is what an attempt pruned after seven days
+looks like — belongs to an invocation that is over. Remove its worktree and its
+directory exactly as step 9 does, then run `git -C "$ROOT" worktree prune` to
+clear any record left naming it, and say how many you reclaimed. One reporting
+`"status": "active"` belongs to a live invocation somewhere: leave it alone.
+
 **A refusal here stops the run before any claim.** `runtime-unavailable`,
 `runtime-unsupported`, `hooks-not-observed`, `hooks-incomplete`, `hooks-disabled`,
 `hooks-untrusted`, `plugin-unresolved`, `bundle-mismatch`, `bundle-ambiguous`,
@@ -272,6 +256,54 @@ some other long-lived pid as `--owner-pid`, and never fall back to a descriptor
 that closes when one tool call ends: the lease's whole guarantee is that it
 lapses when *this review invocation* does, and an application that outlives the
 invocation holds a claim nobody is working on.
+
+### 2. Take a complete inventory of merged pull requests
+
+Page the repository's merged pull requests until a page comes back short. A
+listing that stopped early is indistinguishable from a repository with fewer
+pull requests in it, and the difference is between "#612 has never been reviewed"
+and "#612 was never listed" — so the helper accepts only a contiguous sequence
+from page 1, taken at one page size, ending in a page shorter than that size:
+
+Take one page per call. `$AFTER` is `null` for the first page and each earlier
+page's own `next` for every page after it:
+
+```bash
+gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F cursor="$AFTER" \
+  -f query='query($owner:String!,$name:String!,$limit:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:MERGED,first:$limit,after:$cursor,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{endCursor} nodes{number title mergedAt}}}}' \
+  --jq '{prs: [.data.repository.pullRequests.nodes[] | {number, title, merged_at: .mergedAt}], next: .data.repository.pullRequests.pageInfo.endCursor}'
+```
+
+Repeat that call until a page comes back with fewer than 100 pull requests on
+it. That short page is the last one; `next` is what positions the call after it,
+and nothing else does. Then assemble the pages into the one listing the helper
+reads, writing it into this attempt's own directory:
+
+```bash
+INVENTORY="$ATTEMPT_DIR/inventory.json"
+```
+
+The listing itself has this shape:
+
+```json
+{"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
+```
+
+`page` is the page's 1-based position in the order you fetched it and `limit` is
+the 100 every page was asked for. The helper reads the sequence rather than the
+rows: page numbers must be contiguous from 1, one page size across the whole
+walk, nothing after the first short page. Those are what make a listing with an
+interior page dropped detectable, so never renumber around a page you skipped.
+
+**A page that fails stops the run.** Say which page failed and stop. Nothing has
+been claimed yet, so this stop owes step 9 only `$ATTEMPT_DIR`. Never hand the
+helper the pages that did arrive: a listing with a page missing from it records
+every pull request on that page as one this repository does not have.
+
+The last page is short because a page returned at its own limit may be a page of
+a longer history and nothing in the page itself can tell the two apart. When the
+history ends exactly on a page boundary, the next request comes back with no
+rows at all, and that empty page is the short one.
 
 ### 3. Select and claim exactly one pull request
 
@@ -310,16 +342,31 @@ you. From this point on step 9 owes a release as well.
 Fetch, resolve the remote default branch's head to a full SHA, and create a
 detached temporary worktree at it. The review is verified against that exact
 tree and nothing else, so it never depends on the primary checkout staying
-where it is:
+where it is.
+
+**Three tool calls, each checked before the next.** A shell runs every line of a
+block whatever the ones above it did, so a fetch that failed inside one would be
+followed by a resolution against whatever the local remote-tracking refs still
+hold — a stale tree, reviewed and recorded as though it were the remote's head,
+which is the one thing requirement 1's fetch-failure stop exists to prevent. The
+fetch is therefore its own call, and its status is read before anything else
+runs:
 
 ```bash
 git -C "$ROOT" fetch --quiet origin
+```
+
+**A failed fetch stops the run**, here, with nothing else attempted: release the
+claim through step 9 and say the fetch failed. Never substitute an older local
+ref — a review recorded against a SHA the remote never had says nothing about
+the code anybody else can see, and a `ls-remote` that answers while a fetch
+fails is exactly the shape that makes one look plausible.
+
+Only then resolve the branch and its head:
+
+```bash
 DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD | sed -n 's#^ref: refs/heads/\(.*\)[[:space:]]HEAD$#\1#p')"
 PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"
-RUNTIME="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/kanban-project-review/worktrees"
-REVIEW_ROOT="$RUNTIME/$ATTEMPT"
-REVIEW_WT="$REVIEW_ROOT/tree"
-git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"
 ```
 
 **The default branch is read from the remote, not from
@@ -329,34 +376,19 @@ whose remote moved from `master` to `main` keeps answering `master` for as long
 as the old branch still exists, and the review would then be recorded against a
 branch nobody's default is. `ls-remote --symref` asks the remote itself on every
 invocation. An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref
-at all: stop there, through step 9, rather than pinning a branch nobody named.
+at all, and an empty `$PIN` is a branch this fetch did not bring down: either
+stops the run, through step 9, rather than pinning something nobody named.
 
-**A failed fetch stops the run**: release the claim through step 9 and say the
-fetch failed. Never substitute an older local ref — a review recorded against a
-SHA the remote never had says nothing about the code anybody else can see.
-
-`$REVIEW_ROOT` is named for **this attempt**, under the Git common directory
-every worktree of `$ROOT` shares — beside the lease's own heartbeat records and
-the adapter's, and inside no working tree at all. No worktree, lock, or liveness
-record ever lives under `docs/project_review/`: that directory publishes, and a
-runtime artifact in it would publish with it.
-
-Naming it for the attempt is what makes an orphan reclaimable. **Before creating
-this invocation's own, reclaim the ones nobody is using.** Each directory under
-`$RUNTIME` is some attempt's, so ask the adapter about each one by its name:
+Only then create the worktree, inside the directory step 1 made for this
+attempt:
 
 ```bash
-python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"
+REVIEW_WT="$ATTEMPT_DIR/tree"
+git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"
 ```
 
-A sibling whose attempt reports `"status": "ended"` — or whose attempt the
-adapter refuses as unknown, which is what an attempt pruned after seven days
-looks like — belongs to an invocation that is over. Remove its worktree and its
-directory exactly as step 9 does, then run `git -C "$ROOT" worktree prune` to
-clear any record left naming it, and say how many you reclaimed. One reporting
-`"status": "active"` belongs to a live invocation somewhere: leave it alone.
-That is the recovery path for the one exit no model can clean up after, and it
-costs one `status` call per orphan.
+No worktree, lock, or liveness record ever lives under `docs/project_review/`:
+that directory publishes, and a runtime artifact in it would publish with it.
 
 `$PIN` is the full SHA recorded as the verification commit in step 8.
 
@@ -592,14 +624,15 @@ and says so; report it as it came and let step 9 clean up.
 
 Every exit runs this — a completed record, a refusal, a failed fetch, a
 takeover, and a cancellation alike. **Each resource is owed its cleanup from the
-moment it exists**, not from step 3: a registration that refused still leaves
-`$SCRATCH` behind, and a claim that was never taken leaves nothing to release.
+moment it exists**, not from the step that was meant to fill it: a registration
+that refused started no keeper, and a claim that was never taken leaves nothing
+to release.
 
 So the steps are conditional, in this order, and each runs **only when this
 invocation created what it names**. A step whose resource was never created is
 not run, and not running it is not a failure.
 
-1. **Stop every process this attempt started** — when step 2 registered one:
+1. **Stop every process this attempt started** — when step 1 registered one:
 
    ```bash
    python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"
@@ -633,69 +666,65 @@ not run, and not running it is not a failure.
    finding nothing registered, which is this step done — go on to step 4. Any
    other failure is a real one: retain and report.
 
-4. **Remove `$REVIEW_ROOT`** — whenever step 4 named one, unless step 3 failed
-   for some reason other than finding nothing to remove:
+4. **Remove this attempt's directory** — whenever step 1 made one, unless step 3
+   failed for some reason other than finding nothing to remove:
 
    ```bash
-   rm -rf "$REVIEW_ROOT"
+   rm -rf "$ATTEMPT_DIR"
    ```
 
-   `$REVIEW_ROOT` exists from the moment step 4 named it, so a `worktree add`
-   that never ran or failed outright still owes this — which is the whole
-   difference between a condition on the resource and a condition on the step
-   that was meant to fill it. But `$REVIEW_ROOT` *contains* `$REVIEW_WT`, so
-   removing it after a failed `worktree remove` would delete the very worktree
-   the previous step just reported it had retained — and where that failure left
+   One removal, because everything this invocation created is in there: the
+   inventory from step 2 and the worktree from step 4. `$ATTEMPT_DIR` exists
+   from step 1, so an exit before either of them still owes this — which is the
+   whole difference between a condition on the resource and a condition on the
+   step that was meant to fill it. But it *contains* `$REVIEW_WT`, so removing
+   it after a failed `worktree remove` would delete the very worktree the
+   previous step just reported it had retained — and where that failure left
    Git's administrative record behind, leave the record naming a directory that
    is gone. A partial removal can end either way, with the record dropped and
    the tree still on disk or both still there, so neither is assumed. When
-   step 3 really failed, keep `$REVIEW_ROOT`, report it by path, and say that
+   step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, and say that
    `git -C "$ROOT" worktree prune` is what clears any record still naming it once
-   the directory itself is dealt with.
-
-5. **Remove the inventory's scratch directory** — when step 1 made it:
-
-   ```bash
-   rm -rf "$SCRATCH"
-   ```
-
-   `$SCRATCH` never holds a worktree, so this step is independent of every one
-   above it and runs whatever they did.
-
-Both scratch directories are `mktemp -d` results held in variables of their own.
-**Never derive a removal target from another path**: `dirname` of a variable
-that was never set is `.`, and a recursive removal of the working directory is
-the one mistake this workflow could make that nothing later could repair.
+   the directory itself is dealt with. **Never derive a removal target from
+   another path**: `dirname` of a variable that was never set is `.`, and a
+   recursive removal of the working directory is the one mistake this workflow
+   could make that nothing later could repair.
 
 **A cleanup step that fails is reported with the path it retained, never as
-removed.** Name the worktree still on disk, or the claim still held, so a human
+removed.** Name the directory still on disk, or the claim still held, so a human
 or a later run can finish it. Claiming removal that did not happen is what
 leaves an orphan nobody knows to look for.
 
 **Cleanup and every ownership check are scoped to this attempt.** If this
 attempt's claim was taken over while it ran, its `record`, its report
 allocation, and its release are all refused — correctly — and its cleanup then
-stops its own processes and removes its own worktree, and touches nothing the
-replacement owns. Never remove a worktree, end an attempt, or release a claim
+stops its own processes and removes its own directory, and touches nothing the
+replacement owns. Never remove a directory, end an attempt, or release a claim
 that this invocation did not create.
 
-You do not have to reach step 9 for the lease to end. The keeper stops on turn
-completion, session termination, an interruption the runtime reports, and after
-a bounded silence window for a cancellation it does not report; renewal stops
-with it and the lease lapses on its own. Step 9 makes that prompt rather than
-possible, so never treat a final tool call as the thing that prevents a stranded
-claim.
+**A cancellation reaches all three of these without a tool call of this
+invocation's.** You do not have to reach step 9 for any of them:
 
-**What a cancellation leaves, and who clears it.** The runtime's own mechanism
-ends the keeper and therefore the lease; it cannot run these steps, so a
-cancellation after step 4 leaves `$REVIEW_WT` and `$REVIEW_ROOT` on disk, and
-one before it may leave `$SCRATCH`. Both are outside every working tree — the
-review worktree under this attempt's directory in the Git common directory, the
-inventory under `mktemp -d` — so nothing an operator would notice is dirtied and
-nothing publishes. Neither is orphaned for good, either: the lease lapses to the
-next invocation, and step 4's reclaim pass removes the worktree directory of
-every attempt that has ended before it makes its own. Say, in the completion
-message, whatever this invocation reclaimed on its way in.
+- *Processes.* The keeper stops on turn completion, session termination, an
+  interruption the runtime reports, and after a bounded silence window for a
+  cancellation it does not report. That is #687's mechanism, and it needs
+  nothing from the model.
+- *The claim.* Renewal stops with the keeper, so the lease runs out and the row
+  becomes claimable again; the next invocation takes it over under the helper's
+  lock and records the transition, which is the recovery the lease was designed
+  around. The cancelled attempt cannot write to it afterwards: its token no
+  longer owns the claim, so its `record`, its allocation and its release are all
+  refused.
+- *The directory.* Step 1's reclaim pass removes the directory of every attempt
+  the adapter reports as over, which is exactly what a cancelled one is. That is
+  why everything this invocation creates is named for the attempt and kept in
+  one place: an orphan is identifiable, and the next invocation in this
+  repository is its owner.
+
+So the honest summary is that a cancellation completes cleanup one invocation
+late rather than never, and leaves nothing in a working tree or a publishable
+directory in the meantime. Say, in the completion message, whatever this
+invocation reclaimed on its way in.
 
 ### 10. Report, and stop
 

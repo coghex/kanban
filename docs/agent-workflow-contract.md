@@ -2550,9 +2550,10 @@ rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKI
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/project-review/SKILL.md | kanban | supported | no
+mkdir-cli | executable | mkdir | codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -2906,15 +2907,6 @@ still declares no `personal-path` row of its own, for the reason the
 `find-cli`/`head-cli` paragraph below gives.
 
 `mktemp-cli` and `rm-cli` are `mandatory: no` for the same shape of reason:
-`project-review` (issue #684) assembles its merged-pull-request inventory under
-`mktemp -d`, OUTSIDE the reviewed checkout and the docs worktree — a review
-artifact under `docs/project_review/` would publish with the report beside it —
-and removes it on every exit. Its pinned review worktree needs `mktemp` for
-nothing: that one lives at
-`<git common dir>/kanban-project-review/worktrees/<attempt>/`, named for the
-attempt that made it, so the next invocation can reclaim the directory of any
-attempt the liveness adapter reports as over — which is the recovery path for a
-cancellation no model can clean up after.
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
 worked checkout and deletes it, `janitor` (issue #575) does the same with the
 `worktree prune --dry-run` listing its metadata-prune gate subtracts the
@@ -2979,6 +2971,19 @@ both `note-problem` variants name it in prose to locate the implementation an
 observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
+
+`mkdir-cli` is `project-review`'s alone (issue #684), and it makes exactly one
+directory: `<git common dir>/kanban-project-review/worktrees/<attempt>/`, named
+for the liveness attempt that will own it. Everything one invocation of that
+workflow creates goes in there — its merged-pull-request inventory and the
+detached worktree it pins the review to — so it is OUTSIDE the reviewed
+checkout and the docs worktree, where a review artifact under
+`docs/project_review/` would publish with the report beside it, and it is
+removed as one directory on every exit. Naming it for the attempt is what makes
+a cancellation recoverable: the next invocation asks the liveness adapter about
+each sibling and removes the ones whose attempt is over, so an exit that could
+not run its own cleanup is completed one invocation later rather than never. It
+is `mandatory: no` for the reason the other utilities here are.
 
 `tr-cli` is the documentation-landing helper's own utility (issue #410):
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
@@ -3873,10 +3878,10 @@ cadence being publishable at all. Nothing that is not a document belongs under
 it: the lease's lock reference and heartbeat records, the liveness adapter's
 handshake and attempt records, and the worktree each review is pinned to all
 live under `kanban-project-review/` in the repository's Git common directory —
-`leases/`, `checkpoints/`, `liveness/` and `worktrees/<attempt>/` — with only
-the merged-pull-request inventory under `mktemp -d`. All of them are outside
-every working tree, because a directory that publishes publishes whatever is
-left in it. The drainer's separate
+`leases/`, `checkpoints/`, `liveness/`, and `worktrees/<attempt>/` holding both
+the worktree and that invocation's merged-pull-request inventory. All of them
+are outside every working tree, because a directory that publishes publishes
+whatever is left in it. The drainer's separate
 `workflow.coordination_paths` key
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
 grants only its base-advance exception and never a publication lane. Kanban

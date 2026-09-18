@@ -472,6 +472,30 @@ PINNED_WORKTREE = {
         "Fetch, resolve the remote default branch's head to a full SHA, and "
         "create a detached temporary worktree at it."
     ),
+    "three checked calls, not one block": (
+        "**Three tool calls, each checked before the next.** A shell runs "
+        "every line of a block whatever the ones above it did, so a fetch that "
+        "failed inside one would be followed by a resolution against whatever "
+        "the local remote-tracking refs still hold — a stale tree, reviewed "
+        "and recorded as though it were the remote's head, which is the one "
+        "thing requirement 1's fetch-failure stop exists to prevent."
+    ),
+    "the fetch is its own call": (
+        "The fetch is therefore its own call, and its status is read before "
+        "anything else runs:"
+    ),
+    "a readable remote makes a stale pin plausible": (
+        "Never substitute an older local ref — a review recorded against a SHA "
+        "the remote never had says nothing about the code anybody else can "
+        "see, and a `ls-remote` that answers while a fetch fails is exactly "
+        "the shape that makes one look plausible."
+    ),
+    "an empty resolution stops too": (
+        "An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref "
+        "at all, and an empty `$PIN` is a branch this fetch did not bring "
+        "down: either stops the run, through step 9, rather than pinning "
+        "something nobody named."
+    ),
     "the default branch comes from the remote": (
         "**The default branch is read from the remote, not from "
         "`refs/remotes/origin/HEAD`.** That local symref is written once, by "
@@ -484,21 +508,24 @@ PINNED_WORKTREE = {
         "the review would then be recorded against a branch nobody's default "
         "is."
     ),
-    "no symref at all stops the run": (
-        "An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref "
-        "at all: stop there, through step 9, rather than pinning a branch "
-        "nobody named."
+    "one directory, named for the attempt": (
+        "**Everything this invocation creates goes in one directory named for "
+        "that attempt**, under the Git common directory every worktree of "
+        "`$ROOT` shares — beside the lease's own heartbeat records and the "
+        "adapter's, and inside no working tree at all"
     ),
-    "the review worktree is attempt-scoped runtime state": (
-        "`$REVIEW_ROOT` is named for **this attempt**, under the Git common "
-        "directory every worktree of `$ROOT` shares — beside the lease's own "
-        "heartbeat records and the adapter's, and inside no working tree at "
-        "all."
+    "nothing it creates is anonymous": (
+        "The inventory in step 2 and the pinned worktree in step 4 both live "
+        "there, and step 9 removes the one directory. Nothing this workflow "
+        "creates is anonymous, and nothing of it is left where a `docs/` "
+        "publication or an operator's own working tree could pick it up."
     ),
-    "naming it for the attempt is what makes it reclaimable": (
-        "Naming it for the attempt is what makes an orphan reclaimable. "
-        "**Before creating this invocation's own, reclaim the ones nobody is "
-        "using.**"
+    "the reclaim pass is a cancellation's only cleanup": (
+        "**Then reclaim the directories earlier attempts left.** This is the "
+        "only cleanup a cancellation can get — the runtime ends the keeper, "
+        "but it cannot run step 9 — so it runs here, before anything new is "
+        "made, and it is what makes that exit recoverable rather than merely "
+        "harmless."
     ),
     "an ended or unknown attempt's directory is an orphan": (
         'A sibling whose attempt reports `"status": "ended"` — or whose '
@@ -508,26 +535,24 @@ PINNED_WORKTREE = {
     ),
     "a live attempt's directory is left alone": (
         'One reporting `"status": "active"` belongs to a live invocation '
-        "somewhere: leave it alone. That is the recovery path for the one exit "
-        "no model can clean up after, and it costs one `status` call per "
-        "orphan."
+        "somewhere: leave it alone."
     ),
     "it never depends on the primary checkout": (
         "The review is verified against that exact tree and nothing else, so it "
         "never depends on the primary checkout staying where it is"
     ),
     "a failed fetch stops the run": (
-        "**A failed fetch stops the run**: release the claim through step 9 and "
-        "say the fetch failed."
-    ),
-    "no older local ref": (
-        "Never substitute an older local ref — a review recorded against a SHA "
-        "the remote never had says nothing about the code anybody else can see."
+        "**A failed fetch stops the run**, here, with nothing else attempted: "
+        "release the claim through step 9 and say the fetch failed."
     ),
     "no runtime artifact publishes": (
         "No worktree, lock, or liveness record ever lives under "
         "`docs/project_review/`: that directory publishes, and a runtime "
         "artifact in it would publish with it."
+    ),
+    "the worktree goes in the attempt's directory": (
+        "Only then create the worktree, inside the directory step 1 made for "
+        "this attempt:"
     ),
     "the pin is the verification commit": (
         "`$PIN` is the full SHA recorded as the verification commit in step 8."
@@ -544,10 +569,7 @@ PINNED_WORKTREE_COMMANDS = (
     'git -C "$ROOT" fetch --quiet origin',
     'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote --symref origin HEAD',
     'PIN="$(git -C "$ROOT" rev-parse "refs/remotes/origin/$DEFAULT_BRANCH")"',
-    'RUNTIME="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)/kanban-project-review/worktrees"',
-    'REVIEW_ROOT="$RUNTIME/$ATTEMPT"',
-    'REVIEW_WT="$REVIEW_ROOT/tree"',
-    'python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"',
+    'REVIEW_WT="$ATTEMPT_DIR/tree"',
     'git -C "$ROOT" worktree add --detach "$REVIEW_WT" "$PIN"',
 )
 
@@ -571,8 +593,9 @@ CLEANUP = {
     ),
     "owed from the moment the resource exists": (
         "**Each resource is owed its cleanup from the moment it exists**, not "
-        "from step 3: a registration that refused still leaves `$SCRATCH` "
-        "behind, and a claim that was never taken leaves nothing to release."
+        "from the step that was meant to fill it: a registration that refused "
+        "started no keeper, and a claim that was never taken leaves nothing to "
+        "release."
     ),
     "each step is conditional on what this invocation created": (
         "So the steps are conditional, in this order, and each runs **only "
@@ -580,7 +603,7 @@ CLEANUP = {
         "was never created is not run, and not running it is not a failure."
     ),
     "stop the processes": (
-        "**Stop every process this attempt started** — when step 2 registered "
+        "**Stop every process this attempt started** — when step 1 registered "
         "one:"
     ),
     "a refused registration started nothing": (
@@ -610,18 +633,23 @@ CLEANUP = {
         "which is this step done — go on to step 4. Any other failure is a "
         "real one: retain and report."
     ),
-    "the scratch root is owed whenever it was named": (
-        "**Remove `$REVIEW_ROOT`** — whenever step 4 named one, unless step 3 "
-        "failed for some reason other than finding nothing to remove:"
+    "the attempt directory is owed whenever it was made": (
+        "**Remove this attempt's directory** — whenever step 1 made one, "
+        "unless step 3 failed for some reason other than finding nothing to "
+        "remove:"
+    ),
+    "one removal covers everything the run made": (
+        "One removal, because everything this invocation created is in there: "
+        "the inventory from step 2 and the worktree from step 4."
     ),
     "the condition is on the resource, not the step": (
-        "`$REVIEW_ROOT` exists from the moment step 4 named it, so a "
-        "`worktree add` that never ran or failed outright still owes this — "
-        "which is the whole difference between a condition on the resource and "
-        "a condition on the step that was meant to fill it."
+        "`$ATTEMPT_DIR` exists from step 1, so an exit before either of them "
+        "still owes this — which is the whole difference between a condition "
+        "on the resource and a condition on the step that was meant to fill "
+        "it."
     ),
     "why a failed removal keeps its directory": (
-        "`$REVIEW_ROOT` *contains* `$REVIEW_WT`, so removing it after a failed "
+        "But it *contains* `$REVIEW_WT`, so removing it after a failed "
         "`worktree remove` would delete the very worktree the previous step "
         "just reported it had retained"
     ),
@@ -630,30 +658,9 @@ CLEANUP = {
         "tree still on disk or both still there, so neither is assumed."
     ),
     "a failed removal reports the repair": (
-        "When step 3 really failed, keep `$REVIEW_ROOT`, report it by path, "
+        "When step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, "
         'and say that `git -C "$ROOT" worktree prune` is what clears any '
         "record still naming it once the directory itself is dealt with."
-    ),
-    "what a cancellation leaves": (
-        "**What a cancellation leaves, and who clears it.** The runtime's own "
-        "mechanism ends the keeper and therefore the lease; it cannot run "
-        "these steps, so a cancellation after step 4 leaves `$REVIEW_WT` and "
-        "`$REVIEW_ROOT` on disk, and one before it may leave `$SCRATCH`."
-    ),
-    "what it leaves is outside every working tree": (
-        "Both are outside every working tree — the review worktree under this "
-        "attempt's directory in the Git common directory, the inventory under "
-        "`mktemp -d` — so nothing an operator would notice is dirtied and "
-        "nothing publishes."
-    ),
-    "the next invocation reclaims it": (
-        "Neither is orphaned for good, either: the lease lapses to the next "
-        "invocation, and step 4's reclaim pass removes the worktree directory "
-        "of every attempt that has ended before it makes its own."
-    ),
-    "the inventory scratch is independent": (
-        "`$SCRATCH` never holds a worktree, so this step is independent of "
-        "every one above it and runs whatever they did."
     ),
     "never derive a removal target": (
         "**Never derive a removal target from another path**: `dirname` of a "
@@ -663,7 +670,7 @@ CLEANUP = {
     ),
     "a failed step reports its retained path": (
         "**A cleanup step that fails is reported with the path it retained, "
-        "never as removed.** Name the worktree still on disk, or the claim "
+        "never as removed.** Name the directory still on disk, or the claim "
         "still held, so a human or a later run can finish it."
     ),
     "claiming removal is the defect": (
@@ -674,33 +681,64 @@ CLEANUP = {
         "**Cleanup and every ownership check are scoped to this attempt.**"
     ),
     "a superseded attempt touches nothing of its replacement's": (
-        "its cleanup then stops its own processes and removes its own worktree, "
-        "and touches nothing the replacement owns. Never remove a worktree, end "
-        "an attempt, or release a claim that this invocation did not create."
+        "its cleanup then stops its own processes and removes its own "
+        "directory, and touches nothing the replacement owns. Never remove a "
+        "directory, end an attempt, or release a claim that this invocation "
+        "did not create."
     ),
-    "the runtime ends the lease without a final tool call": (
-        "You do not have to reach step 9 for the lease to end. The keeper stops "
-        "on turn completion, session termination, an interruption the runtime "
-        "reports, and after a bounded silence window for a cancellation it does "
-        "not report; renewal stops with it and the lease lapses on its own."
+    # Requirement 5's cancellation clause, answered mechanism by mechanism
+    # rather than waived: the runtime stops the processes, the lapse and the
+    # takeover release the claim, and step 1's reclaim pass removes the
+    # directory. None of the three depends on a final tool call of the
+    # cancelled invocation's.
+    "a cancellation reaches all three": (
+        "**A cancellation reaches all three of these without a tool call of "
+        "this invocation's.** You do not have to reach step 9 for any of them:"
     ),
-    "a final tool call is not the safeguard": (
-        "never treat a final tool call as the thing that prevents a stranded "
-        "claim."
+    "the runtime stops the processes": (
+        "*Processes.* The keeper stops on turn completion, session "
+        "termination, an interruption the runtime reports, and after a bounded "
+        "silence window for a cancellation it does not report. That is #687's "
+        "mechanism, and it needs nothing from the model."
+    ),
+    "the lease lapses and the row becomes claimable": (
+        "*The claim.* Renewal stops with the keeper, so the lease runs out and "
+        "the row becomes claimable again; the next invocation takes it over "
+        "under the helper's lock and records the transition, which is the "
+        "recovery the lease was designed around."
+    ),
+    "a cancelled attempt cannot write afterwards": (
+        "The cancelled attempt cannot write to it afterwards: its token no "
+        "longer owns the claim, so its `record`, its allocation and its "
+        "release are all refused."
+    ),
+    "the reclaim pass owns the directory": (
+        "*The directory.* Step 1's reclaim pass removes the directory of every "
+        "attempt the adapter reports as over, which is exactly what a "
+        "cancelled one is."
+    ),
+    "an orphan is identifiable and owned": (
+        "That is why everything this invocation creates is named for the "
+        "attempt and kept in one place: an orphan is identifiable, and the "
+        "next invocation in this repository is its owner."
+    ),
+    "one invocation late rather than never": (
+        "So the honest summary is that a cancellation completes cleanup one "
+        "invocation late rather than never, and leaves nothing in a working "
+        "tree or a publishable directory in the meantime."
     ),
 }
 CLEANUP_COMMANDS = (
     'python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"',
     'python3 "$LEDGER" release --root "$DOCS_WT" --repo "$REPO" --pr "$PR" --token "$TOKEN"',
     'git -C "$ROOT" worktree remove --force "$REVIEW_WT"',
-    'rm -rf "$REVIEW_ROOT"',
-    'rm -rf "$SCRATCH"',
+    'rm -rf "$ATTEMPT_DIR"',
 )
 
-# The spelling that made the retained-path rule unkeepable: `$REVIEW_ROOT`
-# contains `$REVIEW_WT`, so one removal covering both deletes the worktree that
-# `git worktree remove` had just failed to remove -- and leaves Git's own
-# record pointing at a directory that is gone.
+# The spelling that made the retained-path rule unkeepable: the attempt's
+# directory contains `$REVIEW_WT`, so one removal covering both it and the
+# worktree deletes the tree `git worktree remove` had just failed to remove --
+# and leaves Git's own record pointing at a directory that is gone.
 REFUSED_COMBINED_REMOVAL = 'rm -rf "$REVIEW_ROOT" "$SCRATCH"'
 
 # A removal target built out of another path. `dirname` of an unset variable is
@@ -1765,17 +1803,17 @@ class LedgerWorkflowTests(unittest.TestCase):
                     ),
                 )
 
-    def test_a_failed_worktree_removal_keeps_its_own_scratch_directory(self):
-        # Round 2's blocker: `$REVIEW_ROOT` contains `$REVIEW_WT`, so one
-        # removal covering both scratch directories deletes the worktree the
-        # step before it had just reported retaining.
+    def test_a_failed_worktree_removal_keeps_the_directory_holding_it(self):
+        # Round 2's blocker: the attempt's directory contains `$REVIEW_WT`, so
+        # a removal that covered both would delete the worktree the step before
+        # it had just reported retaining.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):
                 self.assertNotIn(REFUSED_COMBINED_REMOVAL, content)
                 self.assertLess(
                     content.index('git -C "$ROOT" worktree remove'),
-                    content.index('rm -rf "$REVIEW_ROOT"'),
+                    content.index('rm -rf "$ATTEMPT_DIR"'),
                 )
 
     def test_no_removal_target_is_derived_from_another_path(self):
@@ -1849,8 +1887,9 @@ class LedgerWorkflowTests(unittest.TestCase):
 
     def test_the_steps_are_ordered_the_way_the_review_runs(self):
         order = (
-            "### 1. Take a complete inventory of merged pull requests",
-            "### 2. Register the session liveness adapter",
+            "### 1. Register the session liveness adapter, and reclaim what "
+            "earlier attempts left",
+            "### 2. Take a complete inventory of merged pull requests",
             "### 3. Select and claim exactly one pull request",
             "### 4. Pin the review tree",
             "### 5. Review the pull request",
@@ -3485,7 +3524,7 @@ class WorkflowRun:
             encoding="utf-8",
         )
 
-    def inventory(self, page_size=100, fail_after=None):
+    def inventory(self, page_size=100, fail_after=None, attempt=None):
         """The complete listing, paged through the fake `gh` as the asset says.
 
         The paging rule is the asset's: one call per page, positioned by the
@@ -3512,9 +3551,51 @@ class WorkflowRun:
             after = page["next"]
             if len(page["prs"]) < page_size:
                 break
-        path = self.scratch / "inventory.json"
+        directory = (
+            self.attempt_directory(attempt) if attempt else self.scratch
+        )
+        self.case.assertEqual(
+            asset_command(self.asset, "INVENTORY="),
+            'INVENTORY="$ATTEMPT_DIR/inventory.json"',
+        )
+        path = directory / "inventory.json"
         path.write_text(json.dumps({"pages": pages}), encoding="utf-8")
         return path, pages
+
+    def advance_the_remote(self):
+        """Move the remote's default branch on, so a fetch has work to do."""
+        clone = self.base / f"pusher-{time.monotonic_ns()}"
+        e2e_git(self.base, "clone", "-q", str(self.origin), str(clone))
+        for key, value in (
+            ("user.name", "Project Review E2E"),
+            ("user.email", "e2e@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            e2e_git(clone, "config", key, value)
+        (clone / "ADVANCED.md").write_text("moved on\n", encoding="utf-8")
+        e2e_git(clone, "add", "-A")
+        e2e_git(clone, "commit", "-qm", "advance the remote")
+        e2e_git(clone, "push", "-q", "origin", "HEAD:master")
+        return e2e_git(clone, "rev-parse", "HEAD").strip()
+
+    def lock_remote_tracking_ref(self, branch="master"):
+        """Make a fetch fail while leaving the remote perfectly readable.
+
+        A stale `refs/remotes/origin/<branch>.lock` is what Git refuses to
+        write past, so the fetch fails, `ls-remote` still answers, and the
+        local remote-tracking ref stays where it was -- which is the exact
+        shape that makes a stale pin look plausible.
+        """
+        common = Path(
+            e2e_git(
+                self.root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+            ).strip()
+        )
+        e2e_git(self.root, "pack-refs", "--all")
+        lock = common / "refs" / "remotes" / "origin" / f"{branch}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("", encoding="utf-8")
+        return lock
 
     def move_the_remote_default_branch(self, name="main"):
         """Move the remote's HEAD to a new branch, leaving the local symref
@@ -3775,13 +3856,22 @@ class WorkflowRun:
     # -- the pinned review tree
 
     def runtime_worktrees(self):
-        """`$RUNTIME` -- the attempt-scoped review-worktree directory."""
+        """`$RUNTIME` -- where every attempt's own directory goes."""
         return Path(
             self.sh(
                 asset_command(self.asset, 'RUNTIME="$(git -C "$ROOT" rev-parse')
                 + ' && printf %s "$RUNTIME"'
             ).stdout.strip()
         )
+
+    def attempt_directory(self, attempt):
+        """This attempt's directory, made by the asset's own `mkdir` line."""
+        directory = self.runtime_worktrees() / attempt
+        self.sh(
+            asset_command(self.asset, 'mkdir -p "$ATTEMPT_DIR"'),
+            ATTEMPT_DIR=str(directory),
+        )
+        return directory
 
     def pin(self, attempt=None):
         """Fetch, resolve and detach -- through the asset's own commands.
@@ -3802,13 +3892,13 @@ class WorkflowRun:
             + ' && printf %s "$PIN"',
             DEFAULT_BRANCH=default,
         ).stdout.strip()
-        review_root = self.runtime_worktrees() / attempt
-        review_wt = review_root / "tree"
+        attempt_dir = self.attempt_directory(attempt)
+        review_wt = attempt_dir / "tree"
         self.case.assertEqual(
-            asset_command(self.asset, 'REVIEW_ROOT='), 'REVIEW_ROOT="$RUNTIME/$ATTEMPT"'
+            asset_command(self.asset, 'ATTEMPT_DIR='), 'ATTEMPT_DIR="$RUNTIME/$ATTEMPT"'
         )
         self.case.assertEqual(
-            asset_command(self.asset, 'REVIEW_WT='), 'REVIEW_WT="$REVIEW_ROOT/tree"'
+            asset_command(self.asset, 'REVIEW_WT='), 'REVIEW_WT="$ATTEMPT_DIR/tree"'
         )
         self.sh(
             asset_command(self.asset, 'git -C "$ROOT" worktree add'),
@@ -3829,8 +3919,8 @@ class WorkflowRun:
         nothing_registered = "is not a working tree" in removal.stderr
         if removal.returncode == 0 or nothing_registered:
             self.sh(
-                asset_command(self.asset, 'rm -rf "$REVIEW_ROOT"'),
-                REVIEW_ROOT=str(Path(review_wt).parent),
+                asset_command(self.asset, 'rm -rf "$ATTEMPT_DIR"'),
+                ATTEMPT_DIR=str(Path(review_wt).parent),
             )
         return removal
 
@@ -3884,8 +3974,8 @@ class WorkflowRun:
     # -- a whole review, for the cases that need one to have happened
 
     def review_once(self, outcome="clean", findings=None, repeats=(), recurrences=()):
-        inventory, _ = self.inventory()
         registration = self.register()
+        inventory, _ = self.inventory(attempt=registration["attempt"])
         claimed = self.claim(inventory, registration["keeper_pid"])
         self.case.assertEqual(claimed["status"], "claimed")
         number = claimed["selected"]["number"]
@@ -4092,6 +4182,67 @@ class PinnedTree(WorkflowRunCase):
         self.workflow.remove_pin(review_wt)
 
 
+class FetchFailure(WorkflowRunCase):
+    """Round 4's blocker: a failed fetch stops before anything is pinned."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
+        self.workflow.lease_defaults()
+
+    def test_a_failed_fetch_pins_nothing_and_its_claim_is_released(self):
+        # The remote moves on, and the local remote-tracking ref is locked, so
+        # the fetch fails while `ls-remote` still answers and the stale ref is
+        # still readable. Under one block of commands that is exactly when a
+        # stale tree gets reviewed; the asset makes the fetch its own checked
+        # call, so nothing after it runs.
+        registration = self.workflow.register()
+        attempt_dir = self.workflow.attempt_directory(registration["attempt"])
+        inventory, _ = self.workflow.inventory(attempt=registration["attempt"])
+        claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+        token = claimed["claim"]["token"]
+
+        advanced = self.workflow.advance_the_remote()
+        stale = e2e_git(
+            self.workflow.root, "rev-parse", "refs/remotes/origin/master"
+        ).strip()
+        self.assertNotEqual(advanced, stale)
+        self.workflow.lock_remote_tracking_ref()
+
+        fetch = self.workflow.sh(
+            asset_command(self.workflow.asset, 'git -C "$ROOT" fetch'), check=False
+        )
+        self.assertNotEqual(fetch.returncode, 0, fetch.stdout)
+        # The remote is still perfectly readable, which is what makes the stale
+        # local ref look like an answer.
+        readable = self.workflow.sh(
+            asset_command(self.workflow.asset, 'DEFAULT_BRANCH="$(git -C "$ROOT" ls-remote')
+            + ' && printf %s "$DEFAULT_BRANCH"'
+        )
+        self.assertEqual(readable.stdout.strip(), "master")
+        self.assertEqual(
+            e2e_git(self.workflow.root, "rev-parse", "refs/remotes/origin/master").strip(),
+            stale,
+        )
+
+        # The run stops here: no worktree was created, under this attempt's
+        # directory or anywhere else.
+        self.assertEqual(
+            [path.name for path in sorted(attempt_dir.iterdir())], ["inventory.json"]
+        )
+        self.assertEqual(
+            e2e_git(self.workflow.root, "worktree", "list", "--porcelain").count(
+                "worktree "
+            ),
+            2,
+        )
+        # And step 9 releases the claim, which is all this exit owes besides
+        # its own directory.
+        self.workflow.release(claimed["selected"]["number"], token, check=True)
+        self.assertIsNone(self.workflow.rows()["612"]["claim"])
+        self.workflow.complete_attempt(registration["attempt"])
+
+
 class EarlyExits(WorkflowRunCase):
     """Round 1's second blocker: cleanup on the exits that claim nothing."""
 
@@ -4145,22 +4296,21 @@ class EarlyExits(WorkflowRunCase):
         cwd = self.workflow.base / "working-directory"
         cwd.mkdir()
         (cwd / "keep.md").write_text("not this\n", encoding="utf-8")
-        for prefix in ('rm -rf "$REVIEW_ROOT"', 'rm -rf "$SCRATCH"'):
-            command = asset_command(self.workflow.asset, prefix)
-            self.assertNotIn("dirname", command)
+        command = asset_command(self.workflow.asset, 'rm -rf "$ATTEMPT_DIR"')
+        self.assertNotIn("dirname", command)
+        for value in ("", str(scratch)):
             completed = subprocess.run(
                 ["sh", "-c", command],
                 cwd=str(cwd),
-                env=dict(self.workflow.env, SCRATCH=str(scratch), REVIEW_ROOT=""),
+                env=dict(self.workflow.env, ATTEMPT_DIR=value),
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-            with self.subTest(command=prefix):
+            with self.subTest(attempt_dir=value or "<unset>"):
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertTrue((cwd / "keep.md").is_file())
         self.assertFalse(scratch.exists())
-        self.assertTrue((cwd / "keep.md").is_file())
 
 
 class CleanupFailure(WorkflowRunCase):
@@ -4178,9 +4328,9 @@ class CleanupFailure(WorkflowRunCase):
         # record of it both intact, and `$SCRATCH` goes anyway.
         pin, review_wt = self.workflow.pin()
         review_root = review_wt.parent
-        scratch = self.workflow.base / "scratch-independent"
-        scratch.mkdir()
-        (scratch / "inventory.json").write_text("{}", encoding="utf-8")
+        # The inventory lives in the same directory, so a retained one retains
+        # it too -- which is the point: one directory, reported by one path.
+        (review_root / "inventory.json").write_text("{}", encoding="utf-8")
         mode = review_root.stat().st_mode
         os.chmod(review_root, 0o500)
 
@@ -4205,13 +4355,7 @@ class CleanupFailure(WorkflowRunCase):
         # is exactly why the asset assumes neither and names `worktree prune`
         # as the repair for a record that did survive.
         self.assertTrue(review_wt.is_dir())
-        # Step 5 is independent of both, and still removes the inventory's own
-        # scratch directory.
-        self.workflow.sh(
-            asset_command(self.workflow.asset, 'rm -rf "$SCRATCH"'), SCRATCH=str(scratch)
-        )
-        self.assertFalse(scratch.exists())
-        self.assertTrue(review_wt.is_dir())
+        self.assertTrue((review_root / "inventory.json").is_file())
 
         # Tidying up after a deliberately broken removal is this test's own
         # business, not the workflow's: the record is already gone here, so
@@ -4255,58 +4399,129 @@ class OrphanReclaim(WorkflowRunCase):
         self.assertIn("is not a working tree", removal.stderr)
         self.assertFalse(review_root.exists())
 
-    def test_a_cancellation_after_pinning_is_reclaimed_by_the_next_invocation(self):
-        # The exit no model can clean up after. The session ends with a worktree
-        # pinned, so the lease lapses on its own but `$REVIEW_ROOT` stays --
-        # and the next invocation's step-4 reclaim pass is what removes it.
-        inventory, _ = self.workflow.inventory()
-        cancelled = self.workflow.register(session="session-a", invocation="invocation-1")
-        claimed = self.workflow.claim(inventory, cancelled["keeper_pid"])
+    def cancel_after(self, stage):
+        """Register, claim, create `stage`'s resources, then end the session.
+
+        No cleanup step of the cancelled invocation's runs -- which is the
+        whole case: what has to happen afterwards has to happen without one.
+        """
+        registration = self.workflow.register(
+            session="session-a", invocation="invocation-1"
+        )
+        attempt_dir = self.workflow.attempt_directory(registration["attempt"])
+        inventory, _ = self.workflow.inventory(attempt=registration["attempt"])
+        claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+        self.assertEqual(claimed["status"], "claimed")
+        review_wt = None
+        if stage == "pinned":
+            _, review_wt = self.workflow.pin(attempt=registration["attempt"])
+        self.workflow.hook(
+            "SessionEnd", session="session-a", invocation="invocation-1"
+        )
+        return registration, claimed, attempt_dir, inventory, review_wt
+
+    def assert_cancellation_completes_without_a_tool_call(self, registration, claimed):
+        """Requirement 5's three things, each by the mechanism that does it."""
         token = claimed["claim"]["token"]
-        _, orphan_wt = self.workflow.pin(attempt=cancelled["attempt"])
-        orphan_root = orphan_wt.parent
-        self.workflow.hook("SessionEnd", session="session-a", invocation="invocation-1")
+        # Processes: the runtime's own mechanism ends the keeper.
+        e2e_wait(
+            lambda: not self.workflow.running(registration["keeper_pid"]),
+            "the keeper outlived the cancelled session",
+        )
+        self.assertEqual(
+            self.workflow.attempt_state(registration["attempt"]), "ended"
+        )
+        # The claim: renewal stops with it, the lease runs out, and the row is
+        # claimable again -- by anyone but the cancelled attempt, whose token
+        # no longer owns it.
         e2e_wait(
             lambda: self.workflow.heartbeat_renewals(token) is None,
             "renewal outlived the cancelled session",
         )
-        # Nothing ran cleanup, so the worktree is still there -- outside every
-        # working tree, which is the property that makes it harmless.
-        self.assertTrue(orphan_wt.is_dir())
-        # What the cancellation left in the docs worktree is the claim's own
-        # ledger write and nothing else -- no worktree, no scratch directory,
-        # nothing under a path that publishes.
-        dirty = sorted(
-            line.split()[-1]
-            for line in e2e_git(
-                self.workflow.docs, "status", "--porcelain", "--untracked-files=all"
-            ).splitlines()
+        successor = self.workflow.register(
+            session="session-b", invocation="invocation-2"
         )
-        self.assertEqual(dirty, [self.module.LEDGER_RELATIVE_PATH])
-        # Under the Git common directory, which is inside no working tree: the
-        # primary checkout does not see it either.
+        inventory, _ = self.workflow.inventory(attempt=successor["attempt"])
+        retaken = self.workflow.claim(inventory, successor["keeper_pid"])
+        self.assertEqual(retaken["status"], "claimed")
+        self.assertEqual(retaken["takeover"]["previous_token"], token)
+        for name, attempt in (
+            ("record", lambda: self.workflow.record(
+                claimed["selected"]["number"], token, "clean", "a" * 40, check=False
+            )),
+            ("allocate-report", lambda: self.workflow.allocate(
+                claimed["selected"]["number"], token, check=False
+            )),
+            ("release", lambda: self.workflow.release(
+                claimed["selected"]["number"], token, check=False
+            )),
+        ):
+            with self.subTest(command=name):
+                self.assertEqual(attempt().returncode, 2)
+        return successor
+
+    def test_a_cancellation_after_the_inventory_leaves_nothing_but_its_own_directory(self):
+        # Cancellation before any worktree exists, with no invocation after it:
+        # what the runtime's mechanism achieves on its own is asserted here,
+        # and nothing is left anywhere an operator or a publication would see.
+        registration, claimed, attempt_dir, inventory, _ = self.cancel_after("inventory")
+        self.assertTrue(inventory.is_file())
+        successor = self.assert_cancellation_completes_without_a_tool_call(
+            registration, claimed
+        )
+        # The directory is the only thing left, and it is inside no working
+        # tree: neither checkout has anything untracked from it.
+        self.assertTrue(attempt_dir.is_dir())
         self.assertTrue(
-            str(orphan_root).startswith(str(self.workflow.runtime_worktrees()))
+            str(attempt_dir).startswith(str(self.workflow.runtime_worktrees()))
         )
         self.assertEqual(
             e2e_git(self.workflow.root, "status", "--porcelain", "--untracked-files=all"),
             "",
         )
-        self.assertEqual(self.workflow.attempt_state(cancelled["attempt"]), "ended")
+        self.assertNotIn(
+            "project_review/",
+            "".join(
+                line
+                for line in e2e_git(
+                    self.workflow.docs, "status", "--porcelain", "--untracked-files=all"
+                ).splitlines(keepends=True)
+                if "ledger.md" not in line
+            ),
+        )
+        # And step 1's reclaim pass, on the next invocation, removes it.
+        self.assertEqual(
+            self.workflow.reclaim_orphans(keep=successor["attempt"]),
+            [registration["attempt"]],
+        )
+        self.assertFalse(attempt_dir.exists())
 
-        # The next invocation reclaims it before pinning its own, and leaves
-        # its own alone.
-        live = self.workflow.register(session="session-b", invocation="invocation-2")
-        self.assertEqual(self.workflow.attempt_state(live["attempt"]), "active")
-        reclaimed = self.workflow.reclaim_orphans(keep=live["attempt"])
-        self.assertEqual(reclaimed, [cancelled["attempt"]])
-        self.assertFalse(orphan_root.exists())
-
-        _, own_wt = self.workflow.pin(attempt=live["attempt"])
-        self.assertEqual(self.workflow.reclaim_orphans(keep=live["attempt"]), [])
+    def test_a_cancellation_after_pinning_is_reclaimed_with_its_worktree(self):
+        registration, claimed, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        self.assertTrue(review_wt.is_dir())
+        successor = self.assert_cancellation_completes_without_a_tool_call(
+            registration, claimed
+        )
+        self.assertTrue(review_wt.is_dir())
+        self.assertEqual(
+            e2e_git(self.workflow.root, "status", "--porcelain", "--untracked-files=all"),
+            "",
+        )
+        # Step 1's reclaim pass removes the worktree and the directory holding
+        # it, and leaves the live invocation's own alone.
+        _, own_wt = self.workflow.pin(attempt=successor["attempt"])
+        self.assertEqual(
+            self.workflow.reclaim_orphans(keep=successor["attempt"]),
+            [registration["attempt"]],
+        )
+        self.assertFalse(attempt_dir.exists())
         self.assertTrue(own_wt.is_dir())
+        self.assertNotIn(
+            str(review_wt),
+            e2e_git(self.workflow.root, "worktree", "list", "--porcelain"),
+        )
         self.workflow.remove_pin(own_wt)
-        self.workflow.complete_attempt(live["attempt"])
+        self.workflow.complete_attempt(successor["attempt"])
 
     def test_an_already_tracked_finding_is_recordable_as_findings(self):
         # Round 3's other blocker: a review whose only finding is already in the
@@ -4846,6 +5061,7 @@ def _end_to_end_cases():
         HelperResolution,
         FreshRepository,
         PinnedTree,
+        FetchFailure,
         EarlyExits,
         CleanupFailure,
         OrphanReclaim,
