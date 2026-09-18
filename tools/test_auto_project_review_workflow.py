@@ -605,6 +605,56 @@ class CountingRuleTests(unittest.TestCase):
             )
         )
 
+    def test_a_recorded_review_survives_its_iteration_s_cleanup_failure(self):
+        # The second issue review's spec addition. The delegate publishes its
+        # checkpoint in step 8 and cleans up in step 9, so exactly one of the
+        # uncounted endings leaves a real, published review behind. The
+        # counting rule does not bend for it -- that would make "recorded"
+        # mean two things -- but a report that omitted it would send the next
+        # invocation looking for a row that is already complete, and would
+        # lose the retained paths a human has to clear.
+        for relative_path in RENDERED_ASSETS:
+            text = squashed(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "**One of those endings leaves a recorded review behind, "
+                    "and the report owes it.**",
+                    text,
+                )
+                self.assertIn(
+                    "That iteration is still not counted and still ends the "
+                    "run — the rule above does not bend for it",
+                    text,
+                )
+                self.assertIn(
+                    "name every resource the delegate reported retaining, by "
+                    "the path it named",
+                    text,
+                )
+                self.assertIn(
+                    "Never undo that record and never run the iteration again "
+                    "to tidy up after it",
+                    text,
+                )
+
+    def test_the_delegate_really_records_before_it_cleans_up(self):
+        # The ordering the case above exists for, read from the delegate
+        # rather than assumed: if cleanup came first, no ending could leave a
+        # recorded review behind and this whole disclosure would be describing
+        # a state that cannot occur.
+        for relative_path in DELEGATE_ASSETS.values():
+            text = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertLess(
+                    text.index("### 8. Record the completed attempt"),
+                    text.index("### 9. Clean up, on every exit"),
+                )
+                self.assertIn(
+                    "**A cleanup step that fails is reported with the path it "
+                    "retained, never as removed.**",
+                    flat(text),
+                )
+
     def test_both_renderings_refuse_a_retry_and_a_reach_around(self):
         for relative_path in RENDERED_ASSETS:
             text = squashed(relative_path)
@@ -731,6 +781,15 @@ class StopConditionTests(unittest.TestCase):
                     "either the report path it allocated or the "
                     "existing-finding links a repeats-only review recorded "
                     "instead;",
+                    text,
+                )
+                self.assertIn(
+                    "any review the uncounted last iteration had already "
+                    "recorded before it stopped — the cleanup failure in step "
+                    "3 is the ending that produces one — named beside the "
+                    "counted reviews and told apart from them, together with "
+                    "every resource the delegate reported retaining, by the "
+                    "path it gave;",
                     text,
                 )
                 self.assertIn(

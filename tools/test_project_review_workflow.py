@@ -6053,6 +6053,12 @@ class AdapterIntegration(WorkflowRunCase):
 # that raises if the loop reaches it: "stops after exactly N" and "never begins
 # another after a refusal" are otherwise assertions about a number rather than
 # about the loop.
+#
+# One ending gets a case of its own beyond requirement 9's four: the delegate
+# checkpoints in step 8 and cleans up in step 9, so a removal that fails leaves
+# a completed row behind an iteration that did not count. That is the second
+# issue review's spec addition, and the case drives it the way `CleanupFailure`
+# above drives the delegate's own half -- by making the removal fail for real.
 # ---------------------------------------------------------------------------
 
 AUTOMATION_ASSETS = {
@@ -6092,7 +6098,7 @@ class SerialAutomation(WorkflowRunCase):
         progress report's own material: what was recorded, against what
         target, and why the run ended.
         """
-        recorded, reason, index = [], None, 0
+        recorded, reason, index, result = [], None, 0, None
         while count is None or len(recorded) < count:
             self.assertLess(
                 index, len(plan), "the loop asked for an iteration nobody planned"
@@ -6112,6 +6118,10 @@ class SerialAutomation(WorkflowRunCase):
             "reason": reason,
             "target": "open-ended" if count is None else count,
             "iterations": index,
+            # The ending's own payload, kept because one of them -- a cleanup
+            # that failed after `record` -- carries a completed review the
+            # report has to disclose even though it never counted.
+            "stopped_on": None if reason == COUNT_REACHED else result,
         }
 
     def tripwire(self):
@@ -6198,6 +6208,60 @@ class SerialAutomation(WorkflowRunCase):
 
         return run
 
+    def recorded_then_failed_cleanup(self):
+        """One invocation that records a review and then cannot clean up.
+
+        The only ending that leaves a real, published review behind an
+        uncounted iteration: the delegate checkpoints in step 8 and removes
+        what it made in step 9, so a removal that fails for real -- the
+        attempt directory loses its write permission, exactly as
+        `CleanupFailure` above arranges it -- produces a completed row and a
+        retained path at once.
+        """
+        def run():
+            registration, inventory = self.workflow.registered_inventory(
+                **self.session()
+            )
+            claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+            self.assertEqual(claimed["status"], "claimed")
+            pin, review_wt = self.workflow.pin(attempt=registration["attempt"])
+            recorded = self.workflow.record(
+                claimed["selected"]["number"], claimed["claim"]["token"], "clean", pin
+            )
+            self.assertEqual(recorded["status"], "recorded")
+            attempt_dir = review_wt.parent
+            mode = attempt_dir.stat().st_mode
+            os.chmod(attempt_dir, 0o500)
+            self.addCleanup(self._restore, attempt_dir, mode)
+            removal = self.workflow.sh(
+                asset_command(self.workflow.asset, 'git -C "$ROOT" worktree remove'),
+                check=False,
+                REVIEW_WT=str(review_wt),
+            )
+            self.assertNotEqual(removal.returncode, 0, removal.stdout)
+            self.assertTrue(review_wt.is_dir())
+            self.workflow.complete_attempt(registration["attempt"])
+            # What the automation reads back: an ending that is not
+            # `recorded`, carrying the review that nonetheless was.
+            return {
+                "status": "cleanup-failed",
+                "already_recorded": {
+                    "pr": recorded["pr"],
+                    "outcome": recorded["outcome"],
+                    "commit": recorded["commit"],
+                    "report": recorded["report"],
+                    "repeats": recorded["repeats"],
+                },
+                "retained": str(attempt_dir),
+            }
+
+        return run
+
+    def _restore(self, directory, mode):
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(directory, mode)
+            shutil.rmtree(directory, ignore_errors=True)
+
     def exhausted(self):
         """One invocation over a repository whose listing names nothing.
 
@@ -6235,6 +6299,16 @@ class SerialAutomation(WorkflowRunCase):
         for entry in run["recorded"]:
             links = entry["report"] or ",".join(entry["repeats"]) or "none"
             lines.append(f"#{entry['pr']} {entry['outcome']} {entry['commit']} {links}")
+        stopped = run.get("stopped_on") or {}
+        already = stopped.get("already_recorded")
+        if already:
+            lines.append(
+                f"uncounted, already recorded: #{already['pr']} "
+                f"{already['outcome']} {already['commit']} "
+                f"retained {stopped['retained']}"
+            )
+        else:
+            lines.append("uncounted, already recorded: none")
         lines.append(str(run["reason"]))
         return lines
 
@@ -6348,12 +6422,47 @@ class SerialAutomation(WorkflowRunCase):
         self.assertEqual(run["reason"], COUNT_REACHED)
         self.assertEqual(run["recorded"], [])
         self.assertEqual(run["iterations"], 0)
-        self.assertEqual(self.progress_report(run), ["0 of 0", COUNT_REACHED])
+        self.assertEqual(
+            self.progress_report(run),
+            ["0 of 0", "uncounted, already recorded: none", COUNT_REACHED],
+        )
         # Nothing was claimed, nothing was recorded, and no attempt directory
         # was made: a count of zero is a run that touched the repository not
         # at all.
         self.assertEqual(self.completed_rows(), {})
         self.assertFalse(self.workflow.runtime_worktrees().exists())
+
+    def test_a_cleanup_failure_leaves_a_recorded_review_the_report_must_name(self):
+        # The second issue review's spec addition, end to end. The second
+        # iteration records its review and then fails to remove what it made:
+        # it does not count, it ends the run, and the review it recorded is a
+        # real completed row that the progress report has to disclose along
+        # with the path still on disk.
+        run = self.automate(
+            3, [self.recorded(), self.recorded_then_failed_cleanup(), self.tripwire()]
+        )
+        self.assertEqual(run["reason"], "cleanup-failed")
+        self.assertEqual(len(run["recorded"]), 1)
+        self.assertEqual(run["iterations"], 2)
+
+        stopped = run["stopped_on"]
+        self.assertEqual(stopped["already_recorded"]["outcome"], "clean")
+        self.assertTrue(Path(stopped["retained"]).is_dir(), stopped["retained"])
+
+        # The count is what completed cleanly; the ledger, though, carries
+        # BOTH rows -- which is exactly why the report owes the second one.
+        self.assertEqual(self.progress_report(run)[0], "1 of 3")
+        self.assertEqual(sorted(self.completed_rows()), ["618", "620"])
+        self.assertEqual(
+            self.workflow.rows()[str(stopped["already_recorded"]["pr"])]["status"],
+            "clean",
+        )
+        # And the report names it and the retained path, told apart from the
+        # counted reviews.
+        disclosure = self.progress_report(run)[-2]
+        self.assertIn(str(stopped["already_recorded"]["pr"]), disclosure)
+        self.assertIn(stopped["already_recorded"]["commit"], disclosure)
+        self.assertIn(stopped["retained"], disclosure)
 
     def test_the_tripwire_really_fires(self):
         # Non-vacuity for every case above: "the loop stopped here" rests

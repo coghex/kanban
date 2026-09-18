@@ -91,6 +91,18 @@ that answered a refusal by trying again would spend the user's whole count
 rediscovering it — or, worse, would start a review the single workflow had just
 declined to start.
 
+**One of those endings leaves a recorded review behind, and the report owes
+it.** The delegate publishes its checkpoint in step 8 and cleans up in step 9,
+so an iteration can record a review and then fail to remove what it made. That
+iteration is still not counted and still ends the run — the rule above does not
+bend for it — but the review it recorded is real, published, and the next
+invocation's to build on. Name it in step 5's report, with the pull request,
+the outcome and the verification commit the delegate gave, and name every
+resource the delegate reported retaining, by the path it named. Never undo that
+record and never run the iteration again to tidy up after it: the row is
+complete and the checkpoint is published, so a second attempt at either would be
+this workflow writing the ledger.
+
 Retrying is never the repair, and neither is reaching around the delegate: do
 not re-run an iteration, do not adjust the inventory, the ledger, or the claim
 so that the next attempt might fare better, and do not take a review the
@@ -128,6 +140,10 @@ exhausted queue, on a refusal, or on the user's word:
   each with the outcome the delegate recorded, the verification commit it
   recorded the review against, and either the report path it allocated or the
   existing-finding links a repeats-only review recorded instead;
+- any review the uncounted last iteration had already recorded before it
+  stopped — the cleanup failure in step 3 is the ending that produces one —
+  named beside the counted reviews and told apart from them, together with
+  every resource the delegate reported retaining, by the path it gave;
 - the reason this run ended, in the words step 4 gives it.
 
 Take every one of those from what the delegate reported about its own

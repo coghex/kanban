@@ -2422,14 +2422,18 @@ number of times.
 - **Counting:** an iteration counts toward `N` only when the delegate reported
   a successfully recorded completed review, `clean` or `findings` alike. An
   iteration that ended any other way is not counted and ends the run, and no
-  iteration begins until the one before it has ended.
+  iteration begins until the one before it has ended. One of those endings —
+  a cleanup that failed after `record` published its checkpoint — leaves a
+  completed row behind all the same. It still does not count and still ends the
+  run; what it adds is a disclosure, never an exception.
 - **Stops:** the count is reached; the delegate reports
   `"status": "no-selectable-row"`, which is an ordinary end rather than a
   failure; the user stops an open-ended run; or an iteration did not record a
   review. Every one of them ends with a progress report naming the recorded
   count against the target, each reviewed pull request with its outcome,
-  verification commit and report path or existing-finding links, and the
-  reason the run ended.
+  verification commit and report path or existing-finding links, any review the
+  uncounted last iteration had already recorded together with every path the
+  delegate retained, and the reason the run ended.
 - **Mandatory/optional:** optional, and it starts no run of its own accord.
 
 ## 3. Migration boundary
