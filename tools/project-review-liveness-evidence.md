@@ -531,7 +531,7 @@ still apply and were reused unmodified.
 | Date | 2026-09-17 |
 | Host | macOS 26.6 (Darwin 25.6.0), arm64 |
 | Python | 3.14.6 |
-| Claude Code | 2.1.274, bundle loaded with `--plugin-dir` |
+| Claude Code | 2.1.274 for the completion and between-call runs; 2.1.276, auto-installed part-way through, for the during-call runs. Bundle loaded with `--plugin-dir` |
 | codex-cli | 0.154.0, bundle installed from this branch into an isolated `CODEX_HOME` |
 | Claude model | Haiku 4.5 |
 | Codex model | `gpt-5.6-luna` |
@@ -586,24 +586,81 @@ wrote the timeline. Times are seconds since the driver started.
   measure it: `Interrupt` ended the keeper within a second of Esc. The kill here
   is the worse case for both runtimes deliberately.
 
+### Cancellation during a tool call
+
+The runs above cancel between tool calls, by killing the session's process
+group. A cancellation *during* a call needs a real interrupt, so these were
+driven the way #687's own runs were: the runtime in `tmux`, one prompt pasted
+in, and `tmux send-keys Escape` once the claim was on disk and step 4's command
+was in flight. Step 4 is
+`project_review_liveness.py run … --launch build -- sleep 300`, in the
+foreground.
+
+| Runtime | Registered | Claimed | Escape | Attempt ended | Lease retired |
+|---|---|---|---|---|---|
+| codex-cli 0.154.0 | 27.88 | 35.05 | 98.67 | 98.98, `Interrupt` | 108.20 |
+| Claude Code 2.1.276 (run 1) | 27.10 | 30.66 | 38.53 | 151.9, `SessionEnd` | — |
+| Claude Code 2.1.276 (run 2) | 24.77 | 27.60 | 35.46 | not within 230 s | — |
+
+Codex behaves as the contract says: `Interrupt` reached the hook 0.31 s after
+the Escape, the attempt ended at once, and the renewer retired the lease 9.5 s
+later — one expiry.
+
+**Claude Code does not, on 2.1.276.** This is a change from 2.1.274, and it
+matters enough to state plainly. The probe table above records, on 2.1.274,
+"Esc during a 120 s foreground tool | none | tool process killed". On 2.1.276
+the wrapped command was *not* killed: run 2 watched it directly and it was still
+running 90 s after the Escape. Because a live wrapper keeps its launch exempt
+from the silence window, the keeper then never ends on silence either — run 1's
+attempt ended only when the driver killed the session, 113 s after the Escape,
+and run 2's had not ended 195 s after it.
+
+So for a cancellation during a *foreground wrapped* command on Claude Code
+2.1.276, the bound is not the silence window. It is however long that command
+runs, or the end of the session, whichever comes first. Three consequences,
+none of which this arc's code gets wrong:
+
+- The lease is held for that whole time rather than for the documented bound.
+  Nothing else can review that pull request meanwhile; it is a delay, not a
+  corruption, and the fencing guarantees are untouched.
+- `project-review`'s reclaim pass is right to refuse to remove an attempt's
+  directory while `status` reports an unfinished launch. That refusal is what
+  keeps a surviving command's working tree under it.
+- The version row at the top of this document is *measured on*, not *still
+  true*. Re-probe the foreground-interrupt case on a Claude Code upgrade before
+  quoting §2.13's timings.
+
+Claude Code 2.1.274 auto-updated to 2.1.276 between the completion runs and
+these; both versions therefore appear above, each against what it was observed
+doing.
+
 ### What is retained rather than re-run
 
-The scenarios above this section — Esc during a foreground tool call, Esc
-between tool calls, a wrapped command holding the exemption open, a backgrounded
-command getting none, and `/exit` — were collected on the same two runtime
-versions against the same `hooks.json`, and they are the evidence for the
-keeper's rules themselves. #684 changed nothing the keeper observes: it changed
-which root the registration reads its lease settings from and how the command
-text spells the helper, both of them before a keeper exists. The runs in this
-section re-establish the two ends of the range on the entry path as installed —
-a reported terminal event, and a cancellation nothing reports — and the retained
-runs remain the evidence for everything between them.
+The scenarios above this section — a wrapped command holding the exemption open,
+a backgrounded command getting none, and `/exit` — were collected against the
+same `hooks.json`, and they are the evidence for the keeper's rules themselves.
+#684 changed nothing the keeper observes: it changed which root the registration
+reads its lease settings from, how the command text spells the helper, and it
+added a read-only launch report to `status`, none of which a keeper consults.
+The runs in this section cover the entry path as installed at all three points
+the requirement names — a completed turn, a cancellation between tool calls, and
+a cancellation during one — on both runtimes, and the retained runs remain the
+evidence for the rules between them.
+
+The one retained result this section supersedes is Claude Code's
+foreground-interrupt row, for 2.1.276 only: it was true when measured on
+2.1.274 and is not true now. The row is left where it is, with its version, and
+the change recorded above.
 
 ## Limitations
 
 - **A cancellation Claude Code does not report is bounded, not immediate.** The
   bound is the silence window (10 minutes by default), plus one renewer poll,
-  plus the lease expiry.
+  plus the lease expiry — **provided no wrapped command is still running**. On
+  2.1.276 an interrupt does not kill a foreground wrapped command, and a live
+  wrapper holds its launch exempt from that window, so the bound becomes that
+  command's own remaining run time or the end of the session. See "Cancellation
+  during a tool call".
 - **The wrapped-command exemption ends when the runtime reports the tool call
   finished.** Codex reports a command it moved to a background terminal as in
   flight until the process exits. So on Codex the exemption lasts as long as the

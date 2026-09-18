@@ -2266,7 +2266,15 @@ A registration refusal stops that run before any claim.
 
   Claude Code documents no interrupt event, and none fires. A Claude
   cancellation therefore lapses after at most the silence window, plus one
-  renewer poll, plus the lease expiry.
+  renewer poll, plus the lease expiry — **provided no wrapped command is still
+  running**. A live wrapper holds its launch exempt from that window by design,
+  and on Claude Code 2.1.276 an interrupt no longer kills a foreground wrapped
+  command as it did on 2.1.274, so the bound then becomes that command's own
+  remaining run time, or the end of the session, whichever comes first. The
+  measurement and its consequences are in
+  `tools/project-review-liveness-evidence.md`; the minimum verified versions
+  below are what each behaviour was measured on, not a guarantee that a newer
+  runtime still behaves that way.
 - **Hook events:** Claude Code 2.1.274 or newer: `PreToolUse`, `PostToolUse`,
   `PostToolUseFailure`, `Stop`, `StopFailure`, `SessionEnd`. codex-cli 0.154.0
   or newer: `PreToolUse`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd`,

@@ -750,6 +750,15 @@ CLEANUP = {
         "silence window for a cancellation it does not report. That is #687's "
         "mechanism, and it needs nothing from the model."
     ),
+    "a wrapped command bounds it instead": (
+        "A command started through the wrapper is the exception in both "
+        "directions: it holds its launch exempt from that window while it "
+        "runs, and the runtime does not reliably kill it — on Claude Code "
+        "2.1.276 an interrupted foreground command keeps going. So a "
+        "cancellation with a wrapped command still running is bounded by that "
+        "command, not by the window, and the reclaim pass is what refuses to "
+        "remove its directory meanwhile."
+    ),
     "the lease lapses and the row becomes claimable": (
         "*The claim.* Renewal stops with the keeper, so the lease runs out and "
         "the row becomes claimable again; the next invocation takes it over "
