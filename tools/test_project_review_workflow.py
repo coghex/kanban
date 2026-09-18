@@ -795,8 +795,14 @@ CLEANUP = {
     ),
     "a failed removal reports the repair": (
         "When step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, "
-        'and say that `git -C "$ROOT" worktree prune` is what clears any '
-        "record still naming it once the directory itself is dealt with."
+        "and report any record still naming it as an unresolved record for "
+    ),
+    "prune is never this workflow's to run": (
+        "**Never run Git's `worktree prune` here, or anywhere else in this "
+        "workflow.** It is repository-wide: it clears the administrative "
+        "record of every worktree of this repository whose directory is "
+        "missing, including ones belonging to a person or to another agent "
+        "that this invocation knows nothing about"
     ),
     "never derive a removal target": (
         "**Never derive a removal target from another path**: the parent "
@@ -4120,7 +4126,9 @@ class WorkflowRun:
                 continue
             self.cleanup_worktree(sibling / "tree")
             reclaimed.append(sibling.name)
-        self.sh('git -C "$ROOT" worktree prune')
+        # No `worktree prune`: it is repository-wide, and `worktree remove`
+        # above already cleared the record of each worktree it removed. The
+        # asset refuses the global form for the same reason this driver does.
         self.retained_orphans = retained
         return reclaimed
 
@@ -4794,8 +4802,9 @@ class CleanupFailure(WorkflowRunCase):
         # worktree is still on disk to be reported. Whether Git's own record
         # survived the partial removal is Git's business and varies -- here it
         # dropped the record first and then failed to unlink the tree -- which
-        # is exactly why the asset assumes neither and names `worktree prune`
-        # as the repair for a record that did survive.
+        # is exactly why the asset assumes neither, and reports a record that
+        # did survive as the janitor's rather than clearing it with a
+        # repository-wide prune.
         self.assertTrue(review_wt.is_dir())
         self.assertTrue((review_root / "inventory.json").is_file())
 
@@ -5104,6 +5113,51 @@ class OrphanReclaim(WorkflowRunCase):
         self.assertIsNone(third.poll())
         first.kill()
         third.kill()
+
+    def registered_worktrees(self):
+        """Every worktree path Git has an administrative record for."""
+        listing = e2e_git(self.workflow.root, "worktree", "list", "--porcelain")
+        return [
+            line.split(" ", 1)[1]
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        ]
+
+    def test_reclamation_leaves_an_unrelated_stale_worktree_record_alone(self):
+        # Round 10's blocker. The pass used to end with a repository-wide
+        # `worktree prune`, which clears the record of every worktree of this
+        # repository whose directory is missing -- a person's interrupted
+        # checkout, another agent's, anything this invocation knows nothing
+        # about. Cleanup is attempt-scoped, so a record this pass did not
+        # create has to be exactly where it was afterwards.
+        stranger = self.workflow.base / "someone-elses-worktree"
+        e2e_git(
+            self.workflow.root, "worktree", "add", "--detach", "-q", str(stranger)
+        )
+        shutil.rmtree(stranger)
+        stale = [
+            path
+            for path in self.registered_worktrees()
+            if path.endswith("someone-elses-worktree")
+        ]
+        self.assertEqual(len(stale), 1, self.registered_worktrees())
+        self.assertFalse(Path(stale[0]).exists(), "the record is not stale")
+
+        registration, claimed, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        successor = self.assert_cancellation_completes_without_a_tool_call(
+            registration, claimed
+        )
+        self.assertEqual(
+            self.workflow.reclaim_orphans(keep=successor["attempt"]),
+            [registration["attempt"]],
+        )
+        # The attempt's own record went with the worktree `remove` took, which
+        # is the only record-clearing this pass does.
+        self.assertFalse(attempt_dir.exists())
+        after = self.registered_worktrees()
+        self.assertNotIn(str(review_wt), after)
+        self.assertIn(stale[0], after)
+        self.workflow.complete_attempt(successor["attempt"])
 
     def test_an_unreadable_launch_record_retains_the_directory(self):
         # Requirement 5's fail-closed rule, through the record rather than the

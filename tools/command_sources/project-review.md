@@ -388,8 +388,19 @@ under a live process is the one outcome nothing later can repair, and a
 directory left on disk costs only disk.
 
 Reclaim the rest: remove each one's worktree and directory exactly as step 9
-does, then run `git -C "$ROOT" worktree prune` to clear any record left naming
-them, and say how many you reclaimed and how many you retained and why.
+does, and say how many you reclaimed and how many you retained and why.
+
+**Never run Git's `worktree prune` here, or anywhere else in this workflow.**
+It is repository-wide: it clears the administrative record of every worktree of
+this repository whose directory is missing, including ones belonging to a person
+or to another agent that this invocation knows nothing about — and this pass is
+entitled to touch exactly the attempts it just established were safe to take. It
+would not even be reliable for the record it was reached for, since it honours
+Git's own prune expiry and a freshly orphaned record is usually inside it.
+`git -C "$ROOT" worktree remove --force` clears the record of the one worktree it
+removes, and that is the whole of the record-clearing this pass does. A record that outlives it — the directory already gone, so the removal
+reports `is not a working tree` — is reported by name, with the attempt it
+belonged to, and left for {{cmd:janitor}}, exactly as a retained directory is.
 
 **A refusal here stops the run before any claim.** `runtime-unavailable`,
 `runtime-unsupported`, `hooks-not-observed`, `hooks-incomplete`, `hooks-disabled`,
@@ -813,9 +824,11 @@ not run, and not running it is not a failure.
    Git's administrative record behind, leave the record naming a directory that
    is gone. A partial removal can end either way, with the record dropped and
    the tree still on disk or both still there, so neither is assumed. When
-   step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, and say that
-   `git -C "$ROOT" worktree prune` is what clears any record still naming it once
-   the directory itself is dealt with. **Never derive a removal target from
+   step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, and report any
+   record still naming it as an unresolved record for {{cmd:janitor}}. Do not
+   reach for Git's `worktree prune` and do not tell the reader to: it is
+   repository-wide, and clearing one attempt's leftover at the price of every
+   other worktree's record is not this workflow's to trade. **Never derive a removal target from
    another path**: the parent directory of a variable an early exit never set is
    the working directory, and a recursive removal of that is the one mistake
    this workflow could make that nothing later could repair.
