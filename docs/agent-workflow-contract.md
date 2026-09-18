@@ -2273,8 +2273,15 @@ A registration refusal stops that run before any claim.
   command's tool-finish event is itself a progress event, so it refreshes the
   window rather than ending it, and the keeper waits it out afresh afterwards.
   The bound becomes the command's remaining run time, plus a silence window,
-  plus a keeper poll, plus the lease expiry — or the end of the session,
-  whichever comes first. The
+  plus a keeper poll, plus one renewal interval, plus the lease expiry — or the
+  end of the session, whichever comes first. The renewal interval is a phase of
+  its own because the renewer follows the keeper rather than ending with it: it
+  looks at its liveness signal at least once per renewal interval, so it may
+  write one further renewal after the keeper is gone, and the expiry that then
+  runs down is the one that renewal stamped. This implementation looks once per
+  renewer poll — a second — which is why a measured lapse is shorter than the
+  interval this contract promises, and the promise is what a reader may rely
+  on. The
   measurement and its consequences are in
   `tools/project-review-liveness-evidence.md`; the minimum verified versions
   below are what each behaviour was measured on, not a guarantee that a newer
@@ -2573,7 +2580,7 @@ tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
-dirname-cli | executable | dirname | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/project-review/SKILL.md | kanban | supported | no
+dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
 mkdir-cli | executable | mkdir | codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -2999,22 +3006,34 @@ for the liveness attempt that will own it. Everything one invocation of that
 workflow creates goes in there — its merged-pull-request inventory and the
 detached worktree it pins the review to — so it is OUTSIDE the reviewed
 checkout and the docs worktree, where a review artifact under
-`docs/project_review/` would publish with the report beside it, and it is
-removed as one directory on every exit. Naming it for the attempt is what makes
-a cancellation recoverable: the next invocation asks the liveness adapter about
-each sibling and removes the ones whose attempt is over, so an exit that could
-not run its own cleanup is completed one invocation later rather than never. It
-is `mandatory: no` for the reason the other utilities here are.
+`docs/project_review/` would publish with the report beside it, and an exit that
+reaches its own cleanup removes it as one directory. Naming it for the attempt
+is what makes a cancellation recoverable, and it is equally what makes the
+recovery safe to refuse: the next invocation asks the liveness adapter about
+each sibling and removes one only on positive evidence that nothing is using
+it — the attempt still known to the adapter, its keeper reported ended or
+positively gone, its launch records readable, and no launch of it unfinished.
+Anything else retains the directory by name and with the reason, for a later
+pass or for `janitor` (#706): an attempt the adapter no longer knows, a keeper
+whose standing it cannot establish, a launch record it cannot read, or a wrapped
+command that outlived the cancellation. Removing a worktree a live process is
+working in is the one outcome nothing later repairs, so the pass fails closed
+and a cancellation's directory is taken by the first invocation that can prove
+otherwise — the next one in the ordinary case, and not in every case. It is
+`mandatory: no` for the reason the other utilities here are.
 
 `tr-cli` is the documentation-landing helper's own utility (issue #410):
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
-`dirname-cli` started there too and gained a second consumer with #684: the
-Codex `project-review` skill takes the directory of the ledger helper its
-`find` located, to resolve the session liveness adapter and the sweep cursor
-beside it. The Claude asset needs no such step — `${CLAUDE_PLUGIN_ROOT}` names
-all three directly — and neither asset derives a *removal* target that way: each
-scratch directory cleanup removes is held in a variable of its own, because
-`dirname` of a variable an early exit never set is the working directory. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
+`dirname-cli` is that helper's alone as well. #684 gave it a second consumer and
+then took it back: the Codex `project-review` skill now locates the directory
+its three modules share directly, rather than taking the directory of one of
+them, because a lookup routed through one module made every mode of that
+workflow depend on that module being installed — including the mode that never
+calls it. Neither `project-review` asset derives a path that way now, and
+neither derives a *removal* target from another path at all: each scratch
+directory cleanup removes is held in a variable of its own, because the parent
+of a variable an early exit never set is the working directory.
+`tools/docs_land.sh` also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
 user-invoked action, and every supported macOS/Linux shell already provides

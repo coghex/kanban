@@ -84,7 +84,8 @@ repository that has never had a ledger must not acquire one by being asked for a
 direct batch, and a bundle whose ledger module or liveness adapter could not be
 resolved must not be blocked from a mode that needs neither.
 
-- **An explicit direct request:** resolve `$CURSOR` below and the docs worktree,
+- **An explicit direct request:** resolve the scripts directory and `$CURSOR`
+  below — direct mode's own fence, and not PR mode's — then the docs worktree,
   then go straight to "Direct-commit mode — explicit request only" and do
   everything there. Skip every numbered step.
 - **Anything else:** PR mode, and every step in order.
@@ -94,24 +95,42 @@ resolved must not be blocked from a mode that needs neither.
 Three modules ship with this plugin rather than with the repository being
 reviewed, so each is resolved against this plugin's install location and never
 against `$ROOT` or the docs worktree. That lookup is what lets this workflow run
-in a repository that tracks no copy of any of them:
+in a repository that tracks no copy of any of them.
+
+**Locate the directory the three share, never one of the modules.** Which of
+them this invocation needs is the mode's answer, and the mode was decided above;
+a locator that goes looking for one particular module makes every mode depend on
+that module being installed:
 
 <!-- brand:claude -->
 ```bash
-LEDGER="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py"
-LIVENESS="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py"
-CURSOR="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py"
-[ -f "$LEDGER" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]
+SCRIPTS="${CLAUDE_PLUGIN_ROOT}/scripts"
+[ -d "$SCRIPTS" ]
 ```
 <!-- brand:codex -->
 ```bash
-BUNDLE="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '*/kanban/*/skills/project-review/scripts/project_review_ledger.py' 2>/dev/null | head -n1)"
-LEDGER="$BUNDLE"
-LIVENESS="$(dirname "$BUNDLE")/project_review_liveness.py"
-CURSOR="$(dirname "$BUNDLE")/project_review_cursor.py"
-[ -n "$BUNDLE" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]
+SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -type d -path '*/kanban/*/skills/project-review/scripts' 2>/dev/null | head -n1)"
+[ -n "$SCRIPTS" ] && [ -d "$SCRIPTS" ]
 ```
 <!-- /brand -->
+
+Then resolve and check **only the modules this invocation's mode uses**, in that
+mode's own fence, and run the other mode's fence not at all.
+
+PR mode takes the ledger and the adapter:
+
+```bash
+LEDGER="$SCRIPTS/project_review_ledger.py"
+LIVENESS="$SCRIPTS/project_review_liveness.py"
+[ -f "$LEDGER" ] && [ -f "$LIVENESS" ]
+```
+
+Direct-commit mode takes the cursor, and neither of the others:
+
+```bash
+CURSOR="$SCRIPTS/project_review_cursor.py"
+[ -f "$CURSOR" ]
+```
 
 `$LEDGER` owns `docs/project_review/ledger.md`, the reviewed repository's own
 per-pull-request review record, and every read and write of it below. `$LIVENESS`
@@ -119,11 +138,13 @@ is the session-liveness adapter whose keeper process the claim's lease follows.
 `$CURSOR` owns `docs/project_review_boundaries.md` and serves the explicit-only
 direct-commit mode alone; PR mode never reads or writes it.
 
-**An unresolvable helper stops the run here, before the first read** — but only
-the ones this invocation's mode actually uses. PR mode needs `$LEDGER` and
-`$LIVENESS`; direct mode needs `$CURSOR` and neither of the others, so a missing
-ledger module or adapter is no reason to refuse a direct batch. Do not
-substitute a copy tracked in the reviewed repository, a personal copy, or a path
+**An unresolvable helper stops the run here, before the first read** — and a
+module this mode never calls being absent is not one. That is what the two
+fences above are for: only one of them runs, so a bundle missing its ledger
+module or its adapter refuses a review and still serves a direct batch, and a
+bundle missing its cursor refuses a direct batch and still serves a review. A
+missing shared directory stops either mode, because nothing can be resolved
+without it. Do not substitute a copy tracked in the reviewed repository, a personal copy, or a path
 derived from the working directory: the state those modules own belongs to the
 repository under review, and a helper resolved from the wrong place writes it
 somewhere nobody will look for it again.
@@ -282,7 +303,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py" register --ru
 ```
 <!-- brand:codex -->
 ```bash
-python3 "$(dirname "$BUNDLE")/project_review_liveness.py" register --runtime codex --root "$DOCS_WT" --repo "$REPO" --nonce 0123456789abcdef0123456789abcdef
+python3 "$SCRIPTS/project_review_liveness.py" register --runtime codex --root "$DOCS_WT" --repo "$REPO" --nonce 0123456789abcdef0123456789abcdef
 ```
 <!-- /brand -->
 
@@ -514,7 +535,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py" run --root "$
 ```
 <!-- brand:codex -->
 ```bash
-python3 "$(dirname "$BUNDLE")/project_review_liveness.py" run --root "$DOCS_WT" --attempt "$ATTEMPT" --launch build -- <command>
+python3 "$SCRIPTS/project_review_liveness.py" run --root "$DOCS_WT" --attempt "$ATTEMPT" --launch build -- <command>
 ```
 <!-- /brand -->
 
@@ -777,9 +798,9 @@ not run, and not running it is not a failure.
    step 3 really failed, keep `$ATTEMPT_DIR`, report it by path, and say that
    `git -C "$ROOT" worktree prune` is what clears any record still naming it once
    the directory itself is dealt with. **Never derive a removal target from
-   another path**: `dirname` of a variable that was never set is `.`, and a
-   recursive removal of the working directory is the one mistake this workflow
-   could make that nothing later could repair.
+   another path**: the parent directory of a variable an early exit never set is
+   the working directory, and a recursive removal of that is the one mistake
+   this workflow could make that nothing later could repair.
 
 **A cleanup step that fails is reported with the path it retained, never as
 removed.** Name the directory still on disk, or the claim still held, so a human
@@ -808,12 +829,18 @@ invocation's.** You do not have to reach step 9 for any of them:
   **refreshes** the silence window rather than ending it: the keeper then waits
   that window out afresh, plus a poll, before the lease starts running down.
   The bound is the command's remaining run time, plus a silence window, plus a
-  keeper poll, plus the expiry — or the end of the session, whichever comes
-  first. The reclaim pass is what refuses to remove that directory meanwhile.
-- *The claim.* Renewal stops with the keeper, so the lease runs out and the row
-  becomes claimable again; the next invocation takes it over under the helper's
-  lock and records the transition, which is the recovery the lease was designed
-  around. The cancelled attempt cannot write to it afterwards: its token no
+  keeper poll, plus one renewal interval, plus the expiry — or the end of the
+  session, whichever comes first. The renewal interval is in there because the
+  renewer follows the keeper rather than dying with it: it looks at that signal
+  at least once per renewal interval, so it can write one more renewal after the
+  keeper is gone, and the expiry that runs down is the one *that* renewal
+  stamped. (This implementation looks every renewer poll, a second, which is why
+  the measured lapse is shorter than the interval the contract promises.) The
+  reclaim pass is what refuses to remove that directory meanwhile.
+- *The claim.* Renewal stops with the keeper — within one renewal interval of
+  it, by the rule above — so the lease runs out and the row becomes claimable
+  again; the next invocation takes it over under the helper's lock and records
+  the transition, which is the recovery the lease was designed around. The cancelled attempt cannot write to it afterwards: its token no
   longer owns the claim, so its `record`, its allocation and its release are all
   refused.
 - *The directory.* Step 2's reclaim pass takes the directory of a cancelled

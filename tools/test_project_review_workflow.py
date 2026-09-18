@@ -180,30 +180,53 @@ CLAUDE_CURSOR_HELPER = BUNDLED_HELPERS["cursor"]["claude"]
 CODEX_CURSOR_HELPER = BUNDLED_HELPERS["cursor"]["codex"]
 CURSOR_HELPERS = BUNDLED_HELPERS["cursor"]
 
-# How each brand's rendered asset resolves them. Neither spelling is a path
-# into the reviewed repository: the helpers ship with the bundle, so each is
-# resolved against the bundle's own install location.
+# How each brand's rendered asset locates the directory the three share.
+# Neither spelling is a path into the reviewed repository -- the helpers ship
+# with the bundle -- and neither goes through one of the modules: which of them
+# an invocation needs is the mode's answer, so a locator naming one would make
+# every mode depend on that one being installed.
 HELPER_LOOKUPS = {
-    "claude": (
-        'LEDGER="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py"',
-        'LIVENESS="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py"',
-        'CURSOR="${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py"',
-    ),
+    "claude": ('SCRIPTS="${CLAUDE_PLUGIN_ROOT}/scripts"',),
     "codex": (
-        'BUNDLE="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -path '
-        "'*/kanban/*/skills/project-review/scripts/project_review_ledger.py' "
+        'SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" -type d '
+        "-path '*/kanban/*/skills/project-review/scripts' "
         '2>/dev/null | head -n1)"',
-        'LIVENESS="$(dirname "$BUNDLE")/project_review_liveness.py"',
-        'CURSOR="$(dirname "$BUNDLE")/project_review_cursor.py"',
     ),
 }
 
-# A lookup that would resolve nothing wherever this command actually installs.
+# The locator's own guard, per brand: the Codex one has a found-nothing case
+# that `${CLAUDE_PLUGIN_ROOT}` cannot have.
+HELPER_LOCATOR_GUARDS = {
+    "claude": '[ -d "$SCRIPTS" ]',
+    "codex": '[ -n "$SCRIPTS" ] && [ -d "$SCRIPTS" ]',
+}
+
+# And the resolution below it, one fence per mode and neither brand's own:
+# only the directory above differs per brand. Round 8's blocker -- a single
+# fence resolving and checking all three left direct mode dependent on the
+# ledger module and the adapter, and PR mode on the cursor.
+MODE_HELPERS = {
+    "pr": (
+        'LEDGER="$SCRIPTS/project_review_ledger.py"',
+        'LIVENESS="$SCRIPTS/project_review_liveness.py"',
+        '[ -f "$LEDGER" ] && [ -f "$LIVENESS" ]',
+    ),
+    "direct": (
+        'CURSOR="$SCRIPTS/project_review_cursor.py"',
+        '[ -f "$CURSOR" ]',
+    ),
+}
+
+# A lookup that would resolve nothing wherever this command actually installs,
+# and -- the last two -- the mode-blind resolution round 8 refused: a locator
+# that goes looking for the ledger module, and one fence requiring all three.
 REFUSED_HELPER_LOOKUPS = (
     "$DOCS_WT/project_review_ledger.py",
     "$ROOT/tools/project_review_ledger.py",
     "$DOCS_WT/project_review_cursor.py",
     "$ROOT/tools/project_review_cursor.py",
+    "scripts/project_review_ledger.py' 2>/dev/null",
+    '[ -f "$LEDGER" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]',
 )
 
 # The ledger invocations PR mode makes, in the order it makes them. `read`
@@ -234,7 +257,7 @@ REGISTRATION = {
         '--runtime claude --root "$DOCS_WT" --repo "$REPO" --nonce '
     ),
     "codex": (
-        'python3 "$(dirname "$BUNDLE")/project_review_liveness.py" register '
+        'python3 "$SCRIPTS/project_review_liveness.py" register '
         '--runtime codex --root "$DOCS_WT" --repo "$REPO" --nonce '
     ),
 }
@@ -246,7 +269,7 @@ WRAPPED_LAUNCH = {
         '--root "$DOCS_WT" --attempt "$ATTEMPT" --launch build -- <command>'
     ),
     "codex": (
-        'python3 "$(dirname "$BUNDLE")/project_review_liveness.py" run '
+        'python3 "$SCRIPTS/project_review_liveness.py" run '
         '--root "$DOCS_WT" --attempt "$ATTEMPT" --launch build -- <command>'
     ),
 }
@@ -414,16 +437,31 @@ MODE_DISPATCH = {
         "from a mode that needs neither."
     ),
     "a direct request skips every numbered step": (
-        "**An explicit direct request:** resolve `$CURSOR` below and the docs "
-        'worktree, then go straight to "Direct-commit mode — explicit request '
-        'only" and do everything there. Skip every numbered step.'
+        "**An explicit direct request:** resolve the scripts directory and "
+        "`$CURSOR` below — direct mode's own fence, and not PR mode's — then "
+        'the docs worktree, then go straight to "Direct-commit mode — '
+        'explicit request only" and do everything there. Skip every numbered '
+        "step."
+    ),
+    "the locator never goes through one of the modules": (
+        "**Locate the directory the three share, never one of the modules.** "
+        "Which of them this invocation needs is the mode's answer, and the "
+        "mode was decided above; a locator that goes looking for one "
+        "particular module makes every mode depend on that module being "
+        "installed:"
+    ),
+    "each mode resolves only its own modules": (
+        "Then resolve and check **only the modules this invocation's mode "
+        "uses**, in that mode's own fence, and run the other mode's fence not "
+        "at all."
     ),
     "each mode needs only its own helpers": (
         "**An unresolvable helper stops the run here, before the first read** "
-        "— but only the ones this invocation's mode actually uses. PR mode "
-        "needs `$LEDGER` and `$LIVENESS`; direct mode needs `$CURSOR` and "
-        "neither of the others, so a missing ledger module or adapter is no "
-        "reason to refuse a direct batch."
+        "— and a module this mode never calls being absent is not one. That "
+        "is what the two fences above are for: only one of them runs, so a "
+        "bundle missing its ledger module or its adapter refuses a review and "
+        "still serves a direct batch, and a bundle missing its cursor refuses "
+        "a direct batch and still serves a review."
     ),
     "the migration is pr mode's alone": (
         "**PR mode only.** A direct request reached the direct section above "
@@ -761,10 +799,10 @@ CLEANUP = {
         "record still naming it once the directory itself is dealt with."
     ),
     "never derive a removal target": (
-        "**Never derive a removal target from another path**: `dirname` of a "
-        "variable that was never set is `.`, and a recursive removal of the "
-        "working directory is the one mistake this workflow could make that "
-        "nothing later could repair."
+        "**Never derive a removal target from another path**: the parent "
+        "directory of a variable an early exit never set is the working "
+        "directory, and a recursive removal of that is the one mistake this "
+        "workflow could make that nothing later could repair."
     ),
     "a failed step reports its retained path": (
         "**A cleanup step that fails is reported with the path it retained, "
@@ -813,14 +851,22 @@ CLEANUP = {
     ),
     "the whole bound, named": (
         "The bound is the command's remaining run time, plus a silence window, "
-        "plus a keeper poll, plus the expiry — or the end of the session, "
-        "whichever comes first."
+        "plus a keeper poll, plus one renewal interval, plus the expiry — or "
+        "the end of the session, whichever comes first."
+    ),
+    "why the renewal interval is a phase of its own": (
+        "The renewal interval is in there because the renewer follows the "
+        "keeper rather than dying with it: it looks at that signal at least "
+        "once per renewal interval, so it can write one more renewal after "
+        "the keeper is gone, and the expiry that runs down is the one *that* "
+        "renewal stamped."
     ),
     "the lease lapses and the row becomes claimable": (
-        "*The claim.* Renewal stops with the keeper, so the lease runs out and "
-        "the row becomes claimable again; the next invocation takes it over "
-        "under the helper's lock and records the transition, which is the "
-        "recovery the lease was designed around."
+        "*The claim.* Renewal stops with the keeper — within one renewal "
+        "interval of it, by the rule above — so the lease runs out and the "
+        "row becomes claimable again; the next invocation takes it over under "
+        "the helper's lock and records the transition, which is the recovery "
+        "the lease was designed around."
     ),
     "a cancelled attempt cannot write afterwards": (
         "The cancelled attempt cannot write to it afterwards: its token no "
@@ -1489,7 +1535,9 @@ CLEAN_REVIEW = (
 CLAUDE_ONLY_LINES = (
     "`$ARGUMENTS` may override the count, or name a commit SHA or range.",
     *HELPER_LOOKUPS["claude"],
-    '[ -f "$LEDGER" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]',
+    # The guard is stripped line-wise, so it counts as Claude's own even
+    # though the Codex locator's longer guard contains it as a substring.
+    HELPER_LOCATOR_GUARDS["claude"],
     REGISTRATION["claude"] + "0123456789abcdef0123456789abcdef",
     WRAPPED_LAUNCH["claude"],
 )
@@ -1500,8 +1548,7 @@ CLAUDE_ONLY_LINES = (
 CODEX_ONLY_LINES = (
     "An explicit count, commit SHA, or range overrides the default.",
     *HELPER_LOOKUPS["codex"],
-    'LEDGER="$BUNDLE"',
-    '[ -n "$BUNDLE" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]',
+    HELPER_LOCATOR_GUARDS["codex"],
     REGISTRATION["codex"] + "0123456789abcdef0123456789abcdef",
     WRAPPED_LAUNCH["codex"],
     "   In a read-only sandbox, a complete static trace may be the verification; say so.",
@@ -1799,8 +1846,34 @@ class LedgerWorkflowTests(unittest.TestCase):
             with self.subTest(asset=relative_path):
                 for lookup in HELPER_LOOKUPS[brand]:
                     self.assertIn(lookup, content)
+                self.assertIn(HELPER_LOCATOR_GUARDS[brand], content)
                 for refused in REFUSED_HELPER_LOOKUPS:
                     self.assertNotIn(refused, content)
+
+    def test_each_mode_resolves_and_checks_only_the_modules_it_calls(self):
+        # Round 8's blocker, as a pin: the locator above finds the directory,
+        # and each mode's own fence names its own modules. A fence naming a
+        # module the other mode owns is what made a missing ledger module
+        # refuse a cursor-only batch.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                for mode, lines in MODE_HELPERS.items():
+                    for line in lines:
+                        self.assertIn(line, content, mode)
+                pr_fence = next(
+                    fence
+                    for fence in asset_fences(relative_path)
+                    if 'LEDGER="$SCRIPTS' in fence
+                )
+                direct_fence = next(
+                    fence
+                    for fence in asset_fences(relative_path)
+                    if 'CURSOR="$SCRIPTS' in fence
+                )
+                self.assertNotIn("CURSOR", pr_fence)
+                self.assertNotIn("LEDGER", direct_fence)
+                self.assertNotIn("LIVENESS", direct_fence)
 
     def test_an_unresolvable_helper_stops_before_the_first_read(self):
         phrase = (
@@ -3576,10 +3649,10 @@ class WorkflowRun:
             FAKE_GH_PAGES=str(self.pages_file),
             FAKE_GH_REPO=E2E_REPO,
             FAKE_GH_JQ=asset_jq_program(self.asset),
-            # `$BUNDLE` is the Codex fence's own intermediate: its register
-            # and `run` lines take the helper's directory from it, so it is
-            # bound here exactly as that fence binds it.
-            BUNDLE=str(self.ledger_path),
+            # `$SCRIPTS` is what both locator fences bind: the directory the
+            # three modules share, which each mode's own fence resolves its
+            # own modules against.
+            SCRIPTS=str(self.ledger_path.parent),
             LEDGER=str(self.ledger_path),
             LIVENESS=str(self.liveness_path),
             CURSOR=str(self.cursor_path),
@@ -4275,33 +4348,110 @@ class WorkflowRunCase:
 
 
 class HelperResolution(WorkflowRunCase):
-    def test_the_assets_own_lookup_finds_this_brands_installed_bundle(self):
-        # The lookup is the one thing every later step depends on and the one
-        # thing binding the variables by hand would skip. Run the asset's own
-        # resolution fence, with none of them pre-set, and ask what it found.
-        fence = next(
-            fence
-            for fence in asset_fences(self.workflow.asset)
-            if "project_review_ledger.py" in fence and "read --root" not in fence
-        )
+    """The asset's own resolution fences, run with nothing pre-bound."""
+
+    def resolve(self, fences, report, missing=(), unset=("SCRIPTS", "LEDGER", "LIVENESS", "CURSOR")):
+        """Run `fences` as one script and report the named variables.
+
+        `unset` is what makes this a test of the asset rather than of the
+        fixture: every variable the fences are meant to bind is removed from
+        the environment first, so a fence that stopped binding one fails here
+        instead of reading the value the harness left behind.
+        """
+        for name in missing:
+            (self.workflow.bundle / BRAND_BUNDLES[self.BRAND][name]).unlink()
         environment = dict(self.workflow.env)
-        for name in ("LEDGER", "LIVENESS", "CURSOR"):
-            environment.pop(name)
-        completed = subprocess.run(
-            ["sh", "-c", fence + '\nprintf "%s\\n%s\\n%s\\n" "$LEDGER" "$LIVENESS" "$CURSOR"'],
+        for name in unset:
+            environment.pop(name, None)
+        # The fences' own last status is captured before the report runs and
+        # restored after it. `set -e` cannot do this: a failing left-hand side
+        # of an `&&` list is exempt from it, which is precisely the shape
+        # every one of these checks has, and a trailing report would otherwise
+        # turn a refusal into a pass.
+        script = "\n".join(
+            list(fences) + ["__status=$?", report, 'exit "$__status"']
+        )
+        return subprocess.run(
+            ["sh", "-c", script],
             capture_output=True, text=True, env=environment,
             cwd=str(self.workflow.root), timeout=120,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        resolved = [Path(line) for line in completed.stdout.split()]
-        self.assertEqual(
-            resolved,
-            [
-                self.workflow.ledger_path,
-                self.workflow.liveness_path,
-                self.workflow.cursor_path,
-            ],
+
+    def locator(self):
+        """The fence that finds the directory the three modules share."""
+        return next(
+            fence
+            for fence in asset_fences(self.workflow.asset)
+            if 'SCRIPTS=' in fence
         )
+
+    def mode_fence(self, marker):
+        return next(
+            fence
+            for fence in asset_fences(self.workflow.asset)
+            if marker in fence
+        )
+
+    def test_the_assets_own_lookup_finds_this_brands_installed_bundle(self):
+        # The locator plus PR mode's own fence: the two a review runs, and the
+        # only two, so what they bind is what a review has.
+        completed = self.resolve(
+            [self.locator(), self.mode_fence('LEDGER="$SCRIPTS')],
+            'printf "%s\\n%s\\n" "$LEDGER" "$LIVENESS"',
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            [Path(line) for line in completed.stdout.split()],
+            [self.workflow.ledger_path, self.workflow.liveness_path],
+        )
+
+    def test_the_direct_fence_resolves_the_cursor_with_the_other_two_deleted(self):
+        # Round 8's blocker, executed. The ledger module and the adapter are
+        # removed from the installed bundle first, and then direct mode's own
+        # resolution is run unbound: it must still find the cursor, because a
+        # cursor-only batch calls neither of the deleted modules.
+        completed = self.resolve(
+            [self.locator(), self.mode_fence('CURSOR="$SCRIPTS')],
+            'printf "%s\\n" "$CURSOR"',
+            missing=("ledger", "liveness"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            Path(completed.stdout.strip()), self.workflow.cursor_path
+        )
+
+    def test_the_pr_fence_resolves_the_ledger_with_the_cursor_deleted(self):
+        # The same boundary from the other side, so the rule is not satisfied
+        # by a fence that simply checks nothing: a review runs with no cursor
+        # module installed at all.
+        completed = self.resolve(
+            [self.locator(), self.mode_fence('LEDGER="$SCRIPTS')],
+            'printf "%s\\n%s\\n" "$LEDGER" "$LIVENESS"',
+            missing=("cursor",),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            [Path(line) for line in completed.stdout.split()],
+            [self.workflow.ledger_path, self.workflow.liveness_path],
+        )
+
+    def test_a_mode_fence_still_refuses_when_its_own_module_is_missing(self):
+        # Non-vacuity for the two above: the fences do fail, and each fails on
+        # its own mode's module rather than on any missing file.
+        for missing, fence, mode in (
+            ("ledger", 'LEDGER="$SCRIPTS', "pr"),
+            ("cursor", 'CURSOR="$SCRIPTS', "direct"),
+        ):
+            with self.subTest(mode=mode):
+                # The deletions accumulate across these two, which changes
+                # nothing: each fence is being refused for its own mode's
+                # module, and the one deleted before it was already not that.
+                completed = self.resolve(
+                    [self.locator(), self.mode_fence(fence)],
+                    "true",
+                    missing=(missing,),
+                )
+                self.assertNotEqual(completed.returncode, 0, completed.stdout)
 
 
 class FreshRepository(WorkflowRunCase):
@@ -4983,6 +5133,27 @@ class DirectMode(WorkflowRunCase):
             (self.workflow.bundle / BRAND_BUNDLES[self.BRAND][name]).unlink()
         self.assertIsNone(self.workflow.ledger_bytes())
 
+        # Round 8's blocker: the route starts at the asset's own resolution,
+        # unbound, rather than at a `$CURSOR` the harness pre-set. With the
+        # other two modules gone this is the step that used to refuse.
+        environment = dict(self.workflow.env)
+        for name in ("SCRIPTS", "LEDGER", "LIVENESS", "CURSOR"):
+            environment.pop(name, None)
+        fences = [
+            fence
+            for fence in asset_fences(self.workflow.asset)
+            if "SCRIPTS=" in fence or 'CURSOR="$SCRIPTS' in fence
+        ]
+        resolved = subprocess.run(
+            ["sh", "-c", "\n".join(fences) + '\nprintf "%s\\n" "$CURSOR"'],
+            capture_output=True, text=True, env=environment,
+            cwd=str(self.workflow.root), timeout=120,
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertEqual(
+            Path(resolved.stdout.strip()), self.workflow.cursor_path
+        )
+
         selected = self.workflow.direct_select(count=2)
         self.assertEqual(
             [entry["sha"] for entry in selected["selected"]], list(self.shas[:2])
@@ -5466,6 +5637,32 @@ class AdapterIntegration(WorkflowRunCase):
             time.sleep(0.1)
         self.assert_renewal_stops(token, "renewal outlived the refreshed window")
         self.assertGreaterEqual(time.time() - refreshed_at, E2E_SILENCE)
+        # Round 8's blocker: the bound runs past renewal's cessation. The
+        # renewer follows the keeper rather than dying with it, so what makes
+        # the row claimable again is the expiry of the last renewal it wrote,
+        # and the proof of the whole chain is that a second invocation takes
+        # the claim over -- not merely that the heartbeat went away.
+        self.assertIsNone(self.workflow.heartbeat_renewals(token))
+        successor, successor_inventory = self.workflow.registered_inventory(
+            session="session-successor", invocation="invocation-successor"
+        )
+        def retake():
+            # `claim` returns the parsed result once it succeeds and the
+            # refused invocation itself until then, so the dict is the signal.
+            result = self.workflow.claim(
+                successor_inventory, successor["keeper_pid"], check=False
+            )
+            return result if isinstance(result, dict) else None
+
+        taken = e2e_wait(
+            retake,
+            "the lapsed claim was never takeable",
+            timeout=2 * E2E_SILENCE + 8 * E2E_EXPIRY,
+            interval=0.2,
+        )
+        self.assertEqual(taken["status"], "claimed")
+        self.assertEqual(taken["takeover"]["previous_token"], token)
+        self.assertNotEqual(taken["claim"]["token"], token)
 
     def test_a_superseded_attempt_cannot_write_or_clean_up_its_replacement(self):
         # Requirement 5's attempt scoping, through the adapter: a second

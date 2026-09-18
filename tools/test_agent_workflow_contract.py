@@ -685,7 +685,6 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "awk",
         "python3",
         "mkdir",
-        "dirname",
         "rm",
         "find",
         "head",
@@ -2906,7 +2905,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # and `find` with `head` for the Codex lookup that locates it in the
         # $CODEX_HOME cache; the Claude lookup is a ${CLAUDE_PLUGIN_ROOT}
         # substitution and spawns nothing, so those two are Codex-only here
-        # exactly as they are in the rendered asset.
+        # exactly as they are in the rendered asset. `dirname` was Codex-only
+        # here too until issue #684 round 8: the lookup now finds the
+        # directory the three vendored modules share rather than taking the
+        # directory of one of them, so nothing derives a path with it.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }

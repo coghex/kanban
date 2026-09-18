@@ -562,16 +562,22 @@ killed it. Such a command holds its exemption until it exits, and its
 tool-finish event is itself progress, so it refreshes the silence window rather
 than ending it. For a cancellation with a foreground wrapped command still
 running, the bound is therefore that command's remaining run time, plus a
-silence window, plus a keeper poll, plus the expiry — or the end of the session,
-whichever comes first. `tools/project-review-liveness-evidence.md` records the
+silence window, plus a keeper poll, plus one renewal interval, plus the expiry —
+or the end of the session, whichever comes first. The renewal interval is a
+phase of its own: the renewer follows the keeper rather than ending with it and
+looks at its signal at least once per renewal interval, so it may stamp one last
+renewal after the keeper is gone, and that renewal's expiry is the one that runs
+down. `tools/project-review-liveness-evidence.md` records the
 measurement and the version it was taken on; the design's guarantees are
 unchanged, since a longer hold is a delayed takeover rather than a stale-owner
 write.
 
-A cancelled session's claim is therefore held for at most the silence window
-plus the expiry, rather than one renewal interval. This is inactivity
-detection, accepted deliberately. D-17's hazard is an orphan extending a dead
-claim forever, which the bound still excludes. The fencing guarantees above
+A cancelled session's claim is therefore held for at most the silence window,
+plus a renewal interval, plus the expiry — and for the longer bound above where
+a wrapped command outlived the cancellation — rather than being given up within
+one renewal interval of the cancellation itself. This is inactivity detection,
+accepted deliberately. D-17's hazard is an orphan extending a dead claim
+forever, which the bound still excludes. The fencing guarantees above
 make a slow lapse cost a delayed takeover, never a stale-owner write. A
 long-running command not started through the wrapper can let the claim lapse
 mid-review; the late record is then refused, losing that review's work and

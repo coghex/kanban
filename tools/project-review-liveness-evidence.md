@@ -620,8 +620,14 @@ So for a cancellation during a *foreground wrapped* command on Claude Code
 until it exits, and its tool-finish event is itself a progress event — so it
 refreshes the window rather than ending it, and the keeper waits the window out
 afresh afterwards. The bound is the command's remaining run time, plus a silence
-window, plus a keeper poll, plus the lease expiry; or the end of the session,
-whichever comes first. Three consequences,
+window, plus a keeper poll, plus one renewal interval, plus the lease expiry; or
+the end of the session, whichever comes first. The renewal interval belongs in
+that chain because the renewer follows the keeper rather than ending with it: it
+looks at its signal at least once per renewal interval, so it can stamp one more
+renewal after the keeper is gone. Run 1 measured the shorter form of that phase
+— this implementation looks once per second — and the chain above quotes the
+interval the contract promises rather than the poll this build happens to
+use. Three consequences,
 none of which this arc's code gets wrong:
 
 - The lease is held for that whole time rather than for the documented bound.
@@ -664,8 +670,10 @@ the change recorded above.
   2.1.276 an interrupt does not kill a foreground wrapped command, and a live
   wrapper holds its launch exempt from that window; its finish event then
   refreshes the window rather than ending it. The bound becomes the command's
-  remaining run time, plus a silence window, plus a keeper poll, plus the
-  expiry, or the end of the session. See "Cancellation during a tool call".
+  remaining run time, plus a silence window, plus a keeper poll, plus one
+  renewal interval — the renewer looks at its signal at least once per interval,
+  so it may stamp one last renewal after the keeper is gone — plus that
+  renewal's expiry, or the end of the session. See "Cancellation during a tool call".
 - **The wrapped-command exemption ends when the runtime reports the tool call
   finished.** Codex reports a command it moved to a background terminal as in
   flight until the process exits. So on Codex the exemption lasts as long as the
