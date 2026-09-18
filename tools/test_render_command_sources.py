@@ -28,8 +28,9 @@ VEND-3 (issue #430) `backlog-review`, since VEND-4 (issue #462)
 (issue #544) `finalize`, since VEND-9 (issue #575) `janitor`, since VEND-8
 (issue #576) `autosolve`, and -- authored
 directly against this mechanism rather than vendored from a personal copy --
-`fix`, all ten of which do render into both bundles, so the same class pins
-the shipped sets at twenty-five and twenty-four and pins which registered
+`fix` and, since LEDGER-7 (issue #685), `auto-project-review`, all eleven of
+which do render into both bundles, so the same class pins
+the shipped sets at twenty-six and twenty-five and pins which registered
 source belongs to which kind.
 """
 
@@ -49,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_COMMANDS_PREFIX = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 
-# The shipped sets: Claude's twenty-five names, and Codex's the same set minus
+# The shipped sets: Claude's twenty-six names, and Codex's the same set minus
 # Claude-only `draft-issues`. Pinned as counts and as the one documented
 # difference rather than as a third copy of the name list, which
 # tools/test_claude_plugin.py and tools/test_codex_plugin.py already assert.
@@ -62,10 +63,12 @@ CODEX_SKILLS_PREFIX = "codex-plugin/plugins/kanban/skills"
 # a personal copy, by one more in VEND-7, which vendored `finalize`, by one
 # more in VEND-9, which vendored `janitor` -- whose Codex directory already
 # existed, shipping issue #574's census helper and no SKILL.md, so that bundle
-# gained a workflow without gaining a directory -- and by one more in VEND-8,
-# which vendored `autosolve` and closed the arc.
-SHIPPED_CLAUDE_COUNT = 25
-SHIPPED_CODEX_COUNT = 24
+# gained a workflow without gaining a directory -- by one more in VEND-8,
+# which vendored `autosolve` and closed the arc, and by one more again when
+# issue #685 authored `auto-project-review` against this mechanism from
+# outside that arc, with no personal copy behind it.
+SHIPPED_CLAUDE_COUNT = 26
+SHIPPED_CODEX_COUNT = 25
 CLAUDE_ONLY_WORKFLOW = "draft-issues"
 
 # The registered sources that render into the two bundles rather than under
@@ -82,6 +85,7 @@ SHIPPING_SOURCE_NAMES = {
     "finalize",
     "janitor",
     "autosolve",
+    "auto-project-review",
 }
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"

@@ -105,6 +105,14 @@ checkpoint contains is read back out of Git, and what a lapsed lease permits is
 read back out of the ledger. No test here reaches the network, spawns a model,
 or touches a real repository.
 
+`SerialAutomation` is the last case that proof was waiting on (issue #685,
+LEDGER-7): the automation asset performs no step of its own, so what it adds is
+a counting rule over what the delegate reports, and those cases drive that rule
+over whole delegated invocations made through the same asset-extracted helper
+lines. The automation's own prose is pinned in
+`tools/test_auto_project_review_workflow.py`, beside this half rather than
+inside it.
+
 The prose pins stay beside all of it and neither half stands in for the other:
 the rendered asset is the program an agent executes, so what it says about the
 ledger is a contract in its own right, while what the mechanism does with the
@@ -3630,9 +3638,9 @@ class WorkflowRun:
         # reading the tracked path would not exercise it.
         self.codex_home = base / "codex-home"
         if brand == "codex":
-            self.bundle = self.codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.54.0"
+            self.bundle = self.codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.55.0"
         else:
-            self.bundle = base / "claude-plugins" / "kanban" / "1.55.0"
+            self.bundle = base / "claude-plugins" / "kanban" / "1.56.0"
         source_root = REPO_ROOT / self.spec["bundle_root"]
         for relative in (
             self.spec["ledger"],
@@ -6025,6 +6033,336 @@ class AdapterIntegration(WorkflowRunCase):
         return status
 
 
+# ---------------------------------------------------------------------------
+# Issue #685's automation proof (requirement 9), and the last of the end-to-end
+# acceptance design D-19 lists: "automation counts completed records and stops
+# correctly".
+#
+# The automation asset performs no step of its own -- design D-6 leaves the
+# inventory, the registration, the claim, the pinned worktree, the report and
+# the checkpoint in the single-review workflow -- so there is no helper of its
+# own to drive here. What LEDGER-7 adds is a counting rule over what the
+# delegate reports, and that is what `automate` below is: the loop the asset
+# spells, run over whole delegated invocations made through the same
+# asset-extracted helper lines every case above uses.
+#
+# Two things keep it a proof rather than a restatement. The counted outcome is
+# the delegate's own `record` result, never a flag this driver sets -- so a
+# `record` that stopped reporting `"status": "recorded"` breaks the count. And
+# every case plans one more iteration than it expects to run, as a tripwire
+# that raises if the loop reaches it: "stops after exactly N" and "never begins
+# another after a refusal" are otherwise assertions about a number rather than
+# about the loop.
+# ---------------------------------------------------------------------------
+
+AUTOMATION_ASSETS = {
+    "claude": "claude-plugin/plugins/kanban/commands/auto-project-review.md",
+    "codex": "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md",
+}
+
+# What `automate` reports as the reason a run ended, in the automation asset's
+# own terms. `count-reached` and `no-selectable-row` are its two ordinary ends;
+# everything else is step 3's "did not record a review".
+COUNT_REACHED = "count-reached"
+NOTHING_SELECTABLE = "no-selectable-row"
+
+
+class SerialAutomation(WorkflowRunCase):
+    """The automation's counting rule, over real delegated invocations."""
+
+    def setUp(self):
+        super().setUp()
+        self.workflow.merged(
+            [
+                (620, "2026-09-05T00:00:00Z"),
+                (618, "2026-09-04T00:00:00Z"),
+                (616, "2026-09-03T00:00:00Z"),
+                (614, "2026-09-02T00:00:00Z"),
+            ]
+        )
+        self.workflow.lease_defaults()
+        self.sessions = 0
+
+    # -- the loop
+
+    def automate(self, count, plan):
+        """`plan`'s iterations, counted the way the automation asset says.
+
+        `count` is `None` for an open-ended run. The returned record is the
+        progress report's own material: what was recorded, against what
+        target, and why the run ended.
+        """
+        recorded, reason, index = [], None, 0
+        while count is None or len(recorded) < count:
+            self.assertLess(
+                index, len(plan), "the loop asked for an iteration nobody planned"
+            )
+            result = plan[index]()
+            index += 1
+            # The one reading that decides the count, and it is the delegate's
+            # own word for it rather than anything this driver knows.
+            if result["status"] != "recorded":
+                reason = result["status"]
+                break
+            recorded.append(result)
+        else:
+            reason = COUNT_REACHED
+        return {
+            "recorded": recorded,
+            "reason": reason,
+            "target": "open-ended" if count is None else count,
+            "iterations": index,
+        }
+
+    def tripwire(self):
+        def fire():
+            raise AssertionError("the loop began an iteration it should not have")
+
+        return fire
+
+    # -- the iterations
+
+    def session(self):
+        """A session and invocation id of this iteration's own.
+
+        Registering twice under one session id ends the earlier keeper, which
+        is the adapter's rule for a superseded registration and not what any
+        case here is about.
+        """
+        self.sessions += 1
+        return {
+            "session": f"automation-session-{self.sessions}",
+            "invocation": f"automation-invocation-{self.sessions}",
+        }
+
+    def recorded(self, outcome="clean", findings=None):
+        """One delegated invocation that completes, reported as the
+        automation reads it: entirely out of the delegate's `record` result."""
+        def run():
+            result = self.workflow.review_once(outcome=outcome, findings=findings)
+            return {
+                "status": result["status"],
+                "pr": result["pr"],
+                "outcome": result["outcome"],
+                "commit": result["commit"],
+                "report": result["report"],
+                "repeats": result["repeats"],
+            }
+
+        return run
+
+    def refused_by_a_failed_fetch(self):
+        """One invocation that claims and then stops on step 4's fetch.
+
+        A real refusal of the delegate's rather than a simulated one: the
+        remote moves, its local tracking ref is locked, and the fetch the
+        asset makes its own checked call fails. Step 9 then releases the
+        claim, exactly as it does for any other early exit.
+        """
+        def run():
+            registration, inventory = self.workflow.registered_inventory(
+                **self.session()
+            )
+            claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+            self.assertEqual(claimed["status"], "claimed")
+            self.workflow.advance_the_remote()
+            self.workflow.lock_remote_tracking_ref()
+            fetch = self.workflow.sh(
+                asset_command(self.workflow.asset, 'git -C "$ROOT" fetch'), check=False
+            )
+            self.assertNotEqual(fetch.returncode, 0, fetch.stdout)
+            # Step 9, in the order the asset states it: stop the keeper,
+            # release the claim `record` never took, then the worktree that
+            # was never created and the directory that was.
+            self.workflow.complete_attempt(registration["attempt"])
+            self.workflow.release(claimed["selected"]["number"], claimed["claim"]["token"])
+            self.workflow.cleanup_worktree(inventory.parent / "tree")
+            return {"status": "fetch-failed", "pr": claimed["selected"]["number"]}
+
+        return run
+
+    def interrupted(self):
+        """One invocation whose session ends after the claim and before the
+        record -- the ending requirement 9 names as uncounted."""
+        def run():
+            identity = self.session()
+            registration, inventory = self.workflow.registered_inventory(**identity)
+            claimed = self.workflow.claim(inventory, registration["keeper_pid"])
+            self.assertEqual(claimed["status"], "claimed")
+            self.workflow.hook("SessionEnd", **identity)
+            e2e_wait(
+                lambda: not self.workflow.running(registration["keeper_pid"]),
+                "the keeper outlived the interrupted iteration",
+            )
+            return {"status": "interrupted", "pr": claimed["selected"]["number"]}
+
+        return run
+
+    def exhausted(self):
+        """One invocation over a repository whose listing names nothing.
+
+        The delegate's step 1 stops an empty listing before it registers
+        anything, so this is that stop -- and the status the automation asset
+        names for it is checked against the helper itself below rather than
+        assumed from the prose.
+        """
+        def run():
+            self.workflow.merged([])
+            pages = self.workflow.inventory()
+            self.assertEqual([row for page in pages for row in page["prs"]], [])
+            return {"status": NOTHING_SELECTABLE}
+
+        return run
+
+    # -- what the run produced, read back out of the ledger
+
+    def completed_rows(self):
+        return {
+            number: row
+            for number, row in self.workflow.rows().items()
+            if row["completed_at"] is not None
+        }
+
+    def progress_report(self, run):
+        """The report requirement 5 describes, assembled from `run` alone.
+
+        Built here rather than asserted field by field, because the claim
+        being made is that everything the report names is available from what
+        the delegate reported -- a line that had to reach into the ledger for
+        one of its parts would fail to build rather than read differently.
+        """
+        lines = [f"{len(run['recorded'])} of {run['target']}"]
+        for entry in run["recorded"]:
+            links = entry["report"] or ",".join(entry["repeats"]) or "none"
+            lines.append(f"#{entry['pr']} {entry['outcome']} {entry['commit']} {links}")
+        lines.append(str(run["reason"]))
+        return lines
+
+    # -- the cases
+
+    def test_a_counted_run_records_exactly_the_count_and_reports(self):
+        run = self.automate(3, [self.recorded(), self.recorded(), self.recorded(), self.tripwire()])
+        self.assertEqual(run["reason"], COUNT_REACHED)
+        self.assertEqual(len(run["recorded"]), 3)
+        self.assertEqual(run["iterations"], 3)
+        # Three different pull requests, each recorded once: a loop that
+        # re-reviewed one would reach the count without covering three.
+        self.assertEqual(
+            [entry["pr"] for entry in run["recorded"]], [620, 618, 616]
+        )
+        self.assertEqual(sorted(self.completed_rows()), ["616", "618", "620"])
+        report = self.progress_report(run)
+        self.assertEqual(report[0], "3 of 3")
+        self.assertEqual(report[-1], COUNT_REACHED)
+        for entry, line in zip(run["recorded"], report[1:]):
+            self.assertIn(str(entry["pr"]), line)
+            self.assertIn(entry["commit"], line)
+            self.assertEqual(
+                entry["commit"],
+                e2e_git(self.workflow.root, "rev-parse", "refs/remotes/origin/master").strip(),
+            )
+
+    def test_a_refused_second_iteration_stops_with_one_recorded(self):
+        run = self.automate(
+            3, [self.recorded(), self.refused_by_a_failed_fetch(), self.tripwire()]
+        )
+        self.assertEqual(run["reason"], "fetch-failed")
+        self.assertEqual(len(run["recorded"]), 1)
+        self.assertEqual(run["iterations"], 2)
+        # The refusal is named in the report, and the count is what actually
+        # completed rather than what was attempted.
+        report = self.progress_report(run)
+        self.assertEqual(report[0], "1 of 3")
+        self.assertEqual(report[-1], "fetch-failed")
+        # And the refused iteration left no completion behind: one row is
+        # recorded, the one it claimed is claimable again.
+        self.assertEqual(sorted(self.completed_rows()), ["620"])
+        self.assertIsNone(self.workflow.rows()["618"]["completed_at"])
+        self.assertIsNone(self.workflow.rows()["618"]["claim"])
+
+    def test_a_findings_bearing_iteration_counts_like_a_clean_one(self):
+        run = self.automate(
+            2,
+            [
+                self.recorded(outcome="findings", findings=REPORT_FIXTURE),
+                self.recorded(),
+                self.tripwire(),
+            ],
+        )
+        self.assertEqual(run["reason"], COUNT_REACHED)
+        self.assertEqual(
+            [entry["outcome"] for entry in run["recorded"]], ["findings", "clean"]
+        )
+        # The findings iteration counted, and it counted with its report: the
+        # progress report names the path the delegate allocated.
+        self.assertEqual(run["recorded"][0]["report"], "docs/project_review/620.md")
+        self.assertIn(
+            "docs/project_review/620.md", self.progress_report(run)[1]
+        )
+        self.assertEqual(sorted(self.completed_rows()), ["618", "620"])
+
+    def test_an_interrupted_iteration_is_not_counted_and_ends_the_run(self):
+        run = self.automate(
+            3, [self.recorded(), self.interrupted(), self.tripwire()]
+        )
+        self.assertEqual(run["reason"], "interrupted")
+        self.assertEqual(len(run["recorded"]), 1)
+        self.assertEqual(run["iterations"], 2)
+        self.assertEqual(self.progress_report(run)[0], "1 of 3")
+        self.assertEqual(sorted(self.completed_rows()), ["620"])
+        # The interrupted pull request is still never-reviewed: an iteration
+        # that reviewed and did not record is exactly as uncounted in the
+        # ledger as it is in the run.
+        self.assertEqual(self.workflow.rows()["618"]["status"], "never-reviewed")
+        self.assertIsNone(self.workflow.rows()["618"]["commit"])
+
+    def test_an_open_ended_run_stops_when_nothing_is_selectable(self):
+        run = self.automate(
+            None, [self.recorded(), self.recorded(), self.exhausted(), self.tripwire()]
+        )
+        self.assertEqual(run["reason"], NOTHING_SELECTABLE)
+        self.assertEqual(run["target"], "open-ended")
+        self.assertEqual(len(run["recorded"]), 2)
+        self.assertEqual(self.progress_report(run)[0], "2 of open-ended")
+        self.assertEqual(sorted(self.completed_rows()), ["618", "620"])
+
+    def test_the_exhaustion_status_is_the_one_the_helper_reports(self):
+        # The automation asset names `"status": "no-selectable-row"` as the
+        # stop without error. Read it out of the shipped helper rather than
+        # out of the prose: a listing nothing in it can be reviewed is a
+        # successful selection, and a loop that read it as a refusal would
+        # report the ordinary end of the queue as a failure.
+        self.workflow.merged([])
+        registration, inventory = self.workflow.registered_inventory(**self.session())
+        result = self.workflow.claim(inventory, registration["keeper_pid"])
+        self.assertEqual(result["status"], NOTHING_SELECTABLE)
+        self.assertIsNone(result["selected"])
+        self.workflow.complete_attempt(registration["attempt"])
+        self.assertIn(
+            '`"status": "no-selectable-row"`',
+            flat(read(AUTOMATION_ASSETS[self.BRAND])),
+        )
+
+    def test_a_count_of_zero_delegates_nothing_at_all(self):
+        run = self.automate(0, [self.tripwire()])
+        self.assertEqual(run["reason"], COUNT_REACHED)
+        self.assertEqual(run["recorded"], [])
+        self.assertEqual(run["iterations"], 0)
+        self.assertEqual(self.progress_report(run), ["0 of 0", COUNT_REACHED])
+        # Nothing was claimed, nothing was recorded, and no attempt directory
+        # was made: a count of zero is a run that touched the repository not
+        # at all.
+        self.assertEqual(self.completed_rows(), {})
+        self.assertFalse(self.workflow.runtime_worktrees().exists())
+
+    def test_the_tripwire_really_fires(self):
+        # Non-vacuity for every case above: "the loop stopped here" rests
+        # entirely on the planned iteration after it never running, so the
+        # thing that would report it must actually raise.
+        with self.assertRaises(AssertionError):
+            self.automate(2, [self.recorded(), self.tripwire()])
+
+
 class PackagedConsistencyTests(unittest.TestCase):
     """Requirement 11: both packaged workflows carry the helpers they call."""
 
@@ -6059,6 +6397,7 @@ def _end_to_end_cases():
         CompletedReviews,
         InterruptionAndTakeover,
         AdapterIntegration,
+        SerialAutomation,
     ):
         for brand in BRAND_BUNDLES:
             name = f"{brand.capitalize()}{mixin.__name__}Tests"
