@@ -519,6 +519,24 @@ its launch holds the lease open while the tool call is in flight:
 python3 "$SCRIPTS/project_review_liveness.py" run --root "$DOCS_WT" --attempt "$ATTEMPT" --launch build -- <command>
 ```
 
+**Give every launch a label no earlier launch of this attempt has used.**
+`build` above is an example, not a name to reuse. The exemption belongs to the
+first wrapper that claims a label, so a second `run --launch build` starts its
+command and earns no exemption at all: the keeper stops counting it as progress,
+and a command long enough to need the wrapper is long enough to lose the claim
+while it runs — after which this attempt's `record` is refused and the review's
+work is lost. The adapter says so on standard error, naming the launch and the
+attempt and giving both reasons it can be un-exempt, an unknown attempt or a
+reused label. **That line is a refusal, not a warning to read past.** Name
+launches for what they do — `build`, `test-suite`, `bench-after-fix` — and if it
+appears, stop the command, choose a label nothing has used, and start it again.
+
+The adapter reports the reuse rather than refusing it, and that is deliberate:
+refusing a label before the spawn, or giving a second wrapper an exemption of
+its own, would change the adapter's own execution model, which belongs to #687
+and not here. So the discipline is this workflow's, and the paragraph above is
+it.
+
 It exits with the command's own status. A command the runtime backgrounds
 returns from its tool call at once and gets no such exemption, so a long command
 belongs in the foreground here.
@@ -800,9 +818,30 @@ invocation's.** You do not have to reach step 9 for any of them:
   cancellation it does not report. That is #687's mechanism, and it needs
   nothing from the model. A command started through the wrapper is the
   exception in both directions: it holds its launch exempt from that window
-  while it runs, and the runtime does not reliably kill it — on Claude Code
-  2.1.276 an interrupted foreground command keeps going. So a cancellation with
-  a wrapped command still running is not bounded by the window alone. When that
+  while it runs, and which commands the runtime ends on an interruption is the
+  runtime's own answer rather than a general rule. #687's evidence records
+  both, each against the version it was measured on, and this workflow states
+  them rather than promising past either:
+
+  - **Claude Code 2.1.274:** an interrupt killed a foreground tool's
+    processes, while a command the runtime had backgrounded survived it. A
+    backgrounded launch's tool call is reported finished about eighty
+    milliseconds in, so that survivor holds no exemption — and is the one the
+    reclaim pass has to detect by other means.
+  - **Claude Code 2.1.276:** an interrupted foreground command keeps going,
+    measured still running ninety seconds after the Escape. That one keeps its
+    exemption for as long as it runs, so the keeper does not end on silence
+    while it does.
+  - **codex-cli 0.154.0:** an interrupted foreground command is moved to a
+    background terminal and keeps running, its tool-finish event arriving under
+    the old turn id only when it ends. Codex's `Interrupt` event ends the
+    keeper at once regardless, so the survivor outlives the attempt rather than
+    extending it.
+
+  A version is what each of those was measured on, not a guarantee that a newer
+  runtime still behaves that way; re-probe before quoting one. So a
+  cancellation with a wrapped command still running is not bounded by the
+  window alone. When that
   command finally exits, its tool-finish event is itself a progress event, so it
   **refreshes** the silence window rather than ending it: the keeper then waits
   that window out afresh, plus a poll, before the lease starts running down.

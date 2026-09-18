@@ -547,7 +547,9 @@ execution model, the session adapters supply progress-bound liveness:
   does interruption where the runtime documents an event for it;
 - a cancellation the runtime does not report ends the keeper once the silence
   window passes with no event and no exempt wrapped command, and the lease
-  then lapses at expiry.
+  then lapses a renewal interval and an expiry later — the renewer follows the
+  keeper rather than ending with it, and looks at its signal at least once per
+  renewal interval, so it can stamp one last renewal after the keeper is gone.
 
 A wrapped command's exemption ends when its launching tool call completes.
 A command the runtime runs in the background returns from its tool call at

@@ -665,8 +665,10 @@ the change recorded above.
 ## Limitations
 
 - **A cancellation Claude Code does not report is bounded, not immediate.** The
-  bound is the silence window (10 minutes by default), plus one renewer poll,
-  plus the lease expiry — **provided no wrapped command is still running**. On
+  bound is the silence window (10 minutes by default), plus one keeper poll,
+  plus one renewal interval — the renewer looks at its signal at least once per
+  interval, so it can stamp one last renewal after the keeper is gone — plus
+  the lease expiry, **provided no wrapped command is still running**. On
   2.1.276 an interrupt does not kill a foreground wrapped command, and a live
   wrapper holds its launch exempt from that window; its finish event then
   refreshes the window rather than ending it. The bound becomes the command's

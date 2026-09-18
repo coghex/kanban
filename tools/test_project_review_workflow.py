@@ -840,8 +840,42 @@ CLEANUP = {
     "a wrapped command bounds it instead": (
         "A command started through the wrapper is the exception in both "
         "directions: it holds its launch exempt from that window while it "
-        "runs, and the runtime does not reliably kill it — on Claude Code "
-        "2.1.276 an interrupted foreground command keeps going."
+        "runs, and which commands the runtime ends on an interruption is the "
+        "runtime's own answer rather than a general rule."
+    ),
+    "claude 2.1.274's interrupt, as measured": (
+        "**Claude Code 2.1.274:** an interrupt killed a foreground tool's "
+        "processes, while a command the runtime had backgrounded survived it."
+    ),
+    "claude 2.1.276's interrupt, as measured": (
+        "**Claude Code 2.1.276:** an interrupted foreground command keeps "
+        "going, measured still running ninety seconds after the Escape."
+    ),
+    "codex 0.154.0's interrupt, as measured": (
+        "**codex-cli 0.154.0:** an interrupted foreground command is moved to "
+        "a background terminal and keeps running, its tool-finish event "
+        "arriving under the old turn id only when it ends."
+    ),
+    "a version is what it was measured on": (
+        "A version is what each of those was measured on, not a guarantee "
+        "that a newer runtime still behaves that way; re-probe before quoting "
+        "one."
+    ),
+    "every launch takes a label of its own": (
+        "**Give every launch a label no earlier launch of this attempt has "
+        "used.** `build` above is an example, not a name to reuse. The "
+        "exemption belongs to the first wrapper that claims a label, so a "
+        "second `run --launch build` starts its command and earns no "
+        "exemption at all"
+    ),
+    "the un-exempt line is a refusal": (
+        "**That line is a refusal, not a warning to read past.**"
+    ),
+    "the discipline is the caller's on purpose": (
+        "The adapter reports the reuse rather than refusing it, and that is "
+        "deliberate: refusing a label before the spawn, or giving a second "
+        "wrapper an exemption of its own, would change the adapter's own "
+        "execution model, which belongs to #687 and not here."
     ),
     "its finish refreshes the window rather than ending it": (
         "When that command finally exits, its tool-finish event is itself a "
@@ -3380,6 +3414,12 @@ E2E_REPO = "coghex/kanban"
 # defaults so the asset's own `claim` line -- which carries no `--renewal` or
 # `--expiry` -- takes them. A test that passed its own flags would be proving
 # something about an invocation the workflow never makes.
+# A silence window no observation in this module can outrun. The fixture's
+# ordinary window is a second and a half, which is shorter than registering a
+# successor takes on a loaded runner: a test whose subject is an attempt that
+# is still *active* has to register with this instead, or the attempt ends on
+# silence and is reclaimed for a reason the test was not written about.
+E2E_LONG_SILENCE = 600.0
 E2E_RENEWAL = 0.25
 E2E_EXPIRY = 1.5
 E2E_SILENCE = 1.5
@@ -4801,14 +4841,18 @@ class OrphanReclaim(WorkflowRunCase):
         self.assertIn("is not a working tree", removal.stderr)
         self.assertFalse(review_root.exists())
 
-    def cancel_after(self, stage, terminate=True):
+    def cancel_after(self, stage, terminate=True, silence=E2E_SILENCE):
         """Register, claim, create `stage`'s resources, then end the session.
 
         No cleanup step of the cancelled invocation's runs -- which is the
         whole case: what has to happen afterwards has to happen without one.
+
+        `silence` is the registered attempt's own window: a case that ends the
+        session takes the short one, and a case whose subject is an attempt
+        still active takes `E2E_LONG_SILENCE`, so nothing ends it but the test.
         """
         registration, inventory = self.workflow.registered_inventory(
-            session="session-a", invocation="invocation-1"
+            session="session-a", invocation="invocation-1", silence=silence
         )
         attempt_dir = inventory.parent
         claimed = self.workflow.claim(inventory, registration["keeper_pid"])
@@ -4924,30 +4968,29 @@ class OrphanReclaim(WorkflowRunCase):
         self.workflow.remove_pin(own_wt)
         self.workflow.complete_attempt(successor["attempt"])
 
-    def test_a_survivor_keeps_its_directory_until_it_exits(self):
-        # Round 5's blocker, answered through the interface it asked for. A
-        # wrapped command that outlives a cancelled attempt is the one thing
-        # that must stop the reclaim pass: deleting the worktree it is working
-        # in is what nothing later repairs. The command here is backgrounded --
-        # its tool call finishes at once -- which is exactly the survivor
-        # `exempt_launches` cannot name and `unfinished_launches` can.
-        registration, claimed, attempt_dir, _, review_wt = self.cancel_after("pinned")
+    def start_survivor(self, registration, label="build", tool_use_id="tool-bg"):
+        """A wrapped command of `registration`'s attempt that outlives it.
+
+        Backgrounded, in the sense that matters here: its tool call is
+        reported finished at once, which is the survivor `exempt_launches`
+        cannot name and `unfinished_launches` can.
+        """
         command = (
             f'python3 {self.workflow.liveness_path} run --root {self.workflow.docs} '
-            f'--attempt {registration["attempt"]} --launch build -- make test'
+            f'--attempt {registration["attempt"]} --launch {label} -- make test'
         )
         self.workflow.hook(
             "PreToolUse",
             session="session-a",
             invocation="invocation-1",
             command=command,
-            tool_use_id="tool-bg",
+            tool_use_id=tool_use_id,
         )
         child = subprocess.Popen(
             [
                 sys.executable, str(self.workflow.liveness_path), "run",
                 "--root", str(self.workflow.docs),
-                "--attempt", registration["attempt"], "--launch", "build", "--",
+                "--attempt", registration["attempt"], "--launch", label, "--",
                 sys.executable, "-c", "import time; time.sleep(600)",
             ],
             env=self.workflow.env,
@@ -4962,14 +5005,196 @@ class OrphanReclaim(WorkflowRunCase):
             session="session-a",
             invocation="invocation-1",
             command=command,
-            tool_use_id="tool-bg",
+            tool_use_id=tool_use_id,
         )
         e2e_wait(
-            lambda: self.workflow.attempt_status(registration["attempt"])[
-                "unfinished_launches"
-            ]
-            == ["build"],
+            lambda: label
+            in (self.workflow.attempt_status(registration["attempt"]) or {}).get(
+                "unfinished_launches", []
+            ),
             "the survivor was never reported unfinished",
+        )
+        return child
+
+    def start_wrapped(self, registration, label, tool_use_id):
+        """One wrapped launch, announced to the hook and left running.
+
+        Returns the process and the path its standard error was written to.
+        A file rather than a pipe: the wrapper's own child inherits the
+        descriptor and outlives a `kill` of the wrapper, so a pipe never
+        reaches end of file and reading one would hang.
+        """
+        command = (
+            f'python3 {self.workflow.liveness_path} run --root {self.workflow.docs} '
+            f'--attempt {registration["attempt"]} --launch {label} -- make test'
+        )
+        self.workflow.hook(
+            "PreToolUse",
+            session="session-a",
+            invocation="invocation-1",
+            command=command,
+            tool_use_id=tool_use_id,
+        )
+        errors = self.workflow.scratch / f"wrapper-{label}-{tool_use_id}.err"
+        handle = errors.open("wb")
+        self.addCleanup(handle.close)
+        child = subprocess.Popen(
+            [
+                sys.executable, str(self.workflow.liveness_path), "run",
+                "--root", str(self.workflow.docs),
+                "--attempt", registration["attempt"], "--launch", label, "--",
+                sys.executable, "-c", "import time; time.sleep(600)",
+            ],
+            env=self.workflow.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=handle,
+        )
+        self.workflow.pids.append(child.pid)
+        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait()))
+        return child, errors
+
+    def test_a_reused_launch_label_earns_no_exemption_and_a_fresh_one_does(self):
+        # Round 9's blocker, as the workflow answers it. The adapter gives the
+        # exemption to the first wrapper that claims a label and reports the
+        # second rather than refusing it, so a review that reused `build` for
+        # its second long command would run that command with nothing holding
+        # the keeper alive. The asset's rule is that every launch takes a
+        # label of its own; this is what that rule is worth, sequentially, and
+        # what happens without it.
+        registration, _, attempt_dir, _, review_wt = self.cancel_after(
+            "pinned", terminate=False, silence=E2E_LONG_SILENCE
+        )
+        attempt = registration["attempt"]
+        first, _ = self.start_wrapped(registration, "build", "tool-1")
+        e2e_wait(
+            lambda: self.workflow.attempt_status(attempt)["exempt_launches"]
+            == ["build"],
+            "the first wrapped launch was never exempt",
+        )
+
+        # The same label again: the command runs, the exemption does not, and
+        # the adapter says so on standard error.
+        second, reported = self.start_wrapped(registration, "build", "tool-2")
+        e2e_wait(
+            lambda: self.workflow.attempt_status(attempt)["exempt_launches"] == [],
+            "a reused label kept the first launch's exemption",
+        )
+        self.assertIsNone(second.poll())
+        e2e_wait(
+            lambda: "is not exempt from the silence window"
+            in reported.read_text(encoding="utf-8"),
+            "the adapter never reported the reused label",
+        )
+        self.assertIn("reused label", reported.read_text(encoding="utf-8"))
+        second.kill()
+        # Cleanup still sees it, which is the half that keeps the directory
+        # safe: both wrappers report under the launch's own label.
+        self.assertEqual(
+            self.workflow.attempt_status(attempt)["unfinished_launches"], ["build"]
+        )
+
+        # A label nothing has used -- what the asset requires -- is exempt.
+        third, _ = self.start_wrapped(registration, "test-suite", "tool-3")
+        e2e_wait(
+            lambda: self.workflow.attempt_status(attempt)["exempt_launches"]
+            == ["test-suite"],
+            "a fresh label earned no exemption either",
+        )
+        self.assertIsNone(third.poll())
+        first.kill()
+        third.kill()
+
+    def test_an_unreadable_launch_record_retains_the_directory(self):
+        # Requirement 5's fail-closed rule, through the record rather than the
+        # process. A wrapper record this process cannot parse is a launch it
+        # cannot place, which is not the same as one that has ended -- so the
+        # pass may not delete the worktree on the strength of it.
+        registration, _, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        e2e_wait(
+            lambda: not self.workflow.running(registration["keeper_pid"]),
+            "the keeper outlived the session",
+        )
+        launches = (
+            self.workflow.common_directory()
+            / "kanban-project-review"
+            / "liveness"
+            / "attempts"
+            / registration["attempt"]
+            / "launches"
+        )
+        launches.mkdir(parents=True, exist_ok=True)
+        (launches / "build.wrapper.json").write_text("{ not json", encoding="utf-8")
+        self.assertEqual(
+            self.workflow.attempt_status(registration["attempt"])[
+                "unfinished_launches"
+            ],
+            ["build"],
+        )
+        # Every other signal says take it: the attempt is over and the keeper
+        # is gone. The unreadable record alone is what retains it.
+        self.assertTrue(self.workflow.attempt_is_over(registration["attempt"]))
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertEqual(
+            self.workflow.retained_orphans,
+            [(registration["attempt"], "launches:build")],
+        )
+        self.assertTrue(review_wt.is_dir())
+        self.assertTrue(attempt_dir.is_dir())
+        self.workflow.complete_attempt(successor["attempt"])
+
+    def test_a_survivor_whose_attempt_records_were_pruned_retains_the_directory(self):
+        # The two fail-closed reasons at once, which is the combination that
+        # matters most: the command is still running *and* the adapter can no
+        # longer be asked about it, because a pruned attempt takes its launch
+        # records with it. Reclaiming on `attempt-unknown` alone would delete
+        # the worktree this process is working in.
+        registration, _, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        child = self.start_survivor(registration)
+        e2e_wait(
+            lambda: not self.workflow.running(registration["keeper_pid"]),
+            "the keeper outlived the session",
+        )
+        records = (
+            self.workflow.common_directory()
+            / "kanban-project-review"
+            / "liveness"
+            / "attempts"
+            / registration["attempt"]
+        )
+        shutil.rmtree(records)
+        self.assertIsNone(self.workflow.attempt_status(registration["attempt"]))
+        self.assertEqual(
+            self.workflow.reclaim_refusal(registration["attempt"]), "attempt-unknown"
+        )
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertEqual(
+            self.workflow.retained_orphans,
+            [(registration["attempt"], "attempt-unknown")],
+        )
+        # Retained by path, with its worktree, while the command that made it
+        # unsafe is still running in it.
+        self.assertTrue(review_wt.is_dir())
+        self.assertTrue(attempt_dir.is_dir())
+        self.assertIsNone(child.poll())
+        self.workflow.complete_attempt(successor["attempt"])
+
+    def test_a_survivor_keeps_its_directory_until_it_exits(self):
+        # Round 5's blocker, answered through the interface it asked for. A
+        # wrapped command that outlives a cancelled attempt is the one thing
+        # that must stop the reclaim pass: deleting the worktree it is working
+        # in is what nothing later repairs. The command here is backgrounded --
+        # its tool call finishes at once -- which is exactly the survivor
+        # `exempt_launches` cannot name and `unfinished_launches` can.
+        registration, claimed, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        child = self.start_survivor(registration)
+        self.assertEqual(
+            self.workflow.attempt_status(registration["attempt"])[
+                "unfinished_launches"
+            ],
+            ["build"],
         )
         # The attempt is over and the exemption has lapsed, so every other
         # signal says reclaim it.
@@ -5008,7 +5233,7 @@ class OrphanReclaim(WorkflowRunCase):
         # `unverifiable`, which is not `gone`. Reclaiming on it would delete a
         # checkout on the strength of not being able to see its owner.
         registration, _, attempt_dir, _, review_wt = self.cancel_after(
-            "pinned", terminate=False
+            "pinned", terminate=False, silence=E2E_LONG_SILENCE
         )
         # Rewrite the keeper's host so this process cannot resolve its standing.
         attempt_json = (
@@ -5076,8 +5301,11 @@ class OrphanReclaim(WorkflowRunCase):
         # running" strands the directory, which is why the asset's rule looks
         # at the keeper's standing too.
         registration, claimed, attempt_dir, _, review_wt = self.cancel_after(
-            "pinned", terminate=False
+            "pinned", terminate=False, silence=E2E_LONG_SILENCE
         )
+        # The long window again: this attempt has to still be active when the
+        # kill lands, or it ends on silence, writes an ended record, and stops
+        # being the case this test is about.
         os.kill(registration["keeper_pid"], signal.SIGKILL)
         e2e_wait(
             lambda: not self.workflow.running(registration["keeper_pid"]),

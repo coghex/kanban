@@ -2266,8 +2266,12 @@ A registration refusal stops that run before any claim.
 
   Claude Code documents no interrupt event, and none fires. A Claude
   cancellation therefore lapses after at most the silence window, plus one
-  renewer poll, plus the lease expiry — **provided no wrapped command is still
-  running**. A live wrapper holds its launch exempt from that window by design,
+  keeper poll, plus one renewal interval, plus the lease expiry — **provided no
+  wrapped command is still running**. The renewal interval is in that chain for
+  the same reason it is in the longer one below: the renewer follows the keeper
+  rather than ending with it, and looks at its liveness signal at least once
+  per renewal interval, so it can stamp one last renewal after the keeper is
+  gone. A live wrapper holds its launch exempt from that window by design,
   and on Claude Code 2.1.276 an interrupt no longer kills a foreground wrapped
   command as it did on 2.1.274. The bound then is not the window alone: that
   command's tool-finish event is itself a progress event, so it refreshes the
@@ -2304,7 +2308,16 @@ A registration refusal stops that run before any claim.
     --nonce <hex> [--silence <s>] [--renewal <s>]` prints the attempt id and the
     keeper pid to pass as `claim --owner-pid`.
   - `run --root <path> --attempt <id> --launch <label> -- <command…>` runs a
-    long command as an exempt launch and exits with its status.
+    long command as an exempt launch and exits with its status. **The label is
+    the caller's to keep unique within one attempt.** The exemption belongs to
+    the first wrapper that claims a label; a second `run` under a label already
+    taken starts its command, earns no exemption, and says so on standard
+    error, naming the launch and both reasons a launch can be un-exempt. It is
+    reported rather than refused, and the reported form is recorded under a
+    name of its own so cleanup can still see the process — refusing it before
+    the spawn would be a change to this adapter's execution model. `project-review`
+    is the caller that carries the discipline, and says so where it starts a
+    wrapped command.
   - `complete --root <path> --attempt <id>` ends an attempt.
   - `status --root <path> --attempt <id>` reports its state, and answers two
     different questions about the commands `run` started. `exempt_launches`
@@ -2897,10 +2910,14 @@ which is why it is `mandatory: no`.
 declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
-script that way is a consumer and appears in the row, `$project-review`'s ledger
-helper included — that one lookup locates `project_review_ledger.py`, and the
-sweep cursor its explicit-only direct mode still uses and the session liveness
-adapter its PR mode registers are taken from the same directory beside it. So is each copy of the project-review liveness adapter
+script that way is a consumer and appears in the row, `$project-review`
+included — and that one lookup locates the `scripts` **directory** its three
+vendored modules share, never one of the modules. Each mode then resolves the
+modules it calls from that directory and checks only those: the ledger helper
+and the session liveness adapter for PR mode, the sweep cursor for the
+explicit-only direct mode. A lookup that went through one module would make
+every mode of that skill depend on that module being installed, including the
+mode that never calls it (issue #684). So is each copy of the project-review liveness adapter
 (§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
 refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
 It is `external`/`mandatory: no` for that

@@ -267,7 +267,11 @@ Claude Code loads a plugin's hooks with the plugin itself; they run
 process whose lifetime the project-review lease follows: it stays alive while
 the registered review invocation shows progress, ends at once when the turn or
 session ends, and ends after a silence window when a cancellation goes
-unreported — Claude Code reports none. A session that registers no attempt is
+unreported — Claude Code reports none. The keeper's end is not the lease's: the
+renewer follows that keeper and looks at it at least once per renewal interval,
+so the claim lapses a renewal interval and an expiry after it, and a command
+still running under the adapter's wrapper holds the window open until it exits.
+`docs/agent-workflow-contract.md` §2.13 carries the whole bound. A session that registers no attempt is
 untouched: the hook exits 0, prints nothing, and writes nothing. Since #684 the
 one caller is `/project-review`'s PR mode, which registers an attempt before it
 claims a pull request and refuses to claim one if registration fails. The only
