@@ -2322,13 +2322,20 @@ A registration refusal stops that run before any claim.
   - `status --root <path> --attempt <id>` reports its state, and answers two
     different questions about the commands `run` started. `exempt_launches`
     names the ones holding the silence window open, which skips any launch
-    whose tool call has finished. `unfinished_launches` names the ones whose
-    recorded wrapper process is not known to be gone, finished or not, and
-    fails closed on a record it cannot read or a wrapper on another host. The
-    second is what a caller about to delete that attempt's working directory
-    asks: the runtime-backgrounded command that outlives a cancelled attempt is
-    exactly the one the first can never name, because Claude Code reports its
-    call finished about eighty milliseconds after it starts.
+    whose tool call has finished. `unfinished_launches` names the ones that
+    cannot be established to have ended, finished or not. It decides on the
+    command rather than on the wrapper around it, because a wrapper killed with
+    `SIGKILL` runs no forwarding handler and dies leaving its command running:
+    `run` records the command's own process as soon as it has one and records
+    the launch's end once it has waited that process out, and this report calls
+    a launch gone only on one of those two positives. It fails closed on a
+    record it cannot read, a process on another host, and a launch that
+    recorded neither a command nor an end — a wrapper killed before it spawned
+    and one killed just after are indistinguishable from the record. The
+    second report is what a caller about to delete that attempt's working
+    directory asks: the runtime-backgrounded command that outlives a cancelled
+    attempt is exactly the one the first can never name, because Claude Code
+    reports its call finished about eighty milliseconds after it starts.
 
   A refusal exits 2 with `refused (<reason>)` on standard error.
 - **Refusals before any claim:** `register` refuses before it starts a keeper.

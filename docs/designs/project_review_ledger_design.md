@@ -551,6 +551,13 @@ execution model, the session adapters supply progress-bound liveness:
   keeper rather than ending with it, and looks at its signal at least once per
   renewal interval, so it can stamp one last renewal after the keeper is gone.
 
+Whether a wrapped command is still running is a separate question from whether
+its wrapper is, and cleanup asks the first: a wrapper killed outright runs no
+forwarding handler, so the command it started outlives it. The wrapper records
+that command's own process and, when it has waited it out, the launch's end;
+the launch report calls a launch gone on one of those positives and fails
+closed without either (issue #684, PR #705 review).
+
 A wrapped command's exemption ends when its launching tool call completes.
 A command the runtime runs in the background returns from its tool call at
 once, so it gets no exemption and cannot hold a claim past the silence

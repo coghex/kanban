@@ -360,7 +360,11 @@ class AdapterCase:
                 snapshot[str(path)] = path.read_bytes()
         return snapshot
 
-    def wrapper(self, attempt, label, seconds, new_session=False):
+    def wrapper(self, attempt, label, seconds, new_session=True):
+        # A session of its own by default, so the command it starts can be
+        # reaped with it: killing the wrapper alone leaves that command
+        # running, which since issue #684's amendment is a launch still
+        # reported unfinished rather than a test that has tidied up.
         process = subprocess.Popen(
             [
                 sys.executable, str(self.liveness), "run", "--root", str(self.root),
@@ -376,6 +380,19 @@ class AdapterCase:
         self.pids.append(process.pid)
         self.addCleanup(self.reap, process)
         return process
+
+    def kill_wrapped(self, process):
+        """End a wrapper and the command it started, and wait for both.
+
+        The group is named by the wrapper's own pid rather than looked up:
+        `start_new_session` makes the wrapper its group's leader, and
+        `getpgid` of a wrapper this process has already reaped raises, which
+        would leave the command running and the launch correctly -- but
+        confusingly -- still reported.
+        """
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+        self.reap(process)
 
     @staticmethod
     def reap(process):
@@ -509,10 +526,15 @@ class WrappedCommands(AdapterCase):
         self.assertEqual(ended["status"], "ended")
         self.assertEqual(ended["unfinished_launches"], ["background"])
         self.assertIsNone(wrapped.poll(), "the surviving command should still be running")
-        # And once the command is gone, so is the report -- the directory is
-        # then free to reclaim.
+        # Killing the *wrapper* is not the command ending: it runs no handler
+        # on SIGKILL, so the command it started outlives it and the launch is
+        # still reported. This is the round-11 blocker, as a regression.
         wrapped.kill()
         wrapped.wait(timeout=SETTLE)
+        self.assertEqual(self.status(attempt)["unfinished_launches"], ["background"])
+        # Once the command itself is gone, so is the report -- the directory
+        # is then free to reclaim.
+        self.kill_wrapped(wrapped)
         wait_until(
             lambda: self.status(attempt)["unfinished_launches"] == [],
             "the launch stayed unfinished after its process exited",
@@ -530,15 +552,52 @@ class WrappedCommands(AdapterCase):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "unreadable.wrapper.json").write_text("{not json", encoding="utf-8")
         (directory / "foreign.wrapper.json").write_text(
-            json.dumps({"host": "another-host.invalid", "pid": 1, "at": time.time()}),
+            json.dumps({
+                "host": "another-host.invalid", "pid": 1,
+                "command_pid": 1, "at": time.time(),
+            }),
             encoding="utf-8",
         )
+        here = LEDGER.socket.gethostname()
+        # A wrapper that is gone AND recorded its command, which is also gone.
         (directory / "gone.wrapper.json").write_text(
-            json.dumps({"host": LEDGER.socket.gethostname(), "pid": self.exited_pid(), "at": time.time()}),
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": self.exited_pid(), "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        # A wrapper that is gone and said so: the end it waited out is the
+        # other positive the reader accepts.
+        (directory / "ended.wrapper.json").write_text(
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": self.exited_pid(),
+                "ended_at": time.time(), "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        # A wrapper that is gone with neither: killed before it spawned, or a
+        # moment after, and nothing here tells those apart. Fails closed.
+        (directory / "spawnless.wrapper.json").write_text(
+            json.dumps({"host": here, "pid": self.exited_pid(), "at": time.time()}),
+            encoding="utf-8",
+        )
+        # A command still running under a wrapper that is gone: the round-11
+        # blocker's own shape, and the one the wrapper's pid answered wrongly.
+        survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        self.pids.append(survivor.pid)
+        self.addCleanup(self.reap, survivor)
+        (directory / "orphaned.wrapper.json").write_text(
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": survivor.pid, "at": time.time(),
+            }),
             encoding="utf-8",
         )
         self.assertEqual(
-            self.status(attempt)["unfinished_launches"], ["foreign", "unreadable"]
+            self.status(attempt)["unfinished_launches"],
+            ["foreign", "orphaned", "spawnless", "unreadable"],
         )
         self.assertEqual(self.status(attempt)["exempt_launches"], [])
 
@@ -572,21 +631,19 @@ class WrappedCommands(AdapterCase):
         )
         # The exemption is the first launch's alone, and stays so.
         self.assertEqual(self.status(attempt)["exempt_launches"], ["build"])
-        # The first wrapper goes; the second is still running, and still
-        # reported under the same label.
-        first.kill()
-        first.wait(timeout=SETTLE)
+        # The first wrapper goes, with the command it started; the second is
+        # still running, and still reported under the same label.
+        self.kill_wrapped(first)
         wait_until(
             lambda: self.status(attempt)["exempt_launches"] == [],
             "the exemption outlived the wrapper holding it",
         )
         self.assertEqual(self.status(attempt)["unfinished_launches"], ["build"])
         self.assertIsNone(second.poll(), "the second wrapper should still be running")
-        second.kill()
-        second.wait(timeout=SETTLE)
+        self.kill_wrapped(second)
         wait_until(
             lambda: self.status(attempt)["unfinished_launches"] == [],
-            "a launch stayed unfinished after both wrappers exited",
+            "a launch stayed unfinished after both wrappers and their commands exited",
         )
 
     def test_an_unconnected_or_reused_launch_gets_no_exemption(self):

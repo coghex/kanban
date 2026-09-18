@@ -256,6 +256,28 @@ def _create_json_exclusively(path: Path, value: dict) -> bool:
             os.unlink(temporary)
 
 
+def _amend_launch_record(path, fields: dict) -> None:
+    """Merge `fields` into an existing launch record, or do nothing.
+
+    Every caller is reporting something it has just observed about its own
+    launch, and none of them may fail the command they wrap over it: a record
+    that was never written, has been removed, or cannot be read leaves the
+    reader to fail closed on what it does not know rather than making this
+    process raise.
+    """
+    if path is None:
+        return
+    try:
+        record = _read_json(path)
+    except (OSError, ValueError):
+        return
+    if not isinstance(record, dict):
+        return
+    record.update(fields)
+    with contextlib.suppress(OSError):
+        _write_json_atomically(path, record)
+
+
 def _read_json(path: Path):
     """The object at `path`, None when absent; unreadable raises ValueError."""
     try:
@@ -595,13 +617,27 @@ def unfinished_launches(common: Path, attempt: str, standing) -> list:
         ):
             unfinished.append(stem)
             continue
-        if standing({"host": wrapper["host"], "pid": wrapper["pid"]}) != "gone":
-            # The record's own label where it carries one: a second wrapper of
-            # a reused label is filed under `<label>.<pid>`, and what a caller
-            # needs told is which launch is still running, not which file said
-            # so.
-            recorded = wrapper.get("label")
-            unfinished.append(recorded if isinstance(recorded, str) and recorded else stem)
+        # The record's own label where it carries one: a second wrapper of a
+        # reused label is filed under `<label>.<pid>`, and what a caller needs
+        # told is which launch is still running, not which file said so.
+        recorded = wrapper.get("label")
+        named = recorded if isinstance(recorded, str) and recorded else stem
+        if wrapper.get("ended_at") is not None:
+            # The wrapper waited its command out and said so. That is the one
+            # record that establishes the command ended rather than merely
+            # that its wrapper is no longer here.
+            continue
+        command_pid = wrapper.get("command_pid")
+        if isinstance(command_pid, int):
+            # The command decides, not the wrapper: a wrapper killed with
+            # SIGKILL never forwards the signal, so its command outlives it.
+            if standing({"host": wrapper["host"], "pid": command_pid}) != "gone":
+                unfinished.append(named)
+            continue
+        # Neither a command nor an end was ever recorded. A wrapper killed
+        # before it spawned and one killed a moment after look exactly alike
+        # from here, so this is the case to fail closed on.
+        unfinished.append(named)
     return sorted(set(unfinished))
 
 def run_keeper(common: Path, attempt: str, ready_fd=None) -> str:
@@ -1151,10 +1187,11 @@ def run_wrapped(root, attempt: str, label: str, command) -> int:
         "pid": os.getpid(),
         "at": time.time(),
     }
+    written = None
     if known:
-        exempt = _create_json_exclusively(
-            _launches_directory(common, attempt) / f"{label}.wrapper.json", record
-        )
+        directory = _launches_directory(common, attempt)
+        written = directory / f"{label}.wrapper.json"
+        exempt = _create_json_exclusively(written, record)
         if not exempt:
             # The label is taken, so this wrapper earns no exemption -- the
             # first one holds that -- but it is about to start a process
@@ -1163,11 +1200,9 @@ def run_wrapped(root, attempt: str, label: str, command) -> int:
             # from under it once the first wrapper exited. So it is recorded
             # under a name of its own, which `unfinished_launches` reads and
             # `exempt_launches` does not.
-            _create_json_exclusively(
-                _launches_directory(common, attempt)
-                / f"{label}.{os.getpid()}.wrapper.json",
-                record,
-            )
+            written = directory / f"{label}.{os.getpid()}.wrapper.json"
+            if not _create_json_exclusively(written, record):
+                written = None
     if not exempt:
         print(
             f"project-review liveness: launch {label} of attempt {attempt} is not "
@@ -1175,6 +1210,15 @@ def run_wrapped(root, attempt: str, label: str, command) -> int:
             file=sys.stderr,
         )
     child = subprocess.Popen(list(command))
+    # The wrapper's own process cannot answer "is this command gone". A
+    # wrapper killed with SIGKILL runs no handler, so it dies while the
+    # command it started keeps running -- and a report reading the wrapper
+    # alone would call the launch gone and let a reclaim pass delete the
+    # working tree that command is in. So the command's own process goes into
+    # the record as soon as there is one, and the launch's end goes in once it
+    # has been waited out; `unfinished_launches` decides on those two and
+    # fails closed when it has neither.
+    _amend_launch_record(written, {"command_pid": child.pid})
 
     def forward(signum, frame):
         with contextlib.suppress(OSError):
@@ -1183,6 +1227,7 @@ def run_wrapped(root, attempt: str, label: str, command) -> int:
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, forward)
     status = child.wait()
+    _amend_launch_record(written, {"ended_at": time.time()})
     return status if status >= 0 else 128 - status
 
 

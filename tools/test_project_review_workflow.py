@@ -654,12 +654,20 @@ PINNED_WORKTREE = {
     ),
     "the exemption is the wrong question for cleanup": (
         "**Nothing it launched is still running.** `status` answers that "
-        "separately: `unfinished_launches` names every wrapped launch whose "
-        "process is not known to be gone, whether or not its tool call "
+        "separately: `unfinished_launches` names every wrapped launch that "
+        "cannot be established to have ended, whether or not its tool call "
         "finished — which is the question that matters here, because the "
         "command that outlives a cancelled attempt is a backgrounded one, and "
-        "`exempt_launches` is built to skip exactly those. A non-empty list "
-        "retains."
+        "`exempt_launches` is built to skip exactly those."
+    ),
+    "the command decides, not the wrapper around it": (
+        "It answers on the *command*, not on the wrapper around it: a wrapper "
+        "killed with `SIGKILL` runs no handler and so dies leaving its "
+        "command running, which is why \"the wrapper is gone\" establishes "
+        "nothing. A launch is gone only when the command it recorded is gone, "
+        "or when the wrapper recorded having waited that command out; a "
+        "launch with neither is unfinished, because a wrapper killed before "
+        "it spawned looks exactly like one killed a moment after."
     ),
     "a retained directory is reported with its reason": (
         "A retained directory is reported by path with the reason — the "
@@ -4977,6 +4985,22 @@ class OrphanReclaim(WorkflowRunCase):
         self.workflow.remove_pin(own_wt)
         self.workflow.complete_attempt(successor["attempt"])
 
+    def kill_wrapped(self, process):
+        """End a wrapper and the command it started, and wait for both.
+
+        The group is named by the wrapper's own pid, which `start_new_session`
+        makes its leader: `getpgid` of a wrapper already reaped raises, and a
+        wrapper killed on its own leaves its command running -- which is a
+        launch still reported unfinished, correctly, and not a test that has
+        cleaned up after itself.
+        """
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.kill()
+        process.wait(timeout=E2E_SETTLE)
+
     def start_survivor(self, registration, label="build", tool_use_id="tool-bg"):
         """A wrapped command of `registration`'s attempt that outlives it.
 
@@ -5006,9 +5030,10 @@ class OrphanReclaim(WorkflowRunCase):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         self.workflow.pids.append(child.pid)
-        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait()))
+        self.addCleanup(lambda: self.kill_wrapped(child))
         self.workflow.hook(
             "PostToolUse",
             session="session-a",
@@ -5058,9 +5083,10 @@ class OrphanReclaim(WorkflowRunCase):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=handle,
+            start_new_session=True,
         )
         self.workflow.pids.append(child.pid)
-        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait()))
+        self.addCleanup(lambda: self.kill_wrapped(child))
         return child, errors
 
     def test_a_reused_launch_label_earns_no_exemption_and_a_fresh_one_does(self):
@@ -5096,7 +5122,7 @@ class OrphanReclaim(WorkflowRunCase):
             "the adapter never reported the reused label",
         )
         self.assertIn("reused label", reported.read_text(encoding="utf-8"))
-        second.kill()
+        self.kill_wrapped(second)
         # Cleanup still sees it, which is the half that keeps the directory
         # safe: both wrappers report under the launch's own label.
         self.assertEqual(
@@ -5111,8 +5137,8 @@ class OrphanReclaim(WorkflowRunCase):
             "a fresh label earned no exemption either",
         )
         self.assertIsNone(third.poll())
-        first.kill()
-        third.kill()
+        self.kill_wrapped(first)
+        self.kill_wrapped(third)
 
     def registered_worktrees(self):
         """Every worktree path Git has an administrative record for."""
@@ -5264,9 +5290,22 @@ class OrphanReclaim(WorkflowRunCase):
         )
         self.assertTrue(review_wt.is_dir())
 
-        # Once the command exits, the same pass takes it.
+        # Killing the *wrapper* is not the command ending: SIGKILL runs no
+        # forwarding handler, so the command outlives it and the launch is
+        # still reported. Round 11's blocker, as a regression.
         child.kill()
         child.wait(timeout=E2E_SETTLE)
+        self.assertEqual(
+            self.workflow.attempt_status(registration["attempt"])[
+                "unfinished_launches"
+            ],
+            ["build"],
+        )
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertTrue(review_wt.is_dir())
+
+        # Once the command itself exits, the same pass takes it.
+        self.kill_wrapped(child)
         e2e_wait(
             lambda: self.workflow.attempt_status(registration["attempt"])[
                 "unfinished_launches"

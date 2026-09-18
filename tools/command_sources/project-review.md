@@ -374,11 +374,17 @@ answers must both be positive, and anything else retains:
   worse, because the adapter has no records left to answer either question
   from. Both retain.
 - **Nothing it launched is still running.** `status` answers that separately:
-  `unfinished_launches` names every wrapped launch whose process is not known to
-  be gone, whether or not its tool call finished — which is the question that
+  `unfinished_launches` names every wrapped launch that cannot be established to
+  have ended, whether or not its tool call finished — which is the question that
   matters here, because the command that outlives a cancelled attempt is a
-  backgrounded one, and `exempt_launches` is built to skip exactly those. A
-  non-empty list retains.
+  backgrounded one, and `exempt_launches` is built to skip exactly those. It
+  answers on the *command*, not on the wrapper around it: a wrapper killed with
+  `SIGKILL` runs no handler and so dies leaving its command running, which is why
+  "the wrapper is gone" establishes nothing. A launch is gone only when the
+  command it recorded is gone, or when the wrapper recorded having waited that
+  command out; a launch with neither is unfinished, because a wrapper killed
+  before it spawned looks exactly like one killed a moment after. A non-empty
+  list retains.
 
 A retained directory is reported by path with the reason — the standing that
 could not be verified, or the labels still running — and left for a later
