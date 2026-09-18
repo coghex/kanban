@@ -675,6 +675,8 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "sed",
         "awk",
         "python3",
+        "mkdir",
+        "rm",
     },
     "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {
         "gh",
@@ -682,6 +684,8 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "sed",
         "awk",
         "python3",
+        "mkdir",
+        "rm",
         "find",
         "head",
     },
@@ -2885,6 +2889,33 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
+    def test_the_cache_root_row_describes_the_lookup_the_asset_makes(self):
+        # Issue #684 round 9: the rendered Codex skill stopped locating the
+        # ledger module and started locating the directory its three modules
+        # share, and this paragraph went on describing the old lookup. Pinned
+        # from both sides so neither can move alone -- the asset's own fence
+        # and the prose that explains it.
+        asset = REPO_ROOT / "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
+        content = asset.read_text(encoding="utf-8")
+        self.assertIn(
+            "-type d -path '*/kanban/*/skills/project-review/scripts'", content
+        )
+        self.assertNotIn(
+            "scripts/project_review_ledger.py' 2>/dev/null", content
+        )
+        contract = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(
+            encoding="utf-8"
+        )
+        paragraph = next(
+            block
+            for block in contract.split("\n\n")
+            if "`codex-plugin-cache-root` is one of two user-scoped paths" in block
+        )
+        self.assertIn("scripts` **directory**", paragraph)
+        self.assertNotIn(
+            "that one lookup locates `project_review_ledger.py`", paragraph
+        )
+
     def test_project_review_asset_command_discovery_is_not_vacuous(self):
         # The counterpart of the two pins above for the one vendored workflow
         # that is report-only. Requirement 7 of issue #462 is that no `gh`
@@ -2901,7 +2932,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # and `find` with `head` for the Codex lookup that locates it in the
         # $CODEX_HOME cache; the Claude lookup is a ${CLAUDE_PLUGIN_ROOT}
         # substitution and spawns nothing, so those two are Codex-only here
-        # exactly as they are in the rendered asset.
+        # exactly as they are in the rendered asset. `dirname` was Codex-only
+        # here too until issue #684 round 8: the lookup now finds the
+        # directory the three vendored modules share rather than taking the
+        # directory of one of them, so nothing derives a path with it.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }
@@ -2926,7 +2960,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
             # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the seven rows named below
+            # is not the same as being declared, and the ten rows named below
             # are where a reader looks to find out which assets speak each tool.
             for name in sorted(expected):
                 row = next(
@@ -2944,6 +2978,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "python3-cli",
                         "find-cli",
                         "head-cli",
+                        "mkdir-cli",
+                        "rm-cli",
+                        "dirname-cli",
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")

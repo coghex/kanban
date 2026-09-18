@@ -360,7 +360,11 @@ class AdapterCase:
                 snapshot[str(path)] = path.read_bytes()
         return snapshot
 
-    def wrapper(self, attempt, label, seconds, new_session=False):
+    def wrapper(self, attempt, label, seconds, new_session=True):
+        # A session of its own by default, so the command it starts can be
+        # reaped with it: killing the wrapper alone leaves that command
+        # running, which since issue #684's amendment is a launch still
+        # reported unfinished rather than a test that has tidied up.
         process = subprocess.Popen(
             [
                 sys.executable, str(self.liveness), "run", "--root", str(self.root),
@@ -376,6 +380,19 @@ class AdapterCase:
         self.pids.append(process.pid)
         self.addCleanup(self.reap, process)
         return process
+
+    def kill_wrapped(self, process):
+        """End a wrapper and the command it started, and wait for both.
+
+        The group is named by the wrapper's own pid rather than looked up:
+        `start_new_session` makes the wrapper its group's leader, and
+        `getpgid` of a wrapper this process has already reaped raises, which
+        would leave the command running and the launch correctly -- but
+        confusingly -- still reported.
+        """
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+        self.reap(process)
 
     @staticmethod
     def reap(process):
@@ -481,6 +498,153 @@ class WrappedCommands(AdapterCase):
         self.wait_keeper_gone(registration, timeout=SILENCE + SETTLE)
         self.assertIsNone(wrapped.poll(), "the surviving command should still be running")
         self.assertEqual(self.ended(attempt)["reason"], "silence")
+
+    def test_a_survivor_the_exemption_cannot_name_is_still_reported_unfinished(self):
+        # Issue #684. `exempt_launches` answers "what keeps the keeper alive"
+        # and therefore skips a launch whose tool call has finished -- which is
+        # precisely the runtime-backgrounded command that outlives a cancelled
+        # attempt, and on Claude Code its finish event arrives about 80 ms after
+        # it starts. A caller about to delete the attempt's working directory
+        # needs the other question answered, so `unfinished_launches` ignores
+        # the finish record and reports the process.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        command = self.run_command_text(attempt, "background")
+        self.hook(self.payload("PreToolUse", tool_use_id="tool-bg", command=command))
+        wrapped = self.wrapper(attempt, "background", 600)
+        self.hook(self.payload("PostToolUse", tool_use_id="tool-bg", command=command))
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == ["background"],
+            "the surviving launch was never reported unfinished",
+        )
+        self.assertEqual(self.status(attempt)["exempt_launches"], [])
+        # It stays reported after the attempt ends, which is when a reclaim
+        # pass asks: an ended attempt whose command is still running is exactly
+        # the one whose directory must not be removed.
+        self.wait_keeper_gone(registration, timeout=SILENCE + SETTLE)
+        ended = self.status(attempt)
+        self.assertEqual(ended["status"], "ended")
+        self.assertEqual(ended["unfinished_launches"], ["background"])
+        self.assertIsNone(wrapped.poll(), "the surviving command should still be running")
+        # Killing the *wrapper* is not the command ending: it runs no handler
+        # on SIGKILL, so the command it started outlives it and the launch is
+        # still reported. This is the round-11 blocker, as a regression.
+        wrapped.kill()
+        wrapped.wait(timeout=SETTLE)
+        self.assertEqual(self.status(attempt)["unfinished_launches"], ["background"])
+        # Once the command itself is gone, so is the report -- the directory
+        # is then free to reclaim.
+        self.kill_wrapped(wrapped)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == [],
+            "the launch stayed unfinished after its process exited",
+        )
+
+    def test_an_unreadable_or_foreign_launch_record_fails_closed(self):
+        # The exemption fails open on a record it cannot place, because a
+        # launch it cannot verify must not hold the silence window open.
+        # Cleanup needs the opposite: "not known to be gone" keeps the
+        # directory, because deleting a worktree a live process is working in
+        # is the one outcome nothing later can repair.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        directory = Path(registration["records"]) / "launches"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "unreadable.wrapper.json").write_text("{not json", encoding="utf-8")
+        (directory / "foreign.wrapper.json").write_text(
+            json.dumps({
+                "host": "another-host.invalid", "pid": 1,
+                "command_pid": 1, "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        here = LEDGER.socket.gethostname()
+        # A wrapper that is gone AND recorded its command, which is also gone.
+        (directory / "gone.wrapper.json").write_text(
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": self.exited_pid(), "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        # A wrapper that is gone and said so: the end it waited out is the
+        # other positive the reader accepts.
+        (directory / "ended.wrapper.json").write_text(
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": self.exited_pid(),
+                "ended_at": time.time(), "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        # A wrapper that is gone with neither: killed before it spawned, or a
+        # moment after, and nothing here tells those apart. Fails closed.
+        (directory / "spawnless.wrapper.json").write_text(
+            json.dumps({"host": here, "pid": self.exited_pid(), "at": time.time()}),
+            encoding="utf-8",
+        )
+        # A command still running under a wrapper that is gone: the round-11
+        # blocker's own shape, and the one the wrapper's pid answered wrongly.
+        survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        self.pids.append(survivor.pid)
+        self.addCleanup(self.reap, survivor)
+        (directory / "orphaned.wrapper.json").write_text(
+            json.dumps({
+                "host": here, "pid": self.exited_pid(),
+                "command_pid": survivor.pid, "at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.status(attempt)["unfinished_launches"],
+            ["foreign", "orphaned", "spawnless", "unreadable"],
+        )
+        self.assertEqual(self.status(attempt)["exempt_launches"], [])
+
+    def exited_pid(self):
+        process = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+        process.wait(timeout=SETTLE)
+        return process.pid
+
+    def test_a_reused_label_stays_visible_to_cleanup(self):
+        # Issue #684. A reused `--launch` label loses the exclusive wrapper
+        # record -- the first launch holds it -- and `run` starts the child
+        # anyway. If nothing else recorded that second wrapper, cleanup would
+        # see the first one exit, read "nothing running", and delete the
+        # working directory out from under a live process.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        command = self.run_command_text(attempt, "build")
+        self.hook(self.payload("PreToolUse", tool_use_id="tool-1", command=command))
+        first = self.wrapper(attempt, "build", 600)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == ["build"],
+            "the first launch was never reported",
+        )
+        second = self.wrapper(attempt, "build", 600)
+        wait_until(
+            lambda: len(
+                list((Path(registration["records"]) / "launches").glob("build*.wrapper.json"))
+            )
+            == 2,
+            "the reused launch recorded no wrapper of its own",
+        )
+        # The exemption is the first launch's alone, and stays so.
+        self.assertEqual(self.status(attempt)["exempt_launches"], ["build"])
+        # The first wrapper goes, with the command it started; the second is
+        # still running, and still reported under the same label.
+        self.kill_wrapped(first)
+        wait_until(
+            lambda: self.status(attempt)["exempt_launches"] == [],
+            "the exemption outlived the wrapper holding it",
+        )
+        self.assertEqual(self.status(attempt)["unfinished_launches"], ["build"])
+        self.assertIsNone(second.poll(), "the second wrapper should still be running")
+        self.kill_wrapped(second)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == [],
+            "a launch stayed unfinished after both wrappers and their commands exited",
+        )
 
     def test_an_unconnected_or_reused_launch_gets_no_exemption(self):
         registration = self.registered()
@@ -830,8 +994,17 @@ class Packaging(unittest.TestCase):
                     )
                     self.assertEqual((completed.returncode, completed.stdout), (0, ""))
 
-    def test_the_installed_project_review_workflow_is_unchanged(self):
-        # #684 performs the switch-over; until then the workflow keeps its cursor.
+    def test_the_installed_project_review_workflow_registers_before_it_claims(self):
+        # #684 performed the switch-over: the installed workflow's PR mode
+        # registers an attempt through this adapter and hands its keeper to the
+        # ledger's `claim`, so this module is no longer a mechanism nothing
+        # calls. The cursor survives in the explicit-only direct section until
+        # LEDGER-8 retires it, which is why its presence is asserted too.
+        #
+        # What each asset *says* about the adapter is
+        # tools/test_project_review_workflow.py's contract; what is pinned here
+        # is the coupling itself -- that the caller names this module and the
+        # flag its keeper is passed through.
         for asset in (
             "claude-plugin/plugins/kanban/commands/project-review.md",
             "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
@@ -840,7 +1013,9 @@ class Packaging(unittest.TestCase):
             with self.subTest(asset=asset):
                 text = (REPO_ROOT / asset).read_text(encoding="utf-8")
                 self.assertIn("project_review_cursor.py", text)
-                self.assertNotIn("project_review_liveness", text)
+                self.assertIn("project_review_liveness.py", text)
+                self.assertIn("--owner-pid", text)
+                self.assertNotIn("--liveness-fd", text)
 
 
 def _brand_cases():

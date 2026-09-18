@@ -2237,9 +2237,10 @@ report did not name.
 ### 2.13 Project-review session liveness (lifecycle hooks)
 
 The prerequisite design D-17's 2026-09-17 amendment names (issue #687). It
-consumes #682's lease and blocks #684, which switches `project-review` onto the
-ledger. Until then the installed workflow keeps its cursor, and nothing
-installed registers an attempt.
+consumes #682's lease, and since #684 the installed `project-review` workflow is
+its caller: that workflow registers an attempt, and passes the keeper's pid to
+`project_review_ledger.py claim --owner-pid`, before it claims a pull request.
+A registration refusal stops that run before any claim.
 
 - **Owning source:** `project_review_liveness.py`, shipped identically as
   `claude-plugin/plugins/kanban/scripts/project_review_liveness.py` and
@@ -2265,7 +2266,30 @@ installed registers an attempt.
 
   Claude Code documents no interrupt event, and none fires. A Claude
   cancellation therefore lapses after at most the silence window, plus one
-  renewer poll, plus the lease expiry.
+  keeper poll, plus one renewal interval, plus the lease expiry — **provided no
+  wrapped command is still running**. The renewal interval is in that chain for
+  the same reason it is in the longer one below: the renewer follows the keeper
+  rather than ending with it, and looks at its liveness signal at least once
+  per renewal interval, so it can stamp one last renewal after the keeper is
+  gone. A live wrapper holds its launch exempt from that window by design,
+  and on Claude Code 2.1.276 an interrupt no longer kills a foreground wrapped
+  command as it did on 2.1.274. The bound then is not the window alone: that
+  command's tool-finish event is itself a progress event, so it refreshes the
+  window rather than ending it, and the keeper waits it out afresh afterwards.
+  The bound becomes the command's remaining run time, plus a silence window,
+  plus a keeper poll, plus one renewal interval, plus the lease expiry — or the
+  end of the session, whichever comes first. The renewal interval is a phase of
+  its own because the renewer follows the keeper rather than ending with it: it
+  looks at its liveness signal at least once per renewal interval, so it may
+  write one further renewal after the keeper is gone, and the expiry that then
+  runs down is the one that renewal stamped. This implementation looks once per
+  renewer poll — a second — which is why a measured lapse is shorter than the
+  interval this contract promises, and the promise is what a reader may rely
+  on. The
+  measurement and its consequences are in
+  `tools/project-review-liveness-evidence.md`; the minimum verified versions
+  below are what each behaviour was measured on, not a guarantee that a newer
+  runtime still behaves that way.
 - **Hook events:** Claude Code 2.1.274 or newer: `PreToolUse`, `PostToolUse`,
   `PostToolUseFailure`, `Stop`, `StopFailure`, `SessionEnd`. codex-cli 0.154.0
   or newer: `PreToolUse`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd`,
@@ -2284,9 +2308,34 @@ installed registers an attempt.
     --nonce <hex> [--silence <s>] [--renewal <s>]` prints the attempt id and the
     keeper pid to pass as `claim --owner-pid`.
   - `run --root <path> --attempt <id> --launch <label> -- <command…>` runs a
-    long command as an exempt launch and exits with its status.
+    long command as an exempt launch and exits with its status. **The label is
+    the caller's to keep unique within one attempt.** The exemption belongs to
+    the first wrapper that claims a label; a second `run` under a label already
+    taken starts its command, earns no exemption, and says so on standard
+    error, naming the launch and both reasons a launch can be un-exempt. It is
+    reported rather than refused, and the reported form is recorded under a
+    name of its own so cleanup can still see the process — refusing it before
+    the spawn would be a change to this adapter's execution model. `project-review`
+    is the caller that carries the discipline, and says so where it starts a
+    wrapped command.
   - `complete --root <path> --attempt <id>` ends an attempt.
-  - `status --root <path> --attempt <id>` reports its state.
+  - `status --root <path> --attempt <id>` reports its state, and answers two
+    different questions about the commands `run` started. `exempt_launches`
+    names the ones holding the silence window open, which skips any launch
+    whose tool call has finished. `unfinished_launches` names the ones that
+    cannot be established to have ended, finished or not. It decides on the
+    command rather than on the wrapper around it, because a wrapper killed with
+    `SIGKILL` runs no forwarding handler and dies leaving its command running:
+    `run` records the command's own process as soon as it has one and records
+    the launch's end once it has waited that process out, and this report calls
+    a launch gone only on one of those two positives. It fails closed on a
+    record it cannot read, a process on another host, and a launch that
+    recorded neither a command nor an end — a wrapper killed before it spawned
+    and one killed just after are indistinguishable from the record. The
+    second report is what a caller about to delete that attempt's working
+    directory asks: the runtime-backgrounded command that outlives a cancelled
+    attempt is exactly the one the first can never name, because Claude Code
+    reports its call finished about eighty milliseconds after it starts.
 
   A refusal exits 2 with `refused (<reason>)` on standard error.
 - **Refusals before any claim:** `register` refuses before it starts a keeper.
@@ -2339,9 +2388,10 @@ installed registers an attempt.
   `docs/`. Registration prunes ended attempts after seven days.
 - **Evidence:** `tools/project-review-liveness-evidence.md` records the probes,
   the smoke-test procedure, and the observed timings on both installed runtimes.
-- **Mandatory/optional:** optional. Nothing installed invokes it until #684. A
-  session that never registers an attempt pays a short hook process on each
-  tool event and writes nothing.
+- **Mandatory/optional:** optional. The only caller is `project-review`'s PR
+  mode, which is a user-invoked action; its explicit-only direct-commit mode
+  registers nothing. A session that never registers an attempt pays a short hook
+  process on each tool event and writes nothing.
 
 ## 3. Migration boundary
 
@@ -2549,8 +2599,9 @@ sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skil
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
+mkdir-cli | executable | mkdir | codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -2866,8 +2917,14 @@ which is why it is `mandatory: no`.
 declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
-script that way is a consumer and appears in the row, `$project-review`'s sweep
-cursor included. So is each copy of the project-review liveness adapter
+script that way is a consumer and appears in the row, `$project-review`
+included — and that one lookup locates the `scripts` **directory** its three
+vendored modules share, never one of the modules. Each mode then resolves the
+modules it calls from that directory and checks only those: the ledger helper
+and the session liveness adapter for PR mode, the sweep cursor for the
+explicit-only direct mode. A lookup that went through one module would make
+every mode of that skill depend on that module being installed, including the
+mode that never calls it (issue #684). So is each copy of the project-review liveness adapter
 (§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
 refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
 It is `external`/`mandatory: no` for that
@@ -2924,7 +2981,8 @@ install location — the shared review coordinator for `$pr-review`,
 `$pr-rereview`, `$pr-revise`, `$repair`, and `$fix`, the trusted-comment issue-spec
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
-`$note-problem`, the sweep-cursor module for `$project-review`, and the census
+`$note-problem`, the project-review ledger module for `$project-review` — with
+its sibling sweep cursor and session liveness adapter — and the census
 program for `$janitor` (issue #575) — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
@@ -2935,7 +2993,9 @@ coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`,
 workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py`, `/project-review`
-its bundled sweep cursor at
+its bundled ledger, session liveness adapter and sweep cursor at
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py`,
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py`, and `/janitor` its
 bundled census at `${CLAUDE_PLUGIN_ROOT}/scripts/census.py`, without a
 filesystem search. That plugin bundles its own copy of each, so it never depends on the
@@ -2964,9 +3024,40 @@ observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
 
-`tr-cli` and `dirname-cli` are the documentation-landing helper's own utilities
-(issue #410): `tools/docs_land.sh` reaches both and nothing else in this
-repository does. It also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
+`mkdir-cli` is `project-review`'s alone (issue #684), and it makes exactly one
+directory: `<git common dir>/kanban-project-review/worktrees/<attempt>/`, named
+for the liveness attempt that will own it. Everything one invocation of that
+workflow creates goes in there — its merged-pull-request inventory and the
+detached worktree it pins the review to — so it is OUTSIDE the reviewed
+checkout and the docs worktree, where a review artifact under
+`docs/project_review/` would publish with the report beside it, and an exit that
+reaches its own cleanup removes it as one directory. Naming it for the attempt
+is what makes a cancellation recoverable, and it is equally what makes the
+recovery safe to refuse: the next invocation asks the liveness adapter about
+each sibling and removes one only on positive evidence that nothing is using
+it — the attempt still known to the adapter, its keeper reported ended or
+positively gone, its launch records readable, and no launch of it unfinished.
+Anything else retains the directory by name and with the reason, for a later
+pass or for `janitor` (#706): an attempt the adapter no longer knows, a keeper
+whose standing it cannot establish, a launch record it cannot read, or a wrapped
+command that outlived the cancellation. Removing a worktree a live process is
+working in is the one outcome nothing later repairs, so the pass fails closed
+and a cancellation's directory is taken by the first invocation that can prove
+otherwise — the next one in the ordinary case, and not in every case. It is
+`mandatory: no` for the reason the other utilities here are.
+
+`tr-cli` is the documentation-landing helper's own utility (issue #410):
+`tools/docs_land.sh` reaches it and nothing else in this repository does.
+`dirname-cli` is that helper's alone as well. #684 gave it a second consumer and
+then took it back: the Codex `project-review` skill now locates the directory
+its three modules share directly, rather than taking the directory of one of
+them, because a lookup routed through one module made every mode of that
+workflow depend on that module being installed — including the mode that never
+calls it. Neither `project-review` asset derives a path that way now, and
+neither derives a *removal* target from another path at all: each scratch
+directory cleanup removes is held in a variable of its own, because the parent
+of a variable an early exit never set is the working directory.
+`tools/docs_land.sh` also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
 user-invoked action, and every supported macOS/Linux shell already provides
@@ -2981,8 +3072,10 @@ fast-forward advances it, so `grep -Fx "$BASE"` over
 on empty for every other branch and for a detached HEAD.
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
-records it: `retriage`, `backlog-review`, and `project-review` rewrite roadmap
-and report text with it, `drain-prs` reduces a remote URL to one `owner/name`
+records it: `retriage` and `backlog-review` rewrite roadmap and report text with
+it, `project-review` reduces a remote URL to one `owner/name` with it and strips
+the `origin/` prefix off the remote default branch it pins its review worktree
+to, `drain-prs` reduces a remote URL to one `owner/name`
 with it, and `finalize` does both — the same remote reduction, plus the
 `git worktree list --porcelain` reads that name the primary checkout and the
 merged pull request's own worktree. It stays `mandatory: no` for the reason the
@@ -3780,11 +3873,27 @@ other's rows, and a third fence added later cannot silently displace either.
 Every tracked Markdown file in this repository takes exactly one publication
 lane:
 
-- `coordination` — a coordination record whose content no runtime, installer,
-  or test reads: a findings, code-health, or design document and its status
+- `coordination` — a coordination record whose content nothing in *this*
+  repository reads: a findings, code-health, or design document and its status
   ledger, or a free-form note or roadmap sketch under a declared coordination
   directory.
   Eligible for direct publication to `master`, bypassing the pull-request lane.
+
+  "Nothing in this repository" is the whole of the test, and it is deliberately
+  narrower than "nothing at all". A packaged workflow may read and write a
+  coordination document — `project_review_ledger.py` parses, rewrites and
+  checkpoints `docs/project_review/ledger.md` on every review, so that document
+  is machine-readable workflow state rather than prose nobody parses — and the
+  lane still holds, because what it protects is the tree: this repository's
+  build, its tests, its installers and its executable read none of it, so a
+  change to it alone can invalidate nothing and `build-test` cannot notice it
+  either way. The helper that does read it is a bundled asset operating on
+  whichever repository it was pointed at, reading that repository's review state
+  and none of Kanban's own behavior; its tests build their own documents in
+  temporary directories rather than parsing the tracked one, which is why the
+  `test-parsed` reason is absent from that row and would be a contradiction on
+  it. A document any of this repository's own consumers reads is `pr-atomic`
+  however coordination-shaped it looks.
 - `pr-atomic` — a document that lands atomically with its implementation
   through the pull-request lane, because changing it on its own can invalidate
   the tree.
@@ -3812,7 +3921,9 @@ The `coordination` documents are
 `docs/ui-bugs.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
-`docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
+`docs/coordination/`, every design document under `docs/designs/`, and the
+project-review ledger and every ledger-era findings report under
+`docs/project_review/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -3822,7 +3933,19 @@ This classification is Kanban's own. It describes this repository and nothing
 else. A consuming repository declares its own direct-publication lane through
 `workflow.direct_publication_paths`, which ships empty — exact file paths, or
 whole directories through a trailing-slash entry matched by the same
-whole-component rule the rows below use. The drainer's separate
+whole-component rule the rows below use. `docs/project_review/` is what that
+mechanism is for: a consuming repository enrols the project-review ledger and
+every report the workflow will ever write there through **one**
+`workflow.direct_publication_paths` entry naming that directory, and never a
+declaration per report — which is the whole point of a one-pull-request-per-review
+cadence being publishable at all. Nothing that is not a document belongs under
+it: the lease's lock reference and heartbeat records, the liveness adapter's
+handshake and attempt records, and the worktree each review is pinned to all
+live under `kanban-project-review/` in the repository's Git common directory —
+`leases/`, `checkpoints/`, `liveness/`, and `worktrees/<attempt>/` holding both
+the worktree and that invocation's merged-pull-request inventory. All of them
+are outside every working tree, because a directory that publishes publishes
+whatever is left in it. The drainer's separate
 `workflow.coordination_paths` key
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
 grants only its base-advance exception and never a publication lane. Kanban
@@ -3873,7 +3996,10 @@ recording only one would understate what a change to it can break:
   file to stay consistent with behavior in the same pull request.
 - `audit-report` — a findings, code-health, or design document carrying its
   own status ledger, which `tools/test_source_distribution.py` lists in
-  `EXCLUDED_TRACKED_PATHS`.
+  `EXCLUDED_TRACKED_PATHS`. The ledger may be machine-readable and a packaged
+  workflow may maintain it, as the `docs/project_review/` row's is: the reason
+  is about what the document records and who in this repository reads it, per
+  the `coordination` definition above, not about whether a human typed it.
 - `coordination-note` — a free-form note, roadmap sketch, or other
   non-authoritative coordination document whose content no runtime,
   installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`
@@ -3911,6 +4037,7 @@ docs/media/README.md | pr-atomic | test-parsed;release-document
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
 docs/product_readiness_findings.md | coordination | audit-report
+docs/project_review/ | coordination | audit-report
 docs/project_review_183-170.md | coordination | audit-report
 docs/project_review_195-185.md | coordination | audit-report
 docs/project_review_218-196.md | coordination | audit-report
