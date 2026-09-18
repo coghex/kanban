@@ -554,6 +554,51 @@ def exempt_launches(common: Path, attempt: str, standing) -> list:
     return exempt
 
 
+def unfinished_launches(common: Path, attempt: str, standing) -> list:
+    """Every wrapped command of `attempt` whose process is not known to be gone.
+
+    `exempt_launches` above answers a different question -- which launches keep
+    the keeper alive -- and skips a launch whose tool call has finished,
+    because a command the runtime backgrounded stops earning an exemption the
+    moment its call returns. That is right for the silence window and exactly
+    wrong for cleanup: a backgrounded command is the one that outlives a
+    cancelled attempt, and Claude Code reports its call finished about eighty
+    milliseconds after it starts, so the one survivor that runtime produces is
+    the one `exempt_launches` can never name.
+
+    This reports the same records with the finish ignored, and fails closed
+    where the exemption fails open: a wrapper recorded on another host, or a
+    pid this process may not signal, is `unverifiable` rather than `gone` and
+    is listed. A caller deciding whether it may delete that attempt's working
+    directory needs "nothing of it is still running", not "something of it
+    definitely is".
+    """
+    directory = _launches_directory(common, attempt)
+    try:
+        names = sorted(os.listdir(directory))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    unfinished = []
+    for name in names:
+        if not name.endswith(".wrapper.json"):
+            continue
+        label = name[: -len(".wrapper.json")]
+        try:
+            wrapper = _read_json(directory / name)
+        except ValueError:
+            # A record this process cannot read is a launch it cannot place,
+            # which is not the same as one that has ended.
+            unfinished.append(label)
+            continue
+        if wrapper is None or not isinstance(wrapper.get("pid"), int) or not isinstance(
+            wrapper.get("host"), str
+        ):
+            unfinished.append(label)
+            continue
+        if standing({"host": wrapper["host"], "pid": wrapper["pid"]}) != "gone":
+            unfinished.append(label)
+    return unfinished
+
 def run_keeper(common: Path, attempt: str, ready_fd=None) -> str:
     """Stay alive while the attempt shows progress; return why it ended."""
     ledger = _ledger_module()
@@ -1149,6 +1194,7 @@ def status(root, attempt: str) -> dict:
         "last_progress": progress,
         "keeper_standing": None if keeper is None else ledger.holder_standing(keeper),
         "exempt_launches": exempt_launches(common, attempt, ledger.holder_standing),
+        "unfinished_launches": unfinished_launches(common, attempt, ledger.holder_standing),
     }
 
 

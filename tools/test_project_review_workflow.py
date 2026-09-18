@@ -538,15 +538,38 @@ PINNED_WORKTREE = {
         "made, and it is what makes that exit recoverable rather than merely "
         "harmless."
     ),
-    "an ended or unknown attempt's directory is an orphan": (
-        'A sibling whose attempt reports `"status": "ended"` — or whose '
-        "attempt the adapter refuses as unknown, which is what an attempt "
-        "pruned after seven days looks like — belongs to an invocation that is "
-        "over."
+    "what makes an attempt over": (
+        '**An attempt is over** when `status` reports `"status": "ended"`; when '
+        'it reports `"status": "active"` but a `keeper_standing` other than '
+        "`live`, which is what a keeper killed outright leaves behind — it "
+        "writes no ended record, so reading `active` alone would strand that "
+        "directory for good; or when the adapter refuses it as "
+        "`attempt-unknown`, which is what an attempt pruned after seven days "
+        "looks like."
     ),
     "a live attempt's directory is left alone": (
-        'One reporting `"status": "active"` belongs to a live invocation '
-        "somewhere: leave it alone."
+        "An `active` attempt with a live keeper belongs to an invocation "
+        "running somewhere: leave it alone."
+    ),
+    "over is not the same as reclaimable": (
+        "**An attempt that is over is still not reclaimable while one of its "
+        "commands is running.**"
+    ),
+    "the exemption is the wrong question for cleanup": (
+        "`status` answers that separately: `unfinished_launches` names every "
+        "wrapped launch whose process is not known to be gone, whether or not "
+        "its tool call finished — which is the question that matters here, "
+        "because the command that outlives a cancelled attempt is a "
+        "backgrounded one, and `exempt_launches` is built to skip exactly "
+        "those."
+    ),
+    "a running launch retains its directory": (
+        "A non-empty `unfinished_launches` means something is still working in "
+        "that worktree: **leave the directory alone**, report it by path with "
+        "the labels still running, and let a later invocation or "
+        "{{cmd:janitor}} take it once they have stopped. Deleting a worktree "
+        "out from under a live process is the one outcome nothing later can "
+        "repair."
     ),
     "it never depends on the primary checkout": (
         "The review is verified against that exact tree and nothing else, so it "
@@ -1768,7 +1791,7 @@ class LedgerWorkflowTests(unittest.TestCase):
                     self.assertNotIn(flat(spelling), content)
 
     def test_the_review_is_pinned_to_a_fetched_detached_worktree(self):
-        for relative_path in RENDERED_ASSETS:
+        for relative_path, brand in BRAND_OF_ASSET.items():
             content = read(relative_path)
             flattened = flat(content)
             for command in PINNED_WORKTREE_COMMANDS:
@@ -1776,7 +1799,7 @@ class LedgerWorkflowTests(unittest.TestCase):
                     self.assertIn(command, content)
             for name, phrase in PINNED_WORKTREE.items():
                 with self.subTest(asset=relative_path, rule=name):
-                    self.assertIn(flat(phrase), flattened)
+                    self.assertIn(flat(rendered_phrase(phrase, brand)), flattened)
 
     def test_the_default_branch_is_never_read_from_the_local_symref(self):
         # The round-1 blocker: `git fetch` does not refresh
@@ -3811,24 +3834,58 @@ class WorkflowRun:
             return "unknown"
         return json.loads(completed.stdout)["status"]
 
-    def reclaim_orphans(self, keep=None):
-        """Step 4's reclaim pass: every sibling whose attempt is over.
+    def attempt_status(self, attempt):
+        """The asset's own `status` call, or `None` when it is refused."""
+        completed = self.sh(
+            asset_command(self.asset, 'python3 "$LIVENESS" status'),
+            check=False,
+            SIBLING=attempt,
+        )
+        if completed.returncode != 0:
+            return None
+        return json.loads(completed.stdout)
 
-        The asset states this as prose over one `status` call; what is driven
-        here is that call, its two readings, and the removal it gates.
+    def attempt_state(self, attempt):
+        status = self.attempt_status(attempt)
+        # The adapter refuses an attempt it no longer knows -- a pruned one --
+        # and the asset reads that as an invocation that is over.
+        return "unknown" if status is None else status["status"]
+
+    def attempt_is_over(self, attempt):
+        """The asset's own three-way rule for "this invocation is over".
+
+        `active` is not enough on its own: a keeper killed outright writes no
+        ended record, so its attempt still reads `active` while its standing
+        says otherwise, and treating that as live would strand the directory.
+        """
+        status = self.attempt_status(attempt)
+        if status is None:
+            return True
+        if status["status"] == "ended":
+            return True
+        return status["keeper_standing"] != "live"
+
+    def reclaim_orphans(self, keep=None):
+        """Step 2's reclaim pass, driven through the asset's own `status` call.
+
+        Two readings gate the removal, and both come out of that one call: is
+        this attempt over, and is anything it started still running.
         """
         runtime = self.runtime_worktrees()
-        reclaimed = []
+        reclaimed, retained = [], []
         if not runtime.is_dir():
             return reclaimed
         for sibling in sorted(runtime.iterdir()):
-            if sibling.name == keep:
+            if sibling.name == keep or not self.attempt_is_over(sibling.name):
                 continue
-            if self.attempt_state(sibling.name) == "active":
+            status = self.attempt_status(sibling.name)
+            if status is not None and status["unfinished_launches"]:
+                retained.append((sibling.name, status["unfinished_launches"]))
                 continue
             self.cleanup_worktree(sibling / "tree")
             reclaimed.append(sibling.name)
         self.sh('git -C "$ROOT" worktree prune')
+        self.retained_orphans = retained
         return reclaimed
 
     def first_parent_history(self, count):
@@ -4429,7 +4486,7 @@ class OrphanReclaim(WorkflowRunCase):
         self.assertIn("is not a working tree", removal.stderr)
         self.assertFalse(review_root.exists())
 
-    def cancel_after(self, stage):
+    def cancel_after(self, stage, terminate=True):
         """Register, claim, create `stage`'s resources, then end the session.
 
         No cleanup step of the cancelled invocation's runs -- which is the
@@ -4444,9 +4501,10 @@ class OrphanReclaim(WorkflowRunCase):
         review_wt = None
         if stage == "pinned":
             _, review_wt = self.workflow.pin(attempt=registration["attempt"])
-        self.workflow.hook(
-            "SessionEnd", session="session-a", invocation="invocation-1"
-        )
+        if terminate:
+            self.workflow.hook(
+                "SessionEnd", session="session-a", invocation="invocation-1"
+            )
         return registration, claimed, attempt_dir, inventory, review_wt
 
     def assert_cancellation_completes_without_a_tool_call(self, registration, claimed):
@@ -4549,6 +4607,110 @@ class OrphanReclaim(WorkflowRunCase):
             e2e_git(self.workflow.root, "worktree", "list", "--porcelain"),
         )
         self.workflow.remove_pin(own_wt)
+        self.workflow.complete_attempt(successor["attempt"])
+
+    def test_a_survivor_keeps_its_directory_until_it_exits(self):
+        # Round 5's blocker, answered through the interface it asked for. A
+        # wrapped command that outlives a cancelled attempt is the one thing
+        # that must stop the reclaim pass: deleting the worktree it is working
+        # in is what nothing later repairs. The command here is backgrounded --
+        # its tool call finishes at once -- which is exactly the survivor
+        # `exempt_launches` cannot name and `unfinished_launches` can.
+        registration, claimed, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        command = (
+            f'python3 {self.workflow.liveness_path} run --root {self.workflow.docs} '
+            f'--attempt {registration["attempt"]} --launch build -- make test'
+        )
+        self.workflow.hook(
+            "PreToolUse",
+            session="session-a",
+            invocation="invocation-1",
+            command=command,
+            tool_use_id="tool-bg",
+        )
+        child = subprocess.Popen(
+            [
+                sys.executable, str(self.workflow.liveness_path), "run",
+                "--root", str(self.workflow.docs),
+                "--attempt", registration["attempt"], "--launch", "build", "--",
+                sys.executable, "-c", "import time; time.sleep(600)",
+            ],
+            env=self.workflow.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.workflow.pids.append(child.pid)
+        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait()))
+        self.workflow.hook(
+            "PostToolUse",
+            session="session-a",
+            invocation="invocation-1",
+            command=command,
+            tool_use_id="tool-bg",
+        )
+        e2e_wait(
+            lambda: self.workflow.attempt_status(registration["attempt"])[
+                "unfinished_launches"
+            ]
+            == ["build"],
+            "the survivor was never reported unfinished",
+        )
+        # The attempt is over and the exemption has lapsed, so every other
+        # signal says reclaim it.
+        self.assertTrue(self.workflow.attempt_is_over(registration["attempt"]))
+        self.assertEqual(
+            self.workflow.attempt_status(registration["attempt"])["exempt_launches"], []
+        )
+
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertEqual(
+            self.workflow.retained_orphans, [(registration["attempt"], ["build"])]
+        )
+        self.assertTrue(review_wt.is_dir())
+
+        # Once the command exits, the same pass takes it.
+        child.kill()
+        child.wait(timeout=E2E_SETTLE)
+        e2e_wait(
+            lambda: self.workflow.attempt_status(registration["attempt"])[
+                "unfinished_launches"
+            ]
+            == [],
+            "the launch stayed unfinished after its process exited",
+        )
+        self.assertEqual(
+            self.workflow.reclaim_orphans(keep=successor["attempt"]),
+            [registration["attempt"]],
+        )
+        self.assertFalse(attempt_dir.exists())
+        self.workflow.complete_attempt(successor["attempt"])
+
+    def test_a_killed_keeper_leaves_an_attempt_that_still_reads_active(self):
+        # The other half: a keeper killed outright writes no ended record, so
+        # its attempt reads `active` forever. Reading that alone as "still
+        # running" strands the directory, which is why the asset's rule looks
+        # at the keeper's standing too.
+        registration, claimed, attempt_dir, _, review_wt = self.cancel_after(
+            "pinned", terminate=False
+        )
+        os.kill(registration["keeper_pid"], signal.SIGKILL)
+        e2e_wait(
+            lambda: not self.workflow.running(registration["keeper_pid"]),
+            "the keeper survived a kill",
+        )
+        status = self.workflow.attempt_status(registration["attempt"])
+        self.assertEqual(status["status"], "active")
+        self.assertNotEqual(status["keeper_standing"], "live")
+        self.assertTrue(self.workflow.attempt_is_over(registration["attempt"]))
+
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(
+            self.workflow.reclaim_orphans(keep=successor["attempt"]),
+            [registration["attempt"]],
+        )
+        self.assertFalse(attempt_dir.exists())
         self.workflow.complete_attempt(successor["attempt"])
 
     def test_an_already_tracked_finding_is_recordable_as_findings(self):
@@ -5053,15 +5215,9 @@ class AdapterIntegration(WorkflowRunCase):
         return False
 
     def attempt_status(self, attempt):
-        completed = subprocess.run(
-            [
-                sys.executable, str(self.workflow.liveness_path), "status",
-                "--root", str(self.workflow.docs), "--attempt", attempt,
-            ],
-            capture_output=True, text=True, env=self.workflow.env, timeout=60,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        return json.loads(completed.stdout)
+        status = self.workflow.attempt_status(attempt)
+        self.assertIsNotNone(status, attempt)
+        return status
 
 
 class PackagedConsistencyTests(unittest.TestCase):

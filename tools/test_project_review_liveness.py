@@ -482,6 +482,71 @@ class WrappedCommands(AdapterCase):
         self.assertIsNone(wrapped.poll(), "the surviving command should still be running")
         self.assertEqual(self.ended(attempt)["reason"], "silence")
 
+    def test_a_survivor_the_exemption_cannot_name_is_still_reported_unfinished(self):
+        # Issue #684. `exempt_launches` answers "what keeps the keeper alive"
+        # and therefore skips a launch whose tool call has finished -- which is
+        # precisely the runtime-backgrounded command that outlives a cancelled
+        # attempt, and on Claude Code its finish event arrives about 80 ms after
+        # it starts. A caller about to delete the attempt's working directory
+        # needs the other question answered, so `unfinished_launches` ignores
+        # the finish record and reports the process.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        command = self.run_command_text(attempt, "background")
+        self.hook(self.payload("PreToolUse", tool_use_id="tool-bg", command=command))
+        wrapped = self.wrapper(attempt, "background", 600)
+        self.hook(self.payload("PostToolUse", tool_use_id="tool-bg", command=command))
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == ["background"],
+            "the surviving launch was never reported unfinished",
+        )
+        self.assertEqual(self.status(attempt)["exempt_launches"], [])
+        # It stays reported after the attempt ends, which is when a reclaim
+        # pass asks: an ended attempt whose command is still running is exactly
+        # the one whose directory must not be removed.
+        self.wait_keeper_gone(registration, timeout=SILENCE + SETTLE)
+        ended = self.status(attempt)
+        self.assertEqual(ended["status"], "ended")
+        self.assertEqual(ended["unfinished_launches"], ["background"])
+        self.assertIsNone(wrapped.poll(), "the surviving command should still be running")
+        # And once the command is gone, so is the report -- the directory is
+        # then free to reclaim.
+        wrapped.kill()
+        wrapped.wait(timeout=SETTLE)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == [],
+            "the launch stayed unfinished after its process exited",
+        )
+
+    def test_an_unreadable_or_foreign_launch_record_fails_closed(self):
+        # The exemption fails open on a record it cannot place, because a
+        # launch it cannot verify must not hold the silence window open.
+        # Cleanup needs the opposite: "not known to be gone" keeps the
+        # directory, because deleting a worktree a live process is working in
+        # is the one outcome nothing later can repair.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        directory = Path(registration["records"]) / "launches"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "unreadable.wrapper.json").write_text("{not json", encoding="utf-8")
+        (directory / "foreign.wrapper.json").write_text(
+            json.dumps({"host": "another-host.invalid", "pid": 1, "at": time.time()}),
+            encoding="utf-8",
+        )
+        (directory / "gone.wrapper.json").write_text(
+            json.dumps({"host": LEDGER.socket.gethostname(), "pid": self.exited_pid(), "at": time.time()}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.status(attempt)["unfinished_launches"], ["foreign", "unreadable"]
+        )
+        self.assertEqual(self.status(attempt)["exempt_launches"], [])
+
+    def exited_pid(self):
+        process = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+        process.wait(timeout=SETTLE)
+        return process.pid
+
     def test_an_unconnected_or_reused_launch_gets_no_exemption(self):
         registration = self.registered()
         attempt = registration["attempt"]

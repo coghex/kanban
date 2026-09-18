@@ -2287,7 +2287,16 @@ A registration refusal stops that run before any claim.
   - `run --root <path> --attempt <id> --launch <label> -- <command…>` runs a
     long command as an exempt launch and exits with its status.
   - `complete --root <path> --attempt <id>` ends an attempt.
-  - `status --root <path> --attempt <id>` reports its state.
+  - `status --root <path> --attempt <id>` reports its state, and answers two
+    different questions about the commands `run` started. `exempt_launches`
+    names the ones holding the silence window open, which skips any launch
+    whose tool call has finished. `unfinished_launches` names the ones whose
+    recorded wrapper process is not known to be gone, finished or not, and
+    fails closed on a record it cannot read or a wrapper on another host. The
+    second is what a caller about to delete that attempt's working directory
+    asks: the runtime-backgrounded command that outlives a cancelled attempt is
+    exactly the one the first can never name, because Claude Code reports its
+    call finished about eighty milliseconds after it starts.
 
   A refusal exits 2 with `refused (<reason>)` on standard error.
 - **Refusals before any claim:** `register` refuses before it starts a keeper.

@@ -286,12 +286,28 @@ recoverable rather than merely harmless. Each directory beside yours under
 python3 "$LIVENESS" status --root "$DOCS_WT" --attempt "$SIBLING"
 ```
 
-A sibling whose attempt reports `"status": "ended"` — or whose attempt the
-adapter refuses as unknown, which is what an attempt pruned after seven days
-looks like — belongs to an invocation that is over. Remove its worktree and its
-directory exactly as step 9 does, then run `git -C "$ROOT" worktree prune` to
-clear any record left naming it, and say how many you reclaimed. One reporting
-`"status": "active"` belongs to a live invocation somewhere: leave it alone.
+**An attempt is over** when `status` reports `"status": "ended"`; when it
+reports `"status": "active"` but a `keeper_standing` other than `live`, which is
+what a keeper killed outright leaves behind — it writes no ended record, so
+reading `active` alone would strand that directory for good; or when the adapter
+refuses it as `attempt-unknown`, which is what an attempt pruned after seven
+days looks like. An `active` attempt with a live keeper belongs to an invocation
+running somewhere: leave it alone.
+
+**An attempt that is over is still not reclaimable while one of its commands is
+running.** `status` answers that separately: `unfinished_launches` names every
+wrapped launch whose process is not known to be gone, whether or not its tool
+call finished — which is the question that matters here, because the command
+that outlives a cancelled attempt is a backgrounded one, and `exempt_launches`
+is built to skip exactly those. A non-empty `unfinished_launches` means
+something is still working in that worktree: **leave the directory alone**,
+report it by path with the labels still running, and let a later invocation or
+/janitor take it once they have stopped. Deleting a worktree out from
+under a live process is the one outcome nothing later can repair.
+
+Reclaim the rest: remove each one's worktree and directory exactly as step 9
+does, then run `git -C "$ROOT" worktree prune` to clear any record left naming
+them, and say how many you reclaimed and how many you retained and why.
 
 **A refusal here stops the run before any claim.** `runtime-unavailable`,
 `runtime-unsupported`, `hooks-not-observed`, `hooks-incomplete`, `hooks-disabled`,
