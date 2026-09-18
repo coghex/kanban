@@ -24,9 +24,13 @@ the $project-review history audit, the $drain-prs drainer control surface, the
 $fix approved-pull-request workflow, the $finalize manual merge fallback, which
 had no Codex copy at all before that slice rendered one, the $janitor pipeline
 housekeeping audit, and — issue #576, the eighth and last of that arc — the
-$autosolve autonomous solve-and-review loop.
+$autosolve autonomous solve-and-review loop. Issue #685 then added
+$auto-project-review, which is not part of that arc at all: it vendors no
+personal copy, and is authored against the same mechanism to give
+docs/designs/project_review_ledger_design.md's D-6 the serial repetition the
+single-review workflow deliberately does not perform.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
-(all twenty-four); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
+(all twenty-five); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
 own Haskell code spawns by name (the five above). Every later set is user- or
 daemon-invoked and deliberately excluded from that parity pinning; the
 breadth workflow /draft-issues is Claude-only and has no Codex counterpart here
@@ -239,6 +243,22 @@ JANITOR_SKILL_NAMES = {"janitor"}
 # authored. Its behavioral assertions live in tools/test_autosolve_workflow.py.
 AUTOSOLVE_SKILL_NAMES = {"autosolve"}
 
+# The serial history audit added by issue #685, slice LEDGER-7 of
+# docs/designs/project_review_ledger_design.md. Rendered from
+# tools/command_sources/auto-project-review.md the way the ten sets above
+# are, and like them user-invoked and excluded from Haskell name parity.
+# It is its own category rather than a second $project-review name because
+# the two divide one job along design D-6's line: the single workflow
+# reviews exactly one merged pull request and starts no other, and this one
+# repeats it a counted or open-ended number of times while performing no
+# review, ledger write, claim, or cleanup itself. That makes it the second
+# skill in the bundle whose whole body is a loop over another -- the first
+# being $autosolve, which this deliberately mirrors -- and the one whose two
+# renderings are identical outside the argument convention, because nothing
+# it says depends on which brand is running it. Its behavioral assertions
+# live in tools/test_auto_project_review_workflow.py.
+AUTO_PROJECT_REVIEW_SKILL_NAMES = {"auto-project-review"}
+
 # What a Codex installation must actually discover under skills/.
 EXPECTED_SKILL_NAMES = (
     HASKELL_PARITY_SKILL_NAMES
@@ -253,6 +273,7 @@ EXPECTED_SKILL_NAMES = (
     | FINALIZE_SKILL_NAMES
     | JANITOR_SKILL_NAMES
     | AUTOSOLVE_SKILL_NAMES
+    | AUTO_PROJECT_REVIEW_SKILL_NAMES
 )
 
 # Directories under skills/ that ship helper scripts and NO SKILL.md, so Codex
@@ -611,7 +632,8 @@ class SkillDiscoveryTests(unittest.TestCase):
             | PULL_REQUEST_FIX_SKILL_NAMES
             | FINALIZE_SKILL_NAMES
             | JANITOR_SKILL_NAMES
-            | AUTOSOLVE_SKILL_NAMES,
+            | AUTOSOLVE_SKILL_NAMES
+            | AUTO_PROJECT_REVIEW_SKILL_NAMES,
         )
         self.assertEqual(DRAFTING_SKILL_NAMES & DOCUMENT_SKILL_NAMES, set())
         self.assertEqual(ROADMAP_SKILL_NAMES & DRAFTING_SKILL_NAMES, set())
@@ -702,6 +724,27 @@ class SkillDiscoveryTests(unittest.TestCase):
                 | PULL_REQUEST_FIX_SKILL_NAMES
                 | FINALIZE_SKILL_NAMES
                 | JANITOR_SKILL_NAMES
+            ),
+            set(),
+        )
+        # And the serial loop is disjoint from all of them too, for the
+        # mirrored reason: $project-review is already a category here, and
+        # this skill's whole body is a loop over that one.
+        self.assertEqual(
+            AUTO_PROJECT_REVIEW_SKILL_NAMES
+            & (
+                HASKELL_PARITY_SKILL_NAMES
+                | DRAFTING_SKILL_NAMES
+                | DOCUMENT_SKILL_NAMES
+                | ROADMAP_SKILL_NAMES
+                | PUBLICATION_SKILL_NAMES
+                | BACKLOG_SKILL_NAMES
+                | PROJECT_REVIEW_SKILL_NAMES
+                | DRAINER_SKILL_NAMES
+                | PULL_REQUEST_FIX_SKILL_NAMES
+                | FINALIZE_SKILL_NAMES
+                | JANITOR_SKILL_NAMES
+                | AUTOSOLVE_SKILL_NAMES
             ),
             set(),
         )
@@ -2135,7 +2178,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-four as one that reads only the
+    short description must see the same twenty-five as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

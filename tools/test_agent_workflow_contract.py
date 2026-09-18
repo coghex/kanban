@@ -425,6 +425,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
     "codex-plugin/plugins/kanban/skills/janitor/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
@@ -469,6 +470,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/finalize.md",
     "claude-plugin/plugins/kanban/commands/janitor.md",
     "claude-plugin/plugins/kanban/commands/autosolve.md",
+    "claude-plugin/plugins/kanban/commands/auto-project-review.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -689,6 +691,21 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "find",
         "head",
     },
+}
+
+# Issue #685's serial loop over that same audit, pinned to the empty set --
+# and the empty set is the whole assertion. Design D-6 keeps every step of a
+# review in the single workflow, so this one resolves no helper, reads no
+# repository, and spells no external command at all: the only fenced block in
+# either rendering is the assignment that carries the count. That is why it
+# joins no `files` column in section 4's manifest, where `project-review`
+# appears in ten rows. An extractor that recovered anything here would mean
+# the automation had started doing work of its own, and a manifest row naming
+# it would mean the same, so both are checked -- the discovery below, and the
+# absence of the path from every executable row.
+AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
+    "claude-plugin/plugins/kanban/commands/auto-project-review.md": set(),
+    "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md": set(),
 }
 
 # Issue #548's cursor helper and issue #680's ledger helper, vendored into both
@@ -2984,6 +3001,63 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
+
+    def test_the_auto_project_review_assets_reach_no_command_at_all(self):
+        # Issue #685. The serial loop's own surface, and the one asset pair in
+        # either bundle whose pinned command set is empty. That is design D-6
+        # read from the packaging side: every step of a review -- the
+        # inventory, the registration, the claim, the pinned worktree, the
+        # report, the checkpoint and the cleanup -- stays in the single
+        # workflow, so the loop over it resolves no helper and shells out for
+        # nothing. Both halves are asserted, because an emptiness that rested
+        # on an extractor alone would pass over an asset that had started
+        # running things: the discovery must be empty, AND no executable row
+        # may name either path, which is how a `python3 "$LEDGER" record` added
+        # here later fails twice rather than once.
+        for relative_path in sorted(AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS):
+            self.assertTrue(
+                relative_path in PLUGIN_SURFACE_FILES
+                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
+                f"{relative_path} is not scanned by any plugin surface list",
+            )
+            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertEqual(
+                discovered_commands_for_plugin_file(relative_path, content),
+                AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS[relative_path],
+                relative_path,
+            )
+            declaring = [
+                row["id"]
+                for row in self.manifest
+                if relative_path in row["files"]
+            ]
+            self.assertEqual(declaring, [], f"{relative_path}: {declaring}")
+
+    def test_the_empty_command_set_is_an_extractor_that_still_works(self):
+        # Non-vacuity for the pair above: the same extractor, over the same
+        # kind of file, recovers the delegate's own commands. An extractor
+        # that had stopped matching would report every asset as reaching
+        # nothing, and the assertion above would pass while asserting it.
+        delegate = "claude-plugin/plugins/kanban/commands/project-review.md"
+        content = (REPO_ROOT / delegate).read_text(encoding="utf-8")
+        self.assertEqual(
+            discovered_commands_for_plugin_file(delegate, content),
+            PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS[delegate],
+        )
+        # And a planted invocation in the loop's own text is recovered too, so
+        # the empty set above is a fact about the asset rather than about the
+        # path it is read from.
+        planted = (
+            REPO_ROOT
+            / "claude-plugin/plugins/kanban/commands/auto-project-review.md"
+        ).read_text(encoding="utf-8") + '\n```bash\npython3 "$LEDGER" record\n```\n'
+        self.assertEqual(
+            discovered_commands_for_plugin_file(
+                "claude-plugin/plugins/kanban/commands/auto-project-review.md",
+                planted,
+            ),
+            {"python3"},
+        )
 
     def test_the_vendored_project_review_helpers_are_scanned_and_declared(self):
         # The counterpart of the two vendored-helper pins above. Each copy is a

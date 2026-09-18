@@ -27,13 +27,18 @@ post-#239 tracked Codex skills; issue #328 completed the report side with
 the /project-review history audit, the /drain-prs drainer control surface, the
 /fix approved-pull-request workflow, the /finalize manual merge fallback, the
 /janitor pipeline housekeeping audit, and -- issue #576, the eighth and last of
-that arc -- the /autosolve autonomous solve-and-review loop.
+that arc -- the /autosolve autonomous solve-and-review loop. Issue #685 then
+added /auto-project-review, which is not part of that arc at all: it vendors no
+personal copy, and is authored against the same mechanism to give
+docs/designs/project_review_ledger_design.md's D-6 the serial repetition the
+single-review workflow deliberately does not perform.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
-commands directory (all twenty-five); HASKELL_PARITY_COMMAND_NAMES is the
+commands directory (all twenty-six); HASKELL_PARITY_COMMAND_NAMES is the
 strictly smaller set Kanban's own Haskell code spawns by name (the five
 above). The drafting, document, roadmap, documentation-landing,
 backlog-audit, history-audit, drainer-control, approved-pull-request,
-manual-finalization, pipeline-housekeeping, and autonomous solve-and-review
+manual-finalization, pipeline-housekeeping, autonomous solve-and-review, and
+serial history-audit
 workflows
 are user- or daemon-invoked and are deliberately excluded from that parity
 pinning; see
@@ -260,6 +265,22 @@ JANITOR_COMMAND_NAMES = {"janitor"}
 # authored. Its behavioral assertions live in tools/test_autosolve_workflow.py.
 AUTOSOLVE_COMMAND_NAMES = {"autosolve"}
 
+# The serial history audit added by issue #685, slice LEDGER-7 of
+# docs/designs/project_review_ledger_design.md. Rendered from
+# tools/command_sources/auto-project-review.md the way the nine sets above
+# are, and like them user-invoked and excluded from Haskell name parity.
+# It is its own category rather than a second /project-review name because
+# the two divide one job along design D-6's line: the single workflow
+# reviews exactly one merged pull request and starts no other, and this one
+# repeats it a counted or open-ended number of times while performing no
+# review, ledger write, claim, or cleanup itself. That makes it the second
+# command in the bundle whose whole body is a loop over another -- the first
+# being /autosolve, which this deliberately mirrors -- and the one whose two
+# renderings are identical outside the argument convention, because nothing
+# it says depends on which brand is running it. Its behavioral assertions
+# live in tools/test_auto_project_review_workflow.py.
+AUTO_PROJECT_REVIEW_COMMAND_NAMES = {"auto-project-review"}
+
 # What a Claude Code installation must actually discover in commands/.
 EXPECTED_COMMAND_NAMES = (
     HASKELL_PARITY_COMMAND_NAMES
@@ -274,6 +295,7 @@ EXPECTED_COMMAND_NAMES = (
     | FINALIZE_COMMAND_NAMES
     | JANITOR_COMMAND_NAMES
     | AUTOSOLVE_COMMAND_NAMES
+    | AUTO_PROJECT_REVIEW_COMMAND_NAMES
 )
 
 # Keys that would let a packaged command's frontmatter or manifest silently
@@ -422,7 +444,8 @@ class CommandDiscoveryTests(unittest.TestCase):
             | PULL_REQUEST_FIX_COMMAND_NAMES
             | FINALIZE_COMMAND_NAMES
             | JANITOR_COMMAND_NAMES
-            | AUTOSOLVE_COMMAND_NAMES,
+            | AUTOSOLVE_COMMAND_NAMES
+            | AUTO_PROJECT_REVIEW_COMMAND_NAMES,
         )
         self.assertEqual(DRAFTING_COMMAND_NAMES & DOCUMENT_COMMAND_NAMES, set())
         self.assertEqual(ROADMAP_COMMAND_NAMES & DRAFTING_COMMAND_NAMES, set())
@@ -513,6 +536,27 @@ class CommandDiscoveryTests(unittest.TestCase):
                 | PULL_REQUEST_FIX_COMMAND_NAMES
                 | FINALIZE_COMMAND_NAMES
                 | JANITOR_COMMAND_NAMES
+            ),
+            set(),
+        )
+        # And the serial loop is disjoint from all of them too, for the
+        # mirrored reason: /project-review is already a category here, and
+        # this command's whole body is a loop over that one.
+        self.assertEqual(
+            AUTO_PROJECT_REVIEW_COMMAND_NAMES
+            & (
+                HASKELL_PARITY_COMMAND_NAMES
+                | DRAFTING_COMMAND_NAMES
+                | DOCUMENT_COMMAND_NAMES
+                | ROADMAP_COMMAND_NAMES
+                | PUBLICATION_COMMAND_NAMES
+                | BACKLOG_COMMAND_NAMES
+                | PROJECT_REVIEW_COMMAND_NAMES
+                | DRAINER_COMMAND_NAMES
+                | PULL_REQUEST_FIX_COMMAND_NAMES
+                | FINALIZE_COMMAND_NAMES
+                | JANITOR_COMMAND_NAMES
+                | AUTOSOLVE_COMMAND_NAMES
             ),
             set(),
         )

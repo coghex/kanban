@@ -2393,6 +2393,49 @@ A registration refusal stops that run before any claim.
   registers nothing. A session that never registers an attempt pays a short hook
   process on each tool event and writes nothing.
 
+### 2.14 Serial project review (`$auto-project-review` / `/auto-project-review`)
+
+The repetition §2.13's caller deliberately does not perform (issue #685,
+design `docs/designs/project_review_ledger_design.md` D-6, D-12 and D-17). One
+`project-review` invocation reviews exactly one merged pull request and starts
+no other; this workflow is what runs that invocation a counted or open-ended
+number of times.
+
+- **Owning source:** `tools/command_sources/auto-project-review.md`, rendered
+  into `claude-plugin/plugins/kanban/commands/auto-project-review.md` and
+  `codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md` by
+  `tools/render_command_sources.py`. User-invoked only; no Kanban action
+  spawns it, and nothing schedules it.
+- **Authority:** none of its own. Every step of an iteration is
+  `project-review`'s — the merged-pull-request inventory, the liveness
+  registration §2.13 describes, the claim and its lease, the pinned worktree,
+  the report the ledger allocates, the `record` checkpoint, and the every-exit
+  cleanup. This workflow takes no claim, writes no ledger, allocates no
+  report, commits nothing, pushes nothing, and creates or edits no tracker
+  issue. It is therefore the one packaged workflow that names no external
+  executable at all, and it appears in no `files` column of §4's manifest;
+  `tools/test_agent_workflow_contract.py` pins that emptiness from both sides.
+- **Argument:** one nonnegative decimal integer, or none. `N` runs at most `N`
+  iterations, `0` delegates nothing, and an absent argument runs open-ended
+  until the user stops the run. Anything else — a negative number, a fraction,
+  a second argument, any other text — is refused before the first iteration.
+- **Counting:** an iteration counts toward `N` only when the delegate reported
+  a successfully recorded completed review, `clean` or `findings` alike. An
+  iteration that ended any other way is not counted and ends the run, and no
+  iteration begins until the one before it has ended. One of those endings —
+  a cleanup that failed after `record` published its checkpoint — leaves a
+  completed row behind all the same. It still does not count and still ends the
+  run; what it adds is a disclosure, never an exception.
+- **Stops:** the count is reached; the delegate reports
+  `"status": "no-selectable-row"`, which is an ordinary end rather than a
+  failure; the user stops an open-ended run; or an iteration did not record a
+  review. Every one of them ends with a progress report naming the recorded
+  count against the target, each reviewed pull request with its outcome,
+  verification commit and report path or existing-finding links, any review the
+  uncounted last iteration had already recorded together with every path the
+  delegate retained, and the reason the run ended.
+- **Mandatory/optional:** optional, and it starts no run of its own accord.
+
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
