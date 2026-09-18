@@ -27,7 +27,7 @@ housekeeping audit, and — issue #576, the eighth and last of that arc — the
 $autosolve autonomous solve-and-review loop. Issue #685 then added
 $auto-project-review, which is not part of that arc at all: it vendors no
 personal copy, and is authored against the same mechanism to give
-docs/project_review_ledger_design.md's D-6 the serial repetition the
+docs/designs/project_review_ledger_design.md's D-6 the serial repetition the
 single-review workflow deliberately does not perform.
 EXPECTED_SKILL_NAMES is what a Codex installation must find under skills/
 (all twenty-five); HASKELL_PARITY_SKILL_NAMES is the strictly smaller set Kanban's
@@ -244,7 +244,7 @@ JANITOR_SKILL_NAMES = {"janitor"}
 AUTOSOLVE_SKILL_NAMES = {"autosolve"}
 
 # The serial history audit added by issue #685, slice LEDGER-7 of
-# docs/project_review_ledger_design.md. Rendered from
+# docs/designs/project_review_ledger_design.md. Rendered from
 # tools/command_sources/auto-project-review.md the way the ten sets above
 # are, and like them user-invoked and excluded from Haskell name parity.
 # It is its own category rather than a second $project-review name because
@@ -2178,7 +2178,7 @@ class ManifestListingParityTests(unittest.TestCase):
     without describing it fails here.
 
     Parity is per field, not pooled: an installation that reads only the
-    short description must see the same twenty-four as one that reads only the
+    short description must see the same twenty-five as one that reads only the
     keywords. Non-workflow metadata -- the `kanban` keyword, the display
     name, developer, category, and capabilities -- is not a listing and is
     left alone.

@@ -2396,7 +2396,7 @@ A registration refusal stops that run before any claim.
 ### 2.14 Serial project review (`$auto-project-review` / `/auto-project-review`)
 
 The repetition §2.13's caller deliberately does not perform (issue #685,
-design `docs/project_review_ledger_design.md` D-6, D-12 and D-17). One
+design `docs/designs/project_review_ledger_design.md` D-6, D-12 and D-17). One
 `project-review` invocation reviews exactly one merged pull request and starts
 no other; this workflow is what runs that invocation a counted or open-ended
 number of times.

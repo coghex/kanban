@@ -353,7 +353,7 @@ COMMAND_SOURCES = (
         claude_commands_dir=CLAUDE_COMMANDS_DIR,
         codex_skills_dir=CODEX_SKILLS_DIR,
         note=(
-            "LEDGER-7 of docs/project_review_ledger_design.md, and the first "
+            "LEDGER-7 of docs/designs/project_review_ledger_design.md, and the first "
             "entry in this registry with no personal copy behind it at all: "
             "design D-6 assigns repetition to a workflow that did not exist "
             "in either bundle, so both brands' assets are authored by "

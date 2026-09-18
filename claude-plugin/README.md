@@ -362,7 +362,7 @@ runs) checks that:
   and the five Kanban spawns exactly match the `/`-prefixed tokens
   `src/Kanban/Solve.hs` and `src/Kanban/PullRequestFlow.hs` actually spawn —
   two separate assertions, since Kanban's Haskell code must *not* spawn the
-  twenty user-invoked commands;
+  twenty-one user-invoked commands;
 - the Codex-only document-workflow set is empty, so no counterpart is withheld
   from this bundle;
 - no packaged manifest sets model/effort/permission-mode/working-directory

@@ -3,7 +3,7 @@
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_auto_project_review_workflow.py
 
-Issue #685, slice LEDGER-7 of `docs/project_review_ledger_design.md`. It
+Issue #685, slice LEDGER-7 of `docs/designs/project_review_ledger_design.md`. It
 follows `tools/test_autosolve_workflow.py`, the only other rendered asset whose
 whole body is a loop over another workflow: the asset is the program an agent
 executes, so what it claims is pinned as behavior rather than left to a

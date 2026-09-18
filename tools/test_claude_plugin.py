@@ -30,7 +30,7 @@ the /project-review history audit, the /drain-prs drainer control surface, the
 that arc -- the /autosolve autonomous solve-and-review loop. Issue #685 then
 added /auto-project-review, which is not part of that arc at all: it vendors no
 personal copy, and is authored against the same mechanism to give
-docs/project_review_ledger_design.md's D-6 the serial repetition the
+docs/designs/project_review_ledger_design.md's D-6 the serial repetition the
 single-review workflow deliberately does not perform.
 EXPECTED_COMMAND_NAMES is what a Claude Code installation must find in the
 commands directory (all twenty-six); HASKELL_PARITY_COMMAND_NAMES is the
@@ -266,7 +266,7 @@ JANITOR_COMMAND_NAMES = {"janitor"}
 AUTOSOLVE_COMMAND_NAMES = {"autosolve"}
 
 # The serial history audit added by issue #685, slice LEDGER-7 of
-# docs/project_review_ledger_design.md. Rendered from
+# docs/designs/project_review_ledger_design.md. Rendered from
 # tools/command_sources/auto-project-review.md the way the nine sets above
 # are, and like them user-invoked and excluded from Haskell name parity.
 # It is its own category rather than a second /project-review name because
