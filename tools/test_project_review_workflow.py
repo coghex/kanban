@@ -395,6 +395,55 @@ INVENTORY_RULES = {
 
 # Requirement 1: one review per successful invocation, and the three
 # unsuccessful outcomes that complete zero and enter nothing.
+# Requirement 7 and round 7's blocker: a direct request must not travel the
+# PR-only prelude. The ledger read and the migration are what would create a
+# ledger in a repository that has never had one, just for a cursor-only batch.
+MODE_DISPATCH = {
+    "the mode is decided first": (
+        "**Decide the mode here, and take only that mode's path.** PR mode is "
+        "the default. Direct-commit mode happens only when the user asked for "
+        "it explicitly in this turn, and when they did, **none of the PR-mode "
+        "steps run at all** — not the ledger read, not the migration, not the "
+        "inventory, and not the liveness registration."
+    ),
+    "why that is correctness": (
+        "That is a correctness rule, not tidiness. Direct mode is the "
+        "cursor's; a repository that has never had a ledger must not acquire "
+        "one by being asked for a direct batch, and a bundle whose ledger "
+        "module or liveness adapter could not be resolved must not be blocked "
+        "from a mode that needs neither."
+    ),
+    "a direct request skips every numbered step": (
+        "**An explicit direct request:** resolve `$CURSOR` below and the docs "
+        'worktree, then go straight to "Direct-commit mode — explicit request '
+        'only" and do everything there. Skip every numbered step.'
+    ),
+    "each mode needs only its own helpers": (
+        "**An unresolvable helper stops the run here, before the first read** "
+        "— but only the ones this invocation's mode actually uses. PR mode "
+        "needs `$LEDGER` and `$LIVENESS`; direct mode needs `$CURSOR` and "
+        "neither of the others, so a missing ledger module or adapter is no "
+        "reason to refuse a direct batch."
+    ),
+    "the migration is pr mode's alone": (
+        "**PR mode only.** A direct request reached the direct section above "
+        "and never arrives here; that is what keeps a cursor-only batch from "
+        "creating a ledger."
+    ),
+    "an empty inventory stops before registering": (
+        "**A listing with no pull requests in it at all stops the run here**, "
+        "before step 2. A repository that has merged nothing has nothing for "
+        "this workflow to review, and registering an attempt for it would "
+        "start a keeper, write the adapter's records, and make a directory, "
+        "all to discover that in step 3."
+    ),
+    "that exit owes nothing either": (
+        "Say the repository has no merged pull requests and stop; like a "
+        "failed page, this exit owes step 9 nothing, because nothing was "
+        "created."
+    ),
+}
+
 ONE_REVIEW = {
     "one per invocation": (
         "**One pull request per invocation.** A successful run in the default "
@@ -754,10 +803,18 @@ CLEANUP = {
         "A command started through the wrapper is the exception in both "
         "directions: it holds its launch exempt from that window while it "
         "runs, and the runtime does not reliably kill it — on Claude Code "
-        "2.1.276 an interrupted foreground command keeps going. So a "
-        "cancellation with a wrapped command still running is bounded by that "
-        "command, not by the window, and the reclaim pass is what refuses to "
-        "remove its directory meanwhile."
+        "2.1.276 an interrupted foreground command keeps going."
+    ),
+    "its finish refreshes the window rather than ending it": (
+        "When that command finally exits, its tool-finish event is itself a "
+        "progress event, so it **refreshes** the silence window rather than "
+        "ending it: the keeper then waits that window out afresh, plus a poll, "
+        "before the lease starts running down."
+    ),
+    "the whole bound, named": (
+        "The bound is the command's remaining run time, plus a silence window, "
+        "plus a keeper poll, plus the expiry — or the end of the session, "
+        "whichever comes first."
     ),
     "the lease lapses and the row becomes claimable": (
         "*The claim.* Renewal stops with the keeper, so the lease runs out and "
@@ -770,20 +827,25 @@ CLEANUP = {
         "longer owns the claim, so its `record`, its allocation and its "
         "release are all refused."
     ),
-    "the reclaim pass owns the directory": (
-        "*The directory.* Step 2's reclaim pass removes the directory of every "
-        "attempt the adapter reports as over, which is exactly what a "
-        "cancelled one is."
+    "the reclaim pass takes it only when it is safe": (
+        "*The directory.* Step 2's reclaim pass takes the directory of a "
+        "cancelled attempt **once it can establish that taking it is safe** — "
+        "the keeper positively gone, and no unfinished launch — and retains "
+        "it, by name and with the reason, until then."
     ),
     "an orphan is identifiable and owned": (
         "That is why everything this invocation creates is named for the "
         "attempt and kept in one place: an orphan is identifiable, and the "
-        "next invocation in this repository is its owner."
+        "next invocation in this repository is its owner where it can be, and "
+        "{{cmd:janitor}} where it cannot."
     ),
-    "one invocation late rather than never": (
-        "So the honest summary is that a cancellation completes cleanup one "
-        "invocation late rather than never, and leaves nothing in a working "
-        "tree or a publishable directory in the meantime."
+    "the summary names what janitor is left": (
+        "its directory is taken by the next invocation that can prove nothing "
+        "is using it — which is the invocation after it in the ordinary case, "
+        "and an operator's `janitor` pass where the adapter can no longer "
+        "answer: an `attempt-unknown` refusal, a keeper standing that is "
+        "`unverifiable`, an unreadable launch record, or a launch still "
+        "running."
     ),
 }
 CLEANUP_COMMANDS = (
@@ -1742,8 +1804,7 @@ class LedgerWorkflowTests(unittest.TestCase):
 
     def test_an_unresolvable_helper_stops_before_the_first_read(self):
         phrase = (
-            "**An unresolvable helper stops the run here, before the first "
-            "read.** Do not substitute a copy tracked in the reviewed "
+            "Do not substitute a copy tracked in the reviewed "
             "repository, a personal copy, or a path derived from the working "
             "directory"
         )
@@ -1806,6 +1867,23 @@ class LedgerWorkflowTests(unittest.TestCase):
             for name, phrase in ONE_REVIEW.items():
                 with self.subTest(asset=relative_path, rule=name):
                     self.assertIn(flat(rendered_phrase(phrase, brand)), content)
+
+    def test_a_direct_request_skips_the_pr_only_prelude(self):
+        # Round 7's blocker: the ledger read and migration sat unconditionally
+        # ahead of the direct section, so an explicit direct request in a
+        # repository with no ledger would create one, and an unresolvable
+        # ledger module would block a mode that never uses it.
+        for relative_path, brand in BRAND_OF_ASSET.items():
+            content = flat(read(relative_path))
+            for name, phrase in MODE_DISPATCH.items():
+                with self.subTest(asset=relative_path, rule=name):
+                    self.assertIn(flat(rendered_phrase(phrase, brand)), content)
+            with self.subTest(asset=relative_path, rule="dispatch comes first"):
+                body = read(relative_path)
+                self.assertLess(
+                    body.index("## Which mode this invocation is"),
+                    body.index(LEDGER_INVOCATIONS[0]),
+                )
 
     def test_no_rendering_instructs_a_repeat_or_an_automatic_transition(self):
         for relative_path in RENDERED_ASSETS:
@@ -1897,7 +1975,7 @@ class LedgerWorkflowTests(unittest.TestCase):
                 )
 
     def test_cleanup_runs_on_every_exit_and_reports_what_it_retained(self):
-        for relative_path in RENDERED_ASSETS:
+        for relative_path, brand in BRAND_OF_ASSET.items():
             content = read(relative_path)
             flattened = flat(content)
             for command in CLEANUP_COMMANDS:
@@ -1905,7 +1983,7 @@ class LedgerWorkflowTests(unittest.TestCase):
                     self.assertIn(command, content)
             for name, phrase in CLEANUP.items():
                 with self.subTest(asset=relative_path, rule=name):
-                    self.assertIn(flat(phrase), flattened)
+                    self.assertIn(flat(rendered_phrase(phrase, brand)), flattened)
 
     def test_the_migration_stops_on_a_flagged_report(self):
         for relative_path in RENDERED_ASSETS:
@@ -3978,12 +4056,33 @@ class WorkflowRun:
         )
         return json.loads(completed.stdout)
 
+    def last_progress_at(self, attempt):
+        """The `at` the adapter's own progress record carries."""
+        record = json.loads(
+            (
+                self.common_directory()
+                / "kanban-project-review"
+                / "liveness"
+                / "attempts"
+                / attempt
+                / "progress.json"
+            ).read_text(encoding="utf-8")
+        )
+        return float(record["at"])
+
     def heartbeat_renewals(self, token):
         module = e2e_module("ledger", self.brand)
         record = module.read_heartbeat(module.git_common_directory(self.docs), token)
         return None if record is None else record["renewals"]
 
     # -- the pinned review tree
+
+    def common_directory(self):
+        return Path(
+            e2e_git(
+                self.root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+            ).strip()
+        )
 
     def runtime_worktrees(self):
         """`$RUNTIME` -- where every attempt's own directory goes."""
@@ -4404,16 +4503,37 @@ class EarlyExits(WorkflowRunCase):
         # Step 1 ran and step 2 refused, so nothing of this run is on disk.
         self.assertFalse(self.workflow.runtime_worktrees().exists())
 
-    def test_an_empty_inventory_selects_nothing_and_leaves_no_claim(self):
+    def test_an_empty_inventory_stops_before_anything_is_registered(self):
+        # Round 7's blocker. The asset stops at step 1 for a repository that
+        # has merged nothing, so the route this drives registers nothing and
+        # claims nothing -- and what is asserted is that no keeper, no adapter
+        # record and no directory came into being.
         self.workflow.merged([])
         self.assertEqual(
             self.workflow.inventory(), [{"page": 1, "limit": 100, "prs": []}]
         )
+        self.assertFalse(self.workflow.runtime_worktrees().exists())
+        liveness = (
+            self.workflow.common_directory() / "kanban-project-review" / "liveness"
+        )
+        self.assertFalse((liveness / "attempts").exists())
+        self.assertEqual(self.workflow.rows(), {})
+
+    def test_an_empty_listing_would_select_nothing_if_it_reached_the_claim(self):
+        # The helper's own answer to the listing the step above refuses to
+        # carry further, so the stop is a shortcut rather than the only thing
+        # standing between an empty repository and a claim.
+        self.workflow.merged([])
+        parsed = self.module.parse_inventory(
+            {"pages": self.workflow.inventory()}, "an empty listing"
+        )
+        self.assertEqual(parsed["listed"], [])
         registration, inventory = self.workflow.registered_inventory()
         result = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(result["status"], "no-selectable-row")
         self.assertIsNone(result["selected"])
         self.assertEqual(self.workflow.rows(), {})
+        self.workflow.complete_attempt(registration["attempt"])
 
     def test_the_scratch_removal_cannot_reach_the_working_directory(self):
         # The sharp edge of the round-1 blocker, run rather than described.
@@ -4732,6 +4852,74 @@ class OrphanReclaim(WorkflowRunCase):
         self.assertFalse(attempt_dir.exists())
         self.workflow.complete_attempt(successor["attempt"])
 
+    def test_an_unverifiable_keeper_retains_the_directory(self):
+        # Round 7's fail-closed case. A wrapper or keeper this process cannot
+        # look up -- another host, or a pid it may not signal -- is
+        # `unverifiable`, which is not `gone`. Reclaiming on it would delete a
+        # checkout on the strength of not being able to see its owner.
+        registration, _, attempt_dir, _, review_wt = self.cancel_after(
+            "pinned", terminate=False
+        )
+        # Rewrite the keeper's host so this process cannot resolve its standing.
+        attempt_json = (
+            self.workflow.common_directory()
+            / "kanban-project-review"
+            / "liveness"
+            / "attempts"
+            / registration["attempt"]
+            / "attempt.json"
+        )
+        record = json.loads(attempt_json.read_text(encoding="utf-8"))
+        record["keeper"]["host"] = "another-host.invalid"
+        attempt_json.write_text(json.dumps(record), encoding="utf-8")
+
+        status = self.workflow.attempt_status(registration["attempt"])
+        self.assertEqual(status["status"], "active")
+        self.assertEqual(status["keeper_standing"], "unverifiable")
+        self.assertEqual(
+            self.workflow.reclaim_refusal(registration["attempt"]),
+            "keeper-unverifiable",
+        )
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertEqual(
+            self.workflow.retained_orphans,
+            [(registration["attempt"], "keeper-unverifiable")],
+        )
+        self.assertTrue(review_wt.is_dir())
+        self.workflow.complete_attempt(successor["attempt"])
+
+    def test_an_attempt_the_adapter_no_longer_knows_retains_its_directory(self):
+        # The pruned-record case: registration removes an ended attempt's
+        # liveness records after seven days, and the directory outlives them.
+        # `status` then refuses, so nothing can establish that the attempt's
+        # commands exited -- and the pass must not guess.
+        registration, _, attempt_dir, _, review_wt = self.cancel_after("pinned")
+        e2e_wait(
+            lambda: not self.workflow.running(registration["keeper_pid"]),
+            "the keeper outlived the session",
+        )
+        records = (
+            self.workflow.common_directory()
+            / "kanban-project-review"
+            / "liveness"
+            / "attempts"
+            / registration["attempt"]
+        )
+        shutil.rmtree(records)
+        self.assertIsNone(self.workflow.attempt_status(registration["attempt"]))
+        self.assertEqual(
+            self.workflow.reclaim_refusal(registration["attempt"]), "attempt-unknown"
+        )
+        successor = self.workflow.register(session="session-b", invocation="invocation-2")
+        self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
+        self.assertEqual(
+            self.workflow.retained_orphans,
+            [(registration["attempt"], "attempt-unknown")],
+        )
+        self.assertTrue(review_wt.is_dir())
+        self.workflow.complete_attempt(successor["attempt"])
+
     def test_a_killed_keeper_leaves_an_attempt_that_still_reads_active(self):
         # The other half: a keeper killed outright writes no ended record, so
         # its attempt reads `active` forever. Reading that alone as "still
@@ -4785,6 +4973,43 @@ class DirectMode(WorkflowRunCase):
         super().setUp()
         self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
         self.shas = self.workflow.first_parent_history(6)
+
+    def test_a_direct_request_never_touches_the_ledger_or_the_adapter(self):
+        # Round 7's blocker, executed: the whole direct route, from a
+        # repository that has never had a ledger, with the ledger module and
+        # the adapter removed from the bundle entirely. If the route touched
+        # either, it could not run at all.
+        for name in ("ledger", "liveness"):
+            (self.workflow.bundle / BRAND_BUNDLES[self.BRAND][name]).unlink()
+        self.assertIsNone(self.workflow.ledger_bytes())
+
+        selected = self.workflow.direct_select(count=2)
+        self.assertEqual(
+            [entry["sha"] for entry in selected["selected"]], list(self.shas[:2])
+        )
+        report = (
+            f"docs/project_review_direct_{self.shas[0][:7]}-{self.shas[1][:7]}.md"
+        )
+        (self.workflow.docs / report).write_text(
+            f"# Project Review Findings: direct commits {self.shas[0]}–{self.shas[1]}\n",
+            encoding="utf-8",
+        )
+        recorded = self.workflow.direct_record(self.shas[:2])
+        self.assertEqual(
+            recorded["state"]["direct"]["endpoint"]["sha"], self.shas[1]
+        )
+        # No ledger was created, no attempt was registered, and nothing of the
+        # adapter's exists -- which is the property a repository that has never
+        # run a PR review depends on.
+        self.assertIsNone(self.workflow.ledger_bytes())
+        self.assertFalse(self.workflow.runtime_worktrees().exists())
+        self.assertFalse(
+            (
+                self.workflow.common_directory()
+                / "kanban-project-review"
+                / "liveness"
+            ).exists()
+        )
 
     def test_a_direct_batch_records_on_the_cursor_and_leaves_the_ledger_alone(self):
         before = self.workflow.ledger_bytes()
@@ -5219,11 +5444,28 @@ class AdapterIntegration(WorkflowRunCase):
                 "renewal stopped while a wrapped command was in flight",
             )
             time.sleep(0.1)
-        # The tool call finishes, the exemption ends, and the claim lapses.
+        # The tool call finishes -- and that finish is itself a progress event,
+        # so it *refreshes* the silence window rather than ending it. Round 7's
+        # blocker: the bound after a wrapped command is the command, then a
+        # fresh window, then a poll, then the expiry. Asserted as a timing, not
+        # just an eventual stop, because an eventual stop cannot tell the two
+        # readings apart.
         child.kill()
         child.wait(timeout=E2E_SETTLE)
         self.workflow.hook("PostToolUse", command=command, tool_use_id=tool_use_id)
-        self.assert_renewal_stops(token, "renewal outlived the wrapped command")
+        # Measured from the timestamp the hook itself wrote, not from wall clock
+        # after it: the window runs from that record, and the hook's own runtime
+        # sits between the two.
+        refreshed_at = self.workflow.last_progress_at(registration["attempt"])
+        held = time.time() + 0.6 * E2E_SILENCE
+        while time.time() < held:
+            self.assertIsNotNone(
+                self.workflow.heartbeat_renewals(token),
+                "the finish event ended the window instead of refreshing it",
+            )
+            time.sleep(0.1)
+        self.assert_renewal_stops(token, "renewal outlived the refreshed window")
+        self.assertGreaterEqual(time.time() - refreshed_at, E2E_SILENCE)
 
     def test_a_superseded_attempt_cannot_write_or_clean_up_its_replacement(self):
         # Requirement 5's attempt scoping, through the adapter: a second

@@ -556,6 +556,18 @@ window even when it survives an interruption. A foreground command that the
 runtime kills on interruption ends its exemption at once. Both behaviours are
 verified against each installed runtime, not assumed.
 
+Amended 2026-09-18 from measurement (#684). A foreground command is not always
+killed: Claude Code 2.1.276 leaves an interrupted one running where 2.1.274
+killed it. Such a command holds its exemption until it exits, and its
+tool-finish event is itself progress, so it refreshes the silence window rather
+than ending it. For a cancellation with a foreground wrapped command still
+running, the bound is therefore that command's remaining run time, plus a
+silence window, plus a keeper poll, plus the expiry — or the end of the session,
+whichever comes first. `tools/project-review-liveness-evidence.md` records the
+measurement and the version it was taken on; the design's guarantees are
+unchanged, since a longer hold is a delayed takeover rather than a stale-owner
+write.
+
 A cancelled session's claim is therefore held for at most the silence window
 plus the expiry, rather than one renewal interval. This is inactivity
 detection, accepted deliberately. D-17's hazard is an orphan extending a dead

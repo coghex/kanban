@@ -70,6 +70,24 @@ matched against before the first `gh` call below. Reporting what was resolved is
 what catches a wrong resolution, and it catches it only if it lands before
 anything has been read from the wrong repository.
 
+## Which mode this invocation is, before anything else
+
+**Decide the mode here, and take only that mode's path.** PR mode is the
+default. Direct-commit mode happens only when the user asked for it explicitly
+in this turn, and when they did, **none of the PR-mode steps run at all** — not
+the ledger read, not the migration, not the inventory, and not the liveness
+registration.
+
+That is a correctness rule, not tidiness. Direct mode is the cursor's; a
+repository that has never had a ledger must not acquire one by being asked for a
+direct batch, and a bundle whose ledger module or liveness adapter could not be
+resolved must not be blocked from a mode that needs neither.
+
+- **An explicit direct request:** resolve `$CURSOR` below and the docs worktree,
+  then go straight to "Direct-commit mode — explicit request only" and do
+  everything there. Skip every numbered step.
+- **Anything else:** PR mode, and every step in order.
+
 ## Resolve this bundle's helpers
 
 Three modules ship with this plugin rather than with the repository being
@@ -90,7 +108,10 @@ is the session-liveness adapter whose keeper process the claim's lease follows.
 `$CURSOR` owns `docs/project_review_boundaries.md` and serves the explicit-only
 direct-commit mode alone; PR mode never reads or writes it.
 
-**An unresolvable helper stops the run here, before the first read.** Do not
+**An unresolvable helper stops the run here, before the first read** — but only
+the ones this invocation's mode actually uses. PR mode needs `$LEDGER` and
+`$LIVENESS`; direct mode needs `$CURSOR` and neither of the others, so a missing
+ledger module or adapter is no reason to refuse a direct batch. Do not
 substitute a copy tracked in the reviewed repository, a personal copy, or a path
 derived from the working directory: the state those modules own belongs to the
 repository under review, and a helper resolved from the wrong place writes it
@@ -115,6 +136,9 @@ all — it is the next merge's wedge. Say the reviewed repository has no
 `docs-wip` worktree and ask for one rather than writing anywhere else.
 
 ## Migrate a repository that has no ledger yet
+
+**PR mode only.** A direct request reached the direct section above and never
+arrives here; that is what keeps a cursor-only batch from creating a ledger.
 
 Read the ledger before anything else touches it:
 
@@ -216,6 +240,13 @@ The last page is short because a page returned at its own limit may be a page of
 a longer history and nothing in the page itself can tell the two apart. When the
 history ends exactly on a page boundary, the next request comes back with no
 rows at all, and that empty page is the short one.
+
+**A listing with no pull requests in it at all stops the run here**, before step
+2. A repository that has merged nothing has nothing for this workflow to
+review, and registering an attempt for it would start a keeper, write the
+adapter's records, and make a directory, all to discover that in step 3. Say the
+repository has no merged pull requests and stop; like a failed page, this exit
+owes step 9 nothing, because nothing was created.
 
 ### 2. Register the session liveness adapter, and reclaim what earlier attempts left
 
@@ -746,25 +777,36 @@ invocation's.** You do not have to reach step 9 for any of them:
   exception in both directions: it holds its launch exempt from that window
   while it runs, and the runtime does not reliably kill it — on Claude Code
   2.1.276 an interrupted foreground command keeps going. So a cancellation with
-  a wrapped command still running is bounded by that command, not by the
-  window, and the reclaim pass is what refuses to remove its directory
-  meanwhile.
+  a wrapped command still running is not bounded by the window alone. When that
+  command finally exits, its tool-finish event is itself a progress event, so it
+  **refreshes** the silence window rather than ending it: the keeper then waits
+  that window out afresh, plus a poll, before the lease starts running down.
+  The bound is the command's remaining run time, plus a silence window, plus a
+  keeper poll, plus the expiry — or the end of the session, whichever comes
+  first. The reclaim pass is what refuses to remove that directory meanwhile.
 - *The claim.* Renewal stops with the keeper, so the lease runs out and the row
   becomes claimable again; the next invocation takes it over under the helper's
   lock and records the transition, which is the recovery the lease was designed
   around. The cancelled attempt cannot write to it afterwards: its token no
   longer owns the claim, so its `record`, its allocation and its release are all
   refused.
-- *The directory.* Step 2's reclaim pass removes the directory of every attempt
-  the adapter reports as over, which is exactly what a cancelled one is. That is
-  why everything this invocation creates is named for the attempt and kept in
-  one place: an orphan is identifiable, and the next invocation in this
-  repository is its owner.
+- *The directory.* Step 2's reclaim pass takes the directory of a cancelled
+  attempt **once it can establish that taking it is safe** — the keeper
+  positively gone, and no unfinished launch — and retains it, by name and with
+  the reason, until then. That is why everything this invocation creates is
+  named for the attempt and kept in one place: an orphan is identifiable, and
+  the next invocation in this repository is its owner where it can be, and
+  /janitor where it cannot.
 
-So the honest summary is that a cancellation completes cleanup one invocation
-late rather than never, and leaves nothing in a working tree or a publishable
-directory in the meantime. Say, in the completion message, whatever this
-invocation reclaimed on its way in.
+So the honest summary is that a cancellation's processes and claim resolve on
+their own, and its directory is taken by the next invocation that can prove
+nothing is using it — which is the invocation after it in the ordinary case, and
+an operator's `janitor` pass where the adapter can no longer answer: an
+`attempt-unknown` refusal, a keeper standing that is `unverifiable`, an
+unreadable launch record, or a launch still running. Nothing is left in a
+working tree or under a publishable path in any of those cases. Say, in the
+completion message, what this invocation reclaimed on its way in and what it
+retained and why.
 
 ### 10. Report, and stop
 

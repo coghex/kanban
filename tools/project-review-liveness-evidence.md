@@ -616,8 +616,12 @@ attempt ended only when the driver killed the session, 113 s after the Escape,
 and run 2's had not ended 195 s after it.
 
 So for a cancellation during a *foreground wrapped* command on Claude Code
-2.1.276, the bound is not the silence window. It is however long that command
-runs, or the end of the session, whichever comes first. Three consequences,
+2.1.276, the bound is not the silence window. That command holds its exemption
+until it exits, and its tool-finish event is itself a progress event — so it
+refreshes the window rather than ending it, and the keeper waits the window out
+afresh afterwards. The bound is the command's remaining run time, plus a silence
+window, plus a keeper poll, plus the lease expiry; or the end of the session,
+whichever comes first. Three consequences,
 none of which this arc's code gets wrong:
 
 - The lease is held for that whole time rather than for the documented bound.
@@ -658,9 +662,10 @@ the change recorded above.
   bound is the silence window (10 minutes by default), plus one renewer poll,
   plus the lease expiry — **provided no wrapped command is still running**. On
   2.1.276 an interrupt does not kill a foreground wrapped command, and a live
-  wrapper holds its launch exempt from that window, so the bound becomes that
-  command's own remaining run time or the end of the session. See "Cancellation
-  during a tool call".
+  wrapper holds its launch exempt from that window; its finish event then
+  refreshes the window rather than ending it. The bound becomes the command's
+  remaining run time, plus a silence window, plus a keeper poll, plus the
+  expiry, or the end of the session. See "Cancellation during a tool call".
 - **The wrapped-command exemption ends when the runtime reports the tool call
   finished.** Codex reports a command it moved to a background terminal as in
   flight until the process exits. So on Codex the exemption lasts as long as the

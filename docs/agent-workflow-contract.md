@@ -2269,8 +2269,12 @@ A registration refusal stops that run before any claim.
   renewer poll, plus the lease expiry — **provided no wrapped command is still
   running**. A live wrapper holds its launch exempt from that window by design,
   and on Claude Code 2.1.276 an interrupt no longer kills a foreground wrapped
-  command as it did on 2.1.274, so the bound then becomes that command's own
-  remaining run time, or the end of the session, whichever comes first. The
+  command as it did on 2.1.274. The bound then is not the window alone: that
+  command's tool-finish event is itself a progress event, so it refreshes the
+  window rather than ending it, and the keeper waits it out afresh afterwards.
+  The bound becomes the command's remaining run time, plus a silence window,
+  plus a keeper poll, plus the lease expiry — or the end of the session,
+  whichever comes first. The
   measurement and its consequences are in
   `tools/project-review-liveness-evidence.md`; the minimum verified versions
   below are what each behaviour was measured on, not a guarantee that a newer
