@@ -373,7 +373,9 @@ INVENTORY_RULES = {
         "detectable, so never renumber around a page you skipped."
     ),
     "a failed page stops the run": (
-        "**A page that fails stops the run.** Say which page failed and stop."
+        "**A page that fails stops the run.** Say which page failed and stop. "
+        "This step writes nothing and starts nothing, so a stop here owes step "
+        "9 nothing at all — which is the reason it comes first."
     ),
     "the partial listing is never handed over": (
         "Never hand the helper the pages that did arrive: a listing with a page "
@@ -508,6 +510,11 @@ PINNED_WORKTREE = {
         "the review would then be recorded against a branch nobody's default "
         "is."
     ),
+    "registration follows the inventory": (
+        "Register it **before** claiming, so an invocation that could never "
+        "renew claims nothing — and **after** the inventory, so a repository "
+        "with nothing to review spawns no keeper and writes no record."
+    ),
     "one directory, named for the attempt": (
         "**Everything this invocation creates goes in one directory named for "
         "that attempt**, under the Git common directory every worktree of "
@@ -515,10 +522,14 @@ PINNED_WORKTREE = {
         "adapter's, and inside no working tree at all"
     ),
     "nothing it creates is anonymous": (
-        "The inventory in step 2 and the pinned worktree in step 4 both live "
+        "The listing step 1 assembled and the worktree step 4 pins both live "
         "there, and step 9 removes the one directory. Nothing this workflow "
         "creates is anonymous, and nothing of it is left where a `docs/` "
         "publication or an operator's own working tree could pick it up."
+    ),
+    "the listing reaches disk only at the claim": (
+        "Write the listing step 1 assembled into this attempt's directory, "
+        "which is the first thing this invocation puts on disk:"
     ),
     "the reclaim pass is a cancellation's only cleanup": (
         "**Then reclaim the directories earlier attempts left.** This is the "
@@ -551,7 +562,7 @@ PINNED_WORKTREE = {
         "artifact in it would publish with it."
     ),
     "the worktree goes in the attempt's directory": (
-        "Only then create the worktree, inside the directory step 1 made for "
+        "Only then create the worktree, inside the directory step 2 made for "
         "this attempt:"
     ),
     "the pin is the verification commit": (
@@ -603,7 +614,7 @@ CLEANUP = {
         "was never created is not run, and not running it is not a failure."
     ),
     "stop the processes": (
-        "**Stop every process this attempt started** — when step 1 registered "
+        "**Stop every process this attempt started** — when step 2 registered "
         "one:"
     ),
     "a refused registration started nothing": (
@@ -634,16 +645,16 @@ CLEANUP = {
         "real one: retain and report."
     ),
     "the attempt directory is owed whenever it was made": (
-        "**Remove this attempt's directory** — whenever step 1 made one, "
+        "**Remove this attempt's directory** — whenever step 2 made one, "
         "unless step 3 failed for some reason other than finding nothing to "
         "remove:"
     ),
     "one removal covers everything the run made": (
         "One removal, because everything this invocation created is in there: "
-        "the inventory from step 2 and the worktree from step 4."
+        "the listing step 3 wrote and the worktree step 4 pinned."
     ),
     "the condition is on the resource, not the step": (
-        "`$ATTEMPT_DIR` exists from step 1, so an exit before either of them "
+        "`$ATTEMPT_DIR` exists from step 2, so an exit before either of them "
         "still owes this — which is the whole difference between a condition "
         "on the resource and a condition on the step that was meant to fill "
         "it."
@@ -713,7 +724,7 @@ CLEANUP = {
         "release are all refused."
     ),
     "the reclaim pass owns the directory": (
-        "*The directory.* Step 1's reclaim pass removes the directory of every "
+        "*The directory.* Step 2's reclaim pass removes the directory of every "
         "attempt the adapter reports as over, which is exactly what a "
         "cancelled one is."
     ),
@@ -1712,6 +1723,11 @@ class LedgerWorkflowTests(unittest.TestCase):
                     content.index(REGISTRATION[brand]),
                     content.index(LEDGER_INVOCATIONS[2]),
                 )
+                # And after the inventory: a repository with nothing to review
+                # must spawn no keeper and write no record.
+                self.assertLess(
+                    content.index("gh api graphql"), content.index(REGISTRATION[brand])
+                )
 
     def test_the_registration_nonce_and_helper_path_are_spelled_literally(self):
         # Both halves, because the hook reads the *unexpanded* command text:
@@ -1887,9 +1903,9 @@ class LedgerWorkflowTests(unittest.TestCase):
 
     def test_the_steps_are_ordered_the_way_the_review_runs(self):
         order = (
-            "### 1. Register the session liveness adapter, and reclaim what "
+            "### 1. Take a complete inventory of merged pull requests",
+            "### 2. Register the session liveness adapter, and reclaim what "
             "earlier attempts left",
-            "### 2. Take a complete inventory of merged pull requests",
             "### 3. Select and claim exactly one pull request",
             "### 4. Pin the review tree",
             "### 5. Review the pull request",
@@ -3524,8 +3540,8 @@ class WorkflowRun:
             encoding="utf-8",
         )
 
-    def inventory(self, page_size=100, fail_after=None, attempt=None):
-        """The complete listing, paged through the fake `gh` as the asset says.
+    def inventory(self, page_size=100, fail_after=None):
+        """Step 1: the complete listing, paged through the fake `gh`, in hand.
 
         The paging rule is the asset's: one call per page, positioned by the
         previous page's own `next`, until a page comes back short. What the
@@ -3545,22 +3561,34 @@ class WorkflowRun:
                 **extra,
             )
             if completed.returncode != 0:
-                return None, pages
+                return None
             page = json.loads(completed.stdout)
             pages.append({"page": len(pages) + 1, "limit": page_size, "prs": page["prs"]})
             after = page["next"]
             if len(page["prs"]) < page_size:
                 break
-        directory = (
-            self.attempt_directory(attempt) if attempt else self.scratch
-        )
+        return pages
+
+    def place_inventory(self, pages, attempt):
+        """Step 3's first act: the assembled listing, on disk at last.
+
+        Step 1 leaves it in hand deliberately -- a run that stops there has
+        written nothing and started nothing -- so this is where it reaches the
+        attempt's own directory, at the path the asset names.
+        """
         self.case.assertEqual(
             asset_command(self.asset, "INVENTORY="),
             'INVENTORY="$ATTEMPT_DIR/inventory.json"',
         )
-        path = directory / "inventory.json"
+        path = self.attempt_directory(attempt) / "inventory.json"
         path.write_text(json.dumps({"pages": pages}), encoding="utf-8")
-        return path, pages
+        return path
+
+    def registered_inventory(self, page_size=100, **kwargs):
+        """Steps 1 through 3's first act, in the order the asset spells them."""
+        pages = self.inventory(page_size=page_size)
+        registration = self.register(**kwargs)
+        return registration, self.place_inventory(pages, registration["attempt"])
 
     def advance_the_remote(self):
         """Move the remote's default branch on, so a fetch has work to do."""
@@ -3974,8 +4002,7 @@ class WorkflowRun:
     # -- a whole review, for the cases that need one to have happened
 
     def review_once(self, outcome="clean", findings=None, repeats=(), recurrences=()):
-        registration = self.register()
-        inventory, _ = self.inventory(attempt=registration["attempt"])
+        registration, inventory = self.registered_inventory()
         claimed = self.claim(inventory, registration["keeper_pid"])
         self.case.assertEqual(claimed["status"], "claimed")
         number = claimed["selected"]["number"]
@@ -4091,10 +4118,10 @@ class FreshRepository(WorkflowRunCase):
         self.assertEqual(self.workflow.rows(), {})
         self.workflow.lease_defaults()
 
-        inventory, pages = self.workflow.inventory()
+        pages = self.workflow.inventory()
         self.assertEqual([len(page["prs"]) for page in pages], [2])
 
-        registration = self.workflow.register()
+        registration, inventory = self.workflow.registered_inventory()
         claimed = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(claimed["status"], "claimed")
         self.assertEqual(claimed["selected"]["number"], 612)
@@ -4112,7 +4139,7 @@ class FreshRepository(WorkflowRunCase):
         self.workflow.merged(
             [(n, f"2026-09-0{1 + (700 - n)}T00:00:00Z") for n in range(700, 693, -1)]
         )
-        inventory, pages = self.workflow.inventory(page_size=3)
+        pages = self.workflow.inventory(page_size=3)
         self.assertEqual([len(page["prs"]) for page in pages], [3, 3, 1])
         self.assertEqual([page["page"] for page in pages], [1, 2, 3])
         self.assertEqual({page["limit"] for page in pages}, {3})
@@ -4121,7 +4148,7 @@ class FreshRepository(WorkflowRunCase):
         self.assertIn("cursor=null", " ".join(calls[0]))
         self.assertIn("cursor=3", " ".join(calls[1]))
         parsed = self.module.parse_inventory(
-            json.loads(inventory.read_text(encoding="utf-8")), "the end-to-end listing"
+            {"pages": pages}, "the end-to-end listing"
         )
         self.assertEqual(len(parsed["listed"]), 7)
 
@@ -4129,18 +4156,19 @@ class FreshRepository(WorkflowRunCase):
         self.workflow.merged(
             [(n, "2026-09-01T00:00:00Z") for n in (620, 619, 618, 617)]
         )
-        _, pages = self.workflow.inventory(page_size=2)
+        pages = self.workflow.inventory(page_size=2)
         self.assertEqual([len(page["prs"]) for page in pages], [2, 2, 0])
 
     def test_a_failed_page_stops_before_anything_is_claimed(self):
         self.workflow.merged(
             [(n, "2026-09-01T00:00:00Z") for n in (620, 619, 618, 617)]
         )
-        inventory, pages = self.workflow.inventory(page_size=2, fail_after=2)
-        self.assertIsNone(inventory)
-        self.assertEqual(len(pages), 1)
+        pages = self.workflow.inventory(page_size=2, fail_after=2)
+        self.assertIsNone(pages)
         # Nothing was claimed and nothing was written: no ledger exists yet,
-        # and the docs worktree is exactly its commit.
+        # no attempt directory was made, and the docs worktree is exactly its
+        # commit. Step 1 writing nothing is what makes this stop owe nothing.
+        self.assertFalse(self.workflow.runtime_worktrees().exists())
         self.assertIsNone(self.workflow.ledger_bytes())
         self.assertEqual(
             e2e_git(self.workflow.docs, "status", "--porcelain", "--untracked-files=all"),
@@ -4196,9 +4224,8 @@ class FetchFailure(WorkflowRunCase):
         # still readable. Under one block of commands that is exactly when a
         # stale tree gets reviewed; the asset makes the fetch its own checked
         # call, so nothing after it runs.
-        registration = self.workflow.register()
-        attempt_dir = self.workflow.attempt_directory(registration["attempt"])
-        inventory, _ = self.workflow.inventory(attempt=registration["attempt"])
+        registration, inventory = self.workflow.registered_inventory()
+        attempt_dir = inventory.parent
         claimed = self.workflow.claim(inventory, registration["keeper_pid"])
         token = claimed["claim"]["token"]
 
@@ -4257,7 +4284,8 @@ class EarlyExits(WorkflowRunCase):
         e2e_git(self.workflow.docs, "commit", "-qm", "ledger and lease defaults")
 
     def test_a_registration_refusal_claims_nothing_and_writes_nothing(self):
-        inventory, _ = self.workflow.inventory()
+        pages = self.workflow.inventory()
+        self.assertTrue(pages)
         before = self.workflow.ledger_bytes()
         completed = self.workflow.registration_attempt(handshake=False)
         self.assertEqual(completed.returncode, 2, completed.stdout)
@@ -4271,13 +4299,15 @@ class EarlyExits(WorkflowRunCase):
             e2e_git(self.workflow.docs, "status", "--porcelain", "--untracked-files=all"),
             "",
         )
-        self.assertTrue(inventory.is_file())
+        # Step 1 ran and step 2 refused, so nothing of this run is on disk.
+        self.assertFalse(self.workflow.runtime_worktrees().exists())
 
     def test_an_empty_inventory_selects_nothing_and_leaves_no_claim(self):
         self.workflow.merged([])
-        inventory, pages = self.workflow.inventory()
-        self.assertEqual(pages, [{"page": 1, "limit": 100, "prs": []}])
-        registration = self.workflow.register()
+        self.assertEqual(
+            self.workflow.inventory(), [{"page": 1, "limit": 100, "prs": []}]
+        )
+        registration, inventory = self.workflow.registered_inventory()
         result = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(result["status"], "no-selectable-row")
         self.assertIsNone(result["selected"])
@@ -4405,11 +4435,10 @@ class OrphanReclaim(WorkflowRunCase):
         No cleanup step of the cancelled invocation's runs -- which is the
         whole case: what has to happen afterwards has to happen without one.
         """
-        registration = self.workflow.register(
+        registration, inventory = self.workflow.registered_inventory(
             session="session-a", invocation="invocation-1"
         )
-        attempt_dir = self.workflow.attempt_directory(registration["attempt"])
-        inventory, _ = self.workflow.inventory(attempt=registration["attempt"])
+        attempt_dir = inventory.parent
         claimed = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(claimed["status"], "claimed")
         review_wt = None
@@ -4438,10 +4467,9 @@ class OrphanReclaim(WorkflowRunCase):
             lambda: self.workflow.heartbeat_renewals(token) is None,
             "renewal outlived the cancelled session",
         )
-        successor = self.workflow.register(
+        successor, inventory = self.workflow.registered_inventory(
             session="session-b", invocation="invocation-2"
         )
-        inventory, _ = self.workflow.inventory(attempt=successor["attempt"])
         retaken = self.workflow.claim(inventory, successor["keeper_pid"])
         self.assertEqual(retaken["status"], "claimed")
         self.assertEqual(retaken["takeover"]["previous_token"], token)
@@ -4774,8 +4802,7 @@ class CompletedReviews(WorkflowRunCase):
         report = recorded["report"]
         self.assertIsNotNone(report)
 
-        inventory, _ = self.workflow.inventory()
-        registration = self.workflow.register()
+        registration, inventory = self.workflow.registered_inventory()
         claimed = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(claimed["status"], "claimed")
         # The claim's own payload carries the row's status but not its history,
@@ -4851,8 +4878,7 @@ class InterruptionAndTakeover(WorkflowRunCase):
         self.workflow.lease_defaults()
 
     def test_an_interrupted_review_leaves_no_completion_behind(self):
-        inventory, _ = self.workflow.inventory()
-        registration = self.workflow.register()
+        registration, inventory = self.workflow.registered_inventory()
         self.workflow.claim(inventory, registration["keeper_pid"])
         self.workflow.hook("SessionEnd")
         e2e_wait(
@@ -4869,8 +4895,9 @@ class InterruptionAndTakeover(WorkflowRunCase):
         # renewal stops, the lease lapses, a second invocation takes the claim
         # over -- and the first one's report allocation, record and release are
         # all refused. No false completion, and no stale-owner write.
-        inventory, _ = self.workflow.inventory()
-        first = self.workflow.register(session="session-a", invocation="invocation-1")
+        first, inventory = self.workflow.registered_inventory(
+            session="session-a", invocation="invocation-1"
+        )
         claimed = self.workflow.claim(inventory, first["keeper_pid"])
         stale_token = claimed["claim"]["token"]
         self.assertEqual(claimed["selected"]["number"], 612)
@@ -4881,8 +4908,10 @@ class InterruptionAndTakeover(WorkflowRunCase):
             "the heartbeat was never retired after the session ended",
         )
 
-        second = self.workflow.register(session="session-b", invocation="invocation-2")
-        retaken = self.workflow.claim(inventory, second["keeper_pid"])
+        second, successor_inventory = self.workflow.registered_inventory(
+            session="session-b", invocation="invocation-2"
+        )
+        retaken = self.workflow.claim(successor_inventory, second["keeper_pid"])
         self.assertEqual(retaken["status"], "claimed")
         self.assertEqual(retaken["selected"]["number"], 612)
         self.assertEqual(retaken["takeover"]["previous_token"], stale_token)
@@ -4916,11 +4945,9 @@ class AdapterIntegration(WorkflowRunCase):
         super().setUp()
         self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
         self.workflow.lease_defaults()
-        self.inventory, _ = self.workflow.inventory()
-
     def claimed(self, **kwargs):
-        registration = self.workflow.register(**kwargs)
-        result = self.workflow.claim(self.inventory, registration["keeper_pid"])
+        registration, inventory = self.workflow.registered_inventory(**kwargs)
+        result = self.workflow.claim(inventory, registration["keeper_pid"])
         self.assertEqual(result["status"], "claimed")
         e2e_wait(
             lambda: (self.workflow.heartbeat_renewals(result["claim"]["token"]) or 0) >= 1,

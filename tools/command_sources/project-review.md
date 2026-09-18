@@ -176,17 +176,65 @@ workflow edits a `[legacy]` row by hand.
 
 ## One review, end to end
 
-Steps 1 through 9 are one invocation, and step 1 comes first because everything
-the rest create is named for the attempt it registers. Step 9 runs on **every**
-exit, including the ones that stop early: each of its steps is owed from the
-moment the resource it removes exists, so a run that never reaches step 3 still
-owes it the directory step 1 made.
+Steps 1 through 9 are one invocation, ordered so that nothing is created before
+something needs it: step 1 reads GitHub and writes nothing, step 2 registers the
+attempt everything after it is named for, and step 3 is the first to put
+anything on disk. Step 9 runs on **every** exit, including the ones that stop
+early: each of its steps is owed from the moment the resource it removes exists,
+so a run that stops in step 3 still owes it the directory step 2 made, and one
+that stops in step 1 owes it nothing.
 
-### 1. Register the session liveness adapter, and reclaim what earlier attempts left
+### 1. Take a complete inventory of merged pull requests
+
+Page the repository's merged pull requests until a page comes back short. A
+listing that stopped early is indistinguishable from a repository with fewer
+pull requests in it, and the difference is between "#612 has never been reviewed"
+and "#612 was never listed" — so the helper accepts only a contiguous sequence
+from page 1, taken at one page size, ending in a page shorter than that size:
+
+Take one page per call. `$AFTER` is `null` for the first page and each earlier
+page's own `next` for every page after it:
+
+```bash
+gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F cursor="$AFTER" \
+  -f query='query($owner:String!,$name:String!,$limit:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:MERGED,first:$limit,after:$cursor,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{endCursor} nodes{number title mergedAt}}}}' \
+  --jq '{prs: [.data.repository.pullRequests.nodes[] | {number, title, merged_at: .mergedAt}], next: .data.repository.pullRequests.pageInfo.endCursor}'
+```
+
+Repeat that call until a page comes back with fewer than 100 pull requests on
+it. That short page is the last one; `next` is what positions the call after it,
+and nothing else does. Then assemble the pages into the one listing the helper
+reads — in hand, not on disk: step 3 gives it a home once step 2 has made one.
+It has this shape:
+
+```json
+{"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
+```
+
+`page` is the page's 1-based position in the order you fetched it and `limit` is
+the 100 every page was asked for. The helper reads the sequence rather than the
+rows: page numbers must be contiguous from 1, one page size across the whole
+walk, nothing after the first short page. Those are what make a listing with an
+interior page dropped detectable, so never renumber around a page you skipped.
+
+**A page that fails stops the run.** Say which page failed and stop. This step
+writes nothing and starts nothing, so a stop here owes step 9 nothing at all —
+which is the reason it comes first. Never hand the helper the pages that did
+arrive: a listing with a page missing from it records
+every pull request on that page as one this repository does not have.
+
+The last page is short because a page returned at its own limit may be a page of
+a longer history and nothing in the page itself can tell the two apart. When the
+history ends exactly on a page boundary, the next request comes back with no
+rows at all, and that empty page is the short one.
+
+### 2. Register the session liveness adapter, and reclaim what earlier attempts left
 
 The claim in step 3 is a lease that renews only while a liveness signal is held,
 and the signal is the keeper process this adapter starts. Register it **before**
-claiming, so an invocation that could never renew claims nothing.
+claiming, so an invocation that could never renew claims nothing — and **after**
+the inventory, so a repository with nothing to review spawns no keeper and
+writes no record.
 
 Take a nonce first:
 
@@ -240,7 +288,7 @@ ATTEMPT_DIR="$RUNTIME/$ATTEMPT"
 mkdir -p "$ATTEMPT_DIR"
 ```
 
-The inventory in step 2 and the pinned worktree in step 4 both live there, and
+The listing step 1 assembled and the worktree step 4 pins both live there, and
 step 9 removes the one directory. Nothing this workflow creates is anonymous,
 and nothing of it is left where a `docs/` publication or an operator's own
 working tree could pick it up.
@@ -273,64 +321,23 @@ that closes when one tool call ends: the lease's whole guarantee is that it
 lapses when *this review invocation* does, and an application that outlives the
 invocation holds a claim nobody is working on.
 
-### 2. Take a complete inventory of merged pull requests
-
-Page the repository's merged pull requests until a page comes back short. A
-listing that stopped early is indistinguishable from a repository with fewer
-pull requests in it, and the difference is between "#612 has never been reviewed"
-and "#612 was never listed" — so the helper accepts only a contiguous sequence
-from page 1, taken at one page size, ending in a page shorter than that size:
-
-Take one page per call. `$AFTER` is `null` for the first page and each earlier
-page's own `next` for every page after it:
-
-```bash
-gh api graphql -F owner="${REPO%%/*}" -F name="${REPO##*/}" -F limit=100 -F cursor="$AFTER" \
-  -f query='query($owner:String!,$name:String!,$limit:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:MERGED,first:$limit,after:$cursor,orderBy:{field:CREATED_AT,direction:DESC}){pageInfo{endCursor} nodes{number title mergedAt}}}}' \
-  --jq '{prs: [.data.repository.pullRequests.nodes[] | {number, title, merged_at: .mergedAt}], next: .data.repository.pullRequests.pageInfo.endCursor}'
-```
-
-Repeat that call until a page comes back with fewer than 100 pull requests on
-it. That short page is the last one; `next` is what positions the call after it,
-and nothing else does. Then assemble the pages into the one listing the helper
-reads, writing it into this attempt's own directory:
-
-```bash
-INVENTORY="$ATTEMPT_DIR/inventory.json"
-```
-
-The listing itself has this shape:
-
-```json
-{"pages": [{"page": 1, "limit": 100, "prs": [{"number": 704, "title": "…", "merged_at": "2026-09-17T18:40:53Z"}]}]}
-```
-
-`page` is the page's 1-based position in the order you fetched it and `limit` is
-the 100 every page was asked for. The helper reads the sequence rather than the
-rows: page numbers must be contiguous from 1, one page size across the whole
-walk, nothing after the first short page. Those are what make a listing with an
-interior page dropped detectable, so never renumber around a page you skipped.
-
-**A page that fails stops the run.** Say which page failed and stop. Nothing has
-been claimed yet, so this stop owes step 9 only `$ATTEMPT_DIR`. Never hand the
-helper the pages that did arrive: a listing with a page missing from it records
-every pull request on that page as one this repository does not have.
-
-The last page is short because a page returned at its own limit may be a page of
-a longer history and nothing in the page itself can tell the two apart. When the
-history ends exactly on a page boundary, the next request comes back with no
-rows at all, and that empty page is the short one.
-
 ### 3. Select and claim exactly one pull request
 
 `claim` selects and claims under one lock, so the pull request it names is the
 one it took:
 
+Write the listing step 1 assembled into this attempt's directory, which is the
+first thing this invocation puts on disk:
+
+```bash
+INVENTORY="$ATTEMPT_DIR/inventory.json"
+```
+
+Then claim:
+
 ```bash
 python3 "$LEDGER" claim --root "$DOCS_WT" --repo "$REPO" --owner-pid "$KEEPER" < "$INVENTORY"
 ```
-
-`$INVENTORY` is the assembled listing step 1 wrote.
 
 It reports the pull request in `selected`, the queue it came from in `queue`,
 and the claim's owner token in `claim.token`. Record the number as `$PR` and the
@@ -395,7 +402,7 @@ invocation. An empty `$DEFAULT_BRANCH` is a remote that reported no HEAD symref
 at all, and an empty `$PIN` is a branch this fetch did not bring down: either
 stops the run, through step 9, rather than pinning something nobody named.
 
-Only then create the worktree, inside the directory step 1 made for this
+Only then create the worktree, inside the directory step 2 made for this
 attempt:
 
 ```bash
@@ -656,7 +663,7 @@ So the steps are conditional, in this order, and each runs **only when this
 invocation created what it names**. A step whose resource was never created is
 not run, and not running it is not a failure.
 
-1. **Stop every process this attempt started** — when step 1 registered one:
+1. **Stop every process this attempt started** — when step 2 registered one:
 
    ```bash
    python3 "$LIVENESS" complete --root "$DOCS_WT" --attempt "$ATTEMPT"
@@ -690,7 +697,7 @@ not run, and not running it is not a failure.
    finding nothing registered, which is this step done — go on to step 4. Any
    other failure is a real one: retain and report.
 
-4. **Remove this attempt's directory** — whenever step 1 made one, unless step 3
+4. **Remove this attempt's directory** — whenever step 2 made one, unless step 3
    failed for some reason other than finding nothing to remove:
 
    ```bash
@@ -698,8 +705,8 @@ not run, and not running it is not a failure.
    ```
 
    One removal, because everything this invocation created is in there: the
-   inventory from step 2 and the worktree from step 4. `$ATTEMPT_DIR` exists
-   from step 1, so an exit before either of them still owes this — which is the
+   listing step 3 wrote and the worktree step 4 pinned. `$ATTEMPT_DIR` exists
+   from step 2, so an exit before either of them still owes this — which is the
    whole difference between a condition on the resource and a condition on the
    step that was meant to fill it. But it *contains* `$REVIEW_WT`, so removing
    it after a failed `worktree remove` would delete the very worktree the
@@ -739,7 +746,7 @@ invocation's.** You do not have to reach step 9 for any of them:
   around. The cancelled attempt cannot write to it afterwards: its token no
   longer owns the claim, so its `record`, its allocation and its release are all
   refused.
-- *The directory.* Step 1's reclaim pass removes the directory of every attempt
+- *The directory.* Step 2's reclaim pass removes the directory of every attempt
   the adapter reports as over, which is exactly what a cancelled one is. That is
   why everything this invocation creates is named for the attempt and kept in
   one place: an orphan is identifiable, and the next invocation in this
