@@ -547,6 +547,48 @@ class WrappedCommands(AdapterCase):
         process.wait(timeout=SETTLE)
         return process.pid
 
+    def test_a_reused_label_stays_visible_to_cleanup(self):
+        # Issue #684. A reused `--launch` label loses the exclusive wrapper
+        # record -- the first launch holds it -- and `run` starts the child
+        # anyway. If nothing else recorded that second wrapper, cleanup would
+        # see the first one exit, read "nothing running", and delete the
+        # working directory out from under a live process.
+        registration = self.registered()
+        attempt = registration["attempt"]
+        command = self.run_command_text(attempt, "build")
+        self.hook(self.payload("PreToolUse", tool_use_id="tool-1", command=command))
+        first = self.wrapper(attempt, "build", 600)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == ["build"],
+            "the first launch was never reported",
+        )
+        second = self.wrapper(attempt, "build", 600)
+        wait_until(
+            lambda: len(
+                list((Path(registration["records"]) / "launches").glob("build*.wrapper.json"))
+            )
+            == 2,
+            "the reused launch recorded no wrapper of its own",
+        )
+        # The exemption is the first launch's alone, and stays so.
+        self.assertEqual(self.status(attempt)["exempt_launches"], ["build"])
+        # The first wrapper goes; the second is still running, and still
+        # reported under the same label.
+        first.kill()
+        first.wait(timeout=SETTLE)
+        wait_until(
+            lambda: self.status(attempt)["exempt_launches"] == [],
+            "the exemption outlived the wrapper holding it",
+        )
+        self.assertEqual(self.status(attempt)["unfinished_launches"], ["build"])
+        self.assertIsNone(second.poll(), "the second wrapper should still be running")
+        second.kill()
+        second.wait(timeout=SETTLE)
+        wait_until(
+            lambda: self.status(attempt)["unfinished_launches"] == [],
+            "a launch stayed unfinished after both wrappers exited",
+        )
+
     def test_an_unconnected_or_reused_launch_gets_no_exemption(self):
         registration = self.registered()
         attempt = registration["attempt"]

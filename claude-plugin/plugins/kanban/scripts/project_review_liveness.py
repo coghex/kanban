@@ -582,22 +582,27 @@ def unfinished_launches(common: Path, attempt: str, standing) -> list:
     for name in names:
         if not name.endswith(".wrapper.json"):
             continue
-        label = name[: -len(".wrapper.json")]
+        stem = name[: -len(".wrapper.json")]
         try:
             wrapper = _read_json(directory / name)
         except ValueError:
             # A record this process cannot read is a launch it cannot place,
             # which is not the same as one that has ended.
-            unfinished.append(label)
+            unfinished.append(stem)
             continue
         if wrapper is None or not isinstance(wrapper.get("pid"), int) or not isinstance(
             wrapper.get("host"), str
         ):
-            unfinished.append(label)
+            unfinished.append(stem)
             continue
         if standing({"host": wrapper["host"], "pid": wrapper["pid"]}) != "gone":
-            unfinished.append(label)
-    return unfinished
+            # The record's own label where it carries one: a second wrapper of
+            # a reused label is filed under `<label>.<pid>`, and what a caller
+            # needs told is which launch is still running, not which file said
+            # so.
+            recorded = wrapper.get("label")
+            unfinished.append(recorded if isinstance(recorded, str) and recorded else stem)
+    return sorted(set(unfinished))
 
 def run_keeper(common: Path, attempt: str, ready_fd=None) -> str:
     """Stay alive while the attempt shows progress; return why it ended."""
@@ -1139,11 +1144,30 @@ def run_wrapped(root, attempt: str, label: str, command) -> int:
         raise LivenessError("command-missing", "name the command to run after `--`.")
     common = common_for_root(root)
     exempt = False
-    if (attempt_directory(common, attempt) / "attempt.json").exists():
+    known = (attempt_directory(common, attempt) / "attempt.json").exists()
+    record = {
+        "label": label,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "at": time.time(),
+    }
+    if known:
         exempt = _create_json_exclusively(
-            _launches_directory(common, attempt) / f"{label}.wrapper.json",
-            {"host": socket.gethostname(), "pid": os.getpid(), "at": time.time()},
+            _launches_directory(common, attempt) / f"{label}.wrapper.json", record
         )
+        if not exempt:
+            # The label is taken, so this wrapper earns no exemption -- the
+            # first one holds that -- but it is about to start a process
+            # inside this attempt's working directory all the same, and a
+            # cleanup that could not see it would delete that directory out
+            # from under it once the first wrapper exited. So it is recorded
+            # under a name of its own, which `unfinished_launches` reads and
+            # `exempt_launches` does not.
+            _create_json_exclusively(
+                _launches_directory(common, attempt)
+                / f"{label}.{os.getpid()}.wrapper.json",
+                record,
+            )
     if not exempt:
         print(
             f"project-review liveness: launch {label} of attempt {attempt} is not "

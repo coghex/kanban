@@ -551,25 +551,40 @@ PINNED_WORKTREE = {
         "An `active` attempt with a live keeper belongs to an invocation "
         "running somewhere: leave it alone."
     ),
-    "over is not the same as reclaimable": (
-        "**An attempt that is over is still not reclaimable while one of its "
-        "commands is running.**"
+    "over is not reclaimable": (
+        "**Over is not reclaimable, and every step from here fails closed.** "
+        "Removing this directory deletes a checkout, so the question is never "
+        '"is there a reason to keep it" but "can this invocation *establish* '
+        'that nothing is using it". Two answers must both be positive, and '
+        "anything else retains:"
+    ),
+    "the keeper must be positively gone": (
+        "**The keeper is positively gone.** `keeper_standing` is `gone`, or "
+        "the attempt reports `ended`. `unverifiable` is not gone — it is a "
+        "keeper on another host, or a pid this process may not signal — and an "
+        "`attempt-unknown` refusal is worse, because the adapter has no "
+        "records left to answer either question from. Both retain."
     ),
     "the exemption is the wrong question for cleanup": (
-        "`status` answers that separately: `unfinished_launches` names every "
-        "wrapped launch whose process is not known to be gone, whether or not "
-        "its tool call finished — which is the question that matters here, "
-        "because the command that outlives a cancelled attempt is a "
-        "backgrounded one, and `exempt_launches` is built to skip exactly "
-        "those."
+        "**Nothing it launched is still running.** `status` answers that "
+        "separately: `unfinished_launches` names every wrapped launch whose "
+        "process is not known to be gone, whether or not its tool call "
+        "finished — which is the question that matters here, because the "
+        "command that outlives a cancelled attempt is a backgrounded one, and "
+        "`exempt_launches` is built to skip exactly those. A non-empty list "
+        "retains."
     ),
-    "a running launch retains its directory": (
-        "A non-empty `unfinished_launches` means something is still working in "
-        "that worktree: **leave the directory alone**, report it by path with "
-        "the labels still running, and let a later invocation or "
-        "{{cmd:janitor}} take it once they have stopped. Deleting a worktree "
-        "out from under a live process is the one outcome nothing later can "
-        "repair."
+    "a retained directory is reported with its reason": (
+        "A retained directory is reported by path with the reason — the "
+        "standing that could not be verified, or the labels still running — "
+        "and left for a later invocation, once the answer is positive, or for "
+        "{{cmd:janitor}}, where an operator can decide what this workflow may "
+        "not."
+    ),
+    "a deletion is the unrepairable outcome": (
+        "Deleting a worktree out from under a live process is the one outcome "
+        "nothing later can repair, and a directory left on disk costs only "
+        "disk."
     ),
     "it never depends on the primary checkout": (
         "The review is verified against that exact tree and nothing else, so it "
@@ -3852,7 +3867,7 @@ class WorkflowRun:
         return "unknown" if status is None else status["status"]
 
     def attempt_is_over(self, attempt):
-        """The asset's own three-way rule for "this invocation is over".
+        """The asset's rule for "this invocation is over".
 
         `active` is not enough on its own: a keeper killed outright writes no
         ended record, so its attempt still reads `active` while its standing
@@ -3865,6 +3880,25 @@ class WorkflowRun:
             return True
         return status["keeper_standing"] != "live"
 
+    def reclaim_refusal(self, attempt):
+        """Why this attempt's directory may not be removed, or `None`.
+
+        Fails closed, as the asset does: removal needs a positive answer to
+        both questions, and `unverifiable` or a refused `status` is an answer
+        to neither.
+        """
+        status = self.attempt_status(attempt)
+        if status is None:
+            return "attempt-unknown"
+        if status["status"] != "ended":
+            if status["keeper_standing"] == "live":
+                return "live"
+            if status["keeper_standing"] != "gone":
+                return f"keeper-{status['keeper_standing']}"
+        if status["unfinished_launches"]:
+            return "launches:" + ",".join(status["unfinished_launches"])
+        return None
+
     def reclaim_orphans(self, keep=None):
         """Step 2's reclaim pass, driven through the asset's own `status` call.
 
@@ -3876,11 +3910,13 @@ class WorkflowRun:
         if not runtime.is_dir():
             return reclaimed
         for sibling in sorted(runtime.iterdir()):
-            if sibling.name == keep or not self.attempt_is_over(sibling.name):
+            if sibling.name == keep:
                 continue
-            status = self.attempt_status(sibling.name)
-            if status is not None and status["unfinished_launches"]:
-                retained.append((sibling.name, status["unfinished_launches"]))
+            refusal = self.reclaim_refusal(sibling.name)
+            if refusal == "live":
+                continue
+            if refusal is not None:
+                retained.append((sibling.name, refusal))
                 continue
             self.cleanup_worktree(sibling / "tree")
             reclaimed.append(sibling.name)
@@ -4666,7 +4702,7 @@ class OrphanReclaim(WorkflowRunCase):
         successor = self.workflow.register(session="session-b", invocation="invocation-2")
         self.assertEqual(self.workflow.reclaim_orphans(keep=successor["attempt"]), [])
         self.assertEqual(
-            self.workflow.retained_orphans, [(registration["attempt"], ["build"])]
+            self.workflow.retained_orphans, [(registration["attempt"], "launches:build")]
         )
         self.assertTrue(review_wt.is_dir())
 

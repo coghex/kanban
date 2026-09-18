@@ -295,16 +295,29 @@ refuses it as `attempt-unknown`, which is what an attempt pruned after seven
 days looks like. An `active` attempt with a live keeper belongs to an invocation
 running somewhere: leave it alone.
 
-**An attempt that is over is still not reclaimable while one of its commands is
-running.** `status` answers that separately: `unfinished_launches` names every
-wrapped launch whose process is not known to be gone, whether or not its tool
-call finished — which is the question that matters here, because the command
-that outlives a cancelled attempt is a backgrounded one, and `exempt_launches`
-is built to skip exactly those. A non-empty `unfinished_launches` means
-something is still working in that worktree: **leave the directory alone**,
-report it by path with the labels still running, and let a later invocation or
-$janitor take it once they have stopped. Deleting a worktree out from
-under a live process is the one outcome nothing later can repair.
+**Over is not reclaimable, and every step from here fails closed.** Removing
+this directory deletes a checkout, so the question is never "is there a reason
+to keep it" but "can this invocation *establish* that nothing is using it". Two
+answers must both be positive, and anything else retains:
+
+- **The keeper is positively gone.** `keeper_standing` is `gone`, or the attempt
+  reports `ended`. `unverifiable` is not gone — it is a keeper on another host,
+  or a pid this process may not signal — and an `attempt-unknown` refusal is
+  worse, because the adapter has no records left to answer either question
+  from. Both retain.
+- **Nothing it launched is still running.** `status` answers that separately:
+  `unfinished_launches` names every wrapped launch whose process is not known to
+  be gone, whether or not its tool call finished — which is the question that
+  matters here, because the command that outlives a cancelled attempt is a
+  backgrounded one, and `exempt_launches` is built to skip exactly those. A
+  non-empty list retains.
+
+A retained directory is reported by path with the reason — the standing that
+could not be verified, or the labels still running — and left for a later
+invocation, once the answer is positive, or for $janitor, where an
+operator can decide what this workflow may not. Deleting a worktree out from
+under a live process is the one outcome nothing later can repair, and a
+directory left on disk costs only disk.
 
 Reclaim the rest: remove each one's worktree and directory exactly as step 9
 does, then run `git -C "$ROOT" worktree prune` to clear any record left naming
