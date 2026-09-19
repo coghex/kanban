@@ -5962,6 +5962,22 @@ def read_inventory(stream=None) -> dict:
         ) from error
 
 
+def _optional_report(raw):
+    """`--report`, with an unset shell variable read as the flag being absent.
+
+    The asset spells one recording command for both kinds of batch, so a clean
+    one reaches this with `--report ""`. Without this, `argparse` hands that
+    through as the empty string, `direct_record` reads a value as a report
+    requested, and the batch is refused for a name that describes no range --
+    which is every clean batch the canonical command runs.
+
+    The same rule `--start`, `--end` and `--entry` already take: an empty
+    string is a variable the caller did not set, not a value it set to
+    nothing.
+    """
+    return raw.strip() if raw and raw.strip() else None
+
+
 def _one_commit(raw, refusal: str):
     values = _commit_list(raw)
     if len(values) > 1:
@@ -6258,7 +6274,7 @@ def main(argv=None) -> int:
                 read_walk(),
                 _commit_list(args.reviewed),
                 excluded=_commit_list(args.exclude),
-                report=args.report,
+                report=_optional_report(args.report),
             )
         )
 

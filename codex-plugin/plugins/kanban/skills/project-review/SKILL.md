@@ -998,31 +998,37 @@ git -C "$ROOT" rev-parse -q --verify "$MERGE^2"
 
 **Exit 0 — a merge commit.** It owns exactly itself on the first-parent walk,
 whatever it merged, so `$ENTRY` is `$MERGE` and the batch begins at its first
-parent. Its branch's own commits are not on the first-parent walk at all.
+parent. Its branch's own commits are not on the first-parent walk at all, and
+no further call is needed.
 
-**A non-zero exit — a squash or a rebase, and the two are told apart by the
-chain rather than by arithmetic.** A squash contributes exactly one first-parent
-commit however many the branch had, so `$ENTRY` is `$MERGE`. A rebase
-contributes the branch's whole series as first-parent commits, so `$MERGE` is
-only the newest of them and `$ENTRY` is the oldest. **Never derive that from
-the pull request's commit count.** The count is the branch's, not the base
-branch's: over a squash of several commits it steps past `$MERGE` into real
-direct history, and every commit it steps over stops being selectable.
-
-Read the two lists and compare them:
+**A non-zero exit — a squash or a rebase.** A squash contributes exactly one
+first-parent commit however many the branch had, so `$ENTRY` is `$MERGE`. A
+rebase contributes the branch's whole series as first-parent commits, so
+`$MERGE` is only the newest of them and `$ENTRY` is the oldest. Ask GitHub
+which pull request each commit belongs to rather than inferring it:
 
 ```bash
-gh pr view "$OLDEST_PR" -R "$REPO" --json commits --jq '.commits[].messageHeadline'
-git -C "$ROOT" log --first-parent --format=%H%x09%s "$MERGE"
+gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[].number'
 ```
 
-The first is what the pull request contributed. Walk the second from its top:
-`$MERGE` is the pull request's, and each commit below it is too for as long as
-its subject appears in the first list. The run ends at the first commit whose
-subject does not, and `$ENTRY` is the oldest commit still inside it. A squash
-ends the run at `$MERGE` itself, because the commit below a squash is the direct
-history this batch is here to review; a rebase carries it down the whole series.
-Say which of the two this was, and name `$ENTRY` before passing it.
+**Take that call once per commit, walking the first-parent chain downwards from
+`$MERGE`.** `$SHA` is the commit being asked about, substituted literally. The
+run of commits the pull request owns ends at the first one whose answer does not
+name `$OLDEST_PR`, and `$ENTRY` is the last one whose answer did. A squash ends
+the run at `$MERGE` itself, because the commit below a squash belongs to no pull
+request or to an older one; a rebase carries it down the whole series. Say which
+of the two this was, and name `$ENTRY` before passing it.
+
+**Ask GitHub, and never infer ownership from what a commit looks like.** Neither
+a commit count nor a commit subject identifies a commit. The count is the
+branch's rather than the base branch's, so over a squash of several commits it
+reaches past `$MERGE` into real direct history. Subjects are not unique, so a
+direct commit that happens to share a generic subject — `Update docs`, say —
+with one of the pull request's own extends the run past the end of it. Both
+mistakes move `$ENTRY` older than the truth, and every commit they step over
+stops being selectable, because the frontier only ever moves older. The
+association above is GitHub's own record of which pull request put a commit on
+this branch, and it survives a rebase rewriting the commit's SHA.
 
 **A gap above a first batch's entry is not an instruction to review it.** The
 helper reports every uncovered commit above the resume position, and on a first
@@ -1189,8 +1195,14 @@ The walk is piped in here exactly as it is at selection, and for the same
 reason: the helper resolves and orders every reviewed SHA against the history it
 is given, so a record handed none refuses the batch it is trying to record
 rather than recording it against nothing. `$REPORT` is the path
-`direct-select` named and this batch wrote; drop the flag for a clean batch,
-which records its coverage and writes nothing. A batch that reviewed nothing and
+`direct-select` named and this batch wrote, and it is **empty for a clean
+batch**, which records its coverage and writes nothing. One command serves
+both: an unset `$REPORT` reaches the helper as `--report ""`, and the helper
+reads an empty value as the flag being absent, exactly as it reads an empty
+`--start` as no start. Do not leave a stale path in that variable from an
+earlier batch — the helper derives the name this batch's own commits give and
+refuses any other, so a leftover value refuses the recording rather than
+mislabelling it. A batch that reviewed nothing and
 excluded nothing records nothing and is not a completed batch: the helper
 refuses an empty `--reviewed` with an empty `--exclude`, and refuses a report
 for it too. Recording merges rather than replaces: an earlier exclusion survives

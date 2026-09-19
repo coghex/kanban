@@ -380,12 +380,14 @@ GITHUB_READS = (
     'issue list -R "$REPO" --search',
     # Direct mode's two, and only on a repository's first batch: the oldest
     # merged pull request's merge commit, and -- when that commit turns out
-    # not to be a merge -- how many commits the pull request owns, which is
-    # what places a rebase-merged series above the entry rather than inside
-    # the batch. Both are reads of one pull request the caller already knows
-    # the number of, and neither selects, claims, or records anything.
+    # not to be a merge -- which pull request each first-parent commit below
+    # it belongs to, which is what places a rebase-merged series above the
+    # entry rather than inside the batch. The second is GitHub's own record of
+    # the association rather than anything inferred from the commit, so it
+    # survives the rebase that rewrote the commit's SHA. Neither selects,
+    # claims, or records anything.
     'pr view "$OLDEST_PR" -R "$REPO" --json mergeCommit',
-    'pr view "$OLDEST_PR" -R "$REPO" --json commits',
+    'api "repos/$REPO/commits/$SHA/pulls"',
 )
 
 # `gh pr view` is taken twice: once for the reviewed pull request's own
@@ -1220,8 +1222,14 @@ LINKED_ISSUE_READ = (
 
 REPOSITORY_SCOPE = '-R "$REPO"'
 
-# The one call that cannot carry `-R`, and how it names the repository instead.
+# The two calls that cannot carry `-R`, and how each names the repository
+# instead. The GraphQL inventory splits `$REPO` into the owner and name its
+# query variables take; the commit-to-pull-request association is a REST path,
+# and `$REPO` is the path segment that scopes it. Both are read for the
+# identity they actually name rather than exempted: an exemption would pass a
+# call that named some other repository outright.
 GRAPHQL_REPOSITORY_SCOPE = '-F owner="${REPO%%/*}" -F name="${REPO##*/}"'
+REST_PATH_REPOSITORY_SCOPE = '"repos/$REPO/'
 
 # How `$REPO` is filled: from the remote, with no GitHub call of its own.
 REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
@@ -1401,31 +1409,37 @@ DIRECT_MODE = {
         "so `--entry-none` over one is refused outright however the listing "
         "came back."
     ),
-    "a squash and a rebase are told apart by the chain": (
-        "**A non-zero exit — a squash or a rebase, and the two are told apart "
-        "by the chain rather than by arithmetic.** A squash contributes "
+    "a squash and a rebase both need the association": (
+        "**A non-zero exit — a squash or a rebase.** A squash contributes "
         "exactly one first-parent commit however many the branch had, so "
-        "`$ENTRY` is `$MERGE`. A rebase contributes the branch's whole series "
-        "as first-parent commits, so `$MERGE` is only the newest of them and "
-        "`$ENTRY` is the oldest."
+        "`$ENTRY` is `$MERGE`. A rebase contributes the branch's whole "
+        "series as first-parent commits, so `$MERGE` is only the newest of "
+        "them and `$ENTRY` is the oldest. Ask GitHub which pull request "
+        "each commit belongs to rather than inferring it:"
     ),
-    "the commit count is never the derivation": (
-        "**Never derive that from the pull request's commit count.** The count "
-        "is the branch's, not the base branch's: over a squash of several "
-        "commits it steps past `$MERGE` into real direct history, and every "
-        "commit it steps over stops being selectable."
+    "the association is asked once per commit down the chain": (
+        "**Take that call once per commit, walking the first-parent chain "
+        "downwards from `$MERGE`.** `$SHA` is the commit being asked "
+        "about, substituted literally. The run of commits the pull request "
+        "owns ends at the first one whose answer does not name "
+        "`$OLDEST_PR`, and `$ENTRY` is the last one whose answer did."
     ),
-    "the run is read off the two lists": (
-        "The first is what the pull request contributed. Walk the second from "
-        "its top: `$MERGE` is the pull request's, and each commit below it is "
-        "too for as long as its subject appears in the first list. The run "
-        "ends at the first commit whose subject does not, and `$ENTRY` is the "
-        "oldest commit still inside it."
+    "neither a count nor a subject identifies a commit": (
+        "**Ask GitHub, and never infer ownership from what a commit looks "
+        "like.** Neither a commit count nor a commit subject identifies a "
+        "commit. The count is the branch's rather than the base branch's, "
+        "so over a squash of several commits it reaches past `$MERGE` into "
+        "real direct history. Subjects are not unique, so a direct commit "
+        "that happens to share a generic subject — `Update docs`, say "
+        "— with one of the pull request's own extends the run past the "
+        "end of it."
     ),
-    "a squash ends the run at its own commit": (
-        "A squash ends the run at `$MERGE` itself, because the commit below a "
-        "squash is the direct history this batch is here to review; a rebase "
-        "carries it down the whole series."
+    "both mistakes move the entry older than the truth": (
+        "Both mistakes move `$ENTRY` older than the truth, and every "
+        "commit they step over stops being selectable, because the "
+        "frontier only ever moves older. The association above is GitHub's "
+        "own record of which pull request put a commit on this branch, and "
+        "it survives a rebase rewriting the commit's SHA."
     ),
     "a gap above an entry is not an instruction": (
         "**A gap above a first batch's entry is not an instruction to review "
@@ -1845,11 +1859,12 @@ class RepositoryScopeTests(unittest.TestCase):
                 self.assertNotIn("repo view", "".join(calls))
 
     def test_every_github_call_names_the_resolved_repository(self):
-        # Five of the six carry `-R "$REPO"`. The sixth is the GraphQL
-        # inventory, which has no `-R` to carry: it names the same identity by
-        # splitting `$REPO` into the owner and name its query variables take,
-        # and is read that way rather than exempted -- an exemption would also
-        # pass for a query that named some other repository outright.
+        # Every `gh pr`/`gh issue` call carries `-R "$REPO"`. The two `gh api`
+        # calls have no `-R` to carry and name the same identity another way:
+        # the GraphQL inventory splits `$REPO` into its query variables, and
+        # the commit-to-pull-request association puts it in the REST path. Each
+        # is read for the identity it names rather than exempted, because an
+        # exemption would also pass a call that named some other repository.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             for match in GH_INVOCATION_RE.finditer(content):
@@ -1857,6 +1872,8 @@ class RepositoryScopeTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, call=call):
                     if call.startswith("gh api graphql"):
                         self.assertIn(GRAPHQL_REPOSITORY_SCOPE, call)
+                    elif call.startswith("gh api "):
+                        self.assertIn(REST_PATH_REPOSITORY_SCOPE, call)
                     else:
                         self.assertIn(REPOSITORY_SCOPE, match.group("tail"))
 
@@ -2617,6 +2634,25 @@ argv = sys.argv[1:]
 with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(argv) + "\\n")
 
+if argv[:1] == ["api"] and argv[1:2] != ["graphql"]:
+    # The commit-to-pull-request association direct mode's first batch walks.
+    # Served from a recorded map so a test can state which pull request owns
+    # which first-parent commit -- which is the whole point of asking GitHub
+    # rather than inferring it from the commit.
+    path = argv[1]
+    prefix = "repos/%s/commits/" % (os.environ["FAKE_GH_REPO"],)
+    if not path.startswith(prefix) or not path.endswith("/pulls"):
+        sys.stderr.write("fake gh: unserved api path: %r\\n" % (path,))
+        raise SystemExit(68)
+    sha = path[len(prefix):-len("/pulls")]
+    owners = json.load(open(os.environ["FAKE_GH_ASSOCIATIONS"], encoding="utf-8"))
+    if sha not in owners:
+        sys.stderr.write("fake gh: no association recorded for %r\\n" % (sha,))
+        raise SystemExit(69)
+    for number in owners[sha]:
+        print(number)
+    raise SystemExit(0)
+
 if argv[:2] != ["api", "graphql"]:
     sys.stderr.write("fake gh: only the graphql inventory call is served: %r\\n" % (argv,))
     raise SystemExit(64)
@@ -2905,6 +2941,8 @@ class WorkflowRun:
         self.gh_log = base / "gh-calls.jsonl"
         self.pages_file = base / "merged.json"
         self.pages_file.write_text("[]", encoding="utf-8")
+        self.associations_file = base / "commit-pulls.json"
+        self.associations_file.write_text("{}", encoding="utf-8")
         self.scratch = base / "scratch"
         self.scratch.mkdir()
         self.env = dict(
@@ -2914,6 +2952,7 @@ class WorkflowRun:
             CODEX_HOME=str(self.codex_home),
             FAKE_GH_LOG=str(self.gh_log),
             FAKE_GH_PAGES=str(self.pages_file),
+            FAKE_GH_ASSOCIATIONS=str(self.associations_file),
             FAKE_GH_REPO=E2E_REPO,
             FAKE_GH_JQ=asset_jq_program(self.asset),
             # `$SCRIPTS` is what both locator fences bind: the directory the
@@ -2992,6 +3031,40 @@ class WorkflowRun:
         return module.holder_standing({"host": module.socket.gethostname(), "pid": pid}) == "live"
 
     # -- the reviewed repository's merged history
+
+    def owned_by(self, associations):
+        """Which pull request GitHub says put each first-parent commit here.
+
+        The association direct mode's first batch walks, recorded so a test
+        can state it. A commit with no entry is one the fake refuses to answer
+        for, which is what a walk that asked about the wrong commit looks like.
+        """
+        self.associations_file.write_text(json.dumps(associations), encoding="utf-8")
+
+    def associated_pulls(self, sha):
+        """One association call, made the way the asset spells it."""
+        completed = self.sh(
+            asset_command(self.asset, 'gh api "repos/$REPO/commits/$SHA/pulls"'),
+            SHA=sha,
+        )
+        return [int(line) for line in completed.stdout.split()]
+
+    def entry_from_the_chain(self, merge, oldest_pr, walk):
+        """`$ENTRY`, derived the way the asset's own prose says to derive it.
+
+        The chain is walked downwards from the merge commit, one association
+        call per commit, and the run ends at the first commit whose answer does
+        not name the pull request. This is the derivation under test: it asks
+        GitHub rather than reading anything off the commit, so a shared subject
+        and a branch commit count both reach it as what they are -- facts about
+        the commit that say nothing about who put it here.
+        """
+        entry = merge
+        for sha in walk[walk.index(merge) + 1:]:
+            if oldest_pr not in self.associated_pulls(sha):
+                break
+            entry = sha
+        return entry
 
     def merged(self, numbers_and_times):
         self.pages_file.write_text(
@@ -4767,6 +4840,95 @@ class DirectMode(WorkflowRunCase):
         again = self.workflow.direct_select(count=2, entry="")
         self.assertEqual(again["batch"]["origin"], "recorded-frontier")
         self.assertEqual(again["batch"]["selected"], list(self.shas[3:5]))
+
+    def squashed_history(self, subject):
+        """A squash landing on top, over history that repeats `subject`.
+
+        The duplicate is the point: the commit below the squash carries the
+        same subject as one of the pull request's own, which is exactly the
+        collision a subject-matching derivation reads as ownership. Nothing
+        about the commit says who put it here, so nothing about the commit is
+        what the derivation may read.
+        """
+        e2e_git(self.workflow.root, "commit", "-q", "--allow-empty", "-m", subject)
+        shared = e2e_git(self.workflow.root, "rev-parse", "HEAD").strip()
+        e2e_git(
+            self.workflow.root, "commit", "-q", "--allow-empty",
+            "-m", "Squash several things (#612)",
+        )
+        squash = e2e_git(self.workflow.root, "rev-parse", "HEAD").strip()
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        return squash, shared, walk
+
+    def test_a_squash_over_a_duplicate_subject_owns_only_its_own_commit(self):
+        # Round 2's blocker, at the asset's own level. The derivation the
+        # workflow spells is walked here call by call: the squash is the pull
+        # request's and the commit below it is not, however much they look
+        # alike, so `$ENTRY` is the squash and the shared-subject commit is the
+        # newest thing the batch reviews rather than something it stepped over.
+        self.migrated()
+        squash, shared, walk = self.squashed_history("Update docs")
+        self.workflow.owned_by({squash: [612], shared: []})
+        entry = self.workflow.entry_from_the_chain(squash, 612, walk)
+        self.assertEqual(entry, squash)
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        self.assertEqual(batch["selected"][0], shared)
+        self.assertEqual(batch["gaps"], [squash])
+
+    def test_a_rebased_series_is_carried_down_by_the_same_walk(self):
+        # The other half, so the derivation is not "always the merge commit"
+        # wearing a test: the same call, over a chain GitHub says the pull
+        # request owns three of, reaches the oldest of the three.
+        self.migrated()
+        for index in range(3):
+            e2e_git(
+                self.workflow.root, "commit", "-q", "--allow-empty",
+                "-m", f"rebased {index}",
+            )
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        series = walk[:3]
+        self.workflow.owned_by(
+            dict({sha: [612] for sha in series}, **{walk[3]: []})
+        )
+        entry = self.workflow.entry_from_the_chain(series[0], 612, walk)
+        self.assertEqual(entry, series[-1])
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        for owned in series:
+            self.assertNotIn(owned, batch["selected"])
+        self.assertEqual(batch["selected"], walk[3:5])
+
+    def test_a_clean_batch_records_through_the_command_as_it_is_written(self):
+        # Round 2's other blocker. The asset spells one recording command for
+        # both kinds of batch, so a clean one runs it with `$REPORT` unset --
+        # which reaches the helper as `--report ""`. Run exactly that, from the
+        # rendered fence, with no report written anywhere.
+        self.migrated()
+        selected = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(selected["batch"]["selected"], list(self.shas[:2]))
+        recorded = self.workflow.direct_record(self.shas[:2], report="")
+        self.assertEqual(recorded["status"], "recorded")
+        self.assertIsNone(recorded["report"])
+        self.assertEqual(recorded["frontier"]["sha"], self.shas[1])
+        self.assertEqual(
+            recorded["checkpoint"]["paths"], ["docs/project_review/ledger.md"]
+        )
+        # Nothing was written under the reports directory beside the ledger,
+        # and the next batch resumes below the frontier this one recorded.
+        self.assertEqual(
+            sorted(
+                path.name
+                for path in (self.workflow.docs / "docs" / "project_review").iterdir()
+            ),
+            ["ledger.md"],
+        )
+        again = self.workflow.direct_select(count=1, entry="")
+        self.assertEqual(again["batch"]["selected"], [self.shas[2]])
 
     def test_a_direct_batch_refuses_a_repository_that_has_no_ledger(self):
         # The reason the migration above is not a formality: a direct batch

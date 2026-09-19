@@ -6256,6 +6256,32 @@ class DirectReportTests(DirectTestCase):
             self.state()["direct"]["reports"][0]["path"], report
         )
 
+    def test_an_empty_report_flag_is_the_flag_being_absent(self):
+        # The asset spells one recording command for both kinds of batch, so a
+        # clean one reaches the command line as `--report ""`. Read as a value
+        # that was set, it is a report naming no range and every clean batch
+        # the canonical command runs is refused. Read as the flag being absent
+        # -- the same rule `--start` and `--entry` already take -- the batch
+        # records and writes nothing.
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry_none=True)["batch"]
+        completed = self.helper(
+            "direct-record",
+            "--root", str(self.root),
+            "--repo", REPO,
+            "--reviewed", ",".join(batch["selected"]),
+            "--exclude", "",
+            "--report", "",
+            stdin="\n".join(self.walk),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["status"], "recorded")
+        self.assertIsNone(result["report"])
+        self.assertEqual(result["checkpoint"]["paths"], [LEDGER.LEDGER_RELATIVE_PATH])
+        self.assertEqual(self.state()["direct"]["reports"], [])
+        self.assertEqual(self.state()["direct"]["endpoint"], {"sha": self.walk[1]})
+
     def test_a_report_naming_another_range_is_refused(self):
         self.migrated_ledger()
         batch = self.direct_select(count=3, entry_none=True)["batch"]
