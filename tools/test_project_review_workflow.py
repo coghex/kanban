@@ -1353,6 +1353,18 @@ DIRECT_MODE = {
         "reviewing them here would audit the same work twice under a mode that "
         "cannot record it."
     ),
+    "an explicit start settles the position before the inventory": (
+        "**An explicit start is a position, and it settles this subsection "
+        "before it begins.** When the user named a commit or a range, pass it "
+        "as `--start` and skip the rest of this subsection entirely: the "
+        "helper takes an explicit start over either automatic position, so "
+        "nothing below is needed and nothing below may stop the run."
+    ),
+    "a batch with a start fetches no inventory": (
+        "Do not fetch the inventory for a batch that has a start — an "
+        "inventory that could not be established is a reason to refuse a batch "
+        "that needed one to be positioned, and this batch does not."
+    ),
     "the inventory is established without selecting or claiming": (
         "Fetch it exactly as step 1 does — the same `gh` query, the same page "
         "size, the same completeness rules — and read it yourself rather than "
@@ -1381,8 +1393,7 @@ DIRECT_MODE = {
     ),
     "the oldest pull request's number is set, not assumed": (
         "`$OLDEST_PR` is that pull request's number, read out of the listing "
-        "above and set here — the two calls below are the only reads this "
-        "positioning makes, and both name it"
+        "above and set here."
     ),
     "the helper checks the half it can see": (
         "The helper checks the half of that answer it can see for itself: a "
@@ -1390,24 +1401,37 @@ DIRECT_MODE = {
         "so `--entry-none` over one is refused outright however the listing "
         "came back."
     ),
-    "a rebased pull request owns more than its merge commit": (
-        "A squash puts one commit on the branch; a rebase puts the pull "
-        "request's whole series on it as first-parent commits, so `$MERGE` is "
-        "only the newest of them and beginning at its parent would select the "
-        "rest of the series as direct commits — which this mode must never do."
+    "a squash and a rebase are told apart by the chain": (
+        "**A non-zero exit — a squash or a rebase, and the two are told apart "
+        "by the chain rather than by arithmetic.** A squash contributes "
+        "exactly one first-parent commit however many the branch had, so "
+        "`$ENTRY` is `$MERGE`. A rebase contributes the branch's whole series "
+        "as first-parent commits, so `$MERGE` is only the newest of them and "
+        "`$ENTRY` is the oldest."
     ),
-    "over-stepping is reported rather than lost": (
-        "In the rebase case that lands exactly on the series' oldest commit. "
-        "In the squash case it may reach further back than necessary, and the "
-        "commits it stepped over are reported as `gaps` rather than lost."
+    "the commit count is never the derivation": (
+        "**Never derive that from the pull request's commit count.** The count "
+        "is the branch's, not the base branch's: over a squash of several "
+        "commits it steps past `$MERGE` into real direct history, and every "
+        "commit it steps over stops being selectable."
+    ),
+    "the run is read off the two lists": (
+        "The first is what the pull request contributed. Walk the second from "
+        "its top: `$MERGE` is the pull request's, and each commit below it is "
+        "too for as long as its subject appears in the first list. The run "
+        "ends at the first commit whose subject does not, and `$ENTRY` is the "
+        "oldest commit still inside it."
+    ),
+    "a squash ends the run at its own commit": (
+        "A squash ends the run at `$MERGE` itself, because the commit below a "
+        "squash is the direct history this batch is here to review; a rebase "
+        "carries it down the whole series."
     ),
     "a gap above an entry is not an instruction": (
         "**A gap above a first batch's entry is not an instruction to review "
         "it.** The helper reports every uncovered commit above the resume "
-        "position, and it cannot tell the two kinds apart: a commit the oldest "
-        "pull request owns is PR mode's and is never reviewed here, while a "
-        "commit a squash's step-back went past is direct history and is "
-        "reclaimed with an explicit `--start`."
+        "position, and on a first batch those are the oldest pull request's "
+        "own: they are PR mode's and are never reviewed here."
     ),
     "the direct walk is never sliced": (
         "**Walk the whole first-parent history, not a slice starting at the "

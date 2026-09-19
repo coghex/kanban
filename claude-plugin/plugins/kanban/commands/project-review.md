@@ -952,7 +952,16 @@ oldest merged pull request's own commits, because those belong to PR mode and
 reviewing them here would audit the same work twice under a mode that cannot
 record it.
 
-Establish the repository's merged-pull-request inventory to find it. Fetch it
+**An explicit start is a position, and it settles this subsection before it
+begins.** When the user named a commit or a range, pass it as `--start` and
+skip the rest of this subsection entirely: the helper takes an explicit start
+over either automatic position, so nothing below is needed and nothing below
+may stop the run. Do not fetch the inventory for a batch that has a start — an
+inventory that could not be established is a reason to refuse a batch that
+needed one to be positioned, and this batch does not.
+
+Otherwise the position is derived, and the inventory is what derives it.
+Establish the repository's merged-pull-request inventory. Fetch it
 exactly as step 1 does — the same `gh` query, the same page size, the same
 completeness rules — and read it yourself rather than handing it to the helper:
 this is a positioning question, and **no row is created, no pull request is
@@ -978,18 +987,11 @@ yours, and the flags are how you state it.
 
 **Which commit that is depends on how the pull request landed**, and all three
 cases occur in real histories. `$OLDEST_PR` is that pull request's number, read
-out of the listing above and set here — the two calls below are the only reads
-this positioning makes, and both name it:
+out of the listing above and set here. Take its merge commit and ask what kind
+of commit it is, reading the status before anything else runs:
 
 ```bash
 MERGE="$(gh pr view "$OLDEST_PR" -R "$REPO" --json mergeCommit --jq .mergeCommit.oid)"
-OWNED="$(gh pr view "$OLDEST_PR" -R "$REPO" --json commits --jq '.commits[].oid' | grep -c .)"
-```
-
-Then ask which kind of commit `$MERGE` is, and read the status before anything
-else runs:
-
-```bash
 git -C "$ROOT" rev-parse -q --verify "$MERGE^2"
 ```
 
@@ -997,26 +999,35 @@ git -C "$ROOT" rev-parse -q --verify "$MERGE^2"
 whatever it merged, so `$ENTRY` is `$MERGE` and the batch begins at its first
 parent. Its branch's own commits are not on the first-parent walk at all.
 
-**A non-zero exit — a squash or a rebase.** A squash puts one commit on the
-branch; a rebase puts the pull request's whole series on it as first-parent
-commits, so `$MERGE` is only the newest of them and beginning at its parent
-would select the rest of the series as direct commits — which this mode must
-never do. Stepping back `$OWNED` commits reaches the oldest of them:
+**A non-zero exit — a squash or a rebase, and the two are told apart by the
+chain rather than by arithmetic.** A squash contributes exactly one first-parent
+commit however many the branch had, so `$ENTRY` is `$MERGE`. A rebase
+contributes the branch's whole series as first-parent commits, so `$MERGE` is
+only the newest of them and `$ENTRY` is the oldest. **Never derive that from
+the pull request's commit count.** The count is the branch's, not the base
+branch's: over a squash of several commits it steps past `$MERGE` into real
+direct history, and every commit it steps over stops being selectable.
+
+Read the two lists and compare them:
 
 ```bash
-ENTRY="$(git -C "$ROOT" log --first-parent --format=%H "$MERGE" | sed -n "${OWNED}p")"
+gh pr view "$OLDEST_PR" -R "$REPO" --json commits --jq '.commits[].messageHeadline'
+git -C "$ROOT" log --first-parent --format=%H%x09%s "$MERGE"
 ```
 
-In the rebase case that lands exactly on the series' oldest commit. In the
-squash case it may reach further back than necessary, and the commits it stepped
-over are reported as `gaps` rather than lost.
+The first is what the pull request contributed. Walk the second from its top:
+`$MERGE` is the pull request's, and each commit below it is too for as long as
+its subject appears in the first list. The run ends at the first commit whose
+subject does not, and `$ENTRY` is the oldest commit still inside it. A squash
+ends the run at `$MERGE` itself, because the commit below a squash is the direct
+history this batch is here to review; a rebase carries it down the whole series.
+Say which of the two this was, and name `$ENTRY` before passing it.
 
 **A gap above a first batch's entry is not an instruction to review it.** The
-helper reports every uncovered commit above the resume position, and it cannot
-tell the two kinds apart: a commit the oldest pull request owns is PR mode's and
-is never reviewed here, while a commit a squash's step-back went past is direct
-history and is reclaimed with an explicit `--start`. Announce them and say which
-they are; that judgement is yours, not the helper's.
+helper reports every uncovered commit above the resume position, and on a first
+batch those are the oldest pull request's own: they are PR mode's and are never
+reviewed here. Announce them as that, and say so; the helper cannot tell them
+from a commit an explicit start skipped, so the distinction is yours.
 
 ### Taking the batch
 

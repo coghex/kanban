@@ -6042,6 +6042,54 @@ class DirectEntryPointTests(DirectTestCase):
         # that quietly dropped the first kind would drop the second with it.
         self.assertEqual(batch["gaps"], self.walk[:3])
 
+    def test_a_squash_of_several_commits_still_owns_only_its_own(self):
+        # The blocker a commit count produces. A squash contributes exactly
+        # one first-parent commit however many the branch had, so an entry
+        # derived from the branch's count steps `n - 1` commits past it into
+        # real direct history -- and every commit it stepped over stops being
+        # selectable, because the frontier only ever moves older. The entry
+        # is the squash commit, and the batch begins at the commit below it.
+        branch_commits = 4
+        squash = self.commit("Squash several things (#1)")
+        self.walk = self.first_parent()
+        self.migrated_ledger()
+        batch = self.direct_select(count=3, entry=squash)["batch"]
+        # Nothing between the squash and the batch: the very next first-parent
+        # commit is the newest thing this batch reviews.
+        self.assertEqual(batch["selected"], self.walk[1:4])
+        self.assertEqual(batch["gaps"], [squash])
+        # And the count the branch had reaches a commit this batch must not
+        # have started below, which is the failure stated as a comparison
+        # rather than left to the prose.
+        over_stepped = self.walk[branch_commits - 1]
+        self.assertIn(over_stepped, batch["selected"])
+        wrong = self.direct_select(count=3, start=self.walk[branch_commits])["batch"]
+        self.assertNotIn(over_stepped, wrong["selected"])
+        self.assertIn(over_stepped, wrong["gaps"])
+
+    def test_an_explicit_start_needs_no_entry_and_no_inventory(self):
+        # A user-supplied start overrides either automatic position, so a
+        # first batch that has one is positioned already: it must not be
+        # refused for the entry flags it did not pass, and the workflow must
+        # not make it wait on an inventory it does not need.
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, start=self.walk[2])["batch"]
+        self.assertEqual(batch["origin"], "explicit-start")
+        self.assertEqual(batch["selected"], self.walk[2:4])
+        # The same invocation without the start is the refusal, so the
+        # override is what carried it rather than an absent check.
+        with self.assertRaises(LEDGER.LedgerError):
+            self.direct_select(count=2)
+
+    def test_an_explicit_range_needs_no_entry_either(self):
+        self.migrated_ledger()
+        batch = self.direct_select(
+            count=9, start=self.walk[1], end=self.walk[3]
+        )["batch"]
+        self.assertEqual(batch["origin"], "explicit-start")
+        self.assertEqual(batch["selected"], self.walk[1:4])
+        self.assertTrue(batch["bounded"])
+
     def test_a_confirmed_empty_inventory_begins_at_the_head_of_the_walk(self):
         self.migrated_ledger()
         batch = self.direct_select(count=2, entry_none=True)["batch"]

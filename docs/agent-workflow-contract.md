@@ -2640,7 +2640,7 @@ awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skil
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
-grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
@@ -3096,10 +3096,11 @@ otherwise — the next one in the ordinary case, and not in every case. It is
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
 `dirname-cli` is that helper's alone as well. #684 gave it a second consumer and
 then took it back: the Codex `project-review` skill now locates the directory
-its three modules share directly, rather than taking the directory of one of
-them, because a lookup routed through one module made every mode of that
-workflow depend on that module being installed — including the mode that never
-calls it. Neither `project-review` asset derives a path that way now, and
+its modules share directly — the ledger helper and the session liveness
+adapter, since #686 retired the sweep cursor — rather than taking the directory
+of one of them, because a lookup routed through one module made every mode of
+that workflow depend on that module being installed — including the mode that
+never calls it. Neither `project-review` asset derives a path that way now, and
 neither derives a *removal* target from another path at all: each scratch
 directory cleanup removes is held in a variable of its own, because the parent
 of a variable an early exit never set is the working directory.
@@ -3115,12 +3116,7 @@ refusals refusals rather than wrong writes: the checked-out branch of the
 primary checkout must be the pull request's own base branch before a
 fast-forward advances it, so `grep -Fx "$BASE"` over
 `git symbolic-ref --short HEAD` leaves the variable the fast-forward is guarded
-on empty for every other branch and for a detached HEAD. `project-review` is
-its other packaged consumer, and there it is a count rather than a test: direct
-mode's first batch in a repository counts the oldest merged pull request's own
-commits with `grep -c .` so that a rebase-merged series, whose whole run sits on
-the first-parent walk, is placed above the batch's entry rather than reviewed
-inside it (issue #686).
+on empty for every other branch and for a detached HEAD.
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
 records it: `retriage` and `backlog-review` rewrite roadmap and report text with

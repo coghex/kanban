@@ -677,7 +677,6 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "awk",
-        "grep",
         "python3",
         "mkdir",
         "rm",
@@ -687,7 +686,6 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "awk",
-        "grep",
         "python3",
         "mkdir",
         "rm",
@@ -2978,9 +2976,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
             # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the eleven rows named
-            # below are where a reader looks to find out which assets speak
-            # each tool.
+            # is not the same as being declared, and the ten rows named below
+            # are where a reader looks to find out which assets speak each tool.
             for name in sorted(expected):
                 row = next(
                     row
@@ -3000,7 +2997,6 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "mkdir-cli",
                         "rm-cli",
                         "dirname-cli",
-                        "grep-cli",
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
