@@ -662,15 +662,12 @@ BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS = {
 # leave requirement 7's scoping rule -- `-R "$REPO"` on every call -- resting
 # on nothing discovered. The same four commands appear as backlog-review's,
 # and each is load-bearing for a different rule: `gh` reads the merged pull
-# requests and deduplicates against the tracker, `sed` fills `$REPO` from the
-# remote without a GitHub call of its own, `awk` resolves the docs worktree
-# that holds both the sweep cursor and the report, and `git` walks
-# `--first-parent` history in direct mode. The two files are rendered from one
+# requests, deduplicates against the tracker, and asks which pull request owns
+# a first-parent commit, `sed` fills `$REPO` from the remote without a GitHub
+# call of its own, `awk` resolves the docs worktree that holds the ledger and
+# the reports, and `git` walks `--first-parent` history in direct mode. The two files are rendered from one
 # source, so they are pinned to the same set: a brand block that leaked a
 # command into one and not the other fails here.
-# `grep` is direct mode's, and only on a repository's first batch: counting the
-# oldest merged pull request's own commits is what places a rebase-merged
-# series above the entry rather than inside the batch (issue #686).
 PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/project-review.md": {
         "gh",
@@ -3460,8 +3457,8 @@ class AgentWorkflowContractTests(unittest.TestCase):
         self.assertIn(entry["token"], markdown_home_relative_segments(skill))
 
     def test_the_codex_project_review_skill_declares_the_plugin_cache_root(self):
-        # Round-1 blocker of issue #548's review. The Codex asset resolves its
-        # sweep cursor through `${CODEX_HOME:-$HOME/.codex}`, so it joined the
+        # Round-1 blocker of issue #548's review. The Codex asset resolves
+        # its vendored modules through `${CODEX_HOME:-$HOME/.codex}`, so it joined the
         # consumers of `codex-plugin-cache-root` -- and a `personal-path` row
         # that does not name a consumer is a contract that has stopped
         # describing the tree. The declaring row is named exactly, for the same

@@ -162,12 +162,13 @@ RENDERED_ASSETS = (CLAUDE_ASSET, CODEX_ASSET)
 
 BUNDLE_ROOTS = ("claude-plugin", "codex-plugin")
 
-# The three modules that ship beside the command, vendored the way the
-# trusted-comment helper is: a copy in each bundle held byte-identical, and no
-# tracked original under tools/ because nothing in this repository invokes
-# them. The workflow runs in whatever repository it was pointed at, which
-# tracks no copy of anything, so a helper has to travel with the command that
-# calls it.
+# The two modules that ship beside the command since issue #686 retired the
+# sweep cursor -- the ledger helper and the session liveness adapter --
+# vendored the way the trusted-comment helper is: a copy in each bundle held
+# byte-identical, and no tracked original under tools/ because nothing in this
+# repository invokes them. The workflow runs in whatever repository it was
+# pointed at, which tracks no copy of anything, so a helper has to travel with
+# the command that calls it.
 BUNDLED_HELPERS = {
     "ledger": {
         "claude": "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
@@ -1762,10 +1763,10 @@ def body_of(text: str) -> str:
 def sections_of(text: str):
     """`text` split into its PR half and its explicit-only direct half.
 
-    The split is the unit of assertion for issue #684's requirement 10: the
-    cursor still ships and the direct section still calls it, so "the asset
-    names the cursor" says nothing about whether the rebuild happened. Where it
-    names it does.
+    The split is the unit of assertion for issue #684's requirement 10, and
+    issue #686 is why it still is: both modes call one module now, so "the
+    asset names the ledger" says nothing about whether either rebuild
+    happened. Which subcommands it names, and where, does.
     """
     body = body_of(text)
     index = body.index(DIRECT_SECTION_HEADING)
@@ -2005,9 +2006,9 @@ class ReportOnlyTests(unittest.TestCase):
 
     def test_neither_rendering_carries_a_commit_or_push_instruction(self):
         # Issue #684's acceptance, asserted rather than left to the grep: the
-        # ledger helper's `record` makes the one checkpoint, and an asset
-        # carrying any other committing or pushing text reads as permission to
-        # land the report or the cursor by hand.
+        # ledger helper's `record` and `direct-record` make the only
+        # checkpoints, and an asset carrying any other committing or pushing
+        # text reads as permission to land a report or the ledger by hand.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):

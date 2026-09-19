@@ -622,7 +622,8 @@ class DocumentParsingTests(LedgerTestCase):
         # The two documents coexist until LEDGER-6, and the markers are
         # distinct precisely so neither parser reads the other's document as
         # its own. Handing the ledger a real cursor is the strongest form of
-        # that check, so the cursor here is one its own writer produced.
+        # that check, so the cursor here is one the fixture renders in the
+        # shape its retired writer published.
         record_cursor(self.root, reviewed=[602, 601])
         cursor_text = cursor_path(self.root).read_text(encoding="utf-8")
         with self.assertRaises(LEDGER.LedgerError) as raised:
@@ -1124,11 +1125,13 @@ class DocumentParsingTests(LedgerTestCase):
                     LEDGER.state_for(self.parse(payload), REPO)["migration"], migration
                 )
 
-    def test_direct_and_excluded_are_held_to_the_cursor_modules_own_validation(self):
+    def test_direct_and_excluded_are_held_to_the_carried_over_validation(self):
         # Design D-16 carries these two structures across untouched, so the
-        # rules they are held to are the cursor's rather than a second set
-        # written here. A ledger that relaxed them would accept direct state
-        # the cursor itself would refuse on the next read.
+        # rules they are held to are the ones the retired sweep cursor held
+        # them to -- read here through the same validators
+        # `parse_cursor_document` reads an unmigrated consumer's through,
+        # rather than a second set written beside them. A ledger that relaxed
+        # them would accept direct state its own migration would refuse.
         payload = valid_payload()
         payload["repositories"][REPO]["direct"]["reviewed"] = ["not-a-sha"]
         with self.assertRaises(LEDGER.LedgerError) as raised:
@@ -1991,7 +1994,7 @@ class MigrationTests(LedgerTestCase):
 
     def test_the_boundaries_document_and_a_design_sibling_contribute_nothing(self):
         # The report glob matches both, and both carry `#N` tokens. Only what
-        # the cursor module classifies as a PR report is read, so neither
+        # `report_coverage` classifies as a PR report is read, so neither
         # produces a row and neither produces a flag.
         record_cursor(self.root, reviewed=[602])
         write_report(self.root, "project_review_ledger_design.md", LEDGER_DESIGN_SIBLING)
@@ -6779,7 +6782,7 @@ class BundledLedgerHelperTests(unittest.TestCase):
         self.assertEqual(claude, codex)
 
     def test_no_copy_ships_beside_the_retired_cursor_module(self):
-        # Issue #686 moved the cursor's three parsers into this module and
+        # Issue #686 moved the sweep cursor's three parsers into this module and
         # dropped the module itself from both bundles. A copy still shipping
         # beside it would install a second answer to what a repository's
         # direct progress is, and the two would diverge on the first batch.
