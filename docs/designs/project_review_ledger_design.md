@@ -1054,11 +1054,20 @@ installed workflow stays on the v2 cursor until LEDGER-6 switches it over.
   ledger's `direct` key with the cursor's frontier semantics, the workflow's
   explicit direct invocation calls the ledger module, and
   `project_review_cursor.py` and its registry entries leave both bundles;
-  `docs/project_review_boundaries.md` is read only by migration, through
-  parsers the ledger module carries itself.
+  `docs/project_review_boundaries.md` is read through parsers the ledger
+  module carries itself, by migration and by one other reader. That second
+  reader is the interim handoff D-16 requires: a consumer migrated between
+  LEDGER-6 and this slice kept recording direct batches against that document
+  while the ledger held the state migration imported, so the first
+  `direct-select` or `direct-record` after the cutover folds the two together
+  -- reviewed SHAs and commit exclusions merged, the older of the two
+  frontiers kept, PR state untouched -- and records in the ledger that it did,
+  so the retired document is read exactly once and no later batch can restore
+  state the ledger has moved past.
 - **Scope:** the direct-mode port, its tests, the workflow's direct section,
-  the cursor's removal from both bundles and every enumeration naming it,
-  and the contract prose that described the sweep cursor.
+  the interim handoff and its record, the cursor's removal from both bundles
+  and every enumeration naming it, and the contract prose that described the
+  sweep cursor.
 - **Phase:** 4
 - **Depends on:** LEDGER-6
 - **Ordering:** `not on the critical path`
