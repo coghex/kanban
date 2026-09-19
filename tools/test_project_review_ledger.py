@@ -1913,8 +1913,8 @@ class MigrationTests(LedgerTestCase):
         self.assertIsNone(result["state"]["migration"]["withheld_boundary"])
 
     def test_a_hand_authored_stop_is_withheld_while_its_exception_is_imported(self):
-        # The unchanged cursor parser returns every `PR #N` in the bullet as
-        # reviewed, the exclusive stop included. A stop is the one pull request
+        # `parse_hand_authored_cursor` returns every `PR #N` in the bullet
+        # as reviewed, the exclusive stop included. A stop is the one pull request
         # the batch did not enter, so it is withheld here; the exceptional
         # reviewed PR named in the same bullet still arrives.
         (self.root / "docs" / "project_review_boundaries.md").write_text(

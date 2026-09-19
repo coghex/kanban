@@ -2904,8 +2904,10 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_the_cache_root_row_describes_the_lookup_the_asset_makes(self):
         # Issue #684 round 9: the rendered Codex skill stopped locating the
-        # ledger module and started locating the directory its three modules
-        # share, and this paragraph went on describing the old lookup. Pinned
+        # ledger module and started locating the directory its vendored
+        # modules share -- the ledger helper and the session liveness adapter,
+        # since issue #686 retired the sweep cursor -- and this paragraph went
+        # on describing the old lookup. Pinned
         # from both sides so neither can move alone -- the asset's own fence
         # and the prose that explains it.
         asset = REPO_ROOT / "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
@@ -2941,14 +2943,17 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # from, and `git` because direct-commit mode walks first-parent
         # history with it -- a rewrite that reached for `gh repo view` instead
         # would drop `sed` here rather than passing quietly. Issue #548 added
-        # `python3`, which is how both brands reach the vendored cursor helper,
-        # and `find` with `head` for the Codex lookup that locates it in the
+        # `python3`, which is how both brands reach the vendored helpers, and
+        # `find` with `head` for the Codex lookup that locates them in the
         # $CODEX_HOME cache; the Claude lookup is a ${CLAUDE_PLUGIN_ROOT}
         # substitution and spawns nothing, so those two are Codex-only here
         # exactly as they are in the rendered asset. `dirname` was Codex-only
         # here too until issue #684 round 8: the lookup now finds the
-        # directory the three vendored modules share rather than taking the
-        # directory of one of them, so nothing derives a path with it.
+        # directory the vendored modules share rather than taking the
+        # directory of one of them, so nothing derives a path with it. Issue
+        # #686 left that set at two, the ledger helper and the adapter, and
+        # added no executable: the association it asks GitHub for is another
+        # `gh` call rather than anything read off a commit locally.
         executable_tokens = {
             row["token"] for row in self.manifest if row["kind"] == "executable"
         }

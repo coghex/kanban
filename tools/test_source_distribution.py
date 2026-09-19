@@ -878,12 +878,12 @@ class SourceDistributionTest(unittest.TestCase):
     def test_the_bundled_project_review_state_modules_ship_with_both_bundles(self):
         self.assert_present(
             BUNDLED_PROJECT_REVIEW_MODULES,
-            "Both provider bundles must carry the project-review cursor "
-            "helper their sweep resolves before its first read, the ledger "
-            "helper that supersedes it, and the session liveness adapter with "
-            "the hooks file that runs it; a bundle that ships the command "
-            "without one installs a sweep that stops at its own helper lookup, "
-            "or a lease no session can keep, in every repository.",
+            "Both provider bundles must carry the project-review ledger "
+            "helper both of the command's modes resolve before their first "
+            "read, and the session liveness adapter with the hooks file that "
+            "runs it; a bundle that ships the command without one installs a "
+            "workflow that stops at its own helper lookup, or a lease no "
+            "session can keep, in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):

@@ -996,8 +996,11 @@ class Packaging(unittest.TestCase):
         # #684 performed the switch-over: the installed workflow's PR mode
         # registers an attempt through this adapter and hands its keeper to the
         # ledger's `claim`, so this module is no longer a mechanism nothing
-        # calls. The cursor survives in the explicit-only direct section until
-        # LEDGER-8 retires it, which is why its presence is asserted too.
+        # calls. #686 retired the sweep cursor, leaving the ledger helper and
+        # this adapter as the two modules an asset resolves -- so the ledger's
+        # presence is asserted beside this one's, and direct mode's own fence
+        # resolving the ledger without the adapter is
+        # tools/test_project_review_workflow.py's contract.
         #
         # What each asset *says* about the adapter is
         # tools/test_project_review_workflow.py's contract; what is pinned here

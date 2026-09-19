@@ -2185,15 +2185,21 @@ def report_scope(text: str, path: str) -> dict:
 
 
 def migrate(root, repo: str, confirmations=None) -> dict:
-    """Build one repository's ledger from the cursor and the sibling reports.
+    """Build one repository's ledger from the old record and the sibling reports.
 
     Reads, in this order of authority, whatever `docs/project_review_boundaries.md`
     holds -- the v2 cursor, the v1 cursor, or the hand-authored boundary
-    document -- through the cursor module's own parser, then every sibling
-    report that module classifies as a PR report. Writes nothing while any
-    report is flagged, and writes nothing at all over an existing ledger. The
-    cursor document is neither deleted nor rewritten: it remains the live
-    consumer record until LEDGER-6 switches the workflow over.
+    document -- through the parsers above, then every sibling report
+    `report_coverage` classifies as a PR report. Writes nothing while any
+    report is flagged, and writes nothing at all over an existing ledger.
+
+    That document is neither deleted nor rewritten here or anywhere else. It
+    stopped being the live record when LEDGER-6 switched PR mode over and
+    LEDGER-8 switched direct mode, and it survives as an input to exactly two
+    reads: this migration, for a consumer that has never had a ledger, and
+    `adopt_cursor_direct`'s one-time handoff, for a consumer whose direct
+    batches kept recording against it through the interim between those two
+    slices.
     """
     if not REPO_RE.match(str(repo)):
         raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
@@ -2357,8 +2363,8 @@ def _read_cursor(cursor_path: Path, repo: str):
     reviewed instead of withheld. The ledger is written once and cannot be
     overwritten, so that error would have been permanent.
 
-    Classified with the cursor module's own markers, and parsed with its own
-    parser, so neither half is a second opinion about the same bytes.
+    Classified by the markers above and parsed by the parser above, so
+    neither half is a second opinion about the same bytes.
     """
     try:
         text = cursor_path.read_text(encoding="utf-8")

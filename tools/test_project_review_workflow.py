@@ -23,13 +23,17 @@ left to review.
   vendored commands. This one never mutates a tracker, so a wrong repository
   costs no data — it costs the whole run, which is spent reviewing code the user
   did not ask about and reported as if it were theirs. The calls are pinned
-  exactly: six spellings over seven invocations, with `-R "$REPO"` on the five
-  pull-request and issue reads and `$REPO`'s own owner and name on the inventory
-  query. (`gh pr view` is the one taken twice: once for the reviewed pull
-  request and once to verify a pull request claimed to have fixed an earlier
-  finding.) The resolution that fills `$REPO` reads the remote with `git` and
-  `sed`, so an initial `gh repo view` — a GitHub call made before the identity
-  every other call depends on exists — is refused by name.
+  exactly: eight spellings over nine invocations. Seven carry `-R "$REPO"` —
+  the pull-request and issue reads — and two are `gh api` calls with no `-R`
+  to carry, which name the same identity another way: the merged-pull-request
+  inventory splits `$REPO` into the owner and name its GraphQL variables take,
+  and direct mode's commit-to-pull-request association puts it in the REST
+  path. Each is read for the identity it actually names rather than exempted.
+  (`gh pr view` is the one taken twice: once for the reviewed pull request and
+  once to verify a pull request claimed to have fixed an earlier finding.) The
+  resolution that fills `$REPO` reads the remote with `git` and `sed`, so an
+  initial `gh repo view` — a GitHub call made before the identity every other
+  call depends on exists — is refused by name.
 * **The four Codex-only capabilities reach both brands.** Requirement 4: direct
   commit mode with its frontier rules, the report-filename rules, and the
   `Captured note` / `Verification` / `Evidence` / `Handoff context` capture
@@ -1221,6 +1225,21 @@ LINKED_ISSUE_READ = (
     "so this is a read of its own rather than a second look at the same text."
 )
 
+# This module's own docstring, and the words it spells its counts in. Read
+# back by `test_this_modules_own_docstring_counts_the_calls_correctly`, so a
+# count that stops describing the assets fails here rather than in a review.
+MODULE_DOCSTRING = __doc__ or ""
+
+NUMBER_WORDS = (
+    "zero", "one", "two", "three", "four", "five",
+    "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+)
+
+
+def number_word(value: int) -> str:
+    return NUMBER_WORDS[value]
+
+
 REPOSITORY_SCOPE = '-R "$REPO"'
 
 # The two calls that cannot carry `-R`, and how each names the repository
@@ -1339,9 +1358,9 @@ FORBIDDEN_SPELLINGS = ("gh issue create", "issue-origin")
 # document contradicts the one checkpoint `record` makes.
 FORBIDDEN_VCS_WRITE_RE = re.compile(r"git (commit|push)")
 
-# Requirement 4, capability 1: direct-commit mode and its cursor rules, which
-# existed only in the Codex copy, and which #684 confined to the direct
-# section.
+# Requirement 4, capability 1: direct-commit mode and its frontier rules,
+# which existed only in the Codex copy, which #684 confined to the direct
+# section, and which #686 moved onto the ledger.
 DIRECT_MODE = {
     "twelve-unit default": "Default to 12 review units.",
     "a merge is not implied": (
@@ -1836,8 +1855,8 @@ class RenderedAssetTests(unittest.TestCase):
     def test_no_bundle_ships_an_auxiliary_reference_directory(self):
         # Requirement 5 and design D-10: the boundary rule ships as prose, and
         # the file it describes does not ship at all — it is one consuming
-        # repository's cursor, and bundling it would put that state in every
-        # install. The renderer emits one file per brand and nothing else, so
+        # repository's own review record, and bundling it would put that state
+        # in every install. The renderer emits one file per brand and nothing else, so
         # this holds by construction; it is asserted because the construction
         # is what a later slice might be tempted to extend.
         for root in BUNDLE_ROOTS:
@@ -1877,6 +1896,36 @@ class RepositoryScopeTests(unittest.TestCase):
                         self.assertIn(REST_PATH_REPOSITORY_SCOPE, call)
                     else:
                         self.assertIn(REPOSITORY_SCOPE, match.group("tail"))
+
+    def test_this_modules_own_docstring_counts_the_calls_correctly(self):
+        # The prose-audit gate, turned into one. This module's docstring
+        # states the GitHub surface as three numbers, and three review rounds
+        # of issue #686 were spent on counts that had stopped describing the
+        # list beside them. A number nothing checks is a number that drifts,
+        # so each is read back out of the assets it describes.
+        spellings = len(GITHUB_READS)
+        invocations = DECLARED_GITHUB_CALL_COUNT
+        for relative_path in RENDERED_ASSETS:
+            calls = GH_INVOCATION_RE.findall(read(relative_path))
+            scoped = sum(1 for tail in calls if REPOSITORY_SCOPE in tail)
+            api = sum(1 for tail in calls if tail.startswith("api "))
+            with self.subTest(asset=relative_path):
+                self.assertEqual(len(calls), invocations)
+                self.assertEqual(scoped + api, invocations)
+                self.assertIn(
+                    f"{number_word(spellings)} spellings over "
+                    f"{number_word(invocations)} invocations",
+                    MODULE_DOCSTRING,
+                )
+                self.assertIn(
+                    f"{number_word(scoped).capitalize()} carry "
+                    f"`{REPOSITORY_SCOPE}`",
+                    MODULE_DOCSTRING,
+                )
+                self.assertIn(
+                    f"and {number_word(api)} are `gh api` calls",
+                    MODULE_DOCSTRING,
+                )
 
     def test_each_declared_read_is_present_and_scoped(self):
         for relative_path in RENDERED_ASSETS:
@@ -3243,9 +3292,9 @@ class WorkflowRun:
         Rendered here because the module that wrote it left both bundles in
         issue #686 and nothing produces one any more. The half of the
         mechanism that survives is the parser the ledger carries, and
-        `test_the_cursor_fixture_is_what_the_surviving_parser_reads` proves
-        this rendering round-trips through it -- so the fixture is still
-        checked against a mechanism rather than against itself.
+        `CursorFixtureTests` proves this rendering round-trips through it --
+        so the fixture is still checked against a mechanism rather than
+        against itself.
         """
         module = e2e_module("ledger", self.brand)
         path = Path(self.docs) / module.CURSOR_RELATIVE_PATH
@@ -3818,13 +3867,14 @@ class HelperResolution(WorkflowRunCase):
 
 class FreshRepository(WorkflowRunCase):
     def test_a_fresh_repository_starts_from_an_empty_ledger_and_needs_no_migration(self):
-        # Requirement 11's first proof. No cursor and no report, so `read`
-        # answers about a repository with no state, and the first claim takes
-        # the newest merged pull request out of the never-reviewed queue.
+        # Requirement 11's first proof. No pre-ledger record and no report,
+        # so `read` answers about a repository with no state, and the first
+        # claim takes the newest merged pull request out of the never-reviewed
+        # queue.
         self.workflow.merged([(612, "2026-09-01T00:00:00Z"), (610, "2026-08-01T00:00:00Z")])
         self.assertEqual(self.workflow.rows(), {})
-        # No cursor and no report, so the migration establishes an empty
-        # ledger, flags nothing, and imports no coverage at all.
+        # Nothing to import, so the migration establishes an empty ledger,
+        # flags nothing, and imports no coverage at all.
         migrated = json.loads(self.workflow.migrate().stdout)
         self.assertEqual(migrated["status"], "migrated")
         self.assertEqual(migrated["flags"], [])
