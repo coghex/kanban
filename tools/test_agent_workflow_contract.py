@@ -376,7 +376,7 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     # job runs with, and the conventional XDG config base its job definition
     # pins so the child reads the configuration this installation resolved its
     # identity through. Only one of a helper's returns is followed —
-    # the extractor takes the first that resolves — so the `~/Library` runtime
+    # the extractor takes the first that resolves -- so the `~/Library` runtime
     # and lock spellings are not recovered here and are grounded in the
     # module's docstrings instead, as docs/agent-workflow-contract.md §4
     # records; the record path is composed from the install directory and a
@@ -432,7 +432,6 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
@@ -477,7 +476,6 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
-    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
     "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
@@ -670,12 +668,16 @@ BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS = {
 # `--first-parent` history in direct mode. The two files are rendered from one
 # source, so they are pinned to the same set: a brand block that leaked a
 # command into one and not the other fails here.
+# `grep` is direct mode's, and only on a repository's first batch: counting the
+# oldest merged pull request's own commits is what places a rebase-merged
+# series above the entry rather than inside the batch (issue #686).
 PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/project-review.md": {
         "gh",
         "git",
         "sed",
         "awk",
+        "grep",
         "python3",
         "mkdir",
         "rm",
@@ -685,6 +687,7 @@ PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "git",
         "sed",
         "awk",
+        "grep",
         "python3",
         "mkdir",
         "rm",
@@ -708,13 +711,13 @@ AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
     "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md": set(),
 }
 
-# Issue #548's cursor helper and issue #680's ledger helper, vendored into both
-# bundles and covered the way the trusted-comment helper and the document
-# mechanism above are. The cursor's expectation is an empty set, and that is a
-# pin rather than an omission: its reconciliation is arithmetic over listings
-# the workflow already took, so a cursor that started shelling out would be
-# reaching a checkout its caller never named -- and would owe a manifest row it
-# does not have. The ledger's is `git` since issue #682, which put the lease's
+# Issue #680's ledger helper and issue #687's liveness adapter, vendored into
+# both bundles and covered the way the trusted-comment helper and the document
+# mechanism above are. The cursor helper that used to sit beside them left both
+# bundles in issue #686. The expectation is an exact set, and that is a
+# pin rather than an omission: a module that started spawning something else
+# would be reaching a checkout its caller never named -- and would owe a
+# manifest row it does not have. The ledger's is `git` since issue #682, which put the lease's
 # lock reference and heartbeat records in the Git common directory; its one
 # other spawn, the renewer, runs through `sys.executable` and is pinned by
 # LEDGER_DYNAMIC_EXECUTABLES below. Issue #687's session liveness adapter reads
@@ -722,10 +725,8 @@ AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
 # through `sys.executable` and its wrapper runs the caller's own command, both
 # pinned by the LIVENESS_* sets below.
 PROJECT_REVIEW_HELPER_SURFACE_FILES = {
-    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py": set(),
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/project_review_liveness.py": {"claude", "codex"},
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py": set(),
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": {"git"},
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py": {"claude", "codex"},
 }
@@ -2977,8 +2978,9 @@ class AgentWorkflowContractTests(unittest.TestCase):
                     undocumented_command_message(relative_path, name),
                 )
             # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the ten rows named below
-            # are where a reader looks to find out which assets speak each tool.
+            # is not the same as being declared, and the eleven rows named
+            # below are where a reader looks to find out which assets speak
+            # each tool.
             for name in sorted(expected):
                 row = next(
                     row
@@ -2998,6 +3000,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                         "mkdir-cli",
                         "rm-cli",
                         "dirname-cli",
+                        "grep-cli",
                     },
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
@@ -3083,16 +3086,11 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 expected,
                 relative_path,
             )
-        # Non-vacuity for the cursor's empty sets above: the same extractor
-        # recovers something from a module that does spawn, so "nothing found"
-        # is a property of those two files rather than of the scan.
-        self.assertEqual(
-            discovered_commands_for_plugin_file(
-                "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
-                'subprocess.run(["git", "log"])',
-            ),
-            {"git"},
-        )
+        # Non-vacuity is inherent here now that issue #686 has retired the one
+        # module whose expected set was empty: every set above names at least
+        # one executable, so an extractor that had stopped matching would
+        # recover the empty set for each of them and fail the loop rather than
+        # passing it vacuously.
 
     def test_drain_prs_asset_command_discovery_is_not_vacuous(self):
         # The counterpart of the three pins above for the one vendored

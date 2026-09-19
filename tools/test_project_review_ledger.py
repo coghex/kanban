@@ -4,11 +4,17 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
       or: python3 tools/test_project_review_ledger.py
 
 Issue #680, slice LEDGER-2 of `docs/designs/project_review_ledger_design.md`. The
-module under test ships in both bundles and nothing invokes it yet: design
-D-19 keeps the installed `project-review` command on the v2 cursor until
-LEDGER-6 switches it over, so until then these tests are the module's only
-caller. That makes them the whole of its contract rather than a sample of it,
-and these properties follow.
+module under test ships in both bundles and, since LEDGER-6 and LEDGER-8, is
+the installed `project-review` command's whole state mechanism in both of its
+modes. These tests are its only other caller, and the properties below follow
+from their being the whole of its contract rather than a sample of it.
+
+Issue #686 (LEDGER-8) adds direct-commit mode and the one interim handoff from
+the sweep cursor it replaced. Its cases run the module's own `migrate`,
+`direct-select` and `direct-record` over temporary repositories with real
+first-parent history built by `git commit`, `git merge` and `git rebase`, so
+every rule about a position in an ancestry is asserted against an ancestry
+rather than against a list of invented SHAs this file put in order itself.
 
 Issue #682 (LEDGER-4) adds the lease, and its tests are process-level on
 purpose: every claim runs the real renewer against a real liveness signal --
@@ -26,15 +32,18 @@ ledger at HEAD, the index and the status -- rather than taken from the
 record's own result, and every refusal is asserted to leave the ledger bytes,
 the branch and the operator's files exactly as they were.
 
-* **Fixtures are produced by the mechanism they stand in for.** Every v2
-  cursor here is written by `project_review_cursor.py`'s own `record` and
-  `write_document`, so a cursor shape this migration cannot read is a cursor
-  shape that mechanism cannot write. A v1 cursor is that same recorded payload
-  with only its two version tokens rewritten, because v1 and v2 differ in what
-  `pr.endpoint` *means* rather than in how it is spelled, and no code in this
-  repository writes one any more. The hand-authored boundary document is
-  inline text for the same reason turned the other way: nothing ever wrote it
-  mechanically, so its shape is exactly the prose a human typed.
+* **Fixtures are produced by the mechanism they stand in for, or checked
+  against the half of it that survives.** Every ledger here is written by this
+  module's own writer and read back through its own parser. The cursor
+  documents cannot be: issue #686 retired the module that wrote them, so
+  `render_cursor` reproduces its output, and `CursorFixtureTests` proves that
+  rendering round-trips through the parser this module carries -- with a
+  negative control, because a round trip alone would pass against a parser
+  that accepted anything. A v1 cursor is that same rendering under the other
+  marker and version token, because v1 and v2 differ in what `pr.endpoint`
+  *means* rather than in how it is spelled. The hand-authored boundary
+  document is inline text for the reason turned the other way: nothing ever
+  wrote it mechanically, so its shape is exactly the prose a human typed.
 * **Reports are inline.** The tracked `docs/project_review_*.md` reports are
   excluded from the source distribution, so a test that read them would pass
   in a checkout and error in an unpacked release. The paragraphs below are
@@ -157,9 +166,6 @@ def load_ledger_helper(brand: str):
 
 LEDGER_MODULES = {brand: load_ledger_helper(brand) for brand in LEDGER_HELPERS}
 LEDGER = LEDGER_MODULES["claude"]
-# Resolved through the module's own sibling loader, so the loader that the
-# installed copy depends on is exercised rather than reimplemented here.
-CURSOR = LEDGER.cursor_module()
 
 
 # --------------------------------------------------------------------------
@@ -173,58 +179,90 @@ def write_report(root, name: str, body: str) -> str:
     return f"docs/{name}"
 
 
-def pr_candidates(history=PR_HISTORY):
-    return CURSOR.normalize_candidates(
-        "pr", [{"number": number, "mergedAt": merged_at} for number, merged_at in history]
-    )
+# The header the retired `project_review_cursor.py` wrote above its payload,
+# reproduced verbatim. The parser anchors on the marker rather than on this, so
+# a fixture whose prose drifted would parse anyway -- and a fixture that parsed
+# for the wrong reason proves nothing about the documents real consumers hold.
+V2_CURSOR_HEADER = """# Project review sweep cursor
+
+Machine-owned state for the `project-review` workflow: each repository's
+exclusive older PR boundary, the units completed batches reviewed, the direct
+history endpoint, and the units a user explicitly excluded. PR selection always
+starts at the latest merge and stops before its boundary; a clean batch records
+reviewed coverage exactly as a finding-bearing batch does.
+
+Written by `project_review_cursor.py`. Edit it through that helper rather than
+by hand: the payload below is parsed strictly, and an edit it cannot read stops
+the next sweep instead of being ignored.
+"""
 
 
-def record_cursor(
-    root,
-    repo=REPO,
+def cursor_state(
     *,
     reviewed=(),
     boundary=None,
     excluded=(),
+    excluded_commits=(),
     direct_reviewed=(),
+    direct_frontier=None,
 ):
-    """A v2 cursor written by the cursor module's own record and writer."""
-    document = CURSOR.load_document(root)
-    state = CURSOR.state_for(document, repo)
-    if reviewed or excluded or boundary is not None:
-        state = CURSOR.record(
-            state,
-            "pr",
-            pr_candidates(),
-            list(reviewed),
-            list(excluded),
-            boundary=boundary,
-        )
-    if direct_reviewed:
-        state = CURSOR.record(
-            state,
-            "direct",
-            CURSOR.normalize_candidates("direct", list(DIRECT_HISTORY)),
-            list(direct_reviewed),
-        )
-    document.setdefault("repositories", {})[repo] = state
-    CURSOR.write_document(root, document)
-    return state
+    """One repository's entry, in the shape the retired writer published."""
+    return {
+        "pr": {
+            "endpoint": (
+                None
+                if boundary is None
+                else {
+                    "number": boundary,
+                    "merged_at": dict(PR_HISTORY)[boundary],
+                }
+            ),
+            "reviewed": sorted(set(reviewed)),
+        },
+        "direct": {
+            "endpoint": None if direct_frontier is None else {"sha": direct_frontier},
+            "reviewed": sorted(set(direct_reviewed)),
+        },
+        "excluded": {
+            "prs": sorted(set(excluded)),
+            "commits": sorted(set(excluded_commits)),
+        },
+    }
 
 
-def downgrade_cursor_to_v1(root):
-    """The recorded payload, re-marked as the released version-1 document.
+def render_cursor(states, version=2):
+    """A cursor document in the shape its retired writer rendered.
+
+    Rendered here because that writer left both bundles in issue #686 and
+    nothing produces one any more. The half of the mechanism that survives is
+    the parser this module carries, and
+    `CursorFixtureTests` proves this rendering round-trips through it -- so a
+    cursor shape the migration cannot read is still a cursor shape checked
+    against a mechanism rather than against itself.
 
     Version 1 spelled the same payload and differed only in what `pr.endpoint`
-    meant -- a resume-below frontier that had itself been reviewed, rather than
-    an exclusive stop. Nothing writes one any more, so re-marking a recorded v2
-    payload is the only way to produce one that is not hand-invented.
+    *meant* -- a resume-below frontier that had itself been reviewed, rather
+    than an exclusive stop -- so it is this same rendering under the other
+    marker and the other version token.
     """
-    path = CURSOR.document_path(root)
-    text = path.read_text(encoding="utf-8")
-    text = text.replace(CURSOR.CURSOR_MARKER, CURSOR.LEGACY_CURSOR_MARKER)
-    text = text.replace('"version": 2', '"version": 1')
-    path.write_text(text, encoding="utf-8")
+    marker = LEDGER.CURSOR_MARKER if version == 2 else LEDGER.LEGACY_CURSOR_MARKER
+    payload = json.dumps(
+        {"version": version, "repositories": states}, indent=2, sort_keys=True
+    )
+    return f"{V2_CURSOR_HEADER}\n{marker}\n\n```json\n{payload}\n```\n"
+
+
+def cursor_path(root):
+    return Path(root) / LEDGER.CURSOR_RELATIVE_PATH
+
+
+def record_cursor(root, repo=REPO, *, version=2, **state):
+    """Write one repository's cursor document under `root`."""
+    entry = cursor_state(**state)
+    path = cursor_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_cursor({repo: entry}, version=version), encoding="utf-8")
+    return entry
 
 
 HAND_AUTHORED_CURSOR = """# Project review boundaries
@@ -338,13 +376,10 @@ def valid_payload(rows=None, repo=REPO):
     return {
         "version": LEDGER.SCHEMA_VERSION,
         "repositories": {
-            repo: {
-                "rows": rows if rows is not None else {},
-                "direct": {"endpoint": None, "reviewed": []},
-                "excluded": {"prs": [], "commits": []},
-                "migration": {"source": None, "boundary": None, "withheld_boundary": None},
-                "lease_defaults": None,
-            }
+            repo: dict(
+                LEDGER.empty_repository(),
+                rows=rows if rows is not None else {},
+            )
         },
     }
 
@@ -589,7 +624,7 @@ class DocumentParsingTests(LedgerTestCase):
         # its own. Handing the ledger a real cursor is the strongest form of
         # that check, so the cursor here is one its own writer produced.
         record_cursor(self.root, reviewed=[602, 601])
-        cursor_text = CURSOR.document_path(self.root).read_text(encoding="utf-8")
+        cursor_text = cursor_path(self.root).read_text(encoding="utf-8")
         with self.assertRaises(LEDGER.LedgerError) as raised:
             LEDGER.parse_document(cursor_text, "the cursor document")
         self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
@@ -1196,7 +1231,11 @@ class RenderingTests(LedgerTestCase):
     def test_carried_over_state_and_provenance_are_visible_to_a_reader(self):
         text, _ = self.rendered(
             {},
-            direct={"endpoint": {"sha": DIRECT_HISTORY[1]}, "reviewed": [DIRECT_HISTORY[0]]},
+            direct=dict(
+                LEDGER.empty_repository()["direct"],
+                endpoint={"sha": DIRECT_HISTORY[1]},
+                reviewed=[DIRECT_HISTORY[0]],
+            ),
             excluded={"prs": [444], "commits": [DIRECT_HISTORY[2]]},
             migration={
                 "source": "boundary-document",
@@ -1860,11 +1899,10 @@ class MigrationTests(LedgerTestCase):
 
     def test_a_v1_cursor_contributes_its_frontier_as_coverage(self):
         # Version 1's `pr.endpoint` was the oldest PR the batch reviewed, so it
-        # is real coverage and the cursor module's own read migrates it into
-        # the reviewed set. Unlike the hand-authored stop below, nothing is
+        # is real coverage and this module's own read migrates it into the
+        # reviewed set. Unlike the hand-authored stop below, nothing is
         # withheld.
-        record_cursor(self.root, reviewed=[602, 601], boundary=500)
-        downgrade_cursor_to_v1(self.root)
+        record_cursor(self.root, reviewed=[602, 601], boundary=500, version=1)
         result = self.migrate()
         self.assertEqual(result["cursor"]["source"], "cursor-v1")
         self.assertEqual(self.rows_of(result["state"]), {602, 601, 500})
@@ -1980,11 +2018,20 @@ class MigrationTests(LedgerTestCase):
             self.root,
             reviewed=[602],
             direct_reviewed=[DIRECT_HISTORY[0], DIRECT_HISTORY[1]],
+            direct_frontier=DIRECT_HISTORY[1],
         )
         result = self.migrate()
-        self.assertEqual(result["state"]["direct"], state["direct"])
+        carried = result["state"]["direct"]
+        self.assertEqual(carried["reviewed"], state["direct"]["reviewed"])
+        self.assertEqual(carried["endpoint"], state["direct"]["endpoint"])
         self.assertTrue(state["direct"]["reviewed"])
         self.assertIsNotNone(state["direct"]["endpoint"])
+        # The migration records no handoff: a consumer whose direct batches
+        # kept running against the cursor through the interim period has
+        # progress this read predates, and leaving `adopted` null is what lets
+        # the first direct batch fold that advance in (issue #686).
+        self.assertIsNone(carried["adopted"])
+        self.assertEqual(carried["reports"], [])
         # No direct commit becomes a row: the PR table is PR-only (D-16).
         self.assertEqual(self.rows_of(result["state"]), {602})
 
@@ -1998,7 +2045,7 @@ class MigrationTests(LedgerTestCase):
 
     def test_the_old_cursor_document_survives_the_migration_byte_for_byte(self):
         record_cursor(self.root, reviewed=[602, 601], boundary=533)
-        path = CURSOR.document_path(self.root)
+        path = cursor_path(self.root)
         before = path.read_bytes()
         self.migrate()
         self.assertEqual(path.read_bytes(), before)
@@ -2068,16 +2115,16 @@ class FlaggedMigrationTests(LedgerTestCase):
         self.assertFalse(LEDGER.document_path(self.root).exists())
 
     def test_a_confirmed_enumeration_completes_the_migration_once(self):
-        cursor_path = CURSOR.document_path(self.root)
+        record = cursor_path(self.root)
         record_cursor(self.root, reviewed=[612])
-        before = cursor_path.read_bytes()
+        before = record.read_bytes()
         write_report(self.root, "project_review_432-412.md", ABOVE_INTERVAL_REPORT)
         flagged = write_report(
             self.root, "project_review_612-601.md", AMBIGUOUS_TWO_ENUMERATIONS
         )
         first = LEDGER.migrate(self.root, REPO)
         self.assertEqual(first["status"], "flagged")
-        self.assertEqual(cursor_path.read_bytes(), before)
+        self.assertEqual(record.read_bytes(), before)
 
         second = LEDGER.migrate(self.root, REPO, {flagged: [612, 610]})
         self.assertEqual(second["status"], "migrated")
@@ -2097,7 +2144,7 @@ class FlaggedMigrationTests(LedgerTestCase):
         # are absent rather than imported alongside the ones that were.
         self.assertNotIn("602", second["state"]["rows"])
         self.assertNotIn("601", second["state"]["rows"])
-        self.assertEqual(cursor_path.read_bytes(), before)
+        self.assertEqual(record.read_bytes(), before)
 
         # ... and only once. A third invocation refuses rather than rebuilding.
         with self.assertRaises(LEDGER.LedgerError):
@@ -3257,7 +3304,7 @@ class FilesystemTests(LedgerTestCase):
         # `legacy-exclusive-boundary` endpoint while the provenance still said
         # cursor-v2. Under one read the replacement cannot be seen at all.
         record_cursor(self.root, reviewed=[602, 601], boundary=533)
-        cursor_path = CURSOR.document_path(self.root)
+        record = cursor_path(self.root)
         replacement = (
             "# Project review boundaries\n\n"
             "- `coghex/kanban` — stop before PR #533\n"
@@ -3267,9 +3314,9 @@ class FilesystemTests(LedgerTestCase):
 
         def read_once(self_path, *args, **kwargs):
             content = original(self_path, *args, **kwargs)
-            if Path(self_path) == cursor_path:
+            if Path(self_path) == record:
                 reads.append(str(self_path))
-                cursor_path.write_text(replacement, encoding="utf-8")
+                record.write_text(replacement, encoding="utf-8")
             return content
 
         Path.read_text = read_once
@@ -5746,6 +5793,908 @@ class AttemptSchemaTests(LedgerTestCase):
                 self.assertIn(message, str(raised.exception))
 
 
+# --------------------------------------------------------------------------
+# Direct-commit mode (issue #686, slice LEDGER-8)
+
+
+class DirectTestCase(LeaseTestCase):
+    """A repository with real first-parent history, and a ledger over it.
+
+    The walk is `git log --first-parent --format=%H` taken from commits this
+    fixture actually made, rather than a list of invented SHAs: every rule
+    below is about a position in an ancestry, and a fixture that supplied the
+    positions directly would be asserting against its own ordering. It is
+    captured before the ledger is committed, which is also how production
+    reads it -- the walk is the reviewed branch's, and the checkpoints this
+    module makes are the docs worktree's.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for key, value in (
+            ("user.name", "Ledger Test"),
+            ("user.email", "ledger@example.invalid"),
+            ("commit.gpgsign", "false"),
+        ):
+            git(self.root, "config", key, value)
+        self.walk = self.history(6)
+
+    def commit(self, message, root=None):
+        root = self.root if root is None else root
+        path = Path(root) / f"{message.replace(' ', '-')}.md"
+        path.write_text(f"{message}\n", encoding="utf-8")
+        git(root, "add", "--", str(path.relative_to(root)))
+        git(root, "commit", "-q", "-m", message)
+        return git(root, "rev-parse", "HEAD").stdout.strip()
+
+    def history(self, count):
+        for index in range(count):
+            self.commit(f"history {index}")
+        return self.first_parent()
+
+    def first_parent(self):
+        return git(self.root, "log", "--first-parent", "--format=%H").stdout.split()
+
+    def migrated_ledger(self, **cursor):
+        """The ledger a direct batch resumes from, written by `migrate`."""
+        if cursor:
+            record_cursor(self.root, **cursor)
+        LEDGER.migrate(self.root, REPO)
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "ledger")
+
+    def state(self, repo=REPO):
+        return LEDGER.state_for(LEDGER.load_document(self.root), repo)
+
+    def direct_select(self, count=3, walk=None, **kwargs):
+        return LEDGER.direct_select(
+            self.root, REPO, self.walk if walk is None else walk, count, **kwargs
+        )
+
+    def direct_record(self, reviewed, walk=None, **kwargs):
+        return LEDGER.direct_record(
+            self.root, REPO, self.walk if walk is None else walk, list(reviewed), **kwargs
+        )
+
+    def write_report(self, report, body="# Project Review Findings: direct\n"):
+        path = self.root / report
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return report
+
+    def complete(self, shas, **kwargs):
+        """One whole batch: select, write the report it named, record it."""
+        batch = self.direct_select(count=len(shas), **kwargs)["batch"]
+        self.assertEqual(batch["selected"], list(shas))
+        report = self.write_report(batch["report"])
+        return self.direct_record(shas, report=report)
+
+
+class DirectSelectionTests(DirectTestCase):
+    """The frontier, the gaps, and where a batch begins."""
+
+    def test_a_migrated_frontier_is_what_the_first_selection_resumes_from(self):
+        # Requirement 8's first case, and the reason `migrate` carries the
+        # `direct` key at all: a consumer's existing sweep progress is what
+        # positions the first batch this module ever takes, and a selection
+        # that ignored it would re-review every commit that progress covered.
+        self.migrated_ledger(
+            reviewed=[602],
+            direct_reviewed=[self.walk[0], self.walk[1]],
+            direct_frontier=self.walk[1],
+        )
+        batch = self.direct_select(count=2)["batch"]
+        self.assertEqual(batch["origin"], "recorded-frontier")
+        self.assertEqual(batch["frontier"], {"sha": self.walk[1]})
+        self.assertEqual(batch["selected"], self.walk[2:4])
+        self.assertEqual(batch["gaps"], [])
+
+    def test_selection_resumes_below_the_frontier_and_reports_what_is_above_it(self):
+        # The correction to requirement 1: the frontier is a resume-below
+        # position, not a filter. A commit above it that nothing covers is a
+        # gap -- reported, because the frontier only ever moves older and
+        # nothing below it will come back to collect it.
+        self.migrated_ledger(direct_frontier=self.walk[2], direct_reviewed=[self.walk[2]])
+        batch = self.direct_select(count=2)["batch"]
+        self.assertEqual(batch["begin_index"], 3)
+        self.assertEqual(batch["selected"], self.walk[3:5])
+        self.assertEqual(batch["gaps"], [self.walk[0], self.walk[1]])
+        # Non-vacuity: the commits above the frontier that *are* covered or
+        # excluded are not gaps, so the list is about coverage rather than
+        # about position alone. #2 is the frontier itself and reviewed, #1 is
+        # excluded, and only #0 is left unaccounted for.
+        LEDGER.direct_record(self.root, REPO, self.walk, [], excluded=[self.walk[1]])
+        again = self.direct_select(count=2)["batch"]
+        self.assertEqual(again["gaps"], [self.walk[0]])
+
+    def test_an_explicit_start_overrides_the_frontier_and_nothing_else(self):
+        self.migrated_ledger(direct_frontier=self.walk[3], direct_reviewed=[self.walk[3]])
+        batch = self.direct_select(count=2, start=self.walk[0])["batch"]
+        self.assertEqual(batch["origin"], "explicit-start")
+        self.assertEqual(batch["selected"], self.walk[:2])
+        # The frontier is still reported, because the batch has not moved it.
+        self.assertEqual(batch["frontier"], {"sha": self.walk[3]})
+
+    def test_covered_and_excluded_commits_are_skipped_with_their_reason(self):
+        self.migrated_ledger(
+            direct_reviewed=[self.walk[1]],
+            excluded_commits=[self.walk[2]],
+        )
+        batch = self.direct_select(count=2, entry_none=True)["batch"]
+        self.assertEqual(batch["selected"], [self.walk[0], self.walk[3]])
+        self.assertEqual(
+            batch["skipped"],
+            [
+                {"commit": self.walk[1], "reason": "covered"},
+                {"commit": self.walk[2], "reason": "excluded"},
+            ],
+        )
+
+    def test_an_abbreviated_frontier_resolves_against_the_walk(self):
+        # A frontier recorded by an earlier run in a seven-character spelling
+        # keeps working, because that is the spelling a direct report filename
+        # carries and the one an operator reads off it.
+        self.migrated_ledger(direct_frontier=self.walk[1][:7])
+        batch = self.direct_select(count=1)["batch"]
+        self.assertEqual(batch["selected"], [self.walk[2]])
+
+    def test_an_ambiguous_abbreviation_names_no_commit(self):
+        # Ambiguity is a refusal rather than a choice: a prefix naming two
+        # commits names neither, and picking one sweeps a range nobody asked
+        # for. The walk is replaced by two SHAs sharing a prefix, which is the
+        # only way to produce the collision deterministically.
+        self.migrated_ledger()
+        walk = ["abc1230000", "abc1234444", "def4560000"]
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=1, walk=walk, start="abc123")
+        self.assertIn("names 2 commits", str(raised.exception))
+
+    def test_a_frontier_absent_from_the_walk_is_refused_as_foreign(self):
+        # Requirement 1's refusal. A walk that does not contain the recorded
+        # frontier is either a different repository's or a truncated one, and
+        # both mean the same thing here: this module cannot say where to
+        # resume, so it does not guess.
+        self.migrated_ledger(direct_frontier="f" * 40)
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=1)
+        self.assertIn("does not belong to this history", str(raised.exception))
+
+    def test_the_walk_is_taken_whole_rather_than_from_the_entry_down(self):
+        # The same refusal from the caller's side, which is how it actually
+        # occurs: a walk sliced to begin at the batch's entry point leaves the
+        # recorded frontier outside it.
+        self.migrated_ledger(direct_frontier=self.walk[1], direct_reviewed=[self.walk[1]])
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=1, walk=self.walk[3:])
+        self.assertIn("pipe the whole of", str(raised.exception))
+        # And the unsliced walk, which is what the workflow pipes, selects.
+        self.assertEqual(self.direct_select(count=1)["batch"]["selected"], [self.walk[2]])
+
+    def test_a_range_stops_at_its_older_endpoint(self):
+        self.migrated_ledger()
+        batch = self.direct_select(
+            count=5, start=self.walk[0], end=self.walk[2]
+        )["batch"]
+        self.assertEqual(batch["selected"], self.walk[:3])
+        self.assertTrue(batch["bounded"])
+        self.assertFalse(batch["exhausted"])
+
+    def test_a_short_batch_with_no_range_is_the_history_running_out(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=99, entry_none=True)["batch"]
+        self.assertEqual(batch["selected"], self.walk)
+        self.assertTrue(batch["exhausted"])
+        self.assertFalse(batch["bounded"])
+
+
+class DirectEntryPointTests(DirectTestCase):
+    """Where a repository's very first direct batch begins."""
+
+    def test_an_entry_commit_positions_the_batch_below_it(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry=self.walk[2])["batch"]
+        self.assertEqual(batch["origin"], "inventory-entry")
+        self.assertEqual(batch["selected"], self.walk[3:5])
+        self.assertEqual(batch["gaps"], self.walk[:3])
+
+    def test_a_merge_commit_owns_only_itself_on_the_first_parent_walk(self):
+        # The ordinary history: the oldest merged pull request landed as a
+        # merge commit, so its own SHA is the entry and the batch begins at
+        # its first parent. Its branch commits are not on the first-parent
+        # walk at all, so nothing below the merge belongs to it.
+        base = self.walk[0]
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.commit("feature work")
+        git(self.root, "checkout", "-q", "-")
+        git(self.root, "merge", "-q", "--no-ff", "-m", "Merge pull request #1", "feature")
+        self.walk = self.first_parent()
+        merge = self.walk[0]
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry=merge)["batch"]
+        self.assertEqual(batch["selected"][0], base)
+
+    def test_a_squash_commit_owns_only_itself_too(self):
+        squash = self.commit("Squashed pull request (#1)")
+        self.walk = self.first_parent()
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry=squash)["batch"]
+        self.assertEqual(batch["selected"], self.walk[1:3])
+
+    def test_a_rebased_pull_requests_whole_series_stays_above_the_entry(self):
+        # The case the entry commit exists for. A rebase-merged pull request
+        # puts its whole series on the branch as first-parent commits, so an
+        # entry taken from its merge commit -- the newest of them -- would
+        # select the rest of the series as direct commits. The entry is the
+        # oldest commit the pull request owns, and everything it owns then
+        # sits above the batch.
+        series = [self.commit(f"rebased {index}") for index in range(3)]
+        self.walk = self.first_parent()
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry=series[0])["batch"]
+        for owned in series:
+            self.assertNotIn(owned, batch["selected"])
+        self.assertEqual(batch["selected"], self.walk[3:5])
+        # The series is above the entry, so it is reported rather than
+        # discarded -- and what a gap above an entry means is the workflow's
+        # to say: a commit the oldest pull request owns is never reviewed
+        # here, and one the entry merely stepped over is reclaimed with an
+        # explicit start. The mechanism cannot tell those apart, and a list
+        # that quietly dropped the first kind would drop the second with it.
+        self.assertEqual(batch["gaps"], self.walk[:3])
+
+    def test_a_confirmed_empty_inventory_begins_at_the_head_of_the_walk(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry_none=True)["batch"]
+        self.assertEqual(batch["origin"], "history-head")
+        self.assertEqual(batch["selected"], self.walk[:2])
+        self.assertEqual(batch["gaps"], [])
+
+    def test_an_unanswered_inventory_is_refused_rather_than_read_as_empty(self):
+        # The distinction the whole flag pair exists for: an inventory that
+        # was absent, failed, or came back incomplete is not an empty one, and
+        # beginning at the head of the walk because of it re-reviews every
+        # pull request's own commits as direct history.
+        self.migrated_ledger()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=2)
+        message = str(raised.exception)
+        self.assertIn("--start, --entry, or --entry-none", message)
+        self.assertIn("is not an empty one", message)
+
+    def test_an_empty_inventory_is_refused_over_a_ledger_that_holds_rows(self):
+        # The half of the caller's inventory answer this document can check
+        # for itself, and the dangerous half: rows exist only because merged
+        # pull requests do, so a listing that came back naming none did not
+        # describe this repository -- and the head of the walk would then
+        # review every one of those pull requests' own commits.
+        self.migrated_ledger(reviewed=[602, 601])
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=2, entry_none=True)
+        self.assertIn("already holds 2 row(s)", str(raised.exception))
+        # And the same repository takes the batch when it is positioned
+        # honestly, so the refusal is about the declaration rather than about
+        # a ledger with rows in it.
+        self.assertEqual(
+            self.direct_select(count=2, entry=self.walk[0])["batch"]["selected"],
+            self.walk[1:3],
+        )
+
+    def test_an_entry_and_an_empty_inventory_cannot_both_be_declared(self):
+        self.migrated_ledger()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=2, entry=self.walk[0], entry_none=True)
+        self.assertIn("two different repositories", str(raised.exception))
+
+    def test_an_entry_absent_from_the_walk_refuses_instead_of_falling_back(self):
+        self.migrated_ledger()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=2, entry="f" * 40)
+        message = str(raised.exception)
+        self.assertIn("cannot be placed", message)
+        self.assertIn("would review that pull request's commits", message)
+
+    def test_an_entry_with_no_parent_returns_an_exhausted_empty_batch(self):
+        # The root commit owns the whole of the history below it, which is
+        # nothing. That is an exhausted batch rather than a refusal: the
+        # repository has no direct history to review, which is an answer.
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry=self.walk[-1])["batch"]
+        self.assertEqual(batch["selected"], [])
+        self.assertTrue(batch["exhausted"])
+        self.assertIsNone(batch["report"])
+        self.assertEqual(batch["status" if "status" in batch else "mode"], "direct")
+
+    def test_the_sweep_is_exhausted_once_the_root_commit_is_recorded(self):
+        self.migrated_ledger()
+        self.complete(self.walk, entry_none=True)
+        batch = self.direct_select(count=2)["batch"]
+        self.assertEqual(batch["selected"], [])
+        self.assertTrue(batch["exhausted"])
+        self.assertEqual(batch["gaps"], [])
+
+
+class DirectRecordTests(DirectTestCase):
+    """What a completed batch writes, and what it refuses to."""
+
+    def test_the_frontier_advances_to_the_oldest_commit_reviewed(self):
+        self.migrated_ledger()
+        result = self.complete(self.walk[:3], entry_none=True)
+        self.assertEqual(result["frontier"], {"sha": self.walk[2]})
+        self.assertEqual(
+            self.state()["direct"]["reviewed"], sorted(self.walk[:3])
+        )
+
+    def test_the_frontier_never_moves_newer(self):
+        # Requirement 1: a batch taken above the frontier, after an explicit
+        # start, leaves it where it was. Older means further down a
+        # newest-first walk, so the frontier only ever moves to a larger index.
+        self.migrated_ledger()
+        self.complete(self.walk[:3], entry_none=True)
+        self.assertEqual(self.state()["direct"]["endpoint"], {"sha": self.walk[2]})
+        # A commit above the frontier, recorded on its own: the frontier is
+        # the oldest commit this batch reviewed, and it is newer than the one
+        # already recorded, so nothing moves.
+        recorded = self.direct_record([self.walk[0]])
+        self.assertEqual(recorded["frontier"], {"sha": self.walk[2]})
+        self.assertEqual(self.state()["direct"]["endpoint"], {"sha": self.walk[2]})
+
+    def test_a_clean_batch_records_without_a_report(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry_none=True)["batch"]
+        result = self.direct_record(batch["selected"])
+        self.assertIsNone(result["report"])
+        self.assertEqual(result["frontier"], {"sha": self.walk[1]})
+        self.assertEqual(self.state()["direct"]["reports"], [])
+        self.assertEqual(
+            result["checkpoint"]["paths"], [LEDGER.LEDGER_RELATIVE_PATH]
+        )
+
+    def test_a_batch_that_reviewed_and_excluded_nothing_records_nothing(self):
+        self.migrated_ledger()
+        before = LEDGER.document_path(self.root).read_bytes()
+        head = git(self.root, "rev-parse", "HEAD").stdout.strip()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_record([])
+        self.assertIn("at least one reviewed or excluded commit", str(raised.exception))
+        self.assertEqual(LEDGER.document_path(self.root).read_bytes(), before)
+        self.assertEqual(git(self.root, "rev-parse", "HEAD").stdout.strip(), head)
+
+    def test_an_exclusion_alone_records_and_moves_no_frontier(self):
+        self.migrated_ledger()
+        result = self.direct_record([], excluded=[self.walk[1]])
+        self.assertIsNone(result["frontier"])
+        self.assertEqual(self.state()["excluded"]["commits"], [self.walk[1]])
+
+    def test_exclusions_merge_rather_than_replace(self):
+        self.migrated_ledger(excluded_commits=[self.walk[4]])
+        self.direct_record([], excluded=[self.walk[1]])
+        self.assertEqual(
+            self.state()["excluded"]["commits"], sorted([self.walk[1], self.walk[4]])
+        )
+
+    def test_a_reviewed_commit_absent_from_the_walk_is_refused(self):
+        self.migrated_ledger()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_record(["f" * 40])
+        self.assertIn("absent from the first-parent walk", str(raised.exception))
+
+    def test_no_direct_operation_creates_a_ledger_row(self):
+        # Design D-16: direct commits never become rows, so the PR table is
+        # exactly what the PR path put in it. Checked after a selection, a
+        # completed batch with a report, and an exclusion alike.
+        self.migrated_ledger(reviewed=[602, 601])
+        before = set(self.state()["rows"])
+        self.direct_select(count=2, entry=self.walk[0])
+        self.complete(self.walk[1:3], entry=self.walk[0])
+        self.direct_record([], excluded=[self.walk[5]])
+        self.assertEqual(set(self.state()["rows"]), before)
+        self.assertEqual(before, {"602", "601"})
+
+
+class DirectReportTests(DirectTestCase):
+    """The one report a finding-bearing batch writes, and its two collisions."""
+
+    def test_the_report_is_named_for_the_batch_it_reviewed(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=3, entry_none=True)["batch"]
+        self.assertEqual(
+            batch["report"],
+            f"docs/project_review/direct_{self.walk[0][:7]}-{self.walk[2][:7]}.md",
+        )
+        report = self.write_report(batch["report"])
+        result = self.direct_record(batch["selected"], report=report)
+        self.assertEqual(result["report"], report)
+        self.assertEqual(
+            self.state()["direct"]["reports"][0]["path"], report
+        )
+
+    def test_a_report_naming_another_range_is_refused(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=3, entry_none=True)["batch"]
+        self.write_report(batch["report"])
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            # Two of the three reviewed, so the batch's own name is a
+            # different one: recording the wider name would claim coverage of
+            # a commit this batch never read.
+            self.direct_record(batch["selected"][:2], report=batch["report"])
+        self.assertIn("does not name this batch", str(raised.exception))
+
+    def test_a_name_taken_on_disk_refuses_the_batch_before_it_is_reviewed(self):
+        # The disk half of requirement 4's collision. It is caught at
+        # selection, before any review effort is spent, because a batch whose
+        # report name is taken cannot complete.
+        self.migrated_ledger()
+        self.write_report(
+            f"docs/project_review/direct_{self.walk[0][:7]}-{self.walk[2][:7]}.md"
+        )
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=3, entry_none=True)
+        self.assertIn("already taken", str(raised.exception))
+        self.assertIn("on disk", str(raised.exception))
+
+    def test_a_name_taken_in_the_ledger_alone_is_refused_too(self):
+        # The ledger half, which the disk check cannot see: an operator moved
+        # the earlier report out of the worktree, so nothing holds the name
+        # there -- and reusing it would give two batches one filename and make
+        # the older one unfindable.
+        self.migrated_ledger()
+        result = self.complete(self.walk[:3], entry_none=True)
+        (self.root / result["report"]).unlink()
+        self.assertEqual(self.state()["direct"]["reports"][0]["path"], result["report"])
+        # The name is free on disk now, so only the ledger's own list holds
+        # it. Recording the same range again -- after re-writing the file, so
+        # the refusal cannot be the missing one -- is refused by that list.
+        self.write_report(result["report"])
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_record(self.walk[:3], report=result["report"])
+        self.assertIn("already recorded in this ledger", str(raised.exception))
+
+    def test_a_report_that_was_never_written_is_refused(self):
+        self.migrated_ledger()
+        batch = self.direct_select(count=2, entry_none=True)["batch"]
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_record(batch["selected"], report=batch["report"])
+        self.assertIn("was not written", str(raised.exception))
+
+    def test_a_clean_batch_names_no_report_and_a_named_one_needs_commits(self):
+        self.migrated_ledger()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_record(
+                [], excluded=[self.walk[0]], report="docs/project_review/direct_a-b.md"
+            )
+        self.assertIn("reviewed nothing writes no report", str(raised.exception))
+
+
+class DirectCheckpointTests(DirectTestCase):
+    """The commit a completed batch makes, and everything it leaves alone."""
+
+    def setUp(self):
+        super().setUp()
+        self.migrated_ledger()
+        # An operator's own work in the worktree: modified, staged, untracked.
+        (self.root / "docs" / "notes.md").write_text("notes\n", encoding="utf-8")
+        (self.root / "docs" / "staged.md").write_text("staged\n", encoding="utf-8")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "notes")
+        (self.root / "docs" / "notes.md").write_text("notes, edited\n", encoding="utf-8")
+        (self.root / "docs" / "staged.md").write_text("staged, edited\n", encoding="utf-8")
+        git(self.root, "add", "docs/staged.md")
+        (self.root / "docs" / "untracked.md").write_text("untracked\n", encoding="utf-8")
+
+    def committed_paths(self, commit):
+        return sorted(
+            git(self.root, "show", "--name-only", "--format=", commit).stdout.split()
+        )
+
+    def test_the_checkpoint_carries_the_ledger_and_the_report_and_nothing_else(self):
+        # Requirement 3 and design D-10: a path-scoped commit built in a
+        # private index read from the branch's own head, so an operator's
+        # modified, staged and untracked files are not in it.
+        result = self.complete(self.walk[:2], entry_none=True)
+        checkpoint = result["checkpoint"]["commit"]
+        self.assertEqual(
+            self.committed_paths(checkpoint),
+            sorted([LEDGER.LEDGER_RELATIVE_PATH, result["report"]]),
+        )
+        self.assertEqual(result["checkpoint"]["branch"], "refs/heads/master")
+        self.assertEqual(
+            git(self.root, "rev-parse", "HEAD").stdout.strip(), checkpoint
+        )
+
+    def test_the_operators_own_files_survive_the_checkpoint(self):
+        self.complete(self.walk[:2], entry_none=True)
+        self.assertEqual(
+            (self.root / "docs" / "notes.md").read_text(encoding="utf-8"),
+            "notes, edited\n",
+        )
+        self.assertEqual(
+            (self.root / "docs" / "untracked.md").read_text(encoding="utf-8"),
+            "untracked\n",
+        )
+        status = git(self.root, "status", "--porcelain").stdout
+        self.assertIn(" M docs/notes.md", status)
+        self.assertIn("M  docs/staged.md", status)
+        self.assertIn("?? docs/untracked.md", status)
+
+    def test_the_checkpoint_is_never_pushed(self):
+        # There is no remote here at all, which is the point: a record that
+        # pushed would fail rather than pass quietly, and this asserts the
+        # branch moved locally and nothing else was reached.
+        result = self.complete(self.walk[:2], entry_none=True)
+        self.assertEqual(git(self.root, "remote").stdout.strip(), "")
+        self.assertEqual(
+            git(self.root, "rev-parse", "HEAD").stdout.strip(),
+            result["checkpoint"]["commit"],
+        )
+
+    def test_a_refused_batch_leaves_the_branch_and_the_ledger_untouched(self):
+        head = git(self.root, "rev-parse", "HEAD").stdout.strip()
+        before = LEDGER.document_path(self.root).read_bytes()
+        with self.assertRaises(LEDGER.LedgerError):
+            self.direct_record(["f" * 40])
+        self.assertEqual(git(self.root, "rev-parse", "HEAD").stdout.strip(), head)
+        self.assertEqual(LEDGER.document_path(self.root).read_bytes(), before)
+        self.assertIsNone(self.state()["direct"]["endpoint"])
+
+
+class DirectBesidePullRequestStateTests(RecordTestCase):
+    """A direct batch running beside the PR path's own rows, claims and lease."""
+
+    def setUp(self):
+        super().setUp()
+        self.migrate_and_commit(reviewed=[602, 601])
+        self.walk = [self.commit_history(index) for index in range(4)]
+
+    def commit_history(self, index):
+        path = self.root / f"history-{index}.md"
+        path.write_text(f"history {index}\n", encoding="utf-8")
+        git(self.root, "add", "--", f"history-{index}.md")
+        git(self.root, "commit", "-q", "-m", f"history {index}")
+        return git(self.root, "rev-parse", "HEAD").stdout.strip()
+
+    def walk_newest_first(self):
+        return git(self.root, "log", "--first-parent", "--format=%H").stdout.split()
+
+    def test_a_direct_batch_preserves_a_live_claim_and_its_row(self):
+        # Requirement 3: direct writes take the same per-repository lock as PR
+        # writes and no lease of their own. So a direct batch runs while
+        # somebody holds a live claim -- it contends for the lock and gets it,
+        # and it must leave that claim, its token and its row exactly as they
+        # were.
+        claimed, session = self.claim_pr([merged(612)])
+        number = claimed["selected"]["number"]
+        token = claimed["claim"]["token"]
+        before = self.rows_on_disk()[str(number)]["claim"]
+        self.assertIsNotNone(before)
+
+        walk = self.walk_newest_first()
+        batch = LEDGER.direct_select(
+            self.root, REPO, walk, 2, entry=walk[0]
+        )["batch"]
+        report = self.root / batch["report"]
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("# Project Review Findings: direct\n", encoding="utf-8")
+        LEDGER.direct_record(
+            self.root, REPO, walk, batch["selected"], report=batch["report"]
+        )
+
+        after = self.rows_on_disk()
+        self.assertEqual(after[str(number)]["claim"], before)
+        self.assertEqual(set(after), {"602", "601"} | {str(number)})
+        # And the claim still works: the lease is the PR path's and a direct
+        # batch neither took it nor gave it back.
+        self.assertEqual(
+            LEDGER.fence(self.root, REPO, number, token)["status"], "owner"
+        )
+        session.terminate()
+
+    def test_a_direct_checkpoint_carries_no_pull_request_row_change(self):
+        claimed, session = self.claim_pr([merged(612)])
+        walk = self.walk_newest_first()
+        result = LEDGER.direct_record(self.root, REPO, walk, walk[:1])
+        self.assertEqual(
+            result["checkpoint"]["paths"], [LEDGER.LEDGER_RELATIVE_PATH]
+        )
+        self.assertEqual(
+            self.rows_on_disk()[str(claimed["selected"]["number"])]["claim"]["token"],
+            claimed["claim"]["token"],
+        )
+        session.terminate()
+
+
+class CursorHandoffTests(DirectTestCase):
+    """The one interim handoff, and why it happens exactly once.
+
+    `migrate` read the sweep cursor once. A consumer's direct batches kept
+    recording against that document through the interim period LEDGER-6
+    opened, so the two records diverged: the ledger holds direct progress as
+    of the migration, and the cursor holds it as of the last interim batch.
+    Design D-16 requires that existing direct progress is never discarded, so
+    the first direct invocation after this cutover folds the cursor's half in.
+    """
+
+    def advance_the_interim_cursor(self, **state):
+        """The cursor as a later interim batch left it, after the migration."""
+        record_cursor(self.root, **state)
+
+    def test_an_interim_advance_is_what_the_first_selection_resumes_from(self):
+        # The regression the whole handoff exists for: migrate, then an
+        # interim batch advances the cursor, then the first ledger-era
+        # selection. Without the handoff it resumes from the migrated
+        # frontier and re-reviews everything the interim batch covered.
+        self.migrated_ledger(direct_reviewed=[self.walk[0]], direct_frontier=self.walk[0])
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[0], self.walk[1], self.walk[2]],
+            direct_frontier=self.walk[2],
+        )
+        result = self.direct_select(count=2)
+        self.assertEqual(result["handoff"]["source"], "cursor-v2")
+        self.assertEqual(result["handoff"]["reviewed"], sorted(self.walk[1:3]))
+        self.assertEqual(result["batch"]["frontier"], {"sha": self.walk[2]})
+        self.assertEqual(result["batch"]["selected"], self.walk[3:5])
+        self.assertEqual(result["batch"]["gaps"], [])
+
+    def test_reviewed_commits_and_exclusions_merge_without_loss(self):
+        self.migrated_ledger(
+            direct_reviewed=[self.walk[0]],
+            direct_frontier=self.walk[0],
+            excluded_commits=[self.walk[4]],
+        )
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[1]],
+            direct_frontier=self.walk[1],
+            excluded_commits=[self.walk[3]],
+        )
+        self.direct_select(count=1)
+        carried = self.state()
+        self.assertEqual(
+            carried["direct"]["reviewed"], sorted([self.walk[0], self.walk[1]])
+        )
+        self.assertEqual(
+            carried["excluded"]["commits"], sorted([self.walk[3], self.walk[4]])
+        )
+
+    def test_one_commit_in_two_spellings_merges_to_one(self):
+        # The two records were written by different helpers over different
+        # walks, so the same commit can be abbreviated in one and full in the
+        # other. A union of the raw strings would store it twice, report the
+        # second spelling as coverage the handoff gained, and leave a later
+        # resolution looking at two names for one commit.
+        self.migrated_ledger(
+            direct_reviewed=[self.walk[0]],
+            direct_frontier=self.walk[0],
+            excluded_commits=[self.walk[4]],
+        )
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[0][:7], self.walk[1]],
+            direct_frontier=self.walk[1][:7],
+            excluded_commits=[self.walk[4][:7]],
+        )
+        result = self.direct_select(count=1)
+        self.assertEqual(result["handoff"]["reviewed"], [self.walk[1]])
+        self.assertEqual(result["handoff"]["excluded"], [])
+        carried = self.state()
+        self.assertEqual(
+            carried["direct"]["reviewed"], sorted(self.walk[:2])
+        )
+        self.assertEqual(carried["excluded"]["commits"], [self.walk[4]])
+        self.assertEqual(carried["direct"]["endpoint"], {"sha": self.walk[1]})
+
+    def test_the_older_of_the_two_frontiers_is_kept(self):
+        # Older is what "already swept" means, so taking the newer one would
+        # re-review everything between them. Asserted in both directions, so
+        # the rule is an ordering rather than "whichever record was read last".
+        for ledger_index, cursor_index, expected in ((1, 3, 3), (3, 1, 3)):
+            with self.subTest(ledger=ledger_index, cursor=cursor_index):
+                self.setUp()
+                self.migrated_ledger(
+                    direct_reviewed=[self.walk[ledger_index]],
+                    direct_frontier=self.walk[ledger_index],
+                )
+                self.advance_the_interim_cursor(
+                    direct_reviewed=[self.walk[cursor_index]],
+                    direct_frontier=self.walk[cursor_index],
+                )
+                self.direct_select(count=1)
+                self.assertEqual(
+                    self.state()["direct"]["endpoint"], {"sha": self.walk[expected]}
+                )
+
+    def test_pull_request_state_is_not_touched_by_the_handoff(self):
+        # The cursor's PR half was imported once by `migrate`, and reading it
+        # again would resurrect a boundary the ledger has superseded.
+        self.migrated_ledger(reviewed=[602], boundary=533, direct_frontier=self.walk[0])
+        before = self.state()
+        self.advance_the_interim_cursor(
+            reviewed=[602, 601, 600],
+            boundary=533,
+            excluded=[444],
+            direct_reviewed=[self.walk[1]],
+            direct_frontier=self.walk[1],
+        )
+        self.direct_select(count=1)
+        after = self.state()
+        self.assertEqual(after["rows"], before["rows"])
+        self.assertEqual(after["excluded"]["prs"], before["excluded"]["prs"])
+        self.assertEqual(after["migration"], before["migration"])
+
+    def test_the_handoff_happens_once_and_cannot_restore_stale_state(self):
+        self.migrated_ledger(direct_frontier=self.walk[0], direct_reviewed=[self.walk[0]])
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[1]], direct_frontier=self.walk[1]
+        )
+        first = self.direct_select(count=1)
+        self.assertIsNotNone(first["handoff"])
+        adopted = self.state()["direct"]["adopted"]
+        self.assertEqual(adopted["document"], LEDGER.CURSOR_RELATIVE_PATH)
+
+        # The ledger now moves past the cursor, and the retired document is
+        # then hand-edited back to progress the ledger has superseded. A
+        # second read would fold that stale frontier in and re-review three
+        # commits; the recorded handoff is what stops it.
+        self.complete(self.walk[2:4])
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[1]], direct_frontier=self.walk[1]
+        )
+        second = self.direct_select(count=1)
+        self.assertIsNone(second["handoff"])
+        self.assertEqual(self.state()["direct"]["adopted"], adopted)
+        self.assertEqual(second["batch"]["frontier"], {"sha": self.walk[3]})
+        self.assertEqual(second["batch"]["selected"], [self.walk[4]])
+
+    def test_a_refused_request_does_not_pay_for_the_handoff_first(self):
+        # The handoff writes, and every other refusal in this module leaves
+        # the document byte for byte as it was. So it is written last: two of
+        # the refusals below are the request's own and are refused before the
+        # lock is taken, and two are decided from state after the handoff has
+        # already been computed in memory. Neither kind may spend it.
+        self.migrated_ledger()
+        self.advance_the_interim_cursor(direct_reviewed=[self.walk[1]])
+        # The report a one-commit batch from the head of the walk would write.
+        self.write_report(
+            f"docs/project_review/direct_{self.walk[0][:7]}-{self.walk[0][:7]}.md"
+        )
+        before = LEDGER.document_path(self.root).read_bytes()
+        refusals = (
+            ("no batch", lambda: self.direct_select(count=0, entry_none=True)),
+            (
+                "both entry flags",
+                lambda: self.direct_select(count=1, entry=self.walk[0], entry_none=True),
+            ),
+            ("a commit off the walk", lambda: self.direct_record(["f" * 40])),
+            ("an empty batch", lambda: self.direct_record([])),
+            # Decided from the state the handoff produced, not from the request.
+            ("no entry flag at all", lambda: self.direct_select(count=1)),
+            (
+                "a report name already on disk",
+                lambda: self.direct_select(count=1, entry_none=True),
+            ),
+        )
+        for name, refused in refusals:
+            with self.subTest(refusal=name):
+                with self.assertRaises(LEDGER.LedgerError):
+                    refused()
+                self.assertEqual(
+                    LEDGER.document_path(self.root).read_bytes(), before
+                )
+                self.assertIsNone(self.state()["direct"]["adopted"])
+        # And the handoff is still owed, so the next invocation that gets all
+        # the way through performs it.
+        taken = self.direct_select(count=2, entry_none=True)
+        self.assertIsNotNone(taken["handoff"])
+        self.assertEqual(taken["batch"]["selected"], [self.walk[0], self.walk[2]])
+        self.assertEqual(self.state()["direct"]["reviewed"], [self.walk[1]])
+
+    def test_a_consumer_with_no_cursor_records_the_handoff_anyway(self):
+        # So the read happens once rather than on every batch, and a document
+        # that turns up later cannot reach a ledger that has moved on.
+        self.migrated_ledger()
+        result = self.direct_select(count=1, entry_none=True)
+        self.assertEqual(result["handoff"]["source"], "absent")
+        self.assertIsNone(result["handoff"]["document"])
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[2]], direct_frontier=self.walk[2]
+        )
+        again = self.direct_select(count=1, entry_none=True)
+        self.assertIsNone(again["handoff"])
+        self.assertEqual(self.state()["direct"]["reviewed"], [])
+
+    def test_a_hand_authored_record_is_read_through_this_modules_parser(self):
+        # The cursor module is gone, so the parsers that read its three shapes
+        # are this module's. A consumer holding the oldest of them still hands
+        # off, and its PR half is still not read here.
+        self.migrated_ledger()
+        cursor_path(self.root).write_text(
+            "# Project review boundaries\n\n"
+            f"- `{REPO}` — stop before PR #533\n",
+            encoding="utf-8",
+        )
+        result = self.direct_select(count=1, entry_none=True)
+        self.assertEqual(result["handoff"]["source"], "boundary-document")
+        self.assertEqual(self.state()["rows"], {})
+
+    def test_a_cursor_frontier_absent_from_the_walk_refuses_the_handoff(self):
+        # Fail-closed, like every other unplaceable frontier: a document whose
+        # progress this history cannot hold is either another repository's or
+        # a walk that was cut short, and folding it in would resume above
+        # coverage nobody can account for.
+        self.migrated_ledger(direct_frontier=self.walk[0], direct_reviewed=[self.walk[0]])
+        self.advance_the_interim_cursor(direct_frontier="f" * 40)
+        before = LEDGER.document_path(self.root).read_bytes()
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=1)
+        self.assertIn("interim cursor's frontier", str(raised.exception))
+        self.assertEqual(LEDGER.document_path(self.root).read_bytes(), before)
+
+    def test_an_unreadable_record_is_not_an_absent_one(self):
+        self.migrated_ledger()
+        cursor_path(self.root).write_text(
+            f"{LEDGER.CURSOR_MARKER}\n\n```json\n{{ not json\n```\n", encoding="utf-8"
+        )
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            self.direct_select(count=1, entry_none=True)
+        self.assertIn("unreadable cursor JSON", str(raised.exception))
+
+    def test_a_direct_record_hands_off_when_it_is_the_first_invocation(self):
+        # Either entry point performs it, because either may be the first one
+        # a repository reaches after the cutover.
+        self.migrated_ledger(direct_frontier=self.walk[0], direct_reviewed=[self.walk[0]])
+        self.advance_the_interim_cursor(
+            direct_reviewed=[self.walk[1]], direct_frontier=self.walk[1]
+        )
+        result = self.direct_record([self.walk[2]])
+        self.assertEqual(result["handoff"]["source"], "cursor-v2")
+        self.assertEqual(
+            self.state()["direct"]["reviewed"], sorted(self.walk[:3])
+        )
+        self.assertEqual(result["frontier"], {"sha": self.walk[2]})
+
+
+class CursorFixtureTests(LedgerTestCase):
+    """The retired document's fixture, checked against what still reads it."""
+
+    def test_the_fixture_round_trips_through_the_surviving_parser(self):
+        # `render_cursor` stands in for a writer that no longer exists, so it
+        # owes this: what it produces is what the parser this module carries
+        # reads back, field for field.
+        entry = cursor_state(
+            reviewed=[602, 601],
+            boundary=533,
+            excluded=[444],
+            excluded_commits=[DIRECT_HISTORY[2]],
+            direct_reviewed=[DIRECT_HISTORY[0], DIRECT_HISTORY[1]],
+            direct_frontier=DIRECT_HISTORY[1],
+        )
+        for version in (2, 1):
+            with self.subTest(version=version):
+                parsed = LEDGER.cursor_state_for(
+                    LEDGER.parse_cursor_document(
+                        render_cursor({REPO: entry}, version=version), "fixture"
+                    ),
+                    REPO,
+                )
+                if version == 2:
+                    self.assertEqual(parsed, entry)
+                else:
+                    # Version 1's `pr.endpoint` was the oldest PR the batch
+                    # reviewed, so the parser retires it into coverage on read.
+                    self.assertIsNone(parsed["pr"]["endpoint"])
+                    self.assertEqual(parsed["pr"]["reviewed"], [533, 601, 602])
+                    self.assertEqual(parsed["direct"], entry["direct"])
+
+    def test_a_document_without_a_marker_is_not_read_as_an_absent_one(self):
+        # The negative control: the round trip above would pass just as well
+        # against a parser that accepted anything, and a record read as absent
+        # is a consumer's coverage silently discarded.
+        rendered = render_cursor({REPO: cursor_state(reviewed=[602])})
+        with self.assertRaises(LEDGER.LedgerError) as raised:
+            LEDGER.parse_cursor_document(
+                rendered.replace(LEDGER.CURSOR_MARKER, "<!-- not-a-cursor -->"),
+                "fixture",
+            )
+        self.assertIn("is not a project-review cursor", str(raised.exception))
+
+
 class BundledLedgerHelperTests(unittest.TestCase):
     """The module ships in both bundles and nothing invokes it yet."""
 
@@ -5755,14 +6704,15 @@ class BundledLedgerHelperTests(unittest.TestCase):
         self.assertTrue(claude, CLAUDE_LEDGER_HELPER)
         self.assertEqual(claude, codex)
 
-    def test_each_copy_sits_beside_the_cursor_it_reads(self):
-        # The migration loads the cursor module from beside itself, so a copy
-        # shipped into a directory without one would resolve nothing wherever
-        # it installs.
+    def test_no_copy_ships_beside_the_retired_cursor_module(self):
+        # Issue #686 moved the cursor's three parsers into this module and
+        # dropped the module itself from both bundles. A copy still shipping
+        # beside it would install a second answer to what a repository's
+        # direct progress is, and the two would diverge on the first batch.
         for relative_path in LEDGER_HELPERS.values():
             with self.subTest(copy=relative_path):
                 sibling = (REPO_ROOT / relative_path).parent / "project_review_cursor.py"
-                self.assertTrue(sibling.is_file(), str(sibling))
+                self.assertFalse(sibling.exists(), str(sibling))
 
     def test_both_copies_load_and_agree_on_their_document_contract(self):
         claude, codex = LEDGER_MODULES["claude"], LEDGER_MODULES["codex"]
@@ -5771,9 +6721,14 @@ class BundledLedgerHelperTests(unittest.TestCase):
         self.assertEqual(claude.LEDGER_RELATIVE_PATH, codex.LEDGER_RELATIVE_PATH)
 
     def test_the_ledger_marker_is_distinct_from_the_cursors(self):
-        self.assertNotEqual(LEDGER.LEDGER_MARKER, CURSOR.CURSOR_MARKER)
-        self.assertNotEqual(LEDGER.LEDGER_MARKER, CURSOR.LEGACY_CURSOR_MARKER)
-        self.assertNotEqual(LEDGER.LEDGER_RELATIVE_PATH, CURSOR.DOCUMENT_RELATIVE_PATH)
+        # Both parsers live in this one module now, so the markers are what
+        # keeps each from reading the other's document as its own -- and the
+        # relative paths are what keeps a migration from writing over the
+        # record it is reading.
+        self.assertNotEqual(LEDGER.LEDGER_MARKER, LEDGER.CURSOR_MARKER)
+        self.assertNotEqual(LEDGER.LEDGER_MARKER, LEDGER.LEGACY_CURSOR_MARKER)
+        self.assertNotEqual(LEDGER.CURSOR_MARKER, LEDGER.LEGACY_CURSOR_MARKER)
+        self.assertNotEqual(LEDGER.LEDGER_RELATIVE_PATH, LEDGER.CURSOR_RELATIVE_PATH)
 
     def test_the_helper_spawns_only_git_and_itself(self):
         # Issue #682 gives the helper two spawns: `git`, for the common
@@ -5825,17 +6780,18 @@ class BundledLedgerHelperTests(unittest.TestCase):
                     naming.append(str(path.relative_to(REPO_ROOT)))
         self.assertEqual(sorted(naming), sorted(allowed))
 
-    def test_each_rendered_asset_resolves_the_ledger_and_keeps_the_cursor(self):
+    def test_each_rendered_asset_resolves_this_module_in_both_modes(self):
         # The non-vacuity control for the scan above, and the record of what
-        # LEDGER-6 did and did not change: PR mode runs on this module, and
-        # direct-commit mode keeps the cursor until LEDGER-8 retires it. An
-        # asset that named neither would pass the scan above by naming
-        # nothing.
+        # LEDGER-8 (#686) changed: both modes now run on this module, and the
+        # cursor module it replaced is named by neither asset. An asset that
+        # named nothing at all would pass the scan above by naming nothing.
         for relative_path in RENDERED_ASSETS:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             with self.subTest(asset=relative_path):
                 self.assertIn("project_review_ledger.py", content)
-                self.assertIn("project_review_cursor.py", content)
+                self.assertNotIn("project_review_cursor.py", content)
+                for subcommand in ("claim", "direct-select", "direct-record"):
+                    self.assertIn(f'"$LEDGER" {subcommand} ', content)
 
 
 if __name__ == "__main__":

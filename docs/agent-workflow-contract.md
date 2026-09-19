@@ -2640,7 +2640,7 @@ awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skil
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
-grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
+grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
@@ -2961,13 +2961,17 @@ declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
 script that way is a consumer and appears in the row, `$project-review`
-included — and that one lookup locates the `scripts` **directory** its three
+included — and that one lookup locates the `scripts` **directory** its two
 vendored modules share, never one of the modules. Each mode then resolves the
 modules it calls from that directory and checks only those: the ledger helper
-and the session liveness adapter for PR mode, the sweep cursor for the
-explicit-only direct mode. A lookup that went through one module would make
-every mode of that skill depend on that module being installed, including the
-mode that never calls it (issue #684). So is each copy of the project-review liveness adapter
+and the session liveness adapter for PR mode, the ledger helper alone for the
+explicit-only direct mode, which takes no claim and so needs no adapter. A
+lookup that went through one module would make every mode of that skill depend
+on that module being installed, including the mode that never calls it (issue
+#684). Issue #686 retired the third module, the #548 sweep cursor: direct-commit
+progress is the ledger's `direct` key, and
+`docs/project_review_boundaries.md` survives only as an input the ledger
+module's own parsers read. So is each copy of the project-review liveness adapter
 (§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
 refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
 It is `external`/`mandatory: no` for that
@@ -3025,7 +3029,7 @@ install location — the shared review coordinator for `$pr-review`,
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
 `$note-problem`, the project-review ledger module for `$project-review` — with
-its sibling sweep cursor and session liveness adapter — and the census
+its sibling session liveness adapter — and the census
 program for `$janitor` (issue #575) — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
@@ -3036,10 +3040,9 @@ coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`,
 workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py`, `/project-review`
-its bundled ledger, session liveness adapter and sweep cursor at
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py`,
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py` and
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py`, and `/janitor` its
+its bundled ledger and session liveness adapter at
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py` and
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py`, and `/janitor` its
 bundled census at `${CLAUDE_PLUGIN_ROOT}/scripts/census.py`, without a
 filesystem search. That plugin bundles its own copy of each, so it never depends on the
 Codex plugin being installed, and it declares no `personal-path` row of its
@@ -3112,7 +3115,12 @@ refusals refusals rather than wrong writes: the checked-out branch of the
 primary checkout must be the pull request's own base branch before a
 fast-forward advances it, so `grep -Fx "$BASE"` over
 `git symbolic-ref --short HEAD` leaves the variable the fast-forward is guarded
-on empty for every other branch and for a detached HEAD.
+on empty for every other branch and for a detached HEAD. `project-review` is
+its other packaged consumer, and there it is a count rather than a test: direct
+mode's first batch in a repository counts the oldest merged pull request's own
+commits with `grep -c .` so that a rebase-merged series, whose whole run sits on
+the first-parent walk, is placed above the batch's entry rather than reviewed
+inside it (issue #686).
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
 records it: `retriage` and `backlog-review` rewrite roadmap and report text with

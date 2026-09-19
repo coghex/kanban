@@ -79,12 +79,13 @@ in this turn, and when they did, **none of the PR-mode steps run at all** — no
 the ledger read, not the migration, not the inventory, and not the liveness
 registration.
 
-That is a correctness rule, not tidiness. Direct mode is the cursor's; a
-repository that has never had a ledger must not acquire one by being asked for a
-direct batch, and a bundle whose ledger module or liveness adapter could not be
-resolved must not be blocked from a mode that needs neither.
+That is a correctness rule, not tidiness. Direct mode shares the ledger
+document with PR mode and shares nothing else: it takes no claim, starts no
+keeper, and writes no row, so a bundle whose liveness adapter could not be
+resolved must not be blocked from it, and a repository whose PR queue is
+exhausted must not fall into it.
 
-- **An explicit direct request:** resolve the scripts directory and `$CURSOR`
+- **An explicit direct request:** resolve the scripts directory and `$LEDGER`
   below — direct mode's own fence, and not PR mode's — then the docs worktree,
   then go straight to "Direct-commit mode — explicit request only" and do
   everything there. Skip every numbered step.
@@ -92,12 +93,12 @@ resolved must not be blocked from a mode that needs neither.
 
 ## Resolve this bundle's helpers
 
-Three modules ship with this plugin rather than with the repository being
+Two modules ship with this plugin rather than with the repository being
 reviewed, so each is resolved against this plugin's install location and never
 against `$ROOT` or the docs worktree. That lookup is what lets this workflow run
-in a repository that tracks no copy of any of them.
+in a repository that tracks no copy of either of them.
 
-**Locate the directory the three share, never one of the modules.** Which of
+**Locate the directory the two share, never one of the modules.** Which of
 them this invocation needs is the mode's answer, and the mode was decided above;
 a locator that goes looking for one particular module makes every mode depend on
 that module being installed:
@@ -125,29 +126,30 @@ LIVENESS="$SCRIPTS/project_review_liveness.py"
 [ -f "$LEDGER" ] && [ -f "$LIVENESS" ]
 ```
 
-Direct-commit mode takes the cursor, and neither of the others:
+Direct-commit mode takes the ledger alone:
 
 ```bash
-CURSOR="$SCRIPTS/project_review_cursor.py"
-[ -f "$CURSOR" ]
+LEDGER="$SCRIPTS/project_review_ledger.py"
+[ -f "$LEDGER" ]
 ```
 
 `$LEDGER` owns `docs/project_review/ledger.md`, the reviewed repository's own
-per-pull-request review record, and every read and write of it below. `$LIVENESS`
-is the session-liveness adapter whose keeper process the claim's lease follows.
-`$CURSOR` owns `docs/project_review_boundaries.md` and serves the explicit-only
-direct-commit mode alone; PR mode never reads or writes it.
+review record, and every read and write of it below: one row per merged pull
+request for PR mode, and the `direct` progress — a moving older-history
+frontier, the commits completed batches reviewed, and the reports they wrote —
+for direct mode. `$LIVENESS` is the session-liveness adapter whose keeper
+process the claim's lease follows, and direct mode neither resolves nor calls
+it.
 
 **An unresolvable helper stops the run here, before the first read** — and a
 module this mode never calls being absent is not one. That is what the two
-fences above are for: only one of them runs, so a bundle missing its ledger
-module or its adapter refuses a review and still serves a direct batch, and a
-bundle missing its cursor refuses a direct batch and still serves a review. A
-missing shared directory stops either mode, because nothing can be resolved
-without it. Do not substitute a copy tracked in the reviewed repository, a personal copy, or a path
-derived from the working directory: the state those modules own belongs to the
-repository under review, and a helper resolved from the wrong place writes it
-somewhere nobody will look for it again.
+fences above are for: only one of them runs, so a bundle missing its liveness
+adapter refuses a review and still serves a direct batch. A missing shared
+directory, or a missing ledger module, stops either mode. Do not substitute a
+copy tracked in the reviewed repository, a personal copy, or a path derived from
+the working directory: the state that module owns belongs to the repository
+under review, and a helper resolved from the wrong place writes it somewhere
+nobody will look for it again.
 
 ## Resolve the docs worktree
 
@@ -170,7 +172,10 @@ all — it is the next merge's wedge. Say the reviewed repository has no
 ## Migrate a repository that has no ledger yet
 
 **PR mode only.** A direct request reached the direct section above and never
-arrives here; that is what keeps a cursor-only batch from creating a ledger.
+arrives here. Direct mode reads the same ledger, and it refuses a repository
+that has none rather than establishing one: a direct batch that wrote the first
+ledger would resume from an empty frontier and re-review every commit the
+previous record covered.
 
 Read the ledger before anything else touches it:
 
@@ -188,7 +193,7 @@ python3 "$LEDGER" migrate --root "$DOCS_WT" --repo "$REPO"
 ```
 
 It refuses outright over an existing ledger, so it runs exactly once however
-many invocations follow. A repository with neither a cursor nor a report starts
+many invocations follow. A repository with neither an old record nor a report starts
 from an empty ledger and has no stop and nothing to confirm: the same call
 establishes that empty ledger, reports `"status": "migrated"` with no rows, and
 the run continues. Say which of the two this was.
@@ -764,7 +769,7 @@ repeatable and is omitted when there is none.
 
 The checkpoint is the helper's, and it is the only commit this workflow
 produces. Do not stage, commit, publish, push, or land anything yourself — not
-the ledger, not the report, not the cursor. A refusal here leaves the claim held
+the ledger and not the report. A refusal here leaves the claim held
 and says so; report it as it came and let step 9 clean up.
 
 ### 9. Clean up, on every exit
@@ -944,11 +949,13 @@ repository with no merged pull requests does not, a refusal does not, and a bare
 invocation needs its own explicit direct request, and it reviews one batch and
 stops; it never starts another.
 
-This mode keeps the sweep cursor it has always used. It does not read or write
-the ledger, and the ledger does not schedule it: `$CURSOR` owns
-`docs/project_review_boundaries.md`, whose `direct` endpoint is a moving
-older-history frontier that advances to the oldest commit a completed batch
-reviewed.
+This mode runs against the ledger, and takes nothing else from PR mode. The
+`direct` key of `docs/project_review/ledger.md` holds a moving older-history
+frontier that advances to the oldest commit a completed batch reviewed, the
+commits those batches read, and the reports they wrote. The ledger does not
+*schedule* it: the three queues are PR-only, direct commits never become rows,
+and no claim, lease or keeper is taken for a batch here — a direct batch is an
+explicit single-operator invocation with nothing to contend for.
 
 Default to 12 review units.
 <!-- brand:claude -->
@@ -958,10 +965,87 @@ An explicit count, commit SHA, or range overrides the default.
 <!-- /brand -->
 
 **A count is a batch size, not a position.** An explicit count changes how many
-units this batch takes and nothing else. Only an explicit commit SHA or range
-changes this batch's requested start, and a unit the user excluded is never
-selected again by a later invocation. This mode has no boundary to override:
-the exclusive PR boundary is the cursor's PR half, which nothing here reads.
+commits this batch takes and nothing else. Only an explicit commit SHA or range
+changes this batch's requested start, and a commit the user excluded is never
+selected again by a later invocation. This mode has no PR boundary to override:
+the ledger's rows and queues are PR mode's, and nothing here reads them.
+
+### Positioning the first batch
+
+Every batch after the first resumes one commit below the recorded frontier, and
+needs nothing from this subsection. The **first** batch a repository ever takes
+has no frontier, so it has to be positioned — and the position is below the
+oldest merged pull request's own commits, because those belong to PR mode and
+reviewing them here would audit the same work twice under a mode that cannot
+record it.
+
+Establish the repository's merged-pull-request inventory to find it. Fetch it
+exactly as step 1 does — the same `gh` query, the same page size, the same
+completeness rules — and read it yourself rather than handing it to the helper:
+this is a positioning question, and **no row is created, no pull request is
+selected, and nothing is claimed** by answering it.
+
+- **The listing came back complete and named no merged pull request at all:**
+  pass `--entry-none` below. The walk's head is the entry, because there is no
+  pull-request history for the direct batch to run into.
+- **The listing came back complete and named some:** take the oldest by
+  `mergedAt` and pass its oldest first-parent-owned commit as `--entry`. The
+  helper begins at the commit below it.
+- **The listing was absent, failed, or came back incomplete:** stop and say so.
+  An unanswered question is not an empty repository, and `--entry-none` over one
+  restarts the walk at HEAD and re-reviews every pull request's own commits as
+  direct history. Passing neither flag is refused by the helper for the same
+  reason.
+
+The helper checks the half of that answer it can see for itself: a ledger that
+already holds rows was built from merged pull requests, so `--entry-none` over
+one is refused outright however the listing came back. The other half — a
+listing that lost pages, or a repository whose ledger has no rows yet — is
+yours, and the flags are how you state it.
+
+**Which commit that is depends on how the pull request landed**, and all three
+cases occur in real histories. `$OLDEST_PR` is that pull request's number, read
+out of the listing above and set here — the two calls below are the only reads
+this positioning makes, and both name it:
+
+```bash
+MERGE="$(gh pr view "$OLDEST_PR" -R "$REPO" --json mergeCommit --jq .mergeCommit.oid)"
+OWNED="$(gh pr view "$OLDEST_PR" -R "$REPO" --json commits --jq '.commits[].oid' | grep -c .)"
+```
+
+Then ask which kind of commit `$MERGE` is, and read the status before anything
+else runs:
+
+```bash
+git -C "$ROOT" rev-parse -q --verify "$MERGE^2"
+```
+
+**Exit 0 — a merge commit.** It owns exactly itself on the first-parent walk,
+whatever it merged, so `$ENTRY` is `$MERGE` and the batch begins at its first
+parent. Its branch's own commits are not on the first-parent walk at all.
+
+**A non-zero exit — a squash or a rebase.** A squash puts one commit on the
+branch; a rebase puts the pull request's whole series on it as first-parent
+commits, so `$MERGE` is only the newest of them and beginning at its parent
+would select the rest of the series as direct commits — which this mode must
+never do. Stepping back `$OWNED` commits reaches the oldest of them:
+
+```bash
+ENTRY="$(git -C "$ROOT" log --first-parent --format=%H "$MERGE" | sed -n "${OWNED}p")"
+```
+
+In the rebase case that lands exactly on the series' oldest commit. In the
+squash case it may reach further back than necessary, and the commits it stepped
+over are reported as `gaps` rather than lost.
+
+**A gap above a first batch's entry is not an instruction to review it.** The
+helper reports every uncovered commit above the resume position, and it cannot
+tell the two kinds apart: a commit the oldest pull request owns is PR mode's and
+is never reviewed here, while a commit a squash's step-back went past is direct
+history and is reclaimed with an explicit `--start`. Announce them and say which
+they are; that judgement is yours, not the helper's.
+
+### Taking the batch
 
 Selection is the helper's, and it happens before any unit is reviewed rather
 than in the report-writing step, from the first-parent walk itself rather than
@@ -969,38 +1053,44 @@ from any report's account of it:
 
 ```bash
 git -C "$ROOT" log --first-parent --format=%H \
-  | python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END"
+  | python3 "$LEDGER" direct-select --root "$DOCS_WT" --repo "$REPO" --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END" --entry "$ENTRY"
 ```
 
 `$COUNT` is the requested count and defaults to the 12 above. `$RANGE_START` and
 `$RANGE_END` carry a user-supplied range's two endpoints — its newer and its
 older — and are empty when the user supplied none; an empty `--start` or
-`--end` is no bound at all, so one invocation covers both cases.
+`--end` is no bound at all, so one invocation covers both cases. `$ENTRY` is the
+entry commit the subsection above resolved and is empty for every batch after
+the first. For a repository whose complete listing named no merged pull request,
+replace `--entry "$ENTRY"` with `--entry-none` in that line; an empty `--entry`
+is no entry at all, which is what every batch after the first passes, and it is
+not a declaration that the repository has none.
 
 **A range needs both of its endpoints.** `$RANGE_START` alone is a starting
 point, not a range: the count keeps filling downwards past the older endpoint
 whenever coverage or an exclusion thins the middle of the request. `--end` is a
 bound rather than a target — the batch stops there whatever the count still had
-left, and reports `"bounded": true` rather than `truncated` or `exhausted`,
-because it was the request that ended and neither the page nor the history.
-
-**`$RANGE_START` carries the entry point on the first direct batch**, and is
-empty for every batch after it. Set it to the first-parent parent of the
-earliest pull-request-owned commit already reviewed, and leave it empty for a
-repository that has never used pull requests, which begins at HEAD. An empty
-`--start` is no start at all, so this one invocation covers both — but leaving
-it empty on the *first* batch of a repository that does have PR history restarts
-the walk at HEAD and re-reviews PR-owned commits, because direct state is still
-empty at that moment and there is no endpoint to position it.
+left, and reports `"bounded": true` rather than `exhausted`, because it was the
+request that ended and not the history.
 
 **Walk the whole first-parent history, not a slice starting at the entry
-point.** The recorded endpoint has to be inside the listing the helper positions
-within, and a walk that began below it would refuse it as a cursor belonging to
+point.** The recorded frontier has to be inside the walk the helper positions
+within, and a walk that began below it would refuse it as progress belonging to
 some other history. Every batch after the first is positioned by the record.
 
 Announce the helper's `origin`, frontier, `gaps`, and skipped units with the
-batch. Every uncovered commit above that frontier appears in `gaps` and must be
-announced; never let the direct walk silently discard it.
+batch. Every uncovered commit above the resume position appears in `gaps` and
+must be announced; never let the direct walk silently discard it.
+
+**The first invocation after this repository's cutover hands the old record
+over, and says so.** A consumer migrated before direct mode moved onto the
+ledger kept recording its direct batches against
+`docs/project_review_boundaries.md` in the interim, so the helper folds that
+document's reviewed commits and commit exclusions in and keeps the older of the
+two frontiers, once, on the first `direct-select` or `direct-record` it sees.
+The result's `handoff` names what was carried over; report it. It is recorded in
+the ledger, so it happens exactly once and no later batch can restore state the
+ledger has moved past.
 
 Two rules govern what the helper's reconciliation may conclude here, and each
 one is a mistake this sweep has already made:
@@ -1012,18 +1102,19 @@ one is a mistake this sweep has already made:
   direct commits has been wrong about eight of them, and a commit erased that
   way is erased for good.
 - **Unverifiable state stops the run.** A recorded SHA is validated against
-  current first-parent ancestry, so a malformed, foreign, or ambiguous cursor
-  refuses before review rather than guessing. Report the helper's own message.
+  current first-parent ancestry, so malformed, foreign, or ambiguous direct
+  progress refuses before review rather than guessing. Report the helper's own
+  message.
 
 A commit may be named at any length `git` itself accepts — four characters up,
-the seven a direct-mode report filename carries included. `select` and `record`
-resolve an abbreviated SHA against the walk, and refuse a prefix that names more
-than one commit rather than choosing between them, so length is never the
-refusal; ambiguity is. An endpoint an earlier run recorded in a shorter spelling
-keeps working for the same reason.
+the seven a direct-mode report filename carries included. `direct-select` and
+`direct-record` resolve an abbreviated SHA against the walk, and refuse a prefix
+that names more than one commit rather than choosing between them, so length is
+never the refusal; ambiguity is. A frontier an earlier run recorded in a shorter
+spelling keeps working for the same reason.
 
-If context was compacted, recover the cursor with
-`python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"` rather than from the
+If context was compacted, recover the progress with
+`python3 "$LEDGER" read --root "$DOCS_WT" --repo "$REPO"` rather than from the
 last completed range or a report name: the record survives compaction, a clean
 batch, and a fresh session alike, and the two transient sources survive none of
 them. Ask only when the helper itself reports state it cannot resolve.
@@ -1078,16 +1169,20 @@ Record fixed-later mistakes as completion-summary one-liners. Only current
 mistakes become unprocessed report entries.
 
 A broad blame or survivor inventory is triage, not a reviewed direct-commit
-batch. Advance the cursor past a direct commit only after checking its patch,
+batch. Advance the frontier past a direct commit only after checking its patch,
 message, and current descendants individually.
 
 ### The direct-mode report and record
 
 A direct batch with at least one confirmed current finding writes one report at
-`docs/project_review_direct_<newest7>-<oldest7>.md`, under `$DOCS_WT/`. Its name
-is the reviewer's here — no helper allocates it, because no ledger row owns this
-batch — and an explicit destination from the user wins over it. A clean batch
-writes no report unless the user explicitly asks for one.
+`docs/project_review/direct_<newest7>-<oldest7>.md`, under `$DOCS_WT/`. That
+name is the helper's: `direct-select` returns it as `report`, derived from the
+batch's newest and oldest commit, and refuses the batch outright when something
+already holds it on disk. `direct-record` derives it again from the commits the
+batch actually reviewed, refuses a `--report` that names any other range, and
+refuses one this ledger already records — so a name is taken by the document on
+disk or by the ledger's own list of earlier batches, and neither is overwritten.
+A clean batch writes no report unless the user explicitly asks for one.
 
 Its shape is the one step 7 sets out with two substitutions, and nothing else
 from step 7 applies: the title is
@@ -1098,34 +1193,35 @@ meaning here. The legend line, the `## Status` checklist, one `PRR-*` key
 appearing once in that checklist and once in a finding heading, and the four
 capture sections are all exactly as they are there.
 
-**Record the cursor last.** Record coverage only after every selected unit has
-been reviewed and any required report has been written and validated, so a
-failed report or a failed cursor write is never reported as a completed batch:
+**Record last.** Record coverage only after every selected commit has been
+reviewed and any required report has been written and validated, so a failed
+report or a failed write is never reported as a completed batch:
 
 ```bash
 git -C "$ROOT" log --first-parent --format=%H \
-  | python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode direct --reviewed "$REVIEWED" --exclude "$EXCLUDED"
+  | python3 "$LEDGER" direct-record --root "$DOCS_WT" --repo "$REPO" --reviewed "$REVIEWED" --exclude "$EXCLUDED" --report "$REPORT"
 ```
 
 The walk is piped in here exactly as it is at selection, and for the same
-reason: the helper resolves and orders every reviewed SHA against the candidate
-history it is given, so a `record` handed none refuses the batch it is trying to
-record rather than recording it against nothing. A batch
-that selected nothing records nothing and is not a completed batch: the helper
-refuses an empty `--reviewed` with an empty `--exclude`. `record` merges rather
-than replaces: an earlier exclusion survives a later batch, and the direct
-endpoint only ever moves older.
+reason: the helper resolves and orders every reviewed SHA against the history it
+is given, so a record handed none refuses the batch it is trying to record
+rather than recording it against nothing. `$REPORT` is the path
+`direct-select` named and this batch wrote; drop the flag for a clean batch,
+which records its coverage and writes nothing. A batch that reviewed nothing and
+excluded nothing records nothing and is not a completed batch: the helper
+refuses an empty `--reviewed` with an empty `--exclude`, and refuses a report
+for it too. Recording merges rather than replaces: an earlier exclusion survives
+a later batch, and the frontier only ever moves older.
 
-The cursor and any direct-mode report are left in the docs worktree as
-uncommitted working files; the cursor is durable because it is on disk, not
-because it was landed. Do not publish or land either unless the user separately
-requests it — **direct mode writes to no branch at all**. The one branch write
-this workflow ever makes is PR mode's, and it is the helper's: `record`'s
-path-scoped checkpoint commit, which touches the ledger and the report it
-allocated and nothing else. Direct mode calls `record` on the cursor module,
-which commits nothing.
+`direct-record` makes the same path-scoped checkpoint commit PR mode's `record`
+makes, on the docs worktree's own branch, carrying the ledger and this batch's
+report and nothing else — not an unrelated dirty file, and not an unrelated
+staged one. Like PR mode's, it is **never pushed**: the merge and the
+publication are the user's, and this workflow writes to no remote at all. Do not
+publish or land the checkpoint unless the user separately requests it.
 
 In the completion message, link the report, state its unprocessed finding count,
 list fixed-later and already-tracked findings briefly, and name the durable
-progress the record now holds. Then stop: no next batch, and no transition back
+progress the record now holds — the frontier the helper returned and the
+checkpoint commit it made. Then stop: no next batch, and no transition back
 into PR mode.

@@ -324,21 +324,18 @@ BUNDLED_MECHANISM_MODULES = (
 )
 
 # The project-review workflow's durable-state mechanisms, asserted for the same
-# reason and against the same failure: the workflow's resume contract is issue
-# #548's cursor, so a release that shipped the command without it would install
-# a sweep that refuses to start. Issue #680's ledger ships beside it under the
-# same rule looked at one release ahead -- nothing invokes it until LEDGER-6
-# switches the command over, and a release that dropped it would then install
-# that switched-over command with no state mechanism at all. Issue #687's
-# session liveness adapter is the lease's owner signal under the same rule, and
-# it is inert without the lifecycle hooks file that runs it, so each bundle's
-# hooks file ships beside it. Two copies of each, one per bundle.
+# reason and against the same failure: the workflow's whole resume contract is
+# issue #680's ledger, in both modes since issue #686 moved direct-commit
+# progress onto it and retired the #548 sweep cursor, so a release that shipped
+# the command without it would install a workflow that refuses to start in
+# either mode. Issue #687's session liveness adapter is the lease's owner signal
+# under the same rule, and it is inert without the lifecycle hooks file that
+# runs it, so each bundle's hooks file ships beside it. Two copies of each, one
+# per bundle.
 BUNDLED_PROJECT_REVIEW_MODULES = (
-    "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
     "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
     "claude-plugin/plugins/kanban/hooks/hooks.json",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_cursor.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
     "codex-plugin/plugins/kanban/hooks/hooks.json",

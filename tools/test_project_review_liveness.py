@@ -46,7 +46,6 @@ BRANDS = {
         "bundle_files": (
             "scripts/project_review_liveness.py",
             "scripts/project_review_ledger.py",
-            "scripts/project_review_cursor.py",
             "hooks/hooks.json",
         ),
     },
@@ -64,7 +63,6 @@ BRANDS = {
         "bundle_files": (
             "skills/project-review/scripts/project_review_liveness.py",
             "skills/project-review/scripts/project_review_ledger.py",
-            "skills/project-review/scripts/project_review_cursor.py",
             "hooks/hooks.json",
         ),
     },
@@ -1012,7 +1010,7 @@ class Packaging(unittest.TestCase):
         ):
             with self.subTest(asset=asset):
                 text = (REPO_ROOT / asset).read_text(encoding="utf-8")
-                self.assertIn("project_review_cursor.py", text)
+                self.assertIn("project_review_ledger.py", text)
                 self.assertIn("project_review_liveness.py", text)
                 self.assertIn("--owner-pid", text)
                 self.assertNotIn("--liveness-fd", text)
