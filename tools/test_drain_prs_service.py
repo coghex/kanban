@@ -3146,6 +3146,8 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         rather than left as a zombie this platform still calls alive."""
         child.stdin.close()
         child.wait(timeout=30)
+        if child.stdout is not None:
+            child.stdout.close()
 
     def publish_unheld_document(self, pid):
         """Exactly what a drainer leaves behind, with nothing holding the lock
@@ -3153,6 +3155,40 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         self.checkout_lock_path().write_bytes(
             drain_prs_service.encode_lock_holder(pid)
         )
+
+    def external_drainer_holding_the_lock(self):
+        """A real foreground drainer: a separate process that takes the run
+        lock and is then named by the document written under it.
+
+        The control and the publish-window case below must differ in the one
+        thing the controller can actually be wrong about — whether the PID in
+        the document is the process holding the lock — so the control makes
+        those the same process and the window case makes them different. A
+        child rather than this process, since the point is that the holder is
+        somebody a snapshot could legitimately name and signal.
+        """
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "sys.stdout.write('held\\n')\n"
+                "sys.stdout.flush()\n"
+                "sys.stdin.read()\n",
+                str(self.checkout_lock_path()),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(self.reap, child)
+        self.assertEqual(child.stdout.readline(), "held\n")
+        # Published after the lock is won, in that order, as a run does.
+        self.publish_unheld_document(child.pid)
+        return child
 
     def hold_the_checkout_lock(self):
         """Hold the run lock from this process on its own descriptor, which is
@@ -3265,13 +3301,11 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
 
     def test_a_genuinely_held_lock_is_still_an_external_drainer(self):
         # Requirement 3 and 7's control, differing from the negative case in
-        # exactly one variable: the same live PID in the same document, with
-        # the lock it was written under actually held. Had the fix removed the
-        # `external` state rather than qualified it, this fails.
+        # exactly one variable: the same shape of document, with the lock it
+        # was written under actually held by the process it names. Had the fix
+        # removed the `external` state rather than qualified it, this fails.
         self.scripted_backend()
-        child = self.unrelated_live_process()
-        self.publish_unheld_document(child.pid)
-        self.hold_the_checkout_lock()
+        child = self.external_drainer_holding_the_lock()
         snapshot = drain_prs_service.status_snapshot(self.job)
         self.assertEqual(snapshot["state"], "external")
         self.assertEqual(snapshot["drainer_pid"], child.pid)
@@ -3280,9 +3314,7 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         # Requirement 3's other half: the two transitions a real external
         # drainer is driven through still reach the PID the document names.
         self.scripted_backend()
-        child = self.unrelated_live_process()
-        self.publish_unheld_document(child.pid)
-        self.hold_the_checkout_lock()
+        child = self.external_drainer_holding_the_lock()
         with mock.patch.object(drain_prs_service, "require_default_branch"):
             with self.assertRaisesRegex(
                 drain_prs_service.ServiceError, f"already running as PID {child.pid}"
@@ -3299,6 +3331,33 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
                 drain_prs_service.stop_service(self.job)
         self.assertEqual(sent, [(child.pid, signal.SIGINT)])
         self.assertIsNone(child.poll())
+
+    def test_the_publish_window_still_reports_the_previous_runs_pid(self):
+        """The bound on the fix, pinned rather than left to prose.
+
+        `drain_prs._acquire` wins the lock file, takes the `.git` directory,
+        and only then overwrites the document — deliberately, so a contender
+        that loses the second lock cannot erase the PID of the holder it is
+        about to report. Inside that window the lock is held while the
+        document still names the run before, so the held-lock test says
+        `external` and the document supplies a PID that a reused number makes
+        somebody else's. That is #694's own hazard surviving in a window #694
+        does not reach; closing it means clearing the document at
+        acquisition, which changes how a run starts.
+
+        Asserted so the contract on `lock_file_is_held` and in `docs/` is
+        checkable, and so narrowing or closing this window is a deliberate
+        change to a recorded state rather than a silent one.
+        """
+        self.scripted_backend()
+        child = self.unrelated_live_process()
+        # The previous run's document, its PID since reused.
+        self.publish_unheld_document(child.pid)
+        # A run that holds the lock and has not reached `_publish_lock_owner`.
+        self.hold_the_checkout_lock()
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "external")
+        self.assertEqual(snapshot["drainer_pid"], child.pid)
 
     def test_a_held_lock_naming_no_live_process_stays_stopped(self):
         # The startup window: a run has taken the lock file and not yet

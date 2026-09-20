@@ -1276,11 +1276,15 @@ installation.
   concurrently by their shared canonical identity, which the lock cannot see.
   Both files stay where they are after a run exits — queued and concurrent
   users need the lock object to be stable — so the PID written in them is the
-  last run's until the next one overwrites it. What says a drainer is running
-  now is the lock actually being held; the PID is only which process to name
-  once it is. Nothing here reads a PID out of an unheld lock and calls it a
-  drainer, because on a machine that has since reused that number it would be
-  naming somebody else's process.
+  last run's until the next one overwrites it, which a run does once it holds
+  both locks. What says a drainer is running now is the lock actually being
+  held; the PID is only which process to name once it is. Nothing here reads a
+  PID out of an unheld lock and calls it a drainer, because on a machine that
+  has since reused that number it would be naming somebody else's process. In
+  the moment between a run taking the lock and overwriting the document that
+  is still what happens — the lock is held, and the PID in it is the previous
+  run's — so the guarantee is about a drainer that has finished, not about one
+  that is a few microseconds into starting.
 
 A Linux host that installed the drainer before these paths took each platform's
 own convention has its installation at the `~/Library` spellings. The next
@@ -1442,7 +1446,11 @@ right now, and only then reads the PID to say who holds it. Earlier versions
 called any live process with a matching number an external drainer — and
 process IDs get reused, so on a machine that had been up a while that could be
 your own shell: reported as a drainer, refusing to start the real one, and
-lined up to be sent an interrupt by the next `stop`.
+lined up to be sent an interrupt by the next `stop`. That is fixed for a
+drainer that has finished, which is every case you are likely to meet it in. It
+is not fixed for the instant in which one is starting and has taken the lock
+without having written its PID yet: there the lock is held and the file still
+says the run before, so the old answer comes back for as long as that takes.
 
 The run your service manager starts is the other. It catches its own refusal
 and answers with an exit code: a current controller answers a failing one —

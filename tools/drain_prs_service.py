@@ -1237,7 +1237,9 @@ def lock_pid(repo_path: Path) -> int | None:
     the last holder's PID stays in it across a completed run. Reading one here
     therefore establishes only that a drainer once ran from this checkout.
     `lock_file_is_held` below is what establishes that one is running now, and
-    a caller that needs ownership has to ask it too (#694).
+    a caller that needs ownership has to ask it too (#694). The two together
+    still do not make this PID the holder's during the interval a run has the
+    lock and has not published yet; `lock_file_is_held` records that window.
     """
     try:
         return decode_lock_holder(
@@ -1267,9 +1269,29 @@ def lock_file_is_held(lock_path: Path) -> bool:
     and fails permanently on contention rather than waiting, so probing on
     every poll or every stabilization iteration would give a starting
     foreground drainer a new way to die, naming a dry-run inspection that was
-    never there. The residual collision that leaves is of the same shape #694
-    puts out of scope: a real run whose acquisition lands inside the instant
-    this probe holds the lock is refused as though a run were already live.
+    never there.
+
+    Three collisions survive this, and none of them is closed here.
+
+    A real run whose own acquisition lands inside the instant this probe holds
+    the lock is refused as though a run were already live.
+
+    Holding the lock says *somebody* holds it; it does not say the document
+    beside it names them. `drain_prs._acquire` wins the lock file, then takes
+    the `.git` directory, and only then does `_publish_lock_owner` overwrite
+    the document -- deliberately, so a contender that loses the second lock
+    never erases the PID of the holder it is about to report. Inside that
+    window the lock is held by a starting run while the document still names
+    the *previous* run, so a reader that pairs this probe with `lock_pid`
+    reports that previous PID. When the operating system has reused it, that
+    is #694's own hazard surviving in a window narrower than the one #694
+    closes: `status_snapshot` reports the unrelated process as the external
+    drainer and `stop_service` will signal it. Closing it needs the drainer to
+    clear the document as it takes the lock, which is a change to how a run
+    starts and is out of scope here.
+
+    The third is the one #694 states as out of scope directly: a verified
+    external holder that exits and has its PID reused during the same stop.
     """
     try:
         fd = os.open(lock_path, os.O_RDONLY)
@@ -1869,15 +1891,29 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     the number hands this function a live process that was never a drainer —
     which read as `external` before #694, blocking `start` and aiming
     `stop_service`'s `os.kill` at an unrelated user session. Both questions
-    are asked: `lock_file_is_held` says the lock is held, and only then does
-    `lock_pid` name who holds it.
+    are asked: `lock_file_is_held` says the lock is held, and the document is
+    read only to name who that is.
 
-    A lock held while its document names no live PID — a drainer between
-    taking the lock file and publishing its PID, or a document that cannot be
-    decoded — stays `stopped` with a null `drainer_pid`, exactly as it read
-    before. Widening that window to `external` would have to carry the
-    previous run's PID to report anything at all, which is the reused-PID
-    hazard again by another route.
+    What that pair settles is the steady state, which is where the incident
+    was: a run has finished, nothing holds the lock, and the document is
+    whatever it left. It does not settle the interval between a run taking
+    the lock file and `_publish_lock_owner` overwriting the document, because
+    in that interval the lock is genuinely held and the document genuinely
+    names the run before. So:
+
+    - held, document names a live PID: `external`, reporting that PID. Almost
+      always the holder. During the publish window it is the *previous* run's
+      PID, and if that number has been reused this reports an unrelated
+      process and `stop_service` signals it — #694's hazard surviving in a
+      window this change does not reach. `lock_file_is_held` records it
+      beside the two other collisions; closing it means clearing the document
+      at acquisition, which is a change to how a run starts.
+    - held, document names nothing live or cannot be decoded: `stopped` with
+      a null `drainer_pid`, exactly as it read before. Reporting `external`
+      here would have to carry the previous run's PID to name anything at
+      all, so it would widen the window above rather than narrow it.
+    - not held: `stopped`, whatever the document says. This is the whole of
+      what #694 closes, and it is every state a completed run leaves.
     """
     stored = read_json(job.status_path) or {}
     active_repo = stored_repo_path(stored)

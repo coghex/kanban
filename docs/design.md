@@ -3412,13 +3412,19 @@ above are unchanged, and persistence the user switched off is not a failure.
   stays in it and names something live again the moment the operating system
   reuses that number. Reading the document alone would therefore classify a
   stopped drainer as `external`, refuse to start it, and aim that `os.kill` at
-  whatever had inherited the PID. What bounds the branch for
+  whatever had inherited the PID. What the held-lock test settles is every
+  state a completed run leaves, which is where that arises; it does not settle
+  the interval between a run taking the lock file and publishing its PID,
+  during which the lock is genuinely held and the document genuinely names the
+  run before, so a reused PID is reported and signalled there still. Closing
+  that would mean clearing the document at acquisition, which the acquisition
+  order deliberately does not do, so it is bounded and recorded rather than
+  removed. A lock held while its document names nothing live is `stopped` with
+  no PID reported, since the only number available to report would be the
+  previous run's. What bounds the branch for
   a controller predating #367 is the lock document itself:
   a drainer publishes its PID in a shape such a copy's bare `int()` cannot
-  parse, so it finds no holder and delivers no signal. A lock held by a run
-  that has not published its PID yet is `stopped` with no PID reported, for
-  the same reason: the only number available to report would be the previous
-  run's. And the `run` a service
+  parse, so it finds no holder and delivers no signal. And the `run` a service
   manager launches catches its own startup refusals and
   answers with an exit code, which a controller from this change onward makes a
   failing one so that neither the manager nor Kanban reading the job through it

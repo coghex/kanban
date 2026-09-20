@@ -214,6 +214,13 @@ def repository_drainer_running(repo: Path) -> bool:
     running drainer here: that is a run between taking the lock and publishing
     its PID, and reporting it would mean reporting a PID nobody has written
     yet — the same answer the controller gives that window.
+
+    That publish window is where this predicate is least exact, and it errs in
+    the safe direction: a held lock whose document still names the previous
+    run's reused PID reads as running, so an install or a relocation refuses
+    while a drainer really is starting. The controller's `external` state
+    reads the same window the same way and does not err safe there, since it
+    signals the PID; `drain_prs_service.lock_file_is_held` records that.
     """
     git_dir = Path(
         run(["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"])

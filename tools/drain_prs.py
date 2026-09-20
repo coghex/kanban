@@ -5387,6 +5387,14 @@ def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> s
     drain_prs_service.status_snapshot() before classifying a drainer
     `external`, install_drainer.repository_drainer_running() before refusing
     an install or a relocation.
+
+    Holding the lock is not the same as having published under it, which is
+    why this function has a "still starting up" answer at all. In the window
+    between _acquire() winning the lock file and _publish_lock_owner()
+    overwriting the document, what is in the document is the *previous* run's
+    PID: this function names it, and the sidecar check below is the only thing
+    that keeps it from being dressed up as a mode and a pull request. That
+    window is recorded in full on drain_prs_service.lock_file_is_held().
     """
     # `self_holds_lock_file` says this process already holds the lock file and
     # lost the directory, so the holder it is describing is by definition one
@@ -5463,6 +5471,14 @@ def _publish_lock_owner(
     # leaves the bytes -- which is why every current reader asks
     # drain_prs_service.lock_file_is_held() first and treats a PID from an
     # unheld file as metadata about a finished run (#694).
+    #
+    # This call is also what bounds that rule, because until it runs the
+    # document still holds the previous run's PID while this run holds the
+    # lock. Clearing the file at acquisition instead would close that window,
+    # and is deliberately not done here: the truncate is the winner's, and
+    # _acquire() opens without O_TRUNC precisely so a contender that loses
+    # cannot erase the PID of the holder it is about to report. What the
+    # window leaves open is recorded on lock_file_is_held().
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, drain_prs_service.encode_lock_holder(os.getpid()))
