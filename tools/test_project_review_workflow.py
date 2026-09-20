@@ -1418,6 +1418,33 @@ DIRECT_MODE = {
         "reviewing them here would audit the same work twice under a mode that "
         "cannot record it."
     ),
+    "the batch says which kind it is, by being taken": (
+        "**Find out which kind of batch this is by taking it, not by "
+        "guessing.** Direct mode skipped PR mode's ledger read, so nothing so "
+        "far has said whether `direct.endpoint` already positions this "
+        "invocation — and the answer is not only what the ledger holds: a "
+        "consumer's first batch after the cutover gets its frontier from the "
+        "handoff below, inside the very call that would use it."
+    ),
+    "a positioned batch fetches nothing": (
+        "**It returned a batch.** This invocation was positioned already — by "
+        "the recorded frontier, by the handoff, or by the user's own "
+        "`--start` — and the rest of this subsection is not its business. Go "
+        "on to reviewing it. **Fetch no inventory and ask for no "
+        "association:** neither can change where this batch begins, and a "
+        "failure in either would stop a run that was never waiting on them."
+    ),
+    "the positioning refusal is the first batch saying so": (
+        "**It refused, naming `--start`, `--entry` or `--entry-none`.** That "
+        "refusal is the repository's first direct batch saying so, and it is "
+        "the only thing that says so. It wrote nothing — not the handoff "
+        "either — so the position can be derived now and the same command run "
+        "again with it."
+    ),
+    "any other refusal is not about position": (
+        "**It refused for any other reason.** That is a refusal about this "
+        "batch rather than about its position; report it and stop."
+    ),
     "an explicit start settles the position before the inventory": (
         "**An explicit start is a position, and it settles this subsection "
         "before it begins.** When the user named a commit or a range, pass it "
@@ -5149,6 +5176,60 @@ class DirectMode(WorkflowRunCase):
         )
         again = self.workflow.direct_select(count=1, entry="")
         self.assertEqual(again["batch"]["selected"], [self.shas[2]])
+
+    def test_a_recorded_frontier_positions_the_next_batch_with_no_github_call(self):
+        # Round 7's blocker, executed. A later direct batch is positioned by
+        # the frontier the previous one recorded, so it owes the inventory and
+        # the commit-to-pull-request association nothing -- and must not be
+        # stoppable by either. The empty `$ENTRY` call is what establishes
+        # that, and it establishes it by returning a batch.
+        self.migrated()
+        first = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(first["batch"]["origin"], "inventory-entry")
+        self.workflow.direct_record(self.shas[:2], report="")
+
+        # Every `gh` call the run has made so far. Direct mode makes none of
+        # its own once positioned, so this is empty -- which is the claim, and
+        # also why it needs the control below: an empty log proves nothing
+        # about a fake nobody could have reached.
+        before = self.workflow.gh_calls()
+        self.assertEqual(before, [])
+        # Put the fake in the state where either call this batch might make
+        # would fail: no association recorded for any commit, and no pages.
+        self.workflow.owned_by({})
+        self.workflow.merged([])
+
+        again = self.workflow.direct_select(count=2, entry="")
+        self.assertEqual(again["batch"]["origin"], "recorded-frontier")
+        self.assertEqual(again["batch"]["selected"], list(self.shas[2:4]))
+        self.assertEqual(self.workflow.gh_calls(), before)
+
+        # The control. The association call the derivation would have made is
+        # reachable from here and fails in this state, so the batch above
+        # succeeded by not making it rather than by making one that worked --
+        # and the log does record a call when one happens.
+        refused = self.workflow.sh(
+            asset_command(self.workflow.asset, 'gh api "repos/$REPO/commits/$SHA/pulls"'),
+            check=False,
+            SHA=self.shas[2],
+        )
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertEqual(len(self.workflow.gh_calls()), 1)
+
+    def test_a_first_batch_is_told_by_the_refusal_and_nothing_else(self):
+        # The other side of that branch, and why the refusal is load-bearing:
+        # it is the only thing that says this repository has no frontier yet,
+        # and it has to leave the run able to derive one and try again.
+        self.migrated()
+        refused = self.workflow.direct_select(count=2, entry="", check=False)
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        for flag in ("--start", "--entry", "--entry-none"):
+            self.assertIn(flag, refused.stderr)
+        self.assertEqual(refused.stdout, "")
+        # Nothing was written, so the same command run with the derived entry
+        # is the batch -- the refusal cost the run a call, not its position.
+        taken = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(taken["batch"]["selected"], list(self.shas[:2]))
 
     def test_a_direct_batch_refuses_a_repository_that_has_no_ledger(self):
         # The reason the migration above is not a formality: a direct batch

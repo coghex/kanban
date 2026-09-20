@@ -958,6 +958,27 @@ oldest merged pull request's own commits, because those belong to PR mode and
 reviewing them here would audit the same work twice under a mode that cannot
 record it.
 
+**Find out which kind of batch this is by taking it, not by guessing.** Direct
+mode skipped PR mode's ledger read, so nothing so far has said whether
+`direct.endpoint` already positions this invocation — and the answer is not
+only what the ledger holds: a consumer's first batch after the cutover gets its
+frontier from the handoff below, inside the very call that would use it. So run
+the selection in "Taking the batch" first, with an empty `$ENTRY`, and read what
+comes back:
+
+- **It returned a batch.** This invocation was positioned already — by the
+  recorded frontier, by the handoff, or by the user's own `--start` — and the
+  rest of this subsection is not its business. Go on to reviewing it. **Fetch
+  no inventory and ask for no association:** neither can change where this
+  batch begins, and a failure in either would stop a run that was never
+  waiting on them.
+- **It refused, naming `--start`, `--entry` or `--entry-none`.** That refusal
+  is the repository's first direct batch saying so, and it is the only thing
+  that says so. It wrote nothing — not the handoff either — so the position
+  can be derived now and the same command run again with it.
+- **It refused for any other reason.** That is a refusal about this batch
+  rather than about its position; report it and stop.
+
 **An explicit start is a position, and it settles this subsection before it
 begins.** When the user named a commit or a range, pass it as `--start` and
 skip the rest of this subsection entirely: the helper takes an explicit start
