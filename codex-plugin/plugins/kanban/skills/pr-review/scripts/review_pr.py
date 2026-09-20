@@ -569,7 +569,7 @@ def no_agent_refusal(number: int) -> tuple[int, dict[str, Any]]:
 def pr_origin(pr: dict[str, Any]) -> str | None:
     origin = origin_from_body(str(pr.get("body") or ""))
     if pr.get("isCrossRepository"):
-        return origin if origin in {"kimi", "google"} else None
+        return origin if origin in {"grok", "kimi", "google"} else None
     return origin
 
 
@@ -2029,8 +2029,10 @@ def self_test() -> None:
     assert refusal_code == 1 and refusal["status"] == NO_AGENT_STATUS
     assert "no-agent" in refusal["error"]
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:google -->"}) == "google"
+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "APPROVE"}]) == "APPROVE"
     assert aggregate_verdict([{"verdict": "APPROVE"}, {"verdict": "CHANGES_REQUESTED"}]) == "CHANGES_REQUESTED"

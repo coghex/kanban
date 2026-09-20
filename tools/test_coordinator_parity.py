@@ -341,10 +341,14 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # Claude vs Grok: the Grok copy is the Claude pinning coordinator plus
 # --expected-origin/--expected-route refuse-before-spawn. Compared the same
 # way as DOCUMENTED_DIVERGENCE, with Claude as the `-` side and Grok as `+`.
+#
+# Cross-repository provenance is deliberately NOT recorded here (issue #696).
+# It was, while only the Grok copy kept a grok marker on a fork pull request,
+# and recording it let the gate pass over a standard coordinator that
+# contradicted its own route_reviewers. All five copies now read the same
+# {"grok", "kimi", "google"} set and assert it in the same self-test lines, so
+# any reappearance of that difference is an unrecorded divergence and fails.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
--        return origin if origin in {"kimi", "google"} else None
-+        return origin if origin in {"grok", "kimi", "google"} else None
-@@
     in docs/agent-workflow-contract.md §4 declaring this file, and that
 -    reconciliation matches a literal, not an expression. This bundle vendors a
 -    copy of kanban_config.py beside this module and still does not import it:
@@ -508,14 +512,6 @@ GROK_DOCUMENTED_DIVERGENCE = r'''@@
 +        expected_origin=expected_origin, expected_route=expected_route,
      )
 @@
-     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:claude -->"}) is None
-+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:grok -->"}) == "grok"
-     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:kimi -->"}) == "kimi"
-@@
-     assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:google -->"}) == "google"
-+    assert pr_origin({"isCrossRepository": True, "body": "<!-- pr-origin:codex -->"}) is None
-     assert pr_origin({"isCrossRepository": False, "body": "<!-- pr-origin:claude -->"}) == "claude"
-@@
          help="Path to kanban's config.toml (default: ~/.config/kanban/config.toml)",
 +        "--expected-origin",
 +        metavar="ORIGIN",
@@ -557,8 +553,6 @@ GROK_ROUTE_VOCABULARY = (
     "live_origin",
     "live_route",
     "kanban_config.py",
-    "isCrossRepository",
-    'origin in {"grok", "kimi", "google"}',
 )
 
 # What a failing gate has to tell an author. Issue #624's false failures were
@@ -987,10 +981,12 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
 
 
 class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
-    """The Grok coordinator differs from Claude in expected-origin/route,
-    in not vendoring kanban_config.py beside the coordinator, and in
-    reading external-origin markers on cross-repository pull requests. The
-    Kimi and Google bundles are held byte-identical to this copy by test_kimi_plugin.py and test_google_plugin.py."""
+    """The Grok coordinator differs from Claude in expected-origin/route and
+    in not vendoring kanban_config.py beside the coordinator, and in nothing
+    else. Cross-repository origin reading is no longer among the differences
+    (issue #696): both copies keep a grok, kimi, or google marker on a fork
+    pull request. The Kimi and Google bundles are held byte-identical to this
+    copy by test_kimi_plugin.py and test_google_plugin.py."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -1002,9 +998,8 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         if report is not None:
             self.fail(
                 "The Grok coordinator diverges from the Claude copy outside "
-                "the --expected-origin/--expected-route extension, the "
-                "kanban_config.py vendor claim, and cross-repository grok "
-                "provenance.\n\n"
+                "the --expected-origin/--expected-route extension and the "
+                "kanban_config.py vendor claim.\n\n"
                 f"{report}"
             )
 
@@ -1026,6 +1021,39 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         )
         report = divergence_report(self.claude_source, drifted, self.units)
         self.assertIsNotNone(report)
+
+    def test_a_standard_copy_that_drops_grok_on_a_fork_fails_the_gate(self):
+        # Issue #696's defect, replayed: the standard copy discards a grok
+        # marker on a cross-repository pull request while the external copy
+        # keeps it. The record used to bless exactly this, so the gate passed
+        # over a coordinator that could never reach its own grok arm. Nothing
+        # records it now, so it is reported.
+        regressed = self.claude_source.replace(
+            '        return origin if origin in {"grok", "kimi", "google"} else None',
+            '        return origin if origin in {"kimi", "google"} else None',
+            1,
+        )
+        self.assertNotEqual(regressed, self.claude_source)
+        report = divergence_report(regressed, self.grok_source, self.units)
+        self.assertIsNotNone(report)
+
+    def test_the_fork_origin_set_is_one_expression_in_all_five_copies(self):
+        # The parity walk above compares Claude against Grok, and separate
+        # identity tests hold Kimi and Google to Grok. Codex is held to Claude
+        # by CoordinatorBoundedDivergenceTests. Named here anyway so the one
+        # line this issue is about is pinned in every copy directly, rather
+        # than only as a consequence of three different comparisons.
+        expression = 'return origin if origin in {"grok", "kimi", "google"} else None'
+        for name, path in (
+            ("codex", CODEX_COORDINATOR),
+            ("claude", CLAUDE_COORDINATOR),
+            ("grok", GROK_COORDINATOR),
+            ("kimi", KIMI_COORDINATOR),
+            ("google", GOOGLE_COORDINATOR),
+        ):
+            with self.subTest(coordinator=name):
+                self.assertIn(expression, path.read_text(encoding="utf-8"))
+
 
 class KimiCoordinatorIdentityTests(unittest.TestCase):
     """Kimi and Grok deliberately execute one identical coordinator."""
