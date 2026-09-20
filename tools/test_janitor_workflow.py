@@ -2510,7 +2510,13 @@ ATTEMPT_SWEEP_CONTRACT = {
     ),
     "an absent or empty root is not an anomaly": (
         "A repository with no such directory, or with an empty one, reports "
-        "nothing and is not an anomaly."
+        "nothing and is not an anomaly"
+    ),
+    "an unreadable root is not the absent case": (
+        "an attempt root this census could not read is neither of those cases, "
+        "and does not get that reading: it reports `null` for the inventory "
+        "rather than an empty list, and the rule below makes that an anomaly to "
+        "diagnose"
     ),
     "over and cleanable are two answers": (
         "**The adapter's answer is the only state signal, and two of its "

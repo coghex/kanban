@@ -106,7 +106,10 @@ never. The census reports each one with its attempt id, the state the liveness
 adapter gives it, its age, and the space it occupies, and it resolves that
 adapter from its own bundle exactly as §0 resolved the census itself, so a
 repository that tracks no Kanban tooling is audited anyway. A repository with no
-such directory, or with an empty one, reports nothing and is not an anomaly.
+such directory, or with an empty one, reports nothing and is not an anomaly — but
+an attempt root this census could not read is neither of those cases, and does
+not get that reading: it reports `null` for the inventory rather than an empty
+list, and the rule below makes that an anomaly to diagnose.
 
 **The adapter's answer is the only state signal, and two of its answers are not
 the same answer.** An attempt is `over` when no invocation can be holding it:

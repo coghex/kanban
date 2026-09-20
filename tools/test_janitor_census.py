@@ -1128,6 +1128,43 @@ class AttemptStatusReadingTests(AttemptFixture):
             self.document["warnings"],
         )
 
+    def test_an_untraversable_parent_is_not_reported_as_an_absent_root(self):
+        # `os.path.lexists` answers False for a path whose ancestor cannot be
+        # traversed exactly as it does for one that is not there, so a
+        # `kanban-project-review` directory the operator cannot read would look
+        # like a repository that has never run the workflow -- with every
+        # attempt under it invisible and no warning to diagnose.
+        self.attempt_directory(ATTEMPTS["ended"])
+        parent = self.runtime.parent
+        parent.chmod(0o000)
+        self.addCleanup(parent.chmod, 0o700)
+        document = self.run_census()
+        collection = document["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("Permission denied", collection["error"])
+        self.assertIsNone(document["counts"]["project_review_attempts"])
+        self.assertIsNone(
+            document["counts"]["cleanable_project_review_attempts"]
+        )
+        self.assertTrue(
+            any("attempt directory unreadable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
+
+    def test_a_file_where_the_attempt_root_s_parent_belongs_is_not_absence(self):
+        # The other way the lookup fails without the path being absent. Nothing
+        # can live under it, but this program did not establish that, and
+        # "absent" is the one answer that reads as nothing to clean up.
+        self.runtime.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.parent.write_text("not a directory\n", encoding="utf-8")
+        self.addCleanup(self.runtime.parent.unlink)
+        collection = self.run_census()["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("Not a directory", collection["error"])
+
     def test_an_unreadable_attempt_root_is_null_rather_than_empty(self):
         # The rule the retain ledger follows, on this collection: a directory
         # that exists and cannot be listed is not an empty one.

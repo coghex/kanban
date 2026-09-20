@@ -604,15 +604,34 @@ def project_review_attempts(root: Path, common_dir: Path,
     has never run `project-review`, or whose last run cleaned up after itself,
     reports `present: false` or an empty list and is not an anomaly.
 
-    `attempts` is `null` exactly when the directory exists and could not be
-    listed, which is the same rule `retain_ledger` follows: an unreadable
+    `attempts` is `null` whenever this program could not establish what is
+    there, which is the same rule `retain_ledger` follows: an unreadable
     inventory reported as an empty one would tell the janitor that nothing was
     left behind.
+
+    `present` is three-valued for the same reason, and it is why the lookup is
+    an `lstat` rather than an `os.path.lexists`. That predicate answers `False`
+    for a path whose *ancestor* cannot be traversed exactly as it does for a
+    path that is not there, so a `kanban-project-review` directory the operator
+    cannot read would report `present: false` with an empty list and no warning
+    — every attempt under it invisible, and the reading indistinguishable from a
+    repository that has never run the workflow. Only `FileNotFoundError` is
+    absence here. Everything else, an unreadable ancestor and a file where the
+    parent should be alike, is `present: None` with `attempts: None` and the
+    error, because this program did not find out.
     """
     directory = common_dir / PROJECT_REVIEW_RUNTIME
     result: dict[str, Any] = {"root": str(directory), "present": False,
                               "adapter": None, "attempts": []}
-    if not os.path.lexists(directory):
+    try:
+        os.lstat(directory)
+    except FileNotFoundError:
+        return result
+    except OSError as error:
+        result["present"] = None
+        result["attempts"] = None
+        result["error"] = str(error)
+        warnings.append(f"project-review attempt directory unreadable: {error}")
         return result
     result["present"] = True
     try:
