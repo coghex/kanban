@@ -614,8 +614,8 @@ def eligibility(root: Path, owner: str, tip: str, document: str) -> tuple[bool, 
 
 def blob_at(root: Path, revision: str, document: str) -> str | None:
     """The document's blob at `revision`, or None when it is absent there. An
-    absent path is not an empty baseline: a novel document stays local until a
-    pull request adds it and its classification (#237) — its working copy is
+    absent path is not an empty baseline: a novel document is never published from
+    here but lands through the owning repository's landing lane (#237, §9.1) — its working copy is
     still written, but only over the bytes the run's own preflight observed
     (#605, `_apply_locally`)."""
     proc = git(
@@ -1740,8 +1740,10 @@ def _publish_locked(
     baseline = blob_at(root, tip, document)
     if baseline is None:
         publishable, why_not = False, (
-            f"{document} is absent from the publication tip; a novel document "
-            "stays local until a pull request adds it and its classification"
+            f"{document} is absent from the publication tip; this module never "
+            "publishes a novel document, which lands through the owning "
+            "repository's documentation-landing lane (push-docs and its gate) "
+            "instead"
         )
 
     approved_blob = git_blob_hash(content)

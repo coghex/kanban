@@ -1823,6 +1823,12 @@ class PublishTests(PublishFixture):
         self.assertFalse(result["document_written"])
         self.assertEqual(result["write_outcome"], "no-baseline")
         self.assertIn("--expected-working-copy", result["write_reason"])
+        # The publication reason names where a novel document does land — the
+        # owning repository's own lane — and no longer sends every repository
+        # to an enrollment pull request, which is true only of the one whose
+        # §7 gate refuses an untracked path.
+        self.assertIn("documentation-landing lane", result["reason"])
+        self.assertNotIn("pull request", result["reason"])
         self.assertIsNone(result["applied_record"])
         self.assertIsNone(result["applied_ref"])
         self.assertEqual((self.fx.docs / "docs" / "novel.md").read_text(), "# Novel\n")
