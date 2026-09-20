@@ -879,6 +879,56 @@ class AttemptInventoryTests(AttemptFixture):
                 self.assertNotIn("measurement_error", row)
         self.assertGreater(rows["ended"]["files"], rows["killed"]["files"])
 
+    def test_a_symlink_counts_once_as_itself_and_is_never_followed(self):
+        # The footprint is what the directory costs, so a symlink is an entry
+        # with a size of its own: skipping one under-reports the attempt, and
+        # following one reports the target tree's bytes as this directory's.
+        outside = self.root / "outside"
+        (outside / "nested").mkdir(parents=True)
+        (outside / "nested" / "large").write_text("x" * 4096, encoding="utf-8")
+        attempt = self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        (attempt / "real").write_text("ab\n", encoding="utf-8")
+        (attempt / "to-a-file").symlink_to(attempt / "real")
+        (attempt / "dangling").symlink_to(attempt / "never-existed")
+        (attempt / "to-a-directory").symlink_to(outside)
+        row = self.attempts()["ended"]
+        links = [attempt / name
+                 for name in ("to-a-file", "dangling", "to-a-directory")]
+        expected_files = [attempt / "inventory.json", attempt / "real"]
+        self.assertEqual(row["files"], len(expected_files) + len(links))
+        self.assertEqual(
+            row["bytes"],
+            sum(path.stat().st_size for path in expected_files)
+            + sum(path.lstat().st_size for path in links),
+        )
+        # And nothing of the linked tree is in that total, which is the half a
+        # measurement that followed links would get wrong.
+        self.assertLess(row["bytes"], (outside / "nested" / "large").stat().st_size)
+
+    def test_a_subdirectory_that_cannot_be_listed_makes_the_size_unknown(self):
+        # `os.walk` ignores an unreadable directory by default, which would
+        # report a smaller footprint rather than no footprint -- and a smaller
+        # one reads as a measurement.
+        attempt = self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        closed = attempt / "closed"
+        closed.mkdir()
+        (closed / "hidden").write_text("x" * 64, encoding="utf-8")
+        closed.chmod(0o000)
+        self.addCleanup(closed.chmod, 0o700)
+        row = self.attempts()["ended"]
+        self.assertIsNone(row["files"])
+        self.assertIsNone(row["bytes"])
+        self.assertIn("Permission denied", row["measurement_error"])
+        # Reported, and still classified: the size is unknown, the state is not.
+        self.assertIs(row["cleanable"], True)
+        self.assertTrue(
+            any("could not be measured" in warning
+                for warning in self.document["warnings"]),
+            self.document["warnings"],
+        )
+
     def test_a_pinned_attempt_worktree_is_attributed_to_its_attempt(self):
         # Otherwise a live invocation's detached checkout reads as an
         # unexplained worktree, and the workflow's ordinary worktree-removal

@@ -412,18 +412,37 @@ def directory_footprint(path: Path) -> dict[str, Any]:
 
     `null` for both when the walk failed, with the reason: requirement 1 asks
     for the space an abandoned attempt costs, and a measurement this program
-    could not make is not a measurement of zero. Symlinks are counted as
-    entries and never followed, so a link into the operator's home directory
-    contributes its own size rather than that tree's.
+    could not make is not a measurement of zero. That is also why `onerror`
+    re-raises: `os.walk` ignores a directory it cannot list by default, which
+    would report a *smaller* footprint for a directory that could not be read
+    rather than no footprint at all.
+
+    Every symlink is counted as one entry of its own `lstat` size and is never
+    followed, dangling and directory links included, so a link into the
+    operator's home directory contributes its own few bytes rather than that
+    tree's gigabytes -- and contributes them once, rather than being descended
+    into and counted again. `os.walk` with `followlinks=False` rather than
+    `Path.rglob`, because whether `**` descends through a directory symlink is
+    a property of the Python version and this measurement should not be.
     """
+    def reraise(error: OSError) -> None:
+        raise error
+
     files = 0
     total = 0
     try:
-        for entry in path.rglob("*"):
-            if entry.is_symlink() or not entry.is_file():
-                continue
-            files += 1
-            total += entry.stat().st_size
+        for directory, subdirectories, names in os.walk(
+            path, onerror=reraise, followlinks=False
+        ):
+            base = Path(directory)
+            for name in names:
+                files += 1
+                total += (base / name).lstat().st_size
+            for name in subdirectories:
+                entry = base / name
+                if entry.is_symlink():
+                    files += 1
+                    total += entry.lstat().st_size
     except OSError as error:
         return {"files": None, "bytes": None, "error": str(error)}
     return {"files": files, "bytes": total}
