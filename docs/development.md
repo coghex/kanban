@@ -150,7 +150,9 @@ rather than after the fact.
   version makes a stale cache indistinguishable from a current one. Grok
   installs under `$GROK_HOME/installed-plugins/kanban-<hash>/`. Kimi and Google load
   live from a local marketplace path or `--plugin-dir`, and copy into
-  `$COPILOT_HOME/installed-plugins/` only for git-sourced marketplaces.
+  `$COPILOT_HOME/installed-plugins/` for a remote-marketplace install
+  (`<marketplace-name>/<plugin-name>/`) or a direct one
+  (`_direct/<owner>--<repo>--<bundle path>/`).
 - **Listing.** Add the workflow to every manifest field that enumerates them:
   the description on the Claude side (in both manifests), the description,
   keywords, `interface.shortDescription`, `interface.longDescription`, and

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +71,7 @@ from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("scripts") / "review_pr.py"
+marketplace, plugin, bundle = "kanban-google", "kanban", "google-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"coordinator was not found at {candidate}")
@@ -89,36 +92,58 @@ if os.path.lexists(settings):
         raise SystemExit(
             f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
         )
-    if isinstance(marketplaces, dict) and "kanban-google" in marketplaces:
-        entry = marketplaces["kanban-google"]
+    if isinstance(marketplaces, dict) and marketplace in marketplaces:
+        entry = marketplaces[marketplace]
         if not isinstance(entry, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} have a malformed kanban-google entry."
+                f"Copilot settings at {settings} have a malformed {marketplace} entry."
             )
         source = entry.get("source")
-        if not isinstance(source, dict) or source.get("source") != "directory":
+        if not isinstance(source, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} do not name kanban-google as a directory source."
+                f"Copilot settings at {settings} have a malformed {marketplace} source."
             )
-        recorded = source.get("path")
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        kind = source.get("source")
+        if kind == "directory":
+            recorded = source.get("path")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise SystemExit(
+                    f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
+                )
+            finish(Path(recorded) / "plugins" / plugin / relative)
+        elif kind not in ("git", "github"):
             raise SystemExit(
-                f"Copilot settings at {settings} do not name an absolute kanban-google path: {recorded!r}."
+                f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
             )
-        finish(Path(recorded) / "plugins" / "kanban" / relative)
-matches = sorted(
-    candidate
-    for candidate in (Path(copilot_home) / "installed-plugins").glob(
-        "kanban-*/" + relative.as_posix()
+installed = Path(copilot_home) / "installed-plugins"
+def installs_this_bundle(name):
+    repository, separator, subdirectory = name.rpartition("--")
+    return separator == "--" and subdirectory == bundle and "--" in repository
+roots = []
+from_marketplace = installed / marketplace / plugin
+if from_marketplace.is_dir():
+    roots.append(from_marketplace)
+direct = installed / "_direct"
+if direct.is_dir():
+    roots += sorted(
+        child
+        for child in direct.iterdir()
+        if child.is_dir() and installs_this_bundle(child.name)
     )
-    if candidate.is_file()
-)
-if not matches:
-    raise SystemExit("coordinator was not found: $GOOGLE_PLUGIN_ROOT is unset, the kanban-google marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
+if not roots:
+    raise SystemExit(f"coordinator was not found: $GOOGLE_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+if len(roots) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
+finish(roots[0] / relative)
 '''
+
+# The entry name `copilot plugin install coghex/kanban:google-plugin/plugins/kanban` writes under
+# `$COPILOT_HOME/installed-plugins/_direct/`, observed with GitHub Copilot
+# CLI 1.0.85 and re-pinned against the real CLI by RealCopilotInstallTests:
+# <owner>--<repo>--<bundle path>, the path's separators flattened.
+DIRECT_ENTRY = "coghex--kanban--google-plugin-plugins-kanban"
+GOOGLE_BUNDLE = REPO_ROOT / "google-plugin"
+COPILOT_CLI = shutil.which("copilot")
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
@@ -143,10 +168,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_0_1(self):
+    def test_the_plugin_manifest_declares_version_1_1_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.0.1")
+        self.assertEqual(document["version"], "1.1.0")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -223,13 +248,31 @@ class DocumentationTests(unittest.TestCase):
         self.text = README.read_text(encoding="utf-8")
 
     def test_readme_pins_the_verified_copilot_install_mechanisms(self):
-        self.assertIn("GitHub Copilot CLI 1.0.83", self.text)
+        self.assertIn("GitHub Copilot CLI 1.0.85", self.text)
         self.assertIn("--plugin-dir google-plugin/plugins/kanban", self.text)
         self.assertIn('plugin marketplace add "$PWD/google-plugin"', self.text)
         self.assertIn("plugin install kanban@kanban-google", self.text)
         self.assertIn(
             "extraKnownMarketplaces.kanban-google.source.path", self.text
         )
+
+    def test_readme_states_the_observed_install_contract(self):
+        # Requirement 5: what each supported install path records, where it
+        # puts files, and that a remote marketplace registration is not
+        # available while the manifest stays in a subdirectory.
+        self.assertIn(
+            "copilot plugin install coghex/kanban:google-plugin/plugins/kanban",
+            self.text,
+        )
+        self.assertIn(
+            "installed-plugins/_direct/coghex--kanban--google-plugin-plugins-kanban/",
+            self.text,
+        )
+        self.assertIn("installed-plugins/kanban-google/kanban/", self.text)
+        self.assertIn("*remote* marketplace\nregistration of it is not available", self.text)
+        self.assertIn("`cache_path`", self.text)
+        self.assertIn("`enabledPlugins`", self.text)
+        self.assertNotIn("installed-plugins/kanban-*", self.text)
         self.assertIn("gemini-3.8-flash", self.text)
 
     def test_readme_explains_argument_and_shadowing_behavior(self):
@@ -334,14 +377,25 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertNotIn("$GROK_HOME", text)
         self.assertNotIn("$KIMI_PLUGIN_ROOT", text)
         self.assertIn("Never fall back to a\nClaude, Codex, Grok, or Kimi plugin path", text)
-        self.assertIn("installed-plugins/kanban-<hash>", text)
+        self.assertNotIn("installed-plugins/kanban-<hash>", text)
+        self.assertNotIn("kanban-*", text)
         self.assertIn("$GOOGLE_PLUGIN_ROOT", text)
         self.assertIn("ambiguous Kanban installs", text)
-        self.assertIn('"kanban-*/" + relative.as_posix()', text)
+        self.assertIn("`kanban-google/kanban/`", text)
+        self.assertIn("`_direct/<owner>--<repo>--google-plugin-plugins-kanban/`", text)
+        self.assertIn('installed / marketplace / plugin', text)
+        self.assertIn('installed / "_direct"', text)
         self.assertIn(GOOGLE_COORDINATOR_PYTHON, text)
 
 
 class AutosolveCoordinatorLookupTests(unittest.TestCase):
+    """The autosolve coordinator locator is the same fail-closed Python as
+    /solve's helper lookup, with a different relative path. String search
+    cannot prove it prefers $GOOGLE_PLUGIN_ROOT, reads the recorded local
+    marketplace path, resolves the two copied layouts the Copilot CLI really
+    creates, or refuses an ambiguous or wrong-brand candidate — these run the
+    fenced locator itself."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -349,36 +403,54 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.workdir = self.root / "worked-repo"
         self.workdir.mkdir()
 
-    def install_hashed(self, home: Path, name: str = "kanban-b0441dc6") -> Path:
-        installed = home / ".copilot" / "installed-plugins" / name / "scripts"
-        installed.mkdir(parents=True)
-        target = installed / "review_pr.py"
+    def plant(self, root: Path) -> Path:
+        target = root / "scripts" / "review_pr.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("print('coordinator')\n", encoding="utf-8")
         return target
+
+    def install_direct(self, home: Path, name: str = DIRECT_ENTRY) -> Path:
+        """The direct-install layout, under the entry name the CLI produces.
+
+        `DIRECT_ENTRY` is not invented here: it is what
+        `copilot plugin install coghex/kanban:google-plugin/plugins/kanban`
+        writes, pinned against the real CLI by `RealCopilotInstallTests`
+        below so these CLI-independent cases cannot drift onto a name no
+        install produces.
+        """
+        return self.plant(
+            home / ".copilot" / "installed-plugins" / "_direct" / name
+        )
+
+    def install_marketplace_layout(
+        self, home: Path, marketplace: str = "kanban-google", plugin: str = "kanban"
+    ) -> Path:
+        """The documented `installed-plugins/<marketplace>/<plugin>/` layout."""
+        return self.plant(
+            home / ".copilot" / "installed-plugins" / marketplace / plugin
+        )
 
     def install_marketplace_source(self, root: Path) -> Path:
-        installed = root / "marketplace" / "plugins" / "kanban" / "scripts"
-        installed.mkdir(parents=True)
-        target = installed / "review_pr.py"
-        target.write_text("print('coordinator')\n", encoding="utf-8")
-        return target
+        return self.plant(root / "marketplace" / "plugins" / "kanban")
 
     def register_local_marketplace(self, home: Path, marketplace: Path) -> None:
-        copilot_home = home / ".copilot"
-        copilot_home.mkdir(parents=True, exist_ok=True)
-        (copilot_home / "settings.json").write_text(
-            json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-google": {
-                            "source": {"source": "directory", "path": str(marketplace)}
-                        }
+        self.write_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-google": {
+                        "source": {"source": "directory", "path": str(marketplace)}
                     }
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            },
         )
+
+    def write_settings(self, home: Path, document) -> Path:
+        copilot_home = home / ".copilot"
+        copilot_home.mkdir(parents=True, exist_ok=True)
+        settings = copilot_home / "settings.json"
+        settings.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        return settings
 
     def run_locator(self, plugin_root: str, copilot_home: str):
         return subprocess.run(
@@ -395,12 +467,19 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
             GOOGLE_COORDINATOR_PYTHON,
             AUTOSOLVE.read_text(encoding="utf-8"),
             "the Google autosolve skill must prefer $GOOGLE_PLUGIN_ROOT, then the "
-            "recorded local marketplace path, else one hashed install",
+            "recorded local marketplace path, then the copied install layouts",
         )
 
-    def test_the_lookup_resolves_from_a_hashed_install(self):
-        home = self.root / "copilot-home"
-        expected = self.install_hashed(home)
+    def test_the_lookup_resolves_from_a_direct_install(self):
+        home = self.root / "copilot-direct"
+        expected = self.install_direct(home)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_lookup_resolves_from_the_documented_marketplace_layout(self):
+        home = self.root / "copilot-marketplace-layout"
+        expected = self.install_marketplace_layout(home)
         proc = self.run_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -413,42 +492,52 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
-    def test_a_non_directory_marketplace_source_refuses_without_glob_fallback(self):
-        home = self.root / "copilot-remote"
-        self.install_hashed(home)
-        copilot_home = home / ".copilot"
-        (copilot_home).mkdir(parents=True, exist_ok=True)
-        (copilot_home / "settings.json").write_text(
-            json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-google": {
-                            "source": {"source": "github", "repo": "coghex/kanban"}
+    def test_a_remote_marketplace_source_reaches_the_copied_install_layouts(self):
+        # Requirement 4: `git` and `github` are both valid recorded kinds, and
+        # neither may terminate discovery the way the shipped locator did.
+        for kind in ("git", "github"):
+            with self.subTest(kind=kind):
+                home = self.root / f"copilot-remote-{kind}"
+                expected = self.install_direct(home)
+                self.write_settings(
+                    home,
+                    {
+                        "extraKnownMarketplaces": {
+                            "kanban-google": {
+                                "source": {"source": kind, "repo": "coghex/kanban"}
+                            }
                         }
-                    }
+                    },
+                )
+                proc = self.run_locator("", str(home / ".copilot"))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_an_unsupported_marketplace_source_kind_refuses_without_fallback(self):
+        home = self.root / "copilot-unsupported-source"
+        self.install_direct(home)
+        self.write_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-google": {"source": {"source": "carrier-pigeon"}}
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            },
         )
-        proc = self.run_locator("", str(copilot_home))
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("do not name kanban-google as a directory source", proc.stderr)
+        self.assertIn("unsupported kanban-google source kind", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
-    def test_settings_without_a_google_entry_fall_through_to_the_glob(self):
+    def test_settings_without_a_google_entry_fall_through_to_the_copied_layouts(self):
         home = self.root / "copilot-unrelated-marketplace"
-        expected = self.install_hashed(home)
-        copilot_home = home / ".copilot"
-        (copilot_home / "settings.json").write_text(
-            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
-            encoding="utf-8",
-        )
-        proc = self.run_locator("", str(copilot_home))
+        expected = self.install_direct(home)
+        self.write_settings(home, {"extraKnownMarketplaces": {"somewhere-else": {}}})
+        proc = self.run_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
-    def test_malformed_settings_refuse_without_glob_fallback(self):
+    def test_malformed_settings_refuse_without_fallback(self):
         cases = {
             "invalid-json": "{",
             "non-object": json.dumps([]),
@@ -456,12 +545,8 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
             "entry-not-object": json.dumps(
                 {"extraKnownMarketplaces": {"kanban-google": []}}
             ),
-            "source-not-directory": json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-google": {"source": {"source": "github"}}
-                    }
-                }
+            "source-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-google": {"source": "directory"}}}
             ),
             "relative-path": json.dumps(
                 {
@@ -476,7 +561,7 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         for name, contents in cases.items():
             with self.subTest(case=name):
                 home = self.root / f"copilot-malformed-{name}"
-                self.install_hashed(home)
+                self.install_direct(home)
                 settings = home / ".copilot" / "settings.json"
                 settings.write_text(contents + "\n", encoding="utf-8")
                 proc = self.run_locator("", str(home / ".copilot"))
@@ -484,9 +569,9 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
                 self.assertIn("Copilot settings", proc.stderr)
                 self.assertEqual(proc.stdout.strip(), "")
 
-    def test_a_dangling_settings_symlink_refuses_without_glob_fallback(self):
+    def test_a_dangling_settings_symlink_refuses_without_fallback(self):
         home = self.root / "copilot-dangling-settings"
-        self.install_hashed(home)
+        self.install_direct(home)
         settings = home / ".copilot" / "settings.json"
         settings.symlink_to(settings.with_name("missing-settings.json"))
         proc = self.run_locator("", str(home / ".copilot"))
@@ -497,7 +582,7 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
 
     def test_a_recorded_marketplace_missing_the_helper_refuses_without_fallback(self):
         home = self.root / "copilot-marketplace-missing-helper"
-        self.install_hashed(home)
+        self.install_direct(home)
         marketplace = self.root / "empty-marketplace"
         marketplace.mkdir()
         self.register_local_marketplace(home, marketplace)
@@ -510,43 +595,109 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         home = self.root / "copilot-empty-home"
         home.mkdir()
         expected = self.install_marketplace_source(self.root)
-        plugin_root = expected.parents[1]
+        plugin_root = expected.parents[1]  # .../plugins/kanban
         proc = self.run_locator(str(plugin_root), str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
-    def test_plugin_root_wins_over_a_hashed_install(self):
+    def test_plugin_root_wins_over_both_copied_layouts(self):
         home = self.root / "copilot-both"
-        self.install_hashed(home)
+        self.install_direct(home)
+        self.install_marketplace_layout(home)
         expected = self.install_marketplace_source(self.root)
         plugin_root = expected.parents[1]
         proc = self.run_locator(str(plugin_root), str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
-    def test_the_lookup_fails_closed_when_two_kanban_installs_match(self):
-        home = self.root / "copilot-ambiguous"
-        first = self.install_hashed(home)
-        self.install_hashed(home, "kanban-aaaaaaaa")
+    def test_the_lookup_fails_closed_when_both_copied_layouts_are_eligible(self):
+        home = self.root / "copilot-ambiguous-layouts"
+        direct = self.install_direct(home)
+        layout = self.install_marketplace_layout(home)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+        self.assertTrue(direct.is_file() and layout.is_file())
+
+    def test_the_lookup_fails_closed_when_two_direct_installs_match(self):
+        home = self.root / "copilot-ambiguous-direct"
+        first = self.install_direct(home)
+        self.install_direct(home, "someone--fork--google-plugin-plugins-kanban")
         proc = self.run_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("ambiguous Kanban installs", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
         self.assertTrue(first.is_file())
 
+    def test_a_sole_candidate_missing_the_coordinator_refuses(self):
+        # Requirement 2 and the review's addition: roots are identified before
+        # the helper is looked for, so an empty install refuses rather than
+        # silently leaving the candidate set empty.
+        home = self.root / "copilot-missing-coordinator"
+        root = home / ".copilot" / "installed-plugins" / "_direct" / DIRECT_ENTRY
+        root.mkdir(parents=True)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_empty_candidate_does_not_lose_silently_to_a_competitor(self):
+        home = self.root / "copilot-missing-and-competing"
+        (home / ".copilot" / "installed-plugins" / "_direct" / DIRECT_ENTRY).mkdir(
+            parents=True
+        )
+        self.install_marketplace_layout(home)
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_wrong_brand_install_is_not_adopted(self):
+        home = self.root / "copilot-wrong-brand"
+        self.install_direct(home, "coghex--kanban--kimi-plugin-plugins-kanban")
+        self.install_marketplace_layout(home, marketplace="kanban-kimi")
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_mixed_brand_home_resolves_this_bundle_alone(self):
+        home = self.root / "copilot-mixed-brand"
+        expected = self.install_direct(home)
+        self.install_direct(
+            home, "coghex--kanban--kimi-plugin-plugins-kanban"
+        )
+        self.install_marketplace_layout(home, marketplace="kanban-kimi")
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_bare_plugin_named_direct_entry_is_not_adopted(self):
+        # A local-path `copilot plugin install <dir>` names its entry after the
+        # plugin alone, and both Copilot bundles declare the plugin name
+        # `kanban`. That identifies no bundle, so it is refused rather than
+        # guessed at; `RealCopilotInstallTests` pins that entry name too.
+        home = self.root / "copilot-bare-plugin-entry"
+        self.install_direct(home, "kanban")
+        proc = self.run_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("coordinator was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_the_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
         home = self.root / "copilot-competitor"
-        expected = self.install_hashed(home)
-        other = (
+        expected = self.install_direct(home)
+        self.plant(
+            home / ".copilot" / "installed-plugins" / "otherplugin" / "kanban"
+        )
+        self.plant(
             home
             / ".copilot"
             / "installed-plugins"
-            / "otherplugin-deadbeef"
-            / "scripts"
-            / "review_pr.py"
+            / "_direct"
+            / "someone--other--tools-plugins-kanban"
         )
-        other.parent.mkdir(parents=True)
-        other.write_text("print('other')\n", encoding="utf-8")
         proc = self.run_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -558,6 +709,7 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("coordinator was not found:", proc.stderr)
         self.assertIn("$GOOGLE_PLUGIN_ROOT is unset", proc.stderr)
+        self.assertNotIn("installed-plugins/kanban-*", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
     def test_plugin_root_fails_closed_when_the_relative_path_is_missing(self):
@@ -569,6 +721,132 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("coordinator was not found at", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
+
+
+class RealCopilotInstallTests(unittest.TestCase):
+    """Produce the copied install with the real CLI, never by hand.
+
+    Verified with GitHub Copilot CLI 1.0.85. These skip explicitly when the
+    CLI is absent, which is how CI runs them; what they exist for is to pin
+    the entry names `AutosolveCoordinatorLookupTests` builds its
+    CLI-independent fixtures from, so a passing suite can never assert
+    discovery against a directory no install produces.
+    """
+
+    def setUp(self):
+        if COPILOT_CLI is None:
+            self.skipTest("the GitHub Copilot CLI is not installed")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "copilot-home"
+        self.home.mkdir()
+        # A directory that is not a Kanban checkout, so nothing resolves from
+        # the working directory, and an isolated cache beside the isolated
+        # COPILOT_HOME.
+        self.workdir = self.root / "elsewhere"
+        self.workdir.mkdir()
+
+    def install(self, *arguments):
+        return subprocess.run(
+            [COPILOT_CLI, "plugin", "install", *arguments],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env={
+                **os.environ,
+                "COPILOT_HOME": str(self.home),
+                "XDG_CACHE_HOME": str(self.root / "cache"),
+            },
+            timeout=300,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def run_locator(self, plugin_root: str = ""):
+        return subprocess.run(
+            ["python3", "-", plugin_root, str(self.home)],
+            input=GOOGLE_COORDINATOR_PYTHON,
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            timeout=60,
+        )
+
+    def test_a_repository_direct_install_produces_the_pinned_entry_and_resolves(self):
+        proc = self.install("coghex/kanban:google-plugin/plugins/kanban")
+        if proc.returncode != 0:
+            self.skipTest(
+                "copilot plugin install could not reach the repository: "
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        entries = sorted(
+            child.name
+            for child in (self.home / "installed-plugins" / "_direct").iterdir()
+        )
+        self.assertEqual(entries, [DIRECT_ENTRY], entries)
+        located = self.run_locator()
+        self.assertEqual(located.returncode, 0, located.stderr)
+        self.assertEqual(
+            located.stdout.strip(),
+            str(
+                self.home
+                / "installed-plugins"
+                / "_direct"
+                / DIRECT_ENTRY
+                / "scripts"
+                / "review_pr.py"
+            ),
+        )
+
+    def test_a_local_direct_install_produces_a_bare_entry_the_lookup_refuses(self):
+        proc = self.install(str(GOOGLE_PLUGIN))
+        if proc.returncode != 0:
+            self.skipTest(
+                "copilot plugin install rejected the local bundle path: "
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        entries = sorted(
+            child.name
+            for child in (self.home / "installed-plugins" / "_direct").iterdir()
+        )
+        self.assertEqual(entries, ["kanban"], entries)
+        located = self.run_locator()
+        self.assertNotEqual(located.returncode, 0, located.stdout)
+        self.assertIn("coordinator was not found:", located.stderr)
+
+    def test_a_local_marketplace_install_records_a_directory_source(self):
+        marketplace = subprocess.run(
+            [COPILOT_CLI, "plugin", "marketplace", "add", str(GOOGLE_BUNDLE)],
+            capture_output=True,
+            text=True,
+            cwd=str(self.workdir),
+            env={
+                **os.environ,
+                "COPILOT_HOME": str(self.home),
+                "XDG_CACHE_HOME": str(self.root / "cache"),
+            },
+            timeout=300,
+            stdin=subprocess.DEVNULL,
+        )
+        if marketplace.returncode != 0:
+            self.skipTest(
+                "copilot plugin marketplace add failed: "
+                f"{marketplace.stderr.strip() or marketplace.stdout.strip()}"
+            )
+        installed = self.install("kanban@kanban-google")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        settings = json.loads(
+            (self.home / "settings.json").read_text(encoding="utf-8")
+        )
+        source = settings["extraKnownMarketplaces"]["kanban-google"]["source"]
+        self.assertEqual(source["source"], "directory")
+        self.assertEqual(Path(source["path"]), GOOGLE_BUNDLE)
+        # Nothing is copied for a directory marketplace, which is why the
+        # recorded path is the only thing that resolves this install.
+        self.assertFalse((self.home / "installed-plugins").exists())
+        located = self.run_locator()
+        self.assertEqual(located.returncode, 0, located.stderr)
+        self.assertEqual(located.stdout.strip(), str(COORDINATOR))
 
 
 def load_google_review_pr():

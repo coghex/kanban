@@ -20,7 +20,7 @@ Claude packaging is at [claude-plugin/](../claude-plugin/README.md), Codex at
 
 ## Install and launch
 
-These instructions were verified with GitHub Copilot CLI 1.0.83. Copilot
+These instructions were verified with GitHub Copilot CLI 1.0.85. Copilot
 skills do not substitute a `$ARGUMENTS` variable: put the issue number in the
 invoking message, for example `/solve 652`, and the skill reads it there.
 
@@ -46,7 +46,7 @@ in the same launch line is what lets a `--plugin-dir` session find the
 vendored coordinator and trusted-comment helper beside the skills it loaded.
 
 The marketplace way registers and installs the bundle into that isolated
-profile. Copilot CLI 1.0.83 requires the tested absolute marketplace path:
+profile. Copilot CLI 1.0.85 requires the tested absolute marketplace path:
 
 ```console
 COPILOT_HOME=$HOME/.copilot-google \
@@ -60,13 +60,46 @@ A local marketplace loads live from this directory — nothing is copied — and
 the CLI records its root at
 `extraKnownMarketplaces.kanban-google.source.path` in
 `$COPILOT_HOME/settings.json`, with the sibling `source` value `directory`.
-The skills map that absolute root to `plugins/kanban/`. When no local
-marketplace entry exists, they search exactly one copied git-source install
-under `$COPILOT_HOME/installed-plugins/kanban-*/`; malformed applicable
-settings, a missing helper, or zero or multiple copied matches stop without a
-fallback. A marketplace name collision is refused by the CLI rather than
-merged, which is why this marketplace is named `kanban-google` while the plugin
-inside keeps the shared name `kanban`.
+It writes no `installed-plugins` entry and no `config.json`. The skills map
+that absolute root to `plugins/kanban/`. A marketplace name collision is
+refused by the CLI rather than merged, which is why this marketplace is named
+`kanban-google` while the plugin inside keeps the shared name `kanban`.
+
+While this bundle's manifest stays at
+`google-plugin/.github/plugin/marketplace.json`, a *remote* marketplace
+registration of it is not available: `copilot plugin marketplace add` takes
+only `owner/repo`, a URL, or a local path — no subdirectory form — and then
+looks for a `marketplace.json` at the clone root, whether directly there or
+under a `.plugin/`, `.github/plugin/`, or `.claude-plugin/` directory of it.
+That root is one directory above where this bundle's manifest is tracked.
+
+The one remote install that does work is the direct one, which the CLI warns is
+deprecated in favour of `plugin@marketplace`:
+
+```console
+COPILOT_HOME=$HOME/.copilot-google \
+  copilot plugin install coghex/kanban:google-plugin/plugins/kanban
+```
+
+That copies the bundle to
+`$COPILOT_HOME/installed-plugins/_direct/coghex--kanban--google-plugin-plugins-kanban/`,
+naming the entry `<owner>--<repo>--<bundle path>` with the path's separators
+flattened to single hyphens. It records that directory as `cache_path`, beside
+a `github` source naming the repository and `google-plugin/plugins/kanban`, in
+`$COPILOT_HOME/config.json`, and leaves `settings.json` holding only
+`enabledPlugins`.
+
+When no local marketplace entry applies — none recorded, or one the CLI
+recorded from a `git` or `github` source — the skills search the two copied
+layouts the CLI creates, as one candidate set: the documented marketplace
+layout `$COPILOT_HOME/installed-plugins/kanban-google/kanban/`, and a direct
+install
+`$COPILOT_HOME/installed-plugins/_direct/<owner>--<repo>--google-plugin-plugins-kanban/`.
+Both are anchored to this bundle's own marketplace, plugin, and bundle path
+rather than to any `kanban-*` directory, so a Kimi install sitting beside
+a Google one is never adopted for Google. Malformed applicable settings, an
+unsupported recorded source kind, a missing helper, or zero or several
+candidate roots stop without a fallback.
 
 Whichever way it was loaded, invoke the skills by name in a Google session:
 `/solve` takes one issue to a pull request, `/autosolve` runs `/solve` and
