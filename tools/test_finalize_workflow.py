@@ -53,6 +53,7 @@ everything would otherwise pass while asserting nothing.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -75,6 +76,15 @@ CODEX_ASSET = "codex-plugin/plugins/kanban/skills/finalize/SKILL.md"
 RENDERED_ASSETS = (CLAUDE_ASSET, CODEX_ASSET)
 CODEX_SKILL_DIR = "codex-plugin/plugins/kanban/skills/finalize"
 REVIEW_COORDINATOR = REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py"
+# Both standard publishers, because a grok-origin pull request reaches this
+# gate from either one (issue #696): Kanban dispatches the packaged
+# `pr-review` command and whichever brand's bundle serves it publishes the
+# marker the gate then reads.
+STANDARD_COORDINATORS = {
+    "claude": REVIEW_COORDINATOR,
+    "codex": REPO_ROOT
+    / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
+}
 
 # A `gh` invocation as the assets actually spell one, in a fenced block or in
 # inline code. The lookbehind keeps the `gh` ending a longer word out, and the
@@ -380,12 +390,12 @@ def fence_containing(text: str, needle: str) -> str:
     return matching[0]
 
 
-def load_review_pr_module():
-    """Import the bundled coordinator by file path, the way
+def load_review_pr_module(brand: str = "claude"):
+    """Import a bundled coordinator by file path, the way
     tools/test_claude_plugin.py does: it lives under claude-plugin/, so `-s
     tools` discovery never puts it on sys.path."""
     spec = importlib.util.spec_from_file_location(
-        "kanban_finalize_review_pr", REVIEW_COORDINATOR
+        f"kanban_finalize_{brand}_review_pr", STANDARD_COORDINATORS[brand]
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -393,21 +403,29 @@ def load_review_pr_module():
     return module
 
 
-def coordinator_marker(head: str, verdict: str, reviewers: list[str]) -> str:
+def coordinator_marker(
+    head: str, verdict: str, reviewers: list[str], brand: str = "claude"
+) -> str:
     """A marker built by the publisher's own `review_marker`.
 
     Hand-writing the accepted shape would be asserting this module's idea of
-    it. The one thing the gate has to accept is what
-    `claude-plugin/plugins/kanban/scripts/review_pr.py` actually emits, so the
-    fixture is produced through that function.
+    it. The one thing the gate has to accept is what a bundled
+    `review_pr.py` actually emits, so the fixture is produced through that
+    function.
     """
-    module = load_review_pr_module()
+    module = load_review_pr_module(brand)
     lookup = {
         "codex": module.CODEX_REVIEWER,
         "claude": module.CLAUDE_REVIEWER,
     }
     selected = [lookup[key] for key in reviewers]
     models = [f"model-{key}@xhigh" for key in reviewers]
+    # The Codex copy is the one without nested-model pinning, so its
+    # `review_marker` fills `models=` itself and takes no list. That is the
+    # §2.2 exception tools/test_coordinator_parity.py records, not drift, and
+    # the marker's own shape is identical either way.
+    if len(inspect.signature(module.review_marker).parameters) == 3:
+        return module.review_marker(selected, head, verdict)
     return module.review_marker(selected, models, head, verdict)
 
 
@@ -1089,6 +1107,29 @@ class GateDecisionTests(unittest.TestCase):
                         pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
                     )
                 )
+
+    def test_either_standard_coordinators_codex_marker_finalizes_a_grok_origin(self):
+        # Issue #696: the aligned route sends a grok-origin pull request --
+        # fork or not -- to Codex alone in BOTH standard coordinators, and the
+        # marker each of them publishes for that route has to satisfy this
+        # gate's EXTERNAL_ORIGIN_REVIEWERS check. Built through each copy's own
+        # `review_marker` rather than hand-written, so what is accepted here is
+        # what the publisher emits. The dual-brand marker the unaligned Claude
+        # copy used to publish for this pull request is the refusal asserted
+        # two cases below.
+        state = pull_request_state(body="Closes #7\n\n" + ORIGIN_MARKERS["grok"] + "\n")
+        for brand in STANDARD_COORDINATORS:
+            marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["codex"], brand)
+            self.assertIn("reviewers=codex ", marker)
+            for relative_path in RENDERED_ASSETS:
+                with self.subTest(coordinator=brand, asset=relative_path):
+                    self.assertApproved(
+                        self.decide(
+                            relative_path,
+                            states=[state],
+                            pages=[[comment(1, "2026-08-01T00:00:00Z", marker)]],
+                        )
+                    )
 
     def test_a_grok_origin_pull_request_refuses_a_claude_approval(self):
         marker = coordinator_marker(APPROVED_HEAD, "APPROVE", ["claude"])
