@@ -542,7 +542,9 @@ same run that mutates it, rather than left for a later manual commit.
   document directly. `/draft-report` and `$draft-report` invoke that landing
   once, immediately after the approved report is written: their approval gate
   announces the landing before the user answers, so the approval of the
-  displayed draft is the user-directed request `push-docs` requires.
+  displayed draft is the user-directed request `push-docs` requires. A run
+  that skipped that gate at the user's instruction has no approval to stand
+  on and lands only if the bypass instruction itself asked for the landing.
   `/design-epic` and `$design-epic` land nothing on their own, because a design
   is edited across many conversations and the user chooses when a state of it
   is worth publishing.

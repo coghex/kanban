@@ -222,7 +222,8 @@ not a request that must already be organized or precisely worded.
    updated version again. Approval applies only to the latest version the user
    has seen.
 5. Skip this gate only when the user explicitly instructs this invocation to
-   bypass draft review and write without approval.
+   bypass draft review and write without approval. A skipped gate authorizes
+   no landing; Landing says what a bypassed run may do.
 
 ## Write the approved report
 
@@ -251,7 +252,10 @@ user answers: approving the exact content shown is approving that it lands. So
 once the report is written and verified, invoke $push-docs with the report's
 repository-relative path and nothing else — the landing reaches only this
 report, never another document waiting in the docs worktree — and relay its
-answer:
+answer. A run that skipped the approval gate has no approval to stand on: land
+only when the bypass instruction itself explicitly asked for the landing as
+well, and otherwise leave the report in the docs worktree, unlanded, and say
+so in the handoff. The answer to relay:
 
 - landed: quote the landing commit;
 - refused by the helper's gate, or stopped by one of its warnings: the report

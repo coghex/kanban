@@ -300,6 +300,11 @@ CONTRACT_STATEMENTS = {
     "publication-design-pair-lands-nothing": (
         "/design-epic and $design-epic land nothing on their own"
     ),
+    "publication-bypassed-gate-lands-nothing": (
+        "A run that skipped that gate at the user's instruction has no approval "
+        "to stand on and lands only if the bypass instruction itself asked for "
+        "the landing"
+    ),
     "publication-unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
     ),
@@ -1132,6 +1137,17 @@ REPORT_LANDING_CLAUSES = {
         "with the report's repository-relative path and nothing else"
     ),
     "a-refusal-keeps-it-local": "the report stays in the docs worktree",
+    # The bypass path: a run the user told to write without approval has no
+    # approval exchange to read as a landing request, so it lands only when
+    # that same instruction asked for the landing too.
+    "bypass-authorizes-no-landing": (
+        "a run that skipped the approval gate has no approval to stand on"
+    ),
+    "bypass-lands-only-on-request": (
+        "land only when the bypass instruction itself explicitly asked for the "
+        "landing as well"
+    ),
+    "skipped-gate-is-said-at-the-gate": "a skipped gate authorizes no landing",
 }
 
 DESIGN_LANDING_CLAUSES = {
