@@ -322,22 +322,24 @@ If readiness fails, leave the document in `exploring`, record the gaps as open
 questions or proposals, and report the smallest set of decisions still needed.
 Do not call an unfinished design ready merely so processing can begin.
 
-## Publication
+## Landing
 
-A document this workflow newly creates is local and unpublished, and this
-workflow never publishes one. It is not yet tracked, so no row of
-`docs/agent-workflow-contract.md` §7 matches its path, and an unmatched path is
-`pr-atomic` by the fail-closed default — there is no moment at which a novel
-document is directly publishable. Its first publication requires a separate pull
-request that adds both the document and its `coordination` classification. Only
-after that pull request lands may a later processing run publish
-direct-to-`master` mutations to it. Creating that enrollment pull request is not
-this workflow's job either; say plainly that the document is local so the user
-can decide.
+A document this workflow newly creates never goes through the publication
+module the processing assets invoke: that module publishes an approved mutation
+to a document the publication tip already carries, and never creates one. A new
+design document lands through the owning repository's own documentation-landing
+lane instead — /push-docs and the `tools/docs_land.sh` helper it runs, run from
+`$DOC_ROOT` so the helper it resolves is the owning repository's — whose gate
+decides whether the path may land directly, and only when the user asks for
+that landing. This workflow lands nothing on its own: a design is edited across
+many conversations, and the user chooses when a state of it is worth
+publishing. In `coghex/kanban` an unclassified path is `pr-atomic` and the
+helper refuses it until a pull request adds it and its §7 classification;
+opening that pull request is not this workflow's job. Until it lands, the
+document lives in the docs worktree, and /process-design-doc resumes it there.
 
 An existing document this workflow resumes is unaffected by the above: whether
-its edits publish is the processing workflows' question, answered against the
-same §7 rows.
+its edits publish is the processing workflows' question.
 
 ## Boundaries and handoff
 
