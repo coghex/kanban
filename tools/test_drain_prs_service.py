@@ -12,7 +12,9 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -3086,6 +3088,353 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         result = self._stop_reporting(self._owing(1), self._owing(3))
         self.assertEqual(result["cleanup_discharged"], 0)
         self.assertEqual(result["cleanup_outstanding"], 3)
+
+    # Issue #694: the checkout run lock's document is metadata about the last
+    # run, and current ownership of the lock is what says a drainer is live.
+    #
+    # The lock file is persistent — `drain_prs.RunLock.close` releases by
+    # closing descriptors and nothing ever unlinks or truncates it — so a
+    # completed run leaves its PID in it, and an operating system that reuses
+    # that number hands the controller a live process that was never a
+    # drainer. Classifying that as `external` blocked `start` and aimed
+    # `stop_service`'s `os.kill` at whatever inherited the PID. These live in
+    # this class rather than beside it because the classification and the two
+    # transitions that read it are what they change.
+
+    def checkout_lock_path(self):
+        return self.repo / ".git" / "drain_prs.lock"
+
+    def scripted_backend(self):
+        """Run the case through the service-manager seam, reporting the job
+        loaded.
+
+        The incident was observed with a loaded-but-stopped launchd job, and
+        `state` never consults the backend, so reporting it loaded here is the
+        proof of requirement 5's independence rather than a condition of it.
+        Driving it through the fake is also what makes these answers identical
+        on macOS and on a Linux runner.
+        """
+        backend = RecordingBackend(self.root / "definitions", loaded=True)
+        patched = mock.patch.object(
+            drain_prs_service, "service_backend", return_value=backend
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        return backend
+
+    def unrelated_live_process(self):
+        """A real process this suite did not start as a drainer, which is what
+        macOS handed the incident when it reused the PID.
+
+        Spawned rather than mocked through `pid_alive`, because the defect is
+        about a PID that genuinely resolves to something alive. It reads its
+        own stdin and so lives exactly as long as this test holds the pipe;
+        `sys.executable` rather than `sleep`, since nothing guarantees a
+        fixture's PATH has one.
+        """
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(self.reap, child)
+        return child
+
+    def reap(self, child):
+        """Let it finish and collect it, so the PID is genuinely released
+        rather than left as a zombie this platform still calls alive."""
+        child.stdin.close()
+        child.wait(timeout=30)
+        if child.stdout is not None:
+            child.stdout.close()
+
+    def publish_unheld_document(self, pid):
+        """Exactly what a drainer leaves behind, with nothing holding the lock
+        it was written under."""
+        self.checkout_lock_path().write_bytes(
+            drain_prs_service.encode_lock_holder(pid)
+        )
+
+    def external_drainer_holding_the_lock(self):
+        """A real foreground drainer: a separate process that takes the run
+        lock and is then named by the document written under it.
+
+        The control and the publish-window case below must differ in the one
+        thing the controller can actually be wrong about — whether the PID in
+        the document is the process holding the lock — so the control makes
+        those the same process and the window case makes them different. A
+        child rather than this process, since the point is that the holder is
+        somebody a snapshot could legitimately name and signal.
+        """
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "sys.stdout.write('held\\n')\n"
+                "sys.stdout.flush()\n"
+                "sys.stdin.read()\n",
+                str(self.checkout_lock_path()),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(self.reap, child)
+        self.assertEqual(child.stdout.readline(), "held\n")
+        # Published after the lock is won, in that order, as a run does.
+        self.publish_unheld_document(child.pid)
+        return child
+
+    def hold_the_checkout_lock(self):
+        """Hold the run lock from this process on its own descriptor, which is
+        what a genuine external drainer does.
+
+        `flock` is per open file description, so a descriptor opened here
+        contends with the probe's exactly as another process's would — the
+        same instrument `record_lock_is_held` and the relocation suite's
+        `watch_lock_mode` use.
+        """
+        descriptor = os.open(
+            self.checkout_lock_path(), os.O_RDWR | os.O_CREAT, 0o644
+        )
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return descriptor
+
+    @contextlib.contextmanager
+    def signals_sent(self):
+        """Every real signal this controller delivers, and nothing else.
+
+        `os.kill(pid, 0)` is how `pid_alive` asks whether a process exists, so
+        a bare spy over `os.kill` records liveness probes as if they were
+        signals and can report a delivery that never happened. Only a non-zero
+        signal number is a delivery; the probes are passed through untouched
+        so the states under test are still derived from real processes.
+        """
+        delivered = []
+        real = os.kill
+
+        def kill(pid, number, *rest):
+            if number:
+                delivered.append((pid, number))
+                return None
+            return real(pid, number, *rest)
+
+        with mock.patch.object(drain_prs_service.os, "kill", side_effect=kill):
+            yield delivered
+
+    def probe_spy(self):
+        """A spy over the ownership probe that still answers truthfully, so a
+        case can assert the lock was never taken for it without changing what
+        the snapshot would otherwise have decided.
+
+        The probe, not the lock file: `lock_pid` reads that file on every
+        snapshot and always has. Taking the lock is the part a starting
+        drainer contends with.
+        """
+        return mock.patch.object(
+            drain_prs_service,
+            "lock_file_is_held",
+            side_effect=drain_prs_service.lock_file_is_held,
+        )
+
+    def test_a_reused_pid_in_an_unheld_document_is_not_an_external_drainer(self):
+        # Requirement 1, and the exact incident: a stopped managed job whose
+        # retained document named an interactive shell that had inherited the
+        # PID. Before #694 this read `external` with that PID as
+        # `drainer_pid`.
+        self.scripted_backend()
+        child = self.unrelated_live_process()
+        self.publish_unheld_document(child.pid)
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "stopped")
+        self.assertIsNone(snapshot["drainer_pid"])
+        # Requirement 5: the service manager says the job is loaded, and that
+        # changes nothing about the classification.
+        self.assertTrue(snapshot["launchd_loaded"])
+        self.assertIsNone(child.poll())
+
+    def test_stopping_that_state_signals_nothing_and_leaves_the_process_alive(self):
+        # Requirement 2 and 6. `stop_service` handles `external` with
+        # `os.kill(pid, SIGINT)`, so the false classification was a signal
+        # aimed at an unrelated user session.
+        backend = self.scripted_backend()
+        child = self.unrelated_live_process()
+        self.publish_unheld_document(child.pid)
+        with self.signals_sent() as sent:
+            result = drain_prs_service.stop_service(self.job)
+        self.assertEqual(sent, [])
+        self.assertFalse(result["stopped"])
+        self.assertIn("already stopped", result["message"])
+        self.assertEqual(result["state"], "stopped")
+        self.assertIsNone(child.poll())
+        # Nor was the stop delegated to the service manager instead, which
+        # would be a different transition passing this assertion.
+        self.assertNotIn("request_stop", backend.names())
+
+    def test_a_stale_document_no_longer_blocks_a_start(self):
+        # Requirement 2's other half: `start_service` raises on `external`
+        # before it installs anything, so the stale document used to make the
+        # drainer unstartable until someone deleted the file by hand.
+        self.scripted_backend()
+        child = self.unrelated_live_process()
+        self.publish_unheld_document(child.pid)
+        with (
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "ensure_dirs"),
+            mock.patch.object(
+                drain_prs_service,
+                "install_job",
+                side_effect=drain_prs_service.ServiceError("reached installation"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                drain_prs_service.ServiceError, "reached installation"
+            ):
+                drain_prs_service.start_service(self.job)
+        self.assertIsNone(child.poll())
+
+    def test_a_genuinely_held_lock_is_still_an_external_drainer(self):
+        # Requirement 3 and 7's control, differing from the negative case in
+        # exactly one variable: the same shape of document, with the lock it
+        # was written under actually held by the process it names. Had the fix
+        # removed the `external` state rather than qualified it, this fails.
+        self.scripted_backend()
+        child = self.external_drainer_holding_the_lock()
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "external")
+        self.assertEqual(snapshot["drainer_pid"], child.pid)
+
+    def test_a_genuine_external_drainer_remains_controllable(self):
+        # Requirement 3's other half: the two transitions a real external
+        # drainer is driven through still reach the PID the document names.
+        self.scripted_backend()
+        child = self.external_drainer_holding_the_lock()
+        with mock.patch.object(drain_prs_service, "require_default_branch"):
+            with self.assertRaisesRegex(
+                drain_prs_service.ServiceError, f"already running as PID {child.pid}"
+            ):
+                drain_prs_service.start_service(self.job)
+        with (
+            mock.patch.object(drain_prs_service, "STOP_TIMEOUT_SECONDS", 0),
+            self.signals_sent() as sent,
+        ):
+            # It signals and then waits for an exit this stand-in will never
+            # make. The timeout is not what is under test; which PID the
+            # signal was aimed at is.
+            with self.assertRaises(drain_prs_service.ServiceError):
+                drain_prs_service.stop_service(self.job)
+        self.assertEqual(sent, [(child.pid, signal.SIGINT)])
+        self.assertIsNone(child.poll())
+
+    def test_a_publish_that_lands_during_the_probe_is_the_pid_reported(self):
+        """The document is read after ownership is established, not before.
+
+        The lock and the document move independently, so a run can acquire
+        *and* publish between any two reads. A PID sampled before the probe
+        then names neither the holder nor what the file says by the time the
+        probe answers — it names the run before, and a reused number makes
+        that an unrelated process `stop_service` would signal, which is #694's
+        hazard in a state the fix otherwise covers.
+
+        Driven through the probe itself: the acquisition completes while the
+        snapshot is mid-flight, which is the only moment the ordering is
+        observable.
+        """
+        self.scripted_backend()
+        previous = self.unrelated_live_process()
+        self.publish_unheld_document(previous.pid)
+        self.hold_the_checkout_lock()
+        real = drain_prs_service.lock_file_is_held
+
+        def probe_then_publish(path):
+            held = real(path)
+            # The holder reaches `_publish_lock_owner` here, overwriting the
+            # previous run's PID with its own.
+            self.publish_unheld_document(os.getpid())
+            return held
+
+        with mock.patch.object(
+            drain_prs_service, "lock_file_is_held", side_effect=probe_then_publish
+        ):
+            snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "external")
+        self.assertEqual(snapshot["drainer_pid"], os.getpid())
+        self.assertNotEqual(snapshot["drainer_pid"], previous.pid)
+        self.assertIsNone(previous.poll())
+
+    def test_the_publish_window_still_reports_the_previous_runs_pid(self):
+        """The bound on the fix, pinned rather than left to prose.
+
+        `drain_prs._acquire` wins the lock file, takes the `.git` directory,
+        and only then overwrites the document — deliberately, so a contender
+        that loses the second lock cannot erase the PID of the holder it is
+        about to report. Inside that window the lock is held while the
+        document still names the run before, so the held-lock test says
+        `external` and the document supplies a PID that a reused number makes
+        somebody else's. That is #694's own hazard surviving in a window #694
+        does not reach; closing it means clearing the document at
+        acquisition, which changes how a run starts.
+
+        Asserted so the contract on `lock_file_is_held` and in `docs/` is
+        checkable, and so narrowing or closing this window is a deliberate
+        change to a recorded state rather than a silent one.
+        """
+        self.scripted_backend()
+        child = self.unrelated_live_process()
+        # The previous run's document, its PID since reused.
+        self.publish_unheld_document(child.pid)
+        # A run that holds the lock and has not reached `_publish_lock_owner`.
+        self.hold_the_checkout_lock()
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "external")
+        self.assertEqual(snapshot["drainer_pid"], child.pid)
+
+    def test_a_held_lock_naming_no_live_process_stays_stopped(self):
+        # The startup window: a run has taken the lock file and not yet
+        # published its PID. It reads `stopped` with a null `drainer_pid`,
+        # exactly as before — widening it to `external` would have to report
+        # the *previous* run's PID, which is the reused-PID hazard again.
+        self.scripted_backend()
+        self.hold_the_checkout_lock()
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "stopped")
+        self.assertIsNone(snapshot["drainer_pid"])
+
+    def test_a_live_runner_settles_the_state_without_probing_the_lock(self):
+        # The probe takes the lock for an instant, and a drainer's own
+        # acquisition is `LOCK_NB` and fails permanently on contention. A
+        # snapshot whose answer the probe cannot change must therefore not
+        # take it: `start_service` polls status every 0.25s against the very
+        # process that is trying to acquire it.
+        self.scripted_backend()
+        self.write_status(self.job, self.repo)
+        self.publish_unheld_document(os.getpid())
+        with self.probe_spy() as probe:
+            snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "running")
+        probe.assert_not_called()
+
+    def test_a_document_naming_no_live_process_is_settled_without_the_probe(self):
+        # The other short-circuit: nothing alive is named, so whether the lock
+        # is held cannot make this `external`.
+        self.scripted_backend()
+        child = self.unrelated_live_process()
+        self.reap(child)
+        # Stated rather than assumed: the whole case is that this number
+        # resolves to nothing, and a PID reused in the interval would make it
+        # pass for the wrong reason.
+        self.assertFalse(drain_prs_service.pid_alive(child.pid))
+        self.publish_unheld_document(child.pid)
+        with self.probe_spy() as probe:
+            snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "stopped")
+        probe.assert_not_called()
 
 
 class CleanupObligationTests(RedirectedControllerTestCase):

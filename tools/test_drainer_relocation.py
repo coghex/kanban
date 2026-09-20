@@ -221,6 +221,26 @@ class RelocationFixture(unittest.TestCase):
         )
         return repo
 
+    def run_lock_path(self, checkout):
+        return checkout / ".git" / "drain_prs.lock"
+
+    def hold_checkout_lock(self, checkout):
+        """Hold that checkout's run lock for the rest of the test, which is
+        what makes the PID in the document beside it a live drainer's.
+
+        Since #694 a PID retained in an unheld lock document is metadata about
+        a finished run, so a case that needs a drainer to read as *running*
+        has to produce the lock being held and not only the document. On its
+        own descriptor: `flock` is per open file description, so this contends
+        with `repository_drainer_running`'s probe exactly as another process's
+        descriptor would -- the same property `watch_lock_mode` is built on.
+        """
+        descriptor = os.open(
+            self.run_lock_path(checkout), os.O_RDWR | os.O_CREAT, 0o644
+        )
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def seed_repository(self, checkout, *, install_dir=None):
         """One installed repository, written by the controller's own writers.
 
@@ -1296,10 +1316,10 @@ class RefusalTests(RelocationFixture):
     def test_a_live_checkout_drainer_refuses(self):
         # The bare integer a drainer predating #555 published. Readers still
         # decode it, because one that was already running when these modules
-        # were upgraded left this and is genuinely live.
-        (self.widgets / ".git" / "drain_prs.lock").write_text(
-            str(os.getpid()), encoding="utf-8"
-        )
+        # were upgraded left this and is genuinely live. Held, because #694
+        # made holding the lock the thing that says so.
+        self.run_lock_path(self.widgets).write_text(str(os.getpid()), encoding="utf-8")
+        self.hold_checkout_lock(self.widgets)
         self.assert_refuses_and_changes_nothing("a drainer is running in")
 
     def test_a_live_checkout_drainer_publishing_the_new_document_refuses(self):
@@ -1308,12 +1328,33 @@ class RefusalTests(RelocationFixture):
         `repository_drainer_running` is one of the readers #555 moved onto the
         controller's own decoder, and it is the one that keeps a relocation
         from running over a live drainer — so it has to go on refusing for
-        exactly what a drainer publishes.
+        exactly what a drainer publishes, while it publishes it.
         """
-        (self.widgets / ".git" / "drain_prs.lock").write_bytes(
+        self.run_lock_path(self.widgets).write_bytes(
             drain_prs_service.encode_lock_holder(os.getpid())
         )
+        self.hold_checkout_lock(self.widgets)
         self.assert_refuses_and_changes_nothing("a drainer is running in")
+
+    def test_a_finished_drainers_retained_pid_does_not_refuse(self):
+        """#694: the same document, with nothing holding the lock.
+
+        The lock file is persistent, so this is what every completed run
+        leaves behind. Reading the PID out of it and asking only whether
+        *something* with that number is alive made a relocation refuse
+        whenever the operating system had reused it — and this process is
+        exactly such a PID: alive, and no drainer. The refusal above and this
+        one differ in one variable, so neither can pass by the predicate
+        collapsing to a constant.
+        """
+        self.run_lock_path(self.widgets).write_bytes(
+            drain_prs_service.encode_lock_holder(os.getpid())
+        )
+        self.assertFalse(install_drainer.repository_drainer_running(self.widgets))
+        plan = install_drainer.plan_relocation(self.destination)
+        self.assertEqual(
+            [entry.identity for entry in plan.repositories], ["acme/widgets"]
+        )
 
     def test_an_entry_whose_checkout_is_gone_refuses(self):
         drain_prs_service.merge_repository_record(
@@ -3241,12 +3282,23 @@ _PRE_GATE_EXTERNAL = (
     (
         "#555",
         "the checkout run lock is the one input to a snapshot that no seal "
-        "covers; this arc left the classification reading it exactly as it "
-        "was, so the copy goes on calling `external` a live holder there and "
-        "goes on reaching that holder through the restored decoder rather "
-        "than through anything added here",
+        "covers, so the copy goes on calling `external` a holder it finds "
+        "there, and goes on reaching that holder through the restored decoder "
+        "rather than through anything added here",
         "status_snapshot",
-        ("locked_pid = lock_pid(job.repo_path)", 'state = "external"'),
+        ("external_drainer_pid(job.repo_path)", 'state = "external"'),
+    ),
+    (
+        "#694",
+        "that classification now establishes ownership before it names a "
+        "holder, and this is the hop it does both in; the copy reaches the "
+        "restored decoder through here, because this is the one function that "
+        "reads the document at all",
+        "external_drainer_pid",
+        (
+            "lock_pid(repo_path)",
+            "lock_file_is_held(checkout_lock_path(repo_path))",
+        ),
     ),
 )
 
@@ -3919,11 +3971,12 @@ class StaleInvocationFixture(PreGateControllerFixture):
     # Two independent inputs put it on that branch, and this fixture supplies
     # both. The runtime guard answers the status file — it is under a path that
     # is not a directory, so no runner or child is read from it. The checkout
-    # is the other, and the seals do not cover it: `status_snapshot` also reads
-    # `.git/drain_prs.lock`, and a live holder there alone classifies the state
-    # `external`, and that branch sends the stop to `os.kill`. Here that file
-    # holds nothing, because no drainer runs; the group below named for a
-    # relocated drainer is where one does.
+    # is the other, and the seals do not cover it: `status_snapshot` also asks
+    # whether `.git/drain_prs.lock` is held, classifies the state `external`
+    # when it is, and sends the stop to `os.kill`. Here nothing holds it and
+    # the file does not exist, because no drainer runs; the group below named
+    # for a relocated drainer is where one does, holding the lock for as long
+    # as it lives.
     REPORTING = frozenset({"run", "stop"})
 
     def refusal(self, writer):
@@ -5818,9 +5871,10 @@ class TakeoverScopeTests(TakeoverFixture):
         # are refusals, so a run that treated every recorded repository as
         # affected would refuse an ordinary install whenever any other
         # repository's drainer happened to be running.
-        (self.gadgets / ".git" / "drain_prs.lock").write_text(
-            str(os.getpid()), encoding="utf-8"
+        self.run_lock_path(self.gadgets).write_bytes(
+            drain_prs_service.encode_lock_holder(os.getpid())
         )
+        self.hold_checkout_lock(self.gadgets)
         result = self.take_over()
         self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
 
@@ -5840,9 +5894,10 @@ class TakeoverScopeTests(TakeoverFixture):
         self.assertEqual(result["rewritten"], [str(self.job.definition_path)])
 
     def test_the_stale_repositorys_own_live_drainer_still_refuses(self):
-        (self.widgets / ".git" / "drain_prs.lock").write_text(
-            str(os.getpid()), encoding="utf-8"
+        self.run_lock_path(self.widgets).write_bytes(
+            drain_prs_service.encode_lock_holder(os.getpid())
         )
+        self.hold_checkout_lock(self.widgets)
         before = self.host_state()
         with self.assertRaises(install_drainer.InstallError) as raised:
             self.take_over()

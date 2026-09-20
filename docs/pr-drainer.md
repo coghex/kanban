@@ -1274,6 +1274,17 @@ installation.
   polling service or a single-PR run. This lock is per *checkout*, and remains
   a secondary guard: two clones of one repository are excluded from running
   concurrently by their shared canonical identity, which the lock cannot see.
+  Both files stay where they are after a run exits — queued and concurrent
+  users need the lock object to be stable — so the PID written in them is the
+  last run's until the next one overwrites it, which a run does once it holds
+  both locks. What says a drainer is running now is the lock actually being
+  held; the PID is only which process to name once it is. Nothing here reads a
+  PID out of an unheld lock and calls it a drainer, because on a machine that
+  has since reused that number it would be naming somebody else's process. In
+  the moment between a run taking the lock and overwriting the document that
+  is still what happens — the lock is held, and the PID in it is the previous
+  run's — so the guarantee is about a drainer that has finished, not about one
+  that is a few microseconds into starting.
 
 A Linux host that installed the drainer before these paths took each platform's
 own convention has its installation at the `~/Library` spellings. The next
@@ -1426,6 +1437,25 @@ bound to the old one. It cannot read it: a drainer records its PID in a form
 that command does not understand, so it sees no drainer and says "already
 stopped" instead. Nothing about this depends on the old command behaving
 differently, which is the point — it cannot be changed.
+
+A current command looks at that same file differently, and it is worth knowing
+why if you ever read one by hand. The PID in it is not a claim that a drainer
+is running; the lock file is kept after a run finishes, so what you are reading
+may be last week's drainer. A current command asks whether the lock is held
+right now, and only then reads the PID to say who holds it. Earlier versions
+called any live process with a matching number an external drainer — and
+process IDs get reused, so on a machine that had been up a while that could be
+your own shell: reported as a drainer, refusing to start the real one, and
+lined up to be sent an interrupt by the next `stop`. That is fixed for a
+drainer that has finished, which is every case you are likely to meet it in,
+and for one that starts while the command is looking — the PID is read after
+the lock has been found held, not before, so a drainer that takes the lock and
+writes its PID mid-check is reported as itself. It is not fixed for the instant
+in which one is starting and has taken the lock without having written its PID
+yet: there the lock is held and the file still says the run before, so the old
+answer comes back for as long as that takes. Nothing a reader does can close
+that one, because until the new drainer writes its PID there is nothing on disk
+that names it.
 
 The run your service manager starts is the other. It catches its own refusal
 and answers with an exit code: a current controller answers a failing one —

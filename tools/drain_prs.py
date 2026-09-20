@@ -5345,25 +5345,18 @@ def lock_owner_path_for(root: Path) -> Path:
 
 
 def lock_file_is_held(root: Path) -> bool:
-    """Whether some process holds the lock file, probed without writing.
+    """Whether some process holds this checkout's lock file, probed without
+    writing.
 
-    Taking a lock we immediately drop leaves nothing behind, and an absent or
-    unreadable file cannot be held by anyone.
+    The probe itself is `drain_prs_service.lock_file_is_held`, for the reason
+    `encode_lock_holder` and `decode_lock_holder` are also read out of that
+    module rather than restated here: this module imports the controller, so
+    one spelling of the question can live in only one of them, and a second
+    implementation is how the drainer and the controller would come to
+    disagree about who owns a checkout. This is the checkout-shaped name for
+    it, resolving the path the same `lock_path_for` a real run locks does.
     """
-    try:
-        fd = os.open(lock_path_for(root), os.O_RDONLY)
-    except OSError:
-        return False
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    except OSError:
-        return False
-    finally:
-        # Closing releases whatever this probe just took.
-        os.close(fd)
-    return False
+    return drain_prs_service.lock_file_is_held(lock_path_for(root))
 
 
 def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> str:
@@ -5384,6 +5377,27 @@ def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> s
     drain_prs_service.lock_pid() and
     install_drainer.repository_drainer_running() both decode; the mode lives
     in a sidecar, trusted only when it names that same live PID.
+
+    That published PID is detail and never the ownership test. The lock file
+    outlives the run that wrote it, so a PID read out of it names a live
+    process whenever the run has exited and the operating system has reused
+    the number (#694). This function reaches it only after
+    lock_file_is_held() has established that somebody holds the lock, and the
+    two readers named above ask those same two questions in that same order:
+    drain_prs_service.external_drainer_pid(), which is what
+    status_snapshot() classifies `external` from, and
+    install_drainer.repository_drainer_running() before refusing an install or
+    a relocation. Sampling the PID before the probe instead would report the
+    run before, since a run can take the lock and publish between the two
+    reads.
+
+    Holding the lock is not the same as having published under it, which is
+    why this function has a "still starting up" answer at all. In the window
+    between _acquire() winning the lock file and _publish_lock_owner()
+    overwriting the document, what is in the document is the *previous* run's
+    PID: this function names it, and the sidecar check below is the only thing
+    that keeps it from being dressed up as a mode and a pull request. That
+    window is recorded in full on drain_prs_service.lock_file_is_held().
     """
     # `self_holds_lock_file` says this process already holds the lock file and
     # lost the directory, so the holder it is describing is by definition one
@@ -5451,6 +5465,23 @@ def _publish_lock_owner(
     # checkout as running no drainer rather than as running one it may signal.
     # drain_prs_service.lock_pid() and
     # install_drainer.repository_drainer_running() both decode it.
+    #
+    # It is written into the lock file rather than beside it because the lock
+    # is what publishing it is scoped by: the PID is only ever meaningful for
+    # as long as this process holds the lock it is written under. Nothing
+    # removes it on the way out -- the file has to stay stable for queued and
+    # concurrent users, so RunLock.close() releases by closing descriptors and
+    # leaves the bytes -- which is why every current reader asks
+    # drain_prs_service.lock_file_is_held() first and treats a PID from an
+    # unheld file as metadata about a finished run (#694).
+    #
+    # This call is also what bounds that rule, because until it runs the
+    # document still holds the previous run's PID while this run holds the
+    # lock. Clearing the file at acquisition instead would close that window,
+    # and is deliberately not done here: the truncate is the winner's, and
+    # _acquire() opens without O_TRUNC precisely so a contender that loses
+    # cannot erase the PID of the holder it is about to report. What the
+    # window leaves open is recorded on lock_file_is_held().
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, drain_prs_service.encode_lock_holder(os.getpid()))

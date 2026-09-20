@@ -1261,7 +1261,12 @@ reimplement the removal, and `--check` remains read-only.
   versions wrote; and a run lock held on `.git/drain_prs.lock` — which holds
   the holder's PID as the JSON document `drain_prs_service.encode_lock_holder`
   writes, decoded by `drain_prs_service.decode_lock_holder`, the one function
-  every reader of that file goes through — and then on the `.git` directory,
+  every reader of that file goes through, and which says who last held the lock
+  rather than that it is held, since the file is never removed and ownership is
+  settled by `drain_prs_service.lock_file_is_held`, the one probe that answers
+  whether the lock is held at this instant; the document is overwritten once
+  both locks are won, so between those two points the lock is held and the
+  document still names the run before — and then on the `.git` directory,
   beside a `.git/drain_prs.lock.owner.json` sidecar recording whether that PID
   is the polling service or a single-PR run. That document is the shape it is
   on purpose: a controller predating #367 parses this file with a bare `int()`
@@ -3379,8 +3384,24 @@ brand's asset speaking a tool its declaration does not carry.
   requiring a filesystem object to change what a read does. The status file is
   not the only input to that snapshot, and the other one no seal covers: it
   also reads the checkout's own `.git/drain_prs.lock`, which a relocation
-  neither moves nor closes, and a live holder there alone classifies the state
-  `external`. That branch signals the PID it names with `os.kill` and asks the
+  neither moves nor closes, and a drainer currently holding that lock
+  classifies the state
+  `external`. Holding it is what reaches that branch, not the PID its document
+  names: the file is persistent, so that PID outlives the run that wrote it and
+  names a live process again once the operating system reuses the number, and
+  the document is therefore read only to name a holder the lock has already
+  established, and read after it rather than sampled before, since a run can
+  take the lock and publish between two reads
+  (#694; `drain_prs_service.external_drainer_pid` is where that order lives).
+  That covers every state a completed run leaves and any acquisition that
+  completes mid-snapshot; it does
+  not cover the interval between a run taking the lock file and publishing its
+  PID, where the lock is held and the document still names the run before, so a
+  reused PID is reported and signalled there still — bounded and recorded on
+  `drain_prs_service.lock_file_is_held` rather than closed, since no reading
+  order reaches it and closing it
+  means clearing the document at acquisition, which the acquisition order
+  deliberately does not. That branch signals the PID it names with `os.kill` and asks the
   service manager for nothing, so no allowlist over what the manager was asked
   could observe it, and a relocation's refusal to run while a drainer is live
   says nothing about the drainer started from that checkout afterwards. What
