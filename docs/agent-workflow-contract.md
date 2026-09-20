@@ -2390,7 +2390,8 @@ A registration refusal stops that run before any claim.
   the smoke-test procedure, and the observed timings on both installed runtimes.
 - **Mandatory/optional:** optional. The only caller is `project-review`'s PR
   mode, which is a user-invoked action; its explicit-only direct-commit mode
-  registers nothing. A session that never registers an attempt pays a short hook
+  takes no claim, so it registers nothing and resolves this adapter nowhere
+  (issue #686). A session that never registers an attempt pays a short hook
   process on each tool event and writes nothing.
 
 ### 2.14 Serial project review (`$auto-project-review` / `/auto-project-review`)
@@ -2961,13 +2962,17 @@ declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
 script that way is a consumer and appears in the row, `$project-review`
-included — and that one lookup locates the `scripts` **directory** its three
+included — and that one lookup locates the `scripts` **directory** its two
 vendored modules share, never one of the modules. Each mode then resolves the
 modules it calls from that directory and checks only those: the ledger helper
-and the session liveness adapter for PR mode, the sweep cursor for the
-explicit-only direct mode. A lookup that went through one module would make
-every mode of that skill depend on that module being installed, including the
-mode that never calls it (issue #684). So is each copy of the project-review liveness adapter
+and the session liveness adapter for PR mode, the ledger helper alone for the
+explicit-only direct mode, which takes no claim and so needs no adapter. A
+lookup that went through one module would make every mode of that skill depend
+on that module being installed, including the mode that never calls it (issue
+#684). Issue #686 retired the third module, the #548 sweep cursor: direct-commit
+progress is the ledger's `direct` key, and
+`docs/project_review_boundaries.md` survives only as an input the ledger
+module's own parsers read. So is each copy of the project-review liveness adapter
 (§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
 refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
 It is `external`/`mandatory: no` for that
@@ -3025,7 +3030,7 @@ install location — the shared review coordinator for `$pr-review`,
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
 `$note-problem`, the project-review ledger module for `$project-review` — with
-its sibling sweep cursor and session liveness adapter — and the census
+its sibling session liveness adapter — and the census
 program for `$janitor` (issue #575) — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
@@ -3036,10 +3041,9 @@ coordinator directly at `${CLAUDE_PLUGIN_ROOT}/scripts/review_pr.py`,
 workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py`, `/project-review`
-its bundled ledger, session liveness adapter and sweep cursor at
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py`,
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py` and
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_cursor.py`, and `/janitor` its
+its bundled ledger and session liveness adapter at
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py` and
+`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py`, and `/janitor` its
 bundled census at `${CLAUDE_PLUGIN_ROOT}/scripts/census.py`, without a
 filesystem search. That plugin bundles its own copy of each, so it never depends on the
 Codex plugin being installed, and it declares no `personal-path` row of its
@@ -3093,10 +3097,11 @@ otherwise — the next one in the ordinary case, and not in every case. It is
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
 `dirname-cli` is that helper's alone as well. #684 gave it a second consumer and
 then took it back: the Codex `project-review` skill now locates the directory
-its three modules share directly, rather than taking the directory of one of
-them, because a lookup routed through one module made every mode of that
-workflow depend on that module being installed — including the mode that never
-calls it. Neither `project-review` asset derives a path that way now, and
+its modules share directly — the ledger helper and the session liveness
+adapter, since #686 retired the sweep cursor — rather than taking the directory
+of one of them, because a lookup routed through one module made every mode of
+that workflow depend on that module being installed — including the mode that
+never calls it. Neither `project-review` asset derives a path that way now, and
 neither derives a *removal* target from another path at all: each scratch
 directory cleanup removes is held in a variable of its own, because the parent
 of a variable an early exit never set is the working directory.

@@ -23,15 +23,19 @@ left to review.
   vendored commands. This one never mutates a tracker, so a wrong repository
   costs no data — it costs the whole run, which is spent reviewing code the user
   did not ask about and reported as if it were theirs. The calls are pinned
-  exactly: six spellings over seven invocations, with `-R "$REPO"` on the five
-  pull-request and issue reads and `$REPO`'s own owner and name on the inventory
-  query. (`gh pr view` is the one taken twice: once for the reviewed pull
-  request and once to verify a pull request claimed to have fixed an earlier
-  finding.) The resolution that fills `$REPO` reads the remote with `git` and
-  `sed`, so an initial `gh repo view` — a GitHub call made before the identity
-  every other call depends on exists — is refused by name.
+  exactly: eight spellings over nine invocations. Seven carry `-R "$REPO"` —
+  the pull-request and issue reads — and two are `gh api` calls with no `-R`
+  to carry, which name the same identity another way: the merged-pull-request
+  inventory splits `$REPO` into the owner and name its GraphQL variables take,
+  and direct mode's commit-to-pull-request association puts it in the REST
+  path. Each is read for the identity it actually names rather than exempted.
+  (`gh pr view` is the one taken twice: once for the reviewed pull request and
+  once to verify a pull request claimed to have fixed an earlier finding.) The
+  resolution that fills `$REPO` reads the remote with `git` and `sed`, so an
+  initial `gh repo view` — a GitHub call made before the identity every other
+  call depends on exists — is refused by name.
 * **The four Codex-only capabilities reach both brands.** Requirement 4: direct
-  commit mode with its cursor rules, the report-filename rules, and the
+  commit mode with its frontier rules, the report-filename rules, and the
   `Captured note` / `Verification` / `Evidence` / `Handoff context` capture
   shape existed in one copy only, and each is downstream of writing a report
   rather than an issue body. They are pinned per brand, because a capability
@@ -58,15 +62,17 @@ rebuild could have gone wrong silently:
   the second. So the repetition instructions are pinned as an **absence** over
   the whole rendered body, and the explicit-only rule is pinned as prose beside
   it.
-* **The cursor survives, in one section only.** Direct-commit mode keeps
-  `project_review_cursor.py` unchanged until LEDGER-8 retires it (D-19 as
-  amended), so "the asset names the cursor" cannot distinguish the rebuilt
-  document from the one it replaced. What distinguishes them is *where*: every
-  cursor invocation and every cursor rule now lives below the direct-mode
-  heading, and PR mode names the cursor nowhere. The section split is therefore
-  the unit of assertion, and `test_pr_mode_names_no_cursor_invocation` is the
-  negative control that keeps the ledger pins from passing vacuously on a
-  document that still ran its PR sweep off the cursor.
+* **Direct mode is one section, and it is the ledger's too.** Issue #686
+  retired the sweep cursor and moved direct-commit progress onto the ledger's
+  `direct` key, so both modes now call one module and "the asset names the
+  ledger" cannot distinguish them. What distinguishes them is *which
+  subcommands, and where*: every `direct-select`, `direct-record` and
+  positioning rule lives below the direct-mode heading, and PR mode's
+  `claim`/`allocate-report`/`record` live above it and nowhere else. The
+  section split is therefore the unit of assertion, and
+  `test_pr_mode_names_no_direct_invocation` is the negative control that keeps
+  the direct pins from passing vacuously on a document whose PR sweep had
+  drifted into them.
 * **Every exit cleans up, and a failed cleanup is not a clean one.** D-13's
   cleanup runs on a completed record, a refusal, a failed fetch, a takeover and
   a cancellation alike, and reports the path it retained rather than claiming
@@ -84,17 +90,21 @@ the fixed-later and already-tracked one-liner handling, and the clean-review
 rule that writes no report but still records its attempt are vendored as they
 read today, so each is pinned rather than merely rendered.
 
-`project_review_cursor.py` still ships in both bundles and still owns the state
-document and reconciliation for direct mode. The `Cursor*` cases below exercise
-that module as real state transitions — clean and finding-bearing batches
-preserve coverage without moving the boundary, explicit exclusions persist,
-legacy prose boundaries migrate without losing exceptional reviewed PRs, and
-direct mode retains its moving older-history frontier. Each transition carries
-a negative control that varies the relevant coverage or boundary field, so the
-assertions prove which part of the state actually governs selection. Its PR-mode
-half is now exercised here alone — the workflow no longer calls it — and it is
-kept because `project_review_ledger.py migrate` reads exactly those recorded PR
-endpoints when it imports a consumer's legacy coverage.
+The sweep cursor module ships in neither bundle since issue #686. Its
+direct-mode state transitions moved to `tools/test_project_review_ledger.py`,
+where they run against `project_review_ledger.py`'s own `direct-select` and
+`direct-record` over temporary repositories with real first-parent history; its
+PR-mode half was already superseded by the ledger in issue #684, and the
+document it wrote survives as an input two readers still parse.
+
+Requirement 7 asks that no asset, test or manifest name it, and this module
+keeps that by never spelling it -- including in the assertions that it is
+gone. Those are exact sets instead: `BUNDLED_MODULE_NAMES` is what each
+bundle's project-review scripts directory holds and what the assets resolve,
+asserted as equality rather than as the absence of one retired name. That is
+the stronger claim of the two -- it fails for a module that came back, and for
+any other module that appeared beside it -- and it needs no retired literal to
+make it.
 
 `LedgerEndToEndTests` is the arc's end-to-end proof (issue #684, requirement
 11). It drives the shipped ledger and liveness modules through the invocation
@@ -154,12 +164,13 @@ RENDERED_ASSETS = (CLAUDE_ASSET, CODEX_ASSET)
 
 BUNDLE_ROOTS = ("claude-plugin", "codex-plugin")
 
-# The three modules that ship beside the command, vendored the way the
-# trusted-comment helper is: a copy in each bundle held byte-identical, and no
-# tracked original under tools/ because nothing in this repository invokes
-# them. The workflow runs in whatever repository it was pointed at, which
-# tracks no copy of anything, so a helper has to travel with the command that
-# calls it.
+# The two modules that ship beside the command since issue #686 retired the
+# sweep cursor -- the ledger helper and the session liveness adapter --
+# vendored the way the trusted-comment helper is: a copy in each bundle held
+# byte-identical, and no tracked original under tools/ because nothing in this
+# repository invokes them. The workflow runs in whatever repository it was
+# pointed at, which tracks no copy of anything, so a helper has to travel with
+# the command that calls it.
 BUNDLED_HELPERS = {
     "ledger": {
         "claude": "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
@@ -175,20 +186,11 @@ BUNDLED_HELPERS = {
             "project_review_liveness.py"
         ),
     },
-    "cursor": {
-        "claude": "claude-plugin/plugins/kanban/scripts/project_review_cursor.py",
-        "codex": (
-            "codex-plugin/plugins/kanban/skills/project-review/scripts/"
-            "project_review_cursor.py"
-        ),
-    },
 }
 
-CLAUDE_CURSOR_HELPER = BUNDLED_HELPERS["cursor"]["claude"]
-CODEX_CURSOR_HELPER = BUNDLED_HELPERS["cursor"]["codex"]
-CURSOR_HELPERS = BUNDLED_HELPERS["cursor"]
+CLAUDE_LEDGER_HELPER = BUNDLED_HELPERS["ledger"]["claude"]
 
-# How each brand's rendered asset locates the directory the three share.
+# How each brand's rendered asset locates the directory the two share.
 # Neither spelling is a path into the reviewed repository -- the helpers ship
 # with the bundle -- and neither goes through one of the modules: which of them
 # an invocation needs is the mode's answer, so a locator naming one would make
@@ -211,8 +213,10 @@ HELPER_LOCATOR_GUARDS = {
 
 # And the resolution below it, one fence per mode and neither brand's own:
 # only the directory above differs per brand. Round 8's blocker -- a single
-# fence resolving and checking all three left direct mode dependent on the
-# ledger module and the adapter, and PR mode on the cursor.
+# fence resolving and checking every module left each mode dependent on one it
+# never calls. Since issue #686 both modes call the ledger; direct mode takes
+# no claim, so it still must not require the liveness adapter, and that is the
+# whole of what separates the two fences now.
 MODE_HELPERS = {
     "pr": (
         'LEDGER="$SCRIPTS/project_review_ledger.py"',
@@ -220,22 +224,38 @@ MODE_HELPERS = {
         '[ -f "$LEDGER" ] && [ -f "$LIVENESS" ]',
     ),
     "direct": (
-        'CURSOR="$SCRIPTS/project_review_cursor.py"',
-        '[ -f "$CURSOR" ]',
+        'LEDGER="$SCRIPTS/project_review_ledger.py"',
+        '[ -f "$LEDGER" ]',
     ),
 }
 
 # A lookup that would resolve nothing wherever this command actually installs,
 # and -- the last two -- the mode-blind resolution round 8 refused: a locator
-# that goes looking for the ledger module, and one fence requiring all three.
+# that goes looking for the ledger module, and one fence requiring the adapter
+# for both modes.
 REFUSED_HELPER_LOOKUPS = (
     "$DOCS_WT/project_review_ledger.py",
     "$ROOT/tools/project_review_ledger.py",
-    "$DOCS_WT/project_review_cursor.py",
-    "$ROOT/tools/project_review_cursor.py",
     "scripts/project_review_ledger.py' 2>/dev/null",
-    '[ -f "$LEDGER" ] && [ -f "$LIVENESS" ] && [ -f "$CURSOR" ]',
 )
+
+# What each bundle's project-review scripts directory holds, and what the
+# rendered assets resolve out of it. An exact set on both sides: the module
+# issue #686 retired is gone because this set does not contain it, and so is
+# any other module that might appear beside these two. A list of names to
+# refuse would have to grow once per retirement and would say nothing about a
+# module nobody thought to refuse.
+BUNDLED_MODULE_NAMES = frozenset(
+    {"project_review_ledger.py", "project_review_liveness.py"}
+)
+
+# How a module's name is recognized in an asset or a directory listing.
+BUNDLED_MODULE_RE = re.compile(r"project_review_[a-z_]+\.py")
+
+# What the direct-mode fence must not require. Direct mode takes no claim and
+# starts no keeper, so a bundle whose liveness adapter is missing has to serve
+# a direct batch -- and a fence that checked for it would refuse one.
+REFUSED_DIRECT_HELPERS = ("$LIVENESS", "project_review_liveness.py")
 
 # The ledger invocations PR mode makes, in the order it makes them. `read`
 # comes first because the migration decision is taken from it; `claim` selects
@@ -308,28 +328,30 @@ REFUSED_LIVENESS_FALLBACKS = (
     "to a descriptor that closes when one tool call ends"
 )
 
-# The three invocations the direct-commit section makes, and nothing else makes
-# them. Since #684 the PR path touches the cursor nowhere.
-CURSOR_INVOCATIONS = (
-    'python3 "$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode direct',
-    '--mode direct --count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END"',
-    'python3 "$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode direct',
-    'python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"',
+# The invocations the direct-commit section makes, and nothing else makes
+# them. Both modes call one module since issue #686, so what separates them is
+# the subcommand: these two exist nowhere above the direct heading.
+DIRECT_INVOCATIONS = (
+    'python3 "$LEDGER" direct-select --root "$DOCS_WT" --repo "$REPO"',
+    '--count "${COUNT:-12}" --start "$RANGE_START" --end "$RANGE_END" --entry "$ENTRY"',
+    'python3 "$LEDGER" direct-record --root "$DOCS_WT" --repo "$REPO"',
+    '--reviewed "$REVIEWED" --exclude "$EXCLUDED" --report "$REPORT"',
 )
 
-# The PR-mode cursor invocations the rebuild removed. Pinned by name, because
-# an asset that kept one of them would be running its PR sweep off the cursor
-# while every ledger assertion above still passed.
-REFUSED_PR_CURSOR_INVOCATIONS = (
-    '"$CURSOR" select --root "$DOCS_WT" --repo "$REPO" --mode pr',
-    '"$CURSOR" record --root "$DOCS_WT" --repo "$REPO" --mode pr',
-    "--mode pr",
+# PR mode's own subcommands, which the direct section must not make: a direct
+# batch that claimed a row, allocated a report name against one, or recorded an
+# attempt on one would be writing PR state for commits that have no row.
+REFUSED_DIRECT_INVOCATIONS = (
+    '"$LEDGER" claim',
+    '"$LEDGER" allocate-report',
+    '"$LEDGER" record --root',
+    '"$LEDGER" release',
 )
 
 # The direct-mode walk, which is the whole first-parent history rather than a
 # slice beginning at the entry point. A sliced walk would leave the recorded
-# endpoint outside the listing the helper positions within, and the helper
-# would then refuse it as a foreign cursor on every later batch -- a fail-closed
+# frontier outside the walk the helper positions within, and the helper would
+# then refuse it as foreign progress on every later batch -- a fail-closed
 # stop, but one produced by the caller rather than by any real disagreement.
 DIRECT_WALK = 'git -C "$ROOT" log --first-parent --format=%H \\'
 REFUSED_SLICED_DIRECT_WALK = "--format=%H <entry-point>"
@@ -344,7 +366,7 @@ DIRECT_SECTION_HEADING = "## Direct-commit mode — explicit request only"
 # what is left is only text an agent would run.
 GH_INVOCATION_RE = re.compile(r"(?<![\w-])gh (?P<tail>[a-z][^\n`]*)")
 
-# The six GitHub reads the workflow makes, by the leading words that identify
+# The eight GitHub reads the workflow makes, by the leading words that identify
 # each, in the order the document introduces them. Every one is a read: this
 # workflow performs no tracker mutation at all, which is the whole of D-9.
 #
@@ -368,6 +390,16 @@ GITHUB_READS = (
     'pr diff -R "$REPO"',
     'issue list -R "$REPO" --state open',
     'issue list -R "$REPO" --search',
+    # Direct mode's two, and only on a repository's first batch: the oldest
+    # merged pull request's merge commit, and -- when that commit turns out
+    # not to be a merge -- which pull request each first-parent commit below
+    # it belongs to, which is what places a rebase-merged series above the
+    # entry rather than inside the batch. The second is GitHub's own record of
+    # the association rather than anything inferred from the commit, so it
+    # survives the rebase that rewrote the commit's SHA. Neither selects,
+    # claims, or records anything.
+    'pr view "$OLDEST_PR" -R "$REPO" --json mergeCommit',
+    'api "repos/$REPO/commits/$SHA/pulls"',
 )
 
 # `gh pr view` is taken twice: once for the reviewed pull request's own
@@ -427,8 +459,9 @@ INVENTORY_RULES = {
 # Requirement 1: one review per successful invocation, and the three
 # unsuccessful outcomes that complete zero and enter nothing.
 # Requirement 7 and round 7's blocker: a direct request must not travel the
-# PR-only prelude. The ledger read and the migration are what would create a
-# ledger in a repository that has never had one, just for a cursor-only batch.
+# PR-only prelude. The inventory, the registration and the claim are PR mode's
+# alone, and a direct batch that took them would start a keeper and claim a
+# row for commits that have none.
 MODE_DISPATCH = {
     "the mode is decided first": (
         "**Decide the mode here, and take only that mode's path.** PR mode is "
@@ -438,21 +471,21 @@ MODE_DISPATCH = {
         "inventory, and not the liveness registration."
     ),
     "why that is correctness": (
-        "That is a correctness rule, not tidiness. Direct mode is the "
-        "cursor's; a repository that has never had a ledger must not acquire "
-        "one by being asked for a direct batch, and a bundle whose ledger "
-        "module or liveness adapter could not be resolved must not be blocked "
-        "from a mode that needs neither."
+        "That is a correctness rule, not tidiness. Direct mode shares the "
+        "ledger document with PR mode and shares nothing else: it takes no "
+        "claim, starts no keeper, and writes no row, so a bundle whose "
+        "liveness adapter could not be resolved must not be blocked from it, "
+        "and a repository whose PR queue is exhausted must not fall into it."
     ),
     "a direct request skips every numbered step": (
         "**An explicit direct request:** resolve the scripts directory and "
-        "`$CURSOR` below — direct mode's own fence, and not PR mode's — then "
+        "`$LEDGER` below — direct mode's own fence, and not PR mode's — then "
         'the docs worktree, then go straight to "Direct-commit mode — '
         'explicit request only" and do everything there. Skip every numbered '
         "step."
     ),
     "the locator never goes through one of the modules": (
-        "**Locate the directory the three share, never one of the modules.** "
+        "**Locate the directory the two share, never one of the modules.** "
         "Which of them this invocation needs is the mode's answer, and the "
         "mode was decided above; a locator that goes looking for one "
         "particular module makes every mode depend on that module being "
@@ -467,14 +500,15 @@ MODE_DISPATCH = {
         "**An unresolvable helper stops the run here, before the first read** "
         "— and a module this mode never calls being absent is not one. That "
         "is what the two fences above are for: only one of them runs, so a "
-        "bundle missing its ledger module or its adapter refuses a review and "
-        "still serves a direct batch, and a bundle missing its cursor refuses "
-        "a direct batch and still serves a review."
+        "bundle missing its liveness adapter refuses a review and still serves "
+        "a direct batch."
     ),
     "the migration is pr mode's alone": (
         "**PR mode only.** A direct request reached the direct section above "
-        "and never arrives here; that is what keeps a cursor-only batch from "
-        "creating a ledger."
+        "and never arrives here. Direct mode reads the same ledger, and it "
+        "refuses a repository that has none rather than establishing one: a "
+        "direct batch that wrote the first ledger would resume from an empty "
+        "frontier and re-review every commit the previous record covered."
     ),
     "an empty inventory stops before registering": (
         "**A listing with no pull requests in it at all stops the run here**, "
@@ -553,8 +587,9 @@ EXPLICIT_DIRECT_MODE = {
         "it reviews one batch and stops; it never starts another."
     ),
     "the ledger does not schedule it": (
-        "It does not read or write the ledger, and the ledger does not schedule "
-        "it"
+        "The ledger does not *schedule* it: the three queues are PR-only, "
+        "direct commits never become rows, and no claim, lease or keeper is "
+        "taken for a batch here"
     ),
     "no transition back": (
         "Then stop: no next batch, and no transition back into PR mode."
@@ -984,7 +1019,7 @@ MIGRATION = {
         "however many invocations follow."
     ),
     "a fresh repository needs no stop": (
-        "A repository with neither a cursor nor a report starts from an empty "
+        "A repository with neither an old record nor a report starts from an empty "
         "ledger and has no stop and nothing to confirm: the same call "
         "establishes that empty ledger, reports `\"status\": \"migrated\"` with "
         "no rows, and the run continues."
@@ -1165,7 +1200,7 @@ RECORD_STEP = {
     ),
     "nothing else is landed": (
         "Do not stage, commit, publish, push, or land anything yourself — not "
-        "the ledger, not the report, not the cursor."
+        "the ledger and not the report."
     ),
     "a refusal leaves the claim held": (
         "A refusal here leaves the claim held and says so; report it as it came "
@@ -1197,12 +1232,63 @@ LINKED_ISSUE_READ = (
     "so this is a read of its own rather than a second look at the same text."
 )
 
+# This module's own docstring, and the words it spells its counts in. Read
+# back by `test_this_modules_own_docstring_counts_the_calls_correctly`, so a
+# count that stops describing the assets fails here rather than in a review.
+MODULE_DOCSTRING = __doc__ or ""
+
+NUMBER_WORDS = (
+    "zero", "one", "two", "three", "four", "five",
+    "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+)
+
+
+def number_word(value: int) -> str:
+    return NUMBER_WORDS[value]
+
+
 REPOSITORY_SCOPE = '-R "$REPO"'
 
-# The one call that cannot carry `-R`, and how it names the repository instead.
+# The two calls that cannot carry `-R`, and how each names the repository
+# instead. The GraphQL inventory splits `$REPO` into the owner and name its
+# query variables take; the commit-to-pull-request association is a REST path,
+# and `$REPO` is the path segment that scopes it. Both are read for the
+# identity they actually name rather than exempted: an exemption would pass a
+# call that named some other repository outright.
 GRAPHQL_REPOSITORY_SCOPE = '-F owner="${REPO%%/*}" -F name="${REPO##*/}"'
+REST_PATH_REPOSITORY_SCOPE = '"repos/$REPO/'
 
 # How `$REPO` is filled: from the remote, with no GitHub call of its own.
+# The asset's own global rule about how every `gh` call names the repository,
+# and the three mechanisms it names. Gated against the calls rather than merely
+# quoted: the rule is the reader's only statement of the invariant, and issue
+# #686 added a `gh api` form it did not mention, so a rule that lists fewer
+# mechanisms than the assets use is a rule the next call can quietly fall
+# outside of.
+REPOSITORY_SCOPE_RULE = (
+    "Every `gh` call below names that one identity, in one of three ways: "
+    '`-R "$REPO"` on each of the pull-request and issue reads, `$REPO`\'s own '
+    "owner and name as the query variables of the merged-pull-request "
+    "inventory, and `$REPO` as a path segment of the commit-to-pull-request "
+    "association direct mode\'s first batch takes."
+)
+
+# Each mechanism, and how a call that uses it is recognized. Every actual call
+# matches exactly one, and every one of the three is used by at least one call
+# -- so the rule cannot name a mechanism nothing uses, and no call can use a
+# mechanism the rule does not name.
+SCOPE_MECHANISMS = {
+    "-R flag": lambda tail: REPOSITORY_SCOPE in tail,
+    "graphql variables": lambda tail: (
+        tail.startswith("api graphql") and GRAPHQL_REPOSITORY_SCOPE in tail
+    ),
+    "rest path": lambda tail: (
+        tail.startswith("api ")
+        and not tail.startswith("api graphql")
+        and REST_PATH_REPOSITORY_SCOPE in tail
+    ),
+}
+
 REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
 
 # `$REPO` names the tracker; `$ROOT` names the checkout. Most of this workflow
@@ -1309,9 +1395,9 @@ FORBIDDEN_SPELLINGS = ("gh issue create", "issue-origin")
 # document contradicts the one checkpoint `record` makes.
 FORBIDDEN_VCS_WRITE_RE = re.compile(r"git (commit|push)")
 
-# Requirement 4, capability 1: direct-commit mode and its cursor rules, which
-# existed only in the Codex copy, and which #684 confined to the direct
-# section.
+# Requirement 4, capability 1: direct-commit mode and its frontier rules,
+# which existed only in the Codex copy, which #684 confined to the direct
+# section, and which #686 moved onto the ledger.
 DIRECT_MODE = {
     "twelve-unit default": "Default to 12 review units.",
     "a merge is not implied": (
@@ -1320,30 +1406,168 @@ DIRECT_MODE = {
     "a commit may be abbreviated": (
         "A commit may be named at any length `git` itself accepts — four "
         "characters up, the seven a direct-mode report filename carries "
-        "included. `select` and `record` resolve an abbreviated SHA against "
-        "the walk, and refuse a prefix that names more than one commit rather "
-        "than choosing between them, so length is never the refusal; ambiguity "
-        "is."
+        "included. `direct-select` and `direct-record` resolve an abbreviated "
+        "SHA against the walk, and refuse a prefix that names more than one "
+        "commit rather than choosing between them, so length is never the "
+        "refusal; ambiguity is."
     ),
-    "the entry point is supplied on the first direct batch": (
-        "**`$RANGE_START` carries the entry point on the first direct batch**, "
-        "and is empty for every batch after it. Set it to the first-parent "
-        "parent of the earliest pull-request-owned commit already reviewed, and "
-        "leave it empty for a repository that has never used pull requests, "
-        "which begins at HEAD."
+    "the first batch is positioned below the oldest PR's own commits": (
+        "The **first** batch a repository ever takes has no frontier, so it "
+        "has to be positioned — and the position is below the oldest merged "
+        "pull request's own commits, because those belong to PR mode and "
+        "reviewing them here would audit the same work twice under a mode that "
+        "cannot record it."
     ),
-    "an empty start is no start": (
-        "An empty `--start` is no start at all, so this one invocation covers "
-        "both — but leaving it empty on the *first* batch of a repository that "
-        "does have PR history restarts the walk at HEAD and re-reviews PR-owned "
-        "commits, because direct state is still empty at that moment and there "
-        "is no endpoint to position it."
+    "the batch says which kind it is, by being taken": (
+        "**Find out which kind of batch this is by taking it, not by "
+        "guessing.** Direct mode skipped PR mode's ledger read, so nothing so "
+        "far has said whether `direct.endpoint` already positions this "
+        "invocation — and the answer is not only what the ledger holds: a "
+        "consumer's first batch after the cutover gets its frontier from the "
+        "handoff below, inside the very call that would use it."
+    ),
+    "a positioned batch fetches nothing": (
+        "**It returned a batch.** This invocation was positioned already — by "
+        "the recorded frontier, by the handoff, or by the user's own "
+        "`--start` — and the rest of this subsection is not its business. Go "
+        "on to reviewing it. **Fetch no inventory and ask for no "
+        "association:** neither can change where this batch begins, and a "
+        "failure in either would stop a run that was never waiting on them."
+    ),
+    "the positioning refusal is the first batch saying so": (
+        "**It refused, naming `--start`, `--entry` or `--entry-none`.** That "
+        "refusal is the repository's first direct batch saying so, and it is "
+        "the only thing that says so. It wrote nothing — not the handoff "
+        "either — so the position can be derived now and the same command run "
+        "again with it."
+    ),
+    "any other refusal is not about position": (
+        "**It refused for any other reason.** That is a refusal about this "
+        "batch rather than about its position; report it and stop."
+    ),
+    "an explicit start settles the position before the inventory": (
+        "**An explicit start is a position, and it settles this subsection "
+        "before it begins.** When the user named a commit or a range, pass it "
+        "as `--start` and skip the rest of this subsection entirely: the "
+        "helper takes an explicit start over either automatic position, so "
+        "nothing below is needed and nothing below may stop the run."
+    ),
+    "a batch with a start fetches no inventory": (
+        "Do not fetch the inventory for a batch that has a start — an "
+        "inventory that could not be established is a reason to refuse a batch "
+        "that needed one to be positioned, and this batch does not."
+    ),
+    "the inventory is established without selecting or claiming": (
+        "Fetch it exactly as step 1 does — the same `gh` query, the same page "
+        "size, the same completeness rules — and read it yourself rather than "
+        "handing it to the helper: this is a positioning question, and **no "
+        "row is created, no pull request is selected, and nothing is claimed** "
+        "by answering it."
+    ),
+    "only a confirmed-empty listing permits the head of the walk": (
+        "**The listing was absent, failed, or came back incomplete:** stop and "
+        "say so. An unanswered question is not an empty repository, and "
+        "`--entry-none` over one restarts the walk at HEAD and re-reviews every "
+        "pull request's own commits as direct history. Passing neither flag is "
+        "refused by the helper for the same reason."
+    ),
+    "a merge commit owns only itself": (
+        "**Exit 0 — a merge commit.** It owns exactly itself on the "
+        "first-parent walk, whatever it merged, so `$ENTRY` is `$MERGE` and "
+        "the batch begins at its first parent."
+    ),
+    "the entry-none spelling is named exactly": (
+        "For a repository whose complete listing named no merged pull request, "
+        "replace `--entry \"$ENTRY\"` with `--entry-none` in that line; an empty "
+        "`--entry` is no entry at all, which is what every batch after the "
+        "first passes, and it is not a declaration that the repository has "
+        "none."
+    ),
+    "the oldest pull request's number is set, not assumed": (
+        "`$OLDEST_PR` is the pull request's number, read out of the listing "
+        "above and set here — once for a clear minimum, and once per tied "
+        "pull request when the minimum is shared, since each of them owes its "
+        "own entry before the oldest can be chosen between them."
+    ),
+    "a merge timestamp ties, and the tie is resolved by position": (
+        "**`mergedAt` is recorded to the second, so it ties** — two pull "
+        "requests merged inside one second share a minimum, and the rule has "
+        "to say which. Resolve every tie by position rather than by picking "
+        "one: derive the entry of each pull request tied at that minimum, by "
+        "the rules below, and pass the **oldest** of them — the one furthest "
+        "down the first-parent walk."
+    ),
+    "the oldest tied entry is the only safe one": (
+        "That is the only choice that leaves every tied pull request's own "
+        "commits above the entry; taking the newer of two tied merges leaves "
+        "the other's commits below it, where the batch audits them as direct "
+        "history."
+    ),
+    "the helper checks the half it can see": (
+        "The helper checks the half of that answer it can see for itself: a "
+        "ledger that already holds rows was built from merged pull requests, "
+        "so `--entry-none` over one is refused outright however the listing "
+        "came back."
+    ),
+    "a squash and a rebase both need the association": (
+        "**A non-zero exit — a squash or a rebase.** A squash contributes "
+        "exactly one first-parent commit however many the branch had, so "
+        "`$ENTRY` is `$MERGE`. A rebase contributes the branch's whole "
+        "series as first-parent commits, so `$MERGE` is only the newest of "
+        "them and `$ENTRY` is the oldest. Ask GitHub which pull request "
+        "each commit belongs to rather than inferring it:"
+    ),
+    "the association is asked once per commit down the chain": (
+        "**Take that call once per commit, walking the first-parent chain "
+        "downwards from `$MERGE`.** `$SHA` is the commit being asked "
+        "about, substituted literally. The run of commits the pull request "
+        "owns ends at the first one whose answer does not name "
+        "`$OLDEST_PR`, and `$ENTRY` is the last one whose answer did."
+    ),
+    "neither a count nor a subject identifies a commit": (
+        "**Ask GitHub, and never infer ownership from what a commit looks "
+        "like.** Neither a commit count nor a commit subject identifies a "
+        "commit. The count is the branch's rather than the base branch's, "
+        "so over a squash of several commits it reaches past `$MERGE` into "
+        "real direct history. Subjects are not unique, so a direct commit "
+        "that happens to share a generic subject — `Update docs`, say "
+        "— with one of the pull request's own extends the run past the "
+        "end of it."
+    ),
+    "both mistakes move the entry older than the truth": (
+        "Both mistakes move `$ENTRY` older than the truth, and every "
+        "commit they step over stops being selectable, because the "
+        "frontier only ever moves older. The association above is GitHub's "
+        "own record of which pull request put a commit on this branch, and "
+        "it survives a rebase rewriting the commit's SHA."
+    ),
+    "a gap above an entry is not an instruction": (
+        "**A gap above a first batch's entry is not an instruction to review "
+        "it.** The helper reports every uncovered commit above the resume "
+        "position, which on a first batch is everything from the head of the "
+        "walk down to `$ENTRY` — the oldest pull request's own commits, every "
+        "later pull request's, and any commit interleaved among them."
+    ),
+    "the span above an entry is announced without attributing it": (
+        "Announce the span as PR-era history rather than attributing each "
+        "commit to a pull request — the helper reports positions, not "
+        "ownership, and nothing here has asked GitHub who owns anything above "
+        "`$ENTRY`."
     ),
     "the direct walk is never sliced": (
         "**Walk the whole first-parent history, not a slice starting at the "
-        "entry point.** The recorded endpoint has to be inside the listing the "
+        "entry point.** The recorded frontier has to be inside the walk the "
         "helper positions within, and a walk that began below it would refuse "
-        "it as a cursor belonging to some other history."
+        "it as progress belonging to some other history."
+    ),
+    "the interim handoff happens once and is announced": (
+        "**The first invocation after this repository's cutover hands the old "
+        "record over, and says so.** A consumer migrated before direct mode "
+        "moved onto the ledger kept recording its direct batches against "
+        "`docs/project_review_boundaries.md` in the interim, so the helper "
+        "folds that document's reviewed commits and commit exclusions in and "
+        "keeps the older of the two frontiers, once, on the first "
+        "`direct-select` or `direct-record` it sees."
     ),
     "inventory is not review": (
         "A broad blame or survivor inventory is triage, not a reviewed "
@@ -1363,17 +1587,18 @@ DIRECT_MODE = {
     ),
     "unverifiable state stops the run": (
         "**Unverifiable state stops the run.** A recorded SHA is validated "
-        "against current first-parent ancestry, so a malformed, foreign, or "
-        "ambiguous cursor refuses before review rather than guessing."
+        "against current first-parent ancestry, so malformed, foreign, or "
+        "ambiguous direct progress refuses before review rather than guessing."
     ),
     "direct gaps are announced": (
-        "Every uncovered commit above that frontier appears in `gaps` and must "
-        "be announced; never let the direct walk silently discard it."
+        "Every uncovered commit above the resume position appears in `gaps` "
+        "and must be announced; never let the direct walk silently discard it."
     ),
-    "the cursor belongs to the reviewed repository": (
-        "`$CURSOR` owns `docs/project_review_boundaries.md`, whose `direct` "
-        "endpoint is a moving older-history frontier that advances to the "
-        "oldest commit a completed batch reviewed."
+    "the direct key belongs to the reviewed repository": (
+        "The `direct` key of `docs/project_review/ledger.md` holds a moving "
+        "older-history frontier that advances to the oldest commit a completed "
+        "batch reviewed, the commits those batches read, and the reports they "
+        "wrote."
     ),
     "both endpoints are carried": (
         "`$RANGE_START` and `$RANGE_END` carry a user-supplied range's two "
@@ -1388,35 +1613,49 @@ DIRECT_MODE = {
     "the end is a bound, not a target": (
         "`--end` is a bound rather than a target — the batch stops there "
         "whatever the count still had left, and reports `\"bounded\": true` "
-        "rather than `truncated` or `exhausted`, because it was the request "
-        "that ended and neither the page nor the history."
+        "rather than `exhausted`, because it was the request that ended and "
+        "not the history."
     ),
     "recorded last": (
-        "**Record the cursor last.** Record coverage only after every selected "
-        "unit has been reviewed and any required report has been written and "
-        "validated, so a failed report or a failed cursor write is never "
-        "reported as a completed batch"
+        "**Record last.** Record coverage only after every selected commit has "
+        "been reviewed and any required report has been written and validated, "
+        "so a failed report or a failed write is never reported as a completed "
+        "batch"
     ),
     "an empty batch records nothing": (
-        "A batch that selected nothing records nothing and is not a completed "
-        "batch: the helper refuses an empty `--reviewed` with an empty "
-        "`--exclude`."
+        "A batch that reviewed nothing and excluded nothing records nothing "
+        "and is not a completed batch: the helper refuses an empty "
+        "`--reviewed` with an empty `--exclude`, and refuses a report for it "
+        "too."
     ),
     "merged, never replaced": (
-        "`record` merges rather than replaces: an earlier exclusion survives a "
-        "later batch, and the direct endpoint only ever moves older."
+        "Recording merges rather than replaces: an earlier exclusion survives "
+        "a later batch, and the frontier only ever moves older."
     ),
     "compaction recovery reads the record": (
-        "If context was compacted, recover the cursor with "
-        '`python3 "$CURSOR" read --root "$DOCS_WT" --repo "$REPO"` rather than '
+        "If context was compacted, recover the progress with "
+        '`python3 "$LEDGER" read --root "$DOCS_WT" --repo "$REPO"` rather than '
         "from the last completed range or a report name"
     ),
-    "the direct filename is the reviewer's": (
+    "the direct filename is the helper's": (
         "A direct batch with at least one confirmed current finding writes one "
-        "report at `docs/project_review_direct_<newest7>-<oldest7>.md`, under "
-        "`$DOCS_WT/`. Its name is the reviewer's here — no helper allocates "
-        "it, because no ledger row owns this batch — and an explicit "
-        "destination from the user wins over it."
+        "report at `docs/project_review/direct_<newest7>-<oldest7>.md`, under "
+        "`$DOCS_WT/`. That name is the helper's: `direct-select` returns it as "
+        "`report`, derived from the batch's newest and oldest commit, and "
+        "refuses the batch outright when something already holds it on disk."
+    ),
+    "a name is taken by the disk or by the ledger": (
+        "`direct-record` derives it again from the commits the batch actually "
+        "reviewed, refuses a `--report` that names any other range, and refuses "
+        "one this ledger already records — so a name is taken by the document "
+        "on disk or by the ledger's own list of earlier batches, and neither is "
+        "overwritten."
+    ),
+    "the direct checkpoint is path-scoped and never pushed": (
+        "`direct-record` makes the same path-scoped checkpoint commit PR mode's "
+        "`record` makes, on the docs worktree's own branch, carrying the ledger "
+        "and this batch's report and nothing else — not an unrelated dirty "
+        "file, and not an unrelated staged one."
     ),
     "the direct report shape substitutes two things": (
         "Its shape is the one step 7 sets out with two substitutions, and "
@@ -1459,15 +1698,13 @@ DIRECT_MODE = {
     "a clean direct batch writes no report": (
         "A clean batch writes no report unless the user explicitly asks for one."
     ),
-    "direct mode publishes nothing": (
-        "Do not publish or land either unless the user separately requests it "
-        "— **direct mode writes to no branch at all**."
+    "the direct checkpoint is never pushed": (
+        "Like PR mode's, it is **never pushed**: the merge and the publication "
+        "are the user's, and this workflow writes to no remote at all."
     ),
-    "the one branch write is the pr-mode checkpoint": (
-        "The one branch write this workflow ever makes is PR mode's, and it is "
-        "the helper's: `record`'s path-scoped checkpoint commit, which touches "
-        "the ledger and the report it allocated and nothing else. Direct mode "
-        "calls `record` on the cursor module, which commits nothing."
+    "direct mode publishes nothing on its own": (
+        "Do not publish or land the checkpoint unless the user separately "
+        "requests it."
     ),
 }
 
@@ -1632,10 +1869,10 @@ def body_of(text: str) -> str:
 def sections_of(text: str):
     """`text` split into its PR half and its explicit-only direct half.
 
-    The split is the unit of assertion for issue #684's requirement 10: the
-    cursor still ships and the direct section still calls it, so "the asset
-    names the cursor" says nothing about whether the rebuild happened. Where it
-    names it does.
+    The split is the unit of assertion for issue #684's requirement 10, and
+    issue #686 is why it still is: both modes call one module now, so "the
+    asset names the ledger" says nothing about whether either rebuild
+    happened. Which subcommands it names, and where, does.
     """
     body = body_of(text)
     index = body.index(DIRECT_SECTION_HEADING)
@@ -1705,8 +1942,8 @@ class RenderedAssetTests(unittest.TestCase):
     def test_no_bundle_ships_an_auxiliary_reference_directory(self):
         # Requirement 5 and design D-10: the boundary rule ships as prose, and
         # the file it describes does not ship at all — it is one consuming
-        # repository's cursor, and bundling it would put that state in every
-        # install. The renderer emits one file per brand and nothing else, so
+        # repository's own review record, and bundling it would put that state
+        # in every install. The renderer emits one file per brand and nothing else, so
         # this holds by construction; it is asserted because the construction
         # is what a later slice might be tempted to extend.
         for root in BUNDLE_ROOTS:
@@ -1729,11 +1966,12 @@ class RepositoryScopeTests(unittest.TestCase):
                 self.assertNotIn("repo view", "".join(calls))
 
     def test_every_github_call_names_the_resolved_repository(self):
-        # Five of the six carry `-R "$REPO"`. The sixth is the GraphQL
-        # inventory, which has no `-R` to carry: it names the same identity by
-        # splitting `$REPO` into the owner and name its query variables take,
-        # and is read that way rather than exempted -- an exemption would also
-        # pass for a query that named some other repository outright.
+        # Every `gh pr`/`gh issue` call carries `-R "$REPO"`. The two `gh api`
+        # calls have no `-R` to carry and name the same identity another way:
+        # the GraphQL inventory splits `$REPO` into its query variables, and
+        # the commit-to-pull-request association puts it in the REST path. Each
+        # is read for the identity it names rather than exempted, because an
+        # exemption would also pass a call that named some other repository.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             for match in GH_INVOCATION_RE.finditer(content):
@@ -1741,8 +1979,66 @@ class RepositoryScopeTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, call=call):
                     if call.startswith("gh api graphql"):
                         self.assertIn(GRAPHQL_REPOSITORY_SCOPE, call)
+                    elif call.startswith("gh api "):
+                        self.assertIn(REST_PATH_REPOSITORY_SCOPE, call)
                     else:
                         self.assertIn(REPOSITORY_SCOPE, match.group("tail"))
+
+    def test_this_modules_own_docstring_counts_the_calls_correctly(self):
+        # The prose-audit gate, turned into one. This module's docstring
+        # states the GitHub surface as three numbers, and three review rounds
+        # of issue #686 were spent on counts that had stopped describing the
+        # list beside them. A number nothing checks is a number that drifts,
+        # so each is read back out of the assets it describes.
+        spellings = len(GITHUB_READS)
+        invocations = DECLARED_GITHUB_CALL_COUNT
+        for relative_path in RENDERED_ASSETS:
+            calls = GH_INVOCATION_RE.findall(read(relative_path))
+            scoped = sum(1 for tail in calls if REPOSITORY_SCOPE in tail)
+            api = sum(1 for tail in calls if tail.startswith("api "))
+            with self.subTest(asset=relative_path):
+                self.assertEqual(len(calls), invocations)
+                self.assertEqual(scoped + api, invocations)
+                self.assertIn(
+                    f"{number_word(spellings)} spellings over "
+                    f"{number_word(invocations)} invocations",
+                    MODULE_DOCSTRING,
+                )
+                self.assertIn(
+                    f"{number_word(scoped).capitalize()} carry "
+                    f"`{REPOSITORY_SCOPE}`",
+                    MODULE_DOCSTRING,
+                )
+                self.assertIn(
+                    f"and {number_word(api)} are `gh api` calls",
+                    MODULE_DOCSTRING,
+                )
+
+    def test_the_scope_rule_names_every_mechanism_the_calls_use(self):
+        # The asset's global rule, gated against the calls it governs. Issue
+        # #686 added a `gh api` scoping the rule did not mention, and a rule
+        # that lists fewer mechanisms than the assets use is one the next call
+        # can quietly fall outside of. Both directions are asserted: every
+        # call matches exactly one named mechanism, and every named mechanism
+        # is used -- so the rule cannot grow a mechanism nothing uses either.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(flat(REPOSITORY_SCOPE_RULE), flat(content))
+            used = {name: 0 for name in SCOPE_MECHANISMS}
+            for match in GH_INVOCATION_RE.finditer(content):
+                tail = match.group("tail")
+                matched = [
+                    name
+                    for name, recognizes in SCOPE_MECHANISMS.items()
+                    if recognizes(tail)
+                ]
+                with self.subTest(asset=relative_path, call=match.group(0)):
+                    self.assertEqual(len(matched), 1, matched)
+                used[matched[0]] += 1
+            for name, count in used.items():
+                with self.subTest(asset=relative_path, mechanism=name):
+                    self.assertGreater(count, 0, used)
 
     def test_each_declared_read_is_present_and_scoped(self):
         for relative_path in RENDERED_ASSETS:
@@ -1872,9 +2168,9 @@ class ReportOnlyTests(unittest.TestCase):
 
     def test_neither_rendering_carries_a_commit_or_push_instruction(self):
         # Issue #684's acceptance, asserted rather than left to the grep: the
-        # ledger helper's `record` makes the one checkpoint, and an asset
-        # carrying any other committing or pushing text reads as permission to
-        # land the report or the cursor by hand.
+        # ledger helper's `record` and `direct-record` make the only
+        # checkpoints, and an asset carrying any other committing or pushing
+        # text reads as permission to land a report or the ledger by hand.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):
@@ -1909,27 +2205,29 @@ class LedgerWorkflowTests(unittest.TestCase):
     def test_each_mode_resolves_and_checks_only_the_modules_it_calls(self):
         # Round 8's blocker, as a pin: the locator above finds the directory,
         # and each mode's own fence names its own modules. A fence naming a
-        # module the other mode owns is what made a missing ledger module
-        # refuse a cursor-only batch.
+        # module the other mode never calls is what made a missing adapter
+        # refuse a direct batch. Both fences bind `$LEDGER` since issue #686,
+        # so the adapter is the whole of what separates them -- and there must
+        # be exactly one fence of each shape, or this is choosing between two
+        # and saying nothing about either.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
             with self.subTest(asset=relative_path):
                 for mode, lines in MODE_HELPERS.items():
                     for line in lines:
                         self.assertIn(line, content, mode)
-                pr_fence = next(
+                binding = [
                     fence
                     for fence in asset_fences(relative_path)
                     if 'LEDGER="$SCRIPTS' in fence
-                )
-                direct_fence = next(
-                    fence
-                    for fence in asset_fences(relative_path)
-                    if 'CURSOR="$SCRIPTS' in fence
-                )
-                self.assertNotIn("CURSOR", pr_fence)
-                self.assertNotIn("LEDGER", direct_fence)
-                self.assertNotIn("LIVENESS", direct_fence)
+                ]
+                pr_fences = [fence for fence in binding if 'LIVENESS="$SCRIPTS' in fence]
+                direct_fences = [
+                    fence for fence in binding if 'LIVENESS="$SCRIPTS' not in fence
+                ]
+                self.assertEqual(len(pr_fences), 1, binding)
+                self.assertEqual(len(direct_fences), 1, binding)
+                self.assertNotIn("LIVENESS", direct_fences[0])
 
     def test_an_unresolvable_helper_stops_before_the_first_read(self):
         phrase = (
@@ -2056,7 +2354,11 @@ class LedgerWorkflowTests(unittest.TestCase):
         # because both reads are the same command and a substring check cannot
         # tell them apart.
         for relative_path in RENDERED_ASSETS:
-            content = read(relative_path)
+            # PR mode's half of the document only: direct mode names the same
+            # `read` once more, as its own compaction-recovery instruction,
+            # and counting that one here would make the ordering below depend
+            # on a section neither read is in.
+            content, _ = sections_of(read(relative_path))
             reads = [
                 match.start()
                 for match in re.finditer(re.escape(LEDGER_INVOCATIONS[0]), content)
@@ -2181,7 +2483,7 @@ class LedgerWorkflowTests(unittest.TestCase):
 
 
 class DirectModeTests(unittest.TestCase):
-    """Requirement 7: the cursor survives, explicit-only, in one section."""
+    """Requirement 7 (#684) and requirement 6 (#686): one explicit-only section."""
 
     def test_the_direct_section_is_explicit_only(self):
         for relative_path in RENDERED_ASSETS:
@@ -2191,29 +2493,55 @@ class DirectModeTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, rule=name):
                     self.assertIn(flat(phrase), flattened)
 
-    def test_every_cursor_invocation_lives_in_the_direct_section(self):
+    def test_every_direct_invocation_lives_in_the_direct_section(self):
         for relative_path in RENDERED_ASSETS:
             pr_mode, direct = sections_of(read(relative_path))
-            for invocation in CURSOR_INVOCATIONS:
+            for invocation in DIRECT_INVOCATIONS:
                 with self.subTest(asset=relative_path, invocation=invocation):
                     self.assertIn(invocation, direct)
                     self.assertNotIn(invocation, pr_mode)
 
-    def test_pr_mode_names_no_cursor_invocation(self):
-        # The negative control for every ledger pin above. The cursor still
-        # ships and the direct section still calls it, so a document that had
-        # gained the ledger steps while keeping its cursor-driven PR sweep
-        # would pass all of them. It cannot pass this one: `$CURSOR` appears in
-        # PR mode only where the three helpers are resolved together, and the
-        # PR-mode subcommands are gone by name.
+    def test_pr_mode_names_no_direct_invocation(self):
+        # The negative control for every direct pin above. Both modes now call
+        # `$LEDGER`, so a document whose PR sweep had drifted into
+        # `direct-select` would still name the ledger everywhere the pins look.
+        # It cannot pass this one: the two direct subcommands appear below the
+        # heading and nowhere above it, which the test above asserts, and PR
+        # mode's own four appear above it and nowhere below.
         for relative_path in RENDERED_ASSETS:
-            pr_mode, _ = sections_of(read(relative_path))
-            content = read(relative_path)
-            with self.subTest(asset=relative_path):
-                self.assertNotIn('python3 "$CURSOR"', pr_mode)
-            for spelling in REFUSED_PR_CURSOR_INVOCATIONS:
+            pr_mode, direct = sections_of(read(relative_path))
+            for spelling in REFUSED_DIRECT_INVOCATIONS:
                 with self.subTest(asset=relative_path, spelling=spelling):
-                    self.assertNotIn(spelling, content)
+                    self.assertIn(spelling, pr_mode)
+                    self.assertNotIn(spelling, direct)
+
+    def test_the_direct_section_names_no_liveness_adapter(self):
+        # Direct mode takes no claim, so it starts no keeper and calls the
+        # adapter nowhere. Its own resolution fence sits above this section
+        # with PR mode's, where
+        # `test_each_mode_resolves_and_checks_only_the_modules_it_calls` pins
+        # that it binds `$LEDGER` and not `$LIVENESS`; what this pins is the
+        # other half -- that nothing below the heading reaches for the adapter
+        # either, which is what makes the fence's omission true of the mode
+        # rather than only of the fence.
+        for relative_path in RENDERED_ASSETS:
+            _, direct = sections_of(read(relative_path))
+            with self.subTest(asset=relative_path):
+                self.assertIn('python3 "$LEDGER" direct-select', direct)
+            for spelling in REFUSED_DIRECT_HELPERS:
+                with self.subTest(asset=relative_path, spelling=spelling):
+                    self.assertNotIn(spelling, direct)
+
+    def test_each_asset_names_exactly_the_modules_its_bundle_ships(self):
+        # Issue #686 requirement 7, as an equality over the whole body rather
+        # than as the absence of one retired name. The module that slice
+        # retired is gone because it is not in this set; so is any other
+        # module an asset might resolve out of a bundle that does not ship it,
+        # which would resolve nothing and stop the mode it was resolved for.
+        for relative_path in (*RENDERED_ASSETS, SOURCE):
+            named = set(BUNDLED_MODULE_RE.findall(read(relative_path)))
+            with self.subTest(asset=relative_path):
+                self.assertEqual(named, set(BUNDLED_MODULE_NAMES))
 
     def test_the_direct_mode_rules_reach_both_brands(self):
         for relative_path in RENDERED_ASSETS:
@@ -2349,1050 +2677,38 @@ class BundledHelperTests(unittest.TestCase):
                 self.assertTrue(claude, copies["claude"])
                 self.assertEqual(claude, codex)
 
-    def test_the_cursor_helper_spawns_no_external_command(self):
-        # The reconciliation is arithmetic over listings the workflow already
-        # took, so the helper needs no repository access of its own. Pinned as
-        # an absence because a helper that shelled out would need declaring in
-        # docs/agent-workflow-contract.md, and would also be reaching a
-        # checkout the caller never told it about.
-        source = (REPO_ROOT / CLAUDE_CURSOR_HELPER).read_text(encoding="utf-8")
-        for forbidden in ("subprocess", "os.system", "os.popen"):
+    def test_each_bundle_ships_exactly_those_modules_and_no_other(self):
+        # Issue #686 requirement 7, from the shipping side. The retired module
+        # is not merely unreferenced: it is gone, and a bundle that still
+        # carried it would install a second answer to what a repository's
+        # direct progress is. Asserted as the directory's whole
+        # project-review contents, so a module that came back fails here
+        # whether or not any asset resolves it.
+        for bundle in BUNDLED_HELPERS["ledger"].values():
+            directory = (REPO_ROOT / bundle).parent
+            shipped = {
+                path.name
+                for path in directory.iterdir()
+                if BUNDLED_MODULE_RE.fullmatch(path.name)
+            }
+            with self.subTest(bundle=bundle):
+                self.assertEqual(shipped, set(BUNDLED_MODULE_NAMES))
+
+    def test_the_ledger_helper_spawns_only_git(self):
+        # Its whole repository reach: the common directory, the lock
+        # reference, and the checkpoint commit. Pinned here as the one
+        # executable it names, because a helper that reached for `gh` would be
+        # making a network call the caller never told it about, and one that
+        # reached for anything else would need declaring in
+        # docs/agent-workflow-contract.md.
+        source = (REPO_ROOT / CLAUDE_LEDGER_HELPER).read_text(encoding="utf-8")
+        self.assertIn("subprocess", source)
+        for forbidden in ("os.system", "os.popen", '"gh"', "'gh'"):
             with self.subTest(spelling=forbidden):
                 self.assertNotIn(forbidden, source)
 
 
-def load_cursor_helper(brand: str):
-    """The bundled helper, imported from the copy `brand` actually ships.
-
-    Loaded by path under a private name because it is a bundled asset rather
-    than an importable package: `tools/` is not its home, and giving it one
-    would make the tests pass against a module the workflow never reaches.
-    """
-    path = REPO_ROOT / CURSOR_HELPERS[brand]
-    spec = importlib.util.spec_from_file_location(
-        f"kanban_{brand}_plugin_project_review_cursor", path
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-CURSOR_MODULES = {brand: load_cursor_helper(brand) for brand in CURSOR_HELPERS}
-CURSOR = CURSOR_MODULES["claude"]
-
 REPO = "coghex/kanban"
-
-# A merged history whose number order is deliberately not its merge order:
-# #471 merged before #468 and #470, exactly the way the real batch recorded in
-# docs/project_review_466-399.md ran #466, #467, #465, #464, #406 … A cursor
-# that kept "the smallest number reviewed" would describe a batch that never
-# happened, and would then hand the next invocation a starting point above
-# work it had already done.
-PR_HISTORY = (
-    (470, "2026-08-20T00:00:00Z"),
-    (468, "2026-08-19T00:00:00Z"),
-    (471, "2026-08-18T00:00:00Z"),
-    (466, "2026-08-17T00:00:00Z"),
-    (465, "2026-08-16T00:00:00Z"),
-    (464, "2026-08-15T00:00:00Z"),
-    (463, "2026-08-14T00:00:00Z"),
-    (462, "2026-08-13T00:00:00Z"),
-    (461, "2026-08-12T00:00:00Z"),
-)
-
-# `gh pr list` does not return merge order, so the listing handed to the helper
-# is deliberately in some other order: sorting it is the helper's job, and a
-# fixture that pre-sorted it would never exercise that.
-PR_LISTING = [
-    {"number": number, "mergedAt": merged_at}
-    for number, merged_at in sorted(PR_HISTORY)
-]
-
-# A first-parent walk, newest-first, as `git log --first-parent --format=%H`
-# prints it.
-DIRECT_HISTORY = (
-    "ed90877ac1",
-    "6d54e98bb2",
-    "3b3c54f0c3",
-    "a920f7cd14",
-    "b80f628e25",
-    "e84f7320f6",
-    "65001ff1a7",
-    "331d70e2b8",
-)
-
-
-class CursorTransitionCase(unittest.TestCase):
-    """A docs worktree, and the helper acting on it across invocations.
-
-    Every assertion below goes through the shipped module's own serialization
-    and reconciliation rather than through a selection oracle written here.
-    That is the point: the defect this issue reports is invisible to a
-    substring check, because the prose already claimed the cursor was
-    preserved. What was missing was a mechanism, so what is tested is the
-    mechanism.
-    """
-
-    def setUp(self):
-        self.worktree = Path(tempfile.mkdtemp(prefix="project-review-cursor-"))
-        self.addCleanup(shutil.rmtree, self.worktree, ignore_errors=True)
-        (self.worktree / "docs").mkdir()
-        self.module = CURSOR
-
-    # -- the workflow's own two calls, made the way the asset makes them ----
-
-    def state(self):
-        """A fresh read, as a later invocation carrying no context would do."""
-        return self.module.state_for(self.module.load_document(self.worktree), REPO)
-
-    def page(self, rows):
-        """The newest `rows` merged pull requests, as a bounded `gh` page.
-
-        `gh pr list --limit N` returns a page of the newest N merges, so a
-        bounded listing is a prefix of merge order -- and the older units the
-        sweep is resuming towards are exactly what falls off it.
-        """
-        ordered = sorted(PR_HISTORY, key=lambda entry: entry[1], reverse=True)
-        return [
-            {"number": number, "mergedAt": merged_at}
-            for number, merged_at in ordered[:rows]
-        ]
-
-    def select(self, mode="pr", count=3, state=None, candidates=None, **kwargs):
-        listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
-        return self.module.select(
-            self.state() if state is None else state,
-            mode,
-            self.module.normalize_candidates(
-                mode, listing if candidates is None else candidates
-            ),
-            count,
-            reports=self.module.report_coverage(self.worktree),
-            **kwargs,
-        )
-
-    def record(self, selection, mode="pr", exclude=(), boundary=None):
-        listing = PR_LISTING if mode == "pr" else list(DIRECT_HISTORY)
-        updated = self.module.record(
-            self.state(),
-            mode,
-            self.module.normalize_candidates(mode, listing),
-            [self.units(selection)] if isinstance(selection, (int, str)) else self.units(selection),
-            list(exclude),
-            boundary=boundary,
-        )
-        document = self.module.load_document(self.worktree)
-        document.setdefault("repositories", {})[REPO] = updated
-        self.module.write_document(self.worktree, document)
-        return updated
-
-    def units(self, selection):
-        if isinstance(selection, dict):
-            selection = selection["selected"]
-        if isinstance(selection, (int, str)):
-            return selection
-        return [
-            entry["number"] if "number" in entry else entry["sha"] for entry in selection
-        ]
-
-    def write_report(self, name, body="# Project Review Findings\n"):
-        (self.worktree / "docs" / name).write_text(body, encoding="utf-8")
-
-    def run_cli(self, command, *arguments):
-        """One invocation of the surface the rendered assets actually run.
-
-        The library calls above are the same code, but the argument parsing,
-        the unit lists, and the stdin/file candidate reading are only exercised
-        here — and those are what an asset's fence is made of.
-        """
-        captured = io.StringIO()
-        with contextlib.redirect_stdout(captured):
-            self.module.main(
-                [command, "--root", str(self.worktree), "--repo", REPO, *arguments]
-            )
-        return json.loads(captured.getvalue())
-
-    def forget_the_cursor(self):
-        """Delete the record, leaving the reports and the history untouched.
-
-        The negative control every transition below owes: if an assertion still
-        holds once the record is gone, durable state was not what produced it.
-        """
-        self.module.document_path(self.worktree).unlink()
-
-
-class CursorSelectionTests(CursorTransitionCase):
-    """Requirement 3 and requirement 9: the transitions, not the prose."""
-
-    def test_a_clean_batch_records_and_the_next_invocation_starts_at_head(self):
-        # The defect, end to end. A clean batch writes no report, so before
-        # this mechanism it left nothing at all behind and the next invocation
-        # re-selected the batch it had just finished.
-        first = self.select(count=3)
-        self.assertEqual(self.units(first), [470, 468, 471])
-        self.assertEqual(first["origin"], "history-head")
-
-        self.record(first)  # clean: no report written, cursor recorded anyway
-        self.assertEqual(list((self.worktree / "docs").glob("project_review_*.md")),
-                         [self.module.document_path(self.worktree)])
-
-        second = self.select(count=3)
-        self.assertEqual(self.units(second), [466, 465, 464])
-        self.assertEqual(second["origin"], "history-head")
-
-        # Remove the durable reviewed set and the second invocation repeats the first --
-        # which is exactly what was observed twice while
-        # docs/project_review_466-399.md was being produced.
-        self.forget_the_cursor()
-        self.assertEqual(self.units(self.select(count=3)), [470, 468, 471])
-
-    def test_a_finding_bearing_batch_records_the_same_coverage_as_a_clean_one(self):
-        # Requirement 1: the two batches differ only in whether a report was
-        # also written, so the state they leave has to be identical.
-        clean = self.record(self.select(count=3))
-        reference = json.dumps(clean, sort_keys=True)
-
-        # The second run differs only in that the batch produced a finding, so
-        # a report is written between the selection and the record -- which is
-        # the order the workflow uses, and the order that keeps the report from
-        # reconciling against the batch that is producing it.
-        self.setUp()
-        selection = self.select(count=3)
-        self.write_report("project_review_471-470.md")
-        finding_bearing = self.record(selection)
-        self.assertEqual(json.dumps(finding_bearing, sort_keys=True), reference)
-        self.assertEqual(self.units(self.select(count=3)), [466, 465, 464])
-        self.assertIsNone(finding_bearing["pr"]["endpoint"])
-        self.assertEqual(finding_bearing["pr"]["reviewed"], [468, 470, 471])
-
-    def test_the_boundary_is_exclusive_and_resolved_in_merge_order(self):
-        self.record([], boundary=471)
-        selection = self.select(count=6)
-        self.assertEqual(self.units(selection), [470, 468])
-        self.assertEqual(selection["origin"], "recorded-boundary")
-        self.assertTrue(selection["boundary_reached"])
-
-        numeric = self.module.empty_state()
-        numeric["pr"]["endpoint"] = {
-            "number": 468,
-            "merged_at": "2026-08-19T00:00:00Z",
-        }
-        self.assertEqual(self.units(self.select(count=6, state=numeric)), [470])
-
-    def test_a_boundary_at_merged_head_is_an_empty_completed_pr_sweep(self):
-        self.record([], boundary=470)
-        selection = self.select(count=3)
-        self.assertEqual(self.units(selection), [])
-        self.assertTrue(selection["short"])
-        self.assertTrue(selection["boundary_reached"])
-        self.assertFalse(selection["bounded"])
-        self.assertFalse(selection["truncated"])
-        self.assertFalse(selection["exhausted"])
-
-    def test_a_report_whose_coverage_overlaps_the_naive_selection_is_skipped(self):
-        # The second correction the real sweep had to make: the batch below
-        # the cursor was already covered by a separate report, and nothing
-        # noticed until a human read the directory.
-        self.record(self.select(count=3))
-        self.write_report("project_review_465-464.md")
-
-        selection = self.select(count=3)
-        self.assertEqual(self.units(selection), [466, 463, 462])
-        self.assertEqual(
-            [entry["unit"] for entry in selection["skipped"]],
-            [470, 468, 471, 465, 464],
-        )
-
-        # Without the report the same invocation takes the two units back, so
-        # the skip is the report's doing rather than an artifact of the count.
-        self.module.document_path(self.worktree)  # unchanged
-        (self.worktree / "docs" / "project_review_465-464.md").unlink()
-        self.assertEqual(self.units(self.select(count=3)), [466, 465, 464])
-
-    def test_a_report_does_not_cover_the_numbers_between_its_endpoints(self):
-        # Third spec addition. docs/project_review_463-455.md reviewed #463,
-        # #456 and #455 and nothing between them, so reading `463-455` as
-        # fifteen reviewed pull requests would erase twelve unreviewed ones --
-        # silently, and permanently.
-        self.write_report("project_review_466-462.md")
-        selection = self.select(count=5)
-        self.assertEqual(self.units(selection), [470, 468, 471, 465, 464])
-        self.assertNotIn(466, self.units(selection))
-        self.assertNotIn(462, self.units(selection))
-
-    def test_a_direct_commit_inside_a_reported_interval_is_still_selected(self):
-        # Requirement 5. docs/project_review_463-455.md states that no direct
-        # first-parent commits landed in its interval while eight did, so a
-        # report's account of the commits it covered establishes nothing at
-        # all: coverage in direct mode comes from the record or from nowhere.
-        self.write_report("project_review_direct_ed90877-331d70e.md")
-        self.write_report("project_review_466-461.md")
-        selection = self.select(mode="direct", count=3)
-        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[:3]))
-        self.assertEqual(selection["skipped"], [])
-
-        recorded = self.record(selection, mode="direct")
-        self.assertEqual(
-            recorded["direct"]["endpoint"], {"sha": DIRECT_HISTORY[2]}
-        )
-        self.assertEqual(
-            self.units(self.select(mode="direct", count=3)),
-            list(DIRECT_HISTORY[3:6]),
-        )
-        self.forget_the_cursor()
-        self.assertEqual(
-            self.units(self.select(mode="direct", count=3)),
-            list(DIRECT_HISTORY[:3]),
-        )
-
-    def test_direct_mode_reports_uncovered_units_above_its_resume_frontier(self):
-        first = self.select(
-            mode="direct", count=2, start=DIRECT_HISTORY[3]
-        )
-        self.record(first, mode="direct")
-
-        later = self.select(mode="direct", count=5)
-        self.assertEqual(later["gaps"], list(DIRECT_HISTORY[:3]))
-        self.assertEqual(self.units(later), list(DIRECT_HISTORY[5:]))
-
-    def test_an_explicitly_excluded_unit_is_never_selected_again(self):
-        # Requirement 4 and the review's second spec addition: an exclusion is
-        # persisted independently of the endpoint, because advancing the
-        # endpoint past it would otherwise be indistinguishable from having
-        # reviewed it.
-        self.record(self.select(count=3), exclude=[466])
-        self.assertEqual(self.units(self.select(count=3)), [465, 464, 463])
-
-        self.record(self.select(count=2))
-        self.assertEqual(self.units(self.select(count=3)), [463, 462, 461])
-        self.assertEqual(self.state()["excluded"]["prs"], [466])
-
-    def test_a_requested_range_is_not_filled_from_beyond_its_older_end(self):
-        # Round 4's blocker. Coverage thins the middle of the request, and
-        # without an older bound the count makes the number up from below it —
-        # so the user who asked for #466–#461 gets units they did not ask for,
-        # and the sweep advances past them.
-        self.write_report("project_review_471-468.md")
-        selection = self.select(count=6, start=470, end=464)
-        self.assertEqual(self.units(selection), [470, 466, 465, 464])
-        self.assertTrue(selection["short"])
-        self.assertTrue(selection["bounded"])
-        self.assertFalse(selection["exhausted"])
-        self.assertFalse(selection["truncated"])
-
-        # The negative control, and the defect itself: the same request without
-        # the older bound makes the count up from below #464, so the user is
-        # handed two units they did not ask for and the sweep advances past
-        # them.
-        unbounded = self.select(count=6, start=470)
-        self.assertEqual(self.units(unbounded), [470, 466, 465, 464, 463, 462])
-        self.assertFalse(unbounded["bounded"])
-
-    def test_a_range_bound_stops_the_batch_before_the_count_is_met(self):
-        # The bound is a bound, not a target: it wins over a count that still
-        # had room, in both modes.
-        pr = self.select(count=9, start=470, end=466)
-        self.assertEqual(self.units(pr), [470, 468, 471, 466])
-        direct = self.select(
-            mode="direct", count=9, start=DIRECT_HISTORY[1], end=DIRECT_HISTORY[3]
-        )
-        self.assertEqual(self.units(direct), list(DIRECT_HISTORY[1:4]))
-
-    def test_a_range_end_may_be_abbreviated_and_is_refused_when_absent(self):
-        bounded = self.select(mode="direct", count=9, end=DIRECT_HISTORY[2][:5])
-        self.assertEqual(self.units(bounded), list(DIRECT_HISTORY[:3]))
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, end=9999)
-        self.assertIn("the range ends at pull request #9999", str(caught.exception))
-
-    def test_a_range_cannot_cross_the_boundary_without_an_override(self):
-        self.record([], boundary=464)
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=9, start=470, end=463)
-        self.assertIn("beyond recorded boundary #464", str(caught.exception))
-
-    def test_a_count_changes_the_batch_size_and_not_the_position(self):
-        # Correction 1. Both selections begin at the same unit; only how many
-        # follow it differs.
-        self.record(self.select(count=3))
-        small = self.select(count=1)
-        large = self.select(count=5)
-        self.assertEqual(self.units(small), [466])
-        self.assertEqual(self.units(large)[0], 466)
-        self.assertEqual(small["begin_index"], large["begin_index"])
-        self.assertEqual(small["origin"], large["origin"])
-
-    def test_only_an_explicit_start_or_override_moves_the_position(self):
-        self.record(self.select(count=3))
-        started = self.select(count=2, start=465)
-        self.assertEqual(self.units(started), [465, 464])
-        self.assertEqual(started["origin"], "explicit-start")
-
-        # An override lifts the coverage the position was built from as well
-        # as the position itself; otherwise it moves the sweep back to the
-        # head and then skips everything it finds there.
-        overridden = self.select(count=2, override_boundary=True)
-        self.assertEqual(self.units(overridden), [470, 468])
-        self.assertEqual(overridden["origin"], "boundary-override")
-
-    def test_an_override_still_honors_an_explicit_exclusion(self):
-        # Requirement 4 is unconditional about this: a boundary override says
-        # the coverage is wrong, not that the user changed their mind about a
-        # unit they removed from the sweep.
-        self.record(self.select(count=3), exclude=[466])
-        overridden = self.select(count=9, override_boundary=True)
-        self.assertNotIn(466, self.units(overridden))
-        self.assertEqual(self.units(overridden)[0], 470)
-
-    def test_units_above_an_older_batch_are_selected_from_head_not_reported_as_gaps(self):
-        self.record([], boundary=461)
-        self.record(self.select(count=2, start=465))
-        later = self.select(count=9)
-        self.assertEqual(self.units(later), [470, 468, 471, 466, 463, 462])
-        self.assertEqual(later["gaps"], [])
-        self.assertTrue(later["boundary_reached"])
-        self.assertFalse(later["exhausted"])
-
-    def test_a_report_never_moves_the_resume_position(self):
-        # The other half of "a report covers only what it identifies": if a
-        # report set the position as well as the coverage, everything it
-        # skipped inside its own interval would fall above the resume point
-        # and never be selected again. Re-reviewing two announced units is the
-        # cheaper of the two errors, and the only one that can be noticed.
-        self.write_report("project_review_466-461.md")
-        selection = self.select(count=9)
-        self.assertEqual(selection["origin"], "history-head")
-        self.assertEqual(selection["begin_index"], 0)
-        self.assertEqual(self.units(selection), [470, 468, 471, 465, 464, 463, 462])
-
-    def test_a_batch_shorter_than_the_count_is_the_tail_rather_than_an_error(self):
-        selection = self.select(count=50)
-        self.assertEqual(len(selection["selected"]), len(PR_HISTORY))
-        self.assertTrue(selection["exhausted"])
-
-    def test_an_absent_recorded_endpoint_stops_the_run(self):
-        # Fourth spec addition: a recorded PR is validated against merged
-        # history rather than assumed. A cursor naming a pull request this
-        # repository never merged belongs to some other repository, and
-        # sweeping past it would review history twice.
-        foreign = self.module.empty_state()
-        foreign["pr"]["endpoint"] = {"number": 9999, "merged_at": "2026-01-01T00:00:00Z"}
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, state=foreign)
-        self.assertIn("does not belong to this repository", str(caught.exception))
-
-    def test_an_absent_recorded_sha_stops_the_run(self):
-        foreign = self.module.empty_state()
-        foreign["direct"]["endpoint"] = {"sha": "0123456"}
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(mode="direct", count=3, state=foreign)
-        self.assertIn("first-parent ancestry", str(caught.exception))
-
-    def test_an_absent_supplied_start_is_an_invalid_request(self):
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, start=9999)
-        self.assertIn("not in this repository's merged history", str(caught.exception))
-
-    def test_a_candidate_without_a_merge_timestamp_cannot_be_ordered(self):
-        with self.assertRaises(self.module.CursorError):
-            self.module.normalize_candidates("pr", [{"number": 470}])
-
-
-class BoundedListingTests(CursorTransitionCase):
-    """Round 1's blocker: a page is not a history, and the two must not read
-    alike.
-
-    `gh pr list --limit N` returns the newest N merges. A fixed boundary can
-    fall beyond that page even when the selectable head rows are all present,
-    so the page cannot prove that a short batch has reached the stop rather
-    than merely running out of listed candidates. Reading truncation as either
-    the boundary or repository tail can leave merged work unreviewed or enter
-    direct mode prematurely.
-    """
-
-    def test_a_page_ending_at_the_boundary_stops_there(self):
-        self.record([], boundary=471)
-        boundary = self.state()["pr"]["endpoint"]["number"]
-
-        # The page reaches the boundary and proves the exclusive stop.
-        page = self.page(3)
-        self.assertEqual(page[-1]["number"], boundary)
-        selection = self.select(count=3, candidates=page, listing_limit=3)
-        self.assertEqual(self.units(selection), [470, 468])
-        self.assertTrue(selection["short"])
-        self.assertTrue(selection["boundary_reached"])
-        self.assertFalse(selection["bounded"])
-        self.assertFalse(selection["truncated"])
-        self.assertFalse(selection["exhausted"])
-
-    def test_an_unbounded_short_page_at_its_limit_is_truncated(self):
-        state = self.module.empty_state()
-        state["pr"]["reviewed"] = [470, 468]
-        selection = self.select(
-            count=3, state=state, candidates=self.page(3), listing_limit=3
-        )
-        self.assertEqual(self.units(selection), [471])
-        self.assertTrue(selection["short"])
-        self.assertFalse(selection["bounded"])
-        self.assertFalse(selection["boundary_reached"])
-        self.assertTrue(selection["truncated"])
-        self.assertFalse(selection["exhausted"])
-
-    def test_a_page_under_its_limit_that_comes_up_short_is_the_tail(self):
-        # The other half, and the reason the two answers cannot be collapsed
-        # into one refusal: a genuine tail must still be reviewed and must
-        # still let PR history exhaust so direct mode is reached.
-        selection = self.select(count=50, candidates=PR_LISTING, listing_limit=200)
-        self.assertEqual(len(selection["selected"]), len(PR_HISTORY))
-        self.assertTrue(selection["short"])
-        self.assertFalse(selection["truncated"])
-        self.assertTrue(selection["exhausted"])
-
-    def test_an_undeclared_limit_is_taken_as_a_complete_listing(self):
-        # The unbounded caller is the real one: direct mode hands over a whole
-        # `git log --first-parent` walk, so reporting that as possibly
-        # truncated would send the workflow raising a limit it never set. PR
-        # mode always declares one, which the asset pin above holds it to.
-        selection = self.select(count=3, candidates=self.page(2))
-        self.assertTrue(selection["short"])
-        self.assertTrue(selection["exhausted"])
-        self.assertFalse(selection["truncated"])
-
-        walk = self.select(mode="direct", count=50)
-        self.assertTrue(walk["exhausted"])
-        self.assertFalse(walk["truncated"])
-
-    def test_a_unit_absent_from_a_full_page_asks_for_a_wider_one(self):
-        # The refusals split the same way. "Not in this repository's merged
-        # history at all" is a claim a bounded page cannot support, and acting
-        # on it stops a sweep that only needed a larger number.
-        page = self.page(3)
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, candidates=page, listing_limit=3, start=464)
-        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
-        self.assertNotIn(
-            "is not in this repository's merged history", str(caught.exception)
-        )
-
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, candidates=page, listing_limit=99, start=464)
-        self.assertIn(
-            "is not in this repository's merged history", str(caught.exception)
-        )
-        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
-
-    def test_an_endpoint_off_the_page_asks_for_a_wider_one(self):
-        self.record([], boundary=464)
-        page = self.page(3)
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=3, candidates=page, listing_limit=3)
-        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
-        self.assertNotIn("does not belong to this repository", str(caught.exception))
-
-    def test_a_merge_during_review_does_not_strand_a_completed_batch(self):
-        # Round 1's second blocker. The recording listing is taken after the
-        # batch was reviewed and its report written; merges landing in between
-        # push older rows off a bounded page, so the limit that reached the
-        # batch at selection time need not reach it now. Refusing that as a
-        # wrong claim leaves an already-reviewed batch with no durable
-        # endpoint -- the exact state this cursor exists to prevent.
-        selection = self.select(count=3, candidates=self.page(4), listing_limit=4)
-        reviewed = self.units(selection)
-        self.assertEqual(reviewed, [470, 468, 471])
-
-        # Two newer pull requests merge while the batch is being reviewed, so
-        # the same limit now returns a page that stops above the batch.
-        later = [
-            {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
-            {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
-        ] + self.page(2)
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.module.record(
-                self.state(),
-                "pr",
-                self.module.normalize_candidates("pr", later),
-                reviewed,
-                listing_limit=4,
-            )
-        self.assertIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
-
-        # Raising the limit records the batch that was already reviewed.
-        widened = self.module.normalize_candidates(
-            "pr",
-            [
-                {"number": 480, "mergedAt": "2026-08-22T00:00:00Z"},
-                {"number": 481, "mergedAt": "2026-08-21T00:00:00Z"},
-            ]
-            + PR_LISTING,
-        )
-        recorded = self.module.record(
-            self.state(), "pr", widened, reviewed, listing_limit=40
-        )
-        self.assertIsNone(recorded["pr"]["endpoint"])
-        self.assertEqual(recorded["pr"]["reviewed"], [468, 470, 471])
-
-    def test_an_absent_unit_in_a_complete_listing_is_still_refused_outright(self):
-        # The negative control for the rule above: the softer refusal must be
-        # the bounded-page case alone, or a genuinely wrong claim would send
-        # the workflow into an unbounded raise-and-retry loop.
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.module.record(
-                self.state(),
-                "pr",
-                self.module.normalize_candidates("pr", PR_LISTING),
-                [9999],
-                listing_limit=200,
-            )
-        self.assertIn("absent from the candidate history", str(caught.exception))
-        self.assertNotIn(self.module.RAISE_LIMIT_INSTRUCTION, str(caught.exception))
-
-
-class AbbreviatedShaTests(CursorTransitionCase):
-    """Round 2's blocker: one commit, several spellings.
-
-    `git log --format=%H` prints forty characters. A user naming a commit reads
-    the seven a direct-mode report filename carries — `docs/project_review_
-    direct_<newest7>-<oldest7>.md` is the shape this workflow writes — and an
-    endpoint recorded by an earlier run may be in either. Exact equality
-    refuses a correctly-spelled commit as absent, which is a stop the sweep
-    cannot be argued out of.
-    """
-
-    def test_an_abbreviated_start_names_the_commit_it_identifies(self):
-        selection = self.select(mode="direct", count=2, start=DIRECT_HISTORY[2][:7])
-        self.assertEqual(
-            self.units(selection), list(DIRECT_HISTORY[2:4])
-        )
-        self.assertEqual(selection["origin"], "explicit-start")
-        # The full spelling is the same request, so the two agree.
-        self.assertEqual(
-            self.units(self.select(mode="direct", count=2, start=DIRECT_HISTORY[2])),
-            self.units(selection),
-        )
-
-    def test_an_abbreviated_recorded_endpoint_still_positions_the_sweep(self):
-        # A cursor written by an earlier run, or by a walk taken with
-        # `--format=%h`, holds a short SHA. It has to keep working against a
-        # `%H` walk, or the sweep stops on state it wrote itself.
-        short = self.module.empty_state()
-        short["direct"]["endpoint"] = {"sha": DIRECT_HISTORY[1][:7]}
-        selection = self.select(mode="direct", count=2, state=short)
-        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
-        self.assertEqual(selection["origin"], "recorded-endpoint")
-
-    def test_an_abbreviated_coverage_or_exclusion_entry_still_matches(self):
-        short = self.module.empty_state()
-        short["direct"]["reviewed"] = [DIRECT_HISTORY[0][:7]]
-        short["excluded"]["commits"] = [DIRECT_HISTORY[1][:8]]
-        selection = self.select(mode="direct", count=2, state=short)
-        self.assertEqual(self.units(selection), list(DIRECT_HISTORY[2:4]))
-        self.assertEqual(
-            sorted(entry["reason"] for entry in selection["skipped"]),
-            ["covered", "excluded"],
-        )
-
-    def test_recording_an_abbreviated_unit_stores_the_history_spelling(self):
-        # The state converges on one name per commit rather than accumulating
-        # a second every time a walk is taken with a different abbreviation.
-        recorded = self.module.record(
-            self.state(),
-            "direct",
-            self.module.normalize_candidates("direct", list(DIRECT_HISTORY)),
-            [DIRECT_HISTORY[0][:7], DIRECT_HISTORY[1][:7]],
-            [DIRECT_HISTORY[2][:7]],
-        )
-        self.assertEqual(recorded["direct"]["endpoint"], {"sha": DIRECT_HISTORY[1]})
-        self.assertEqual(
-            recorded["direct"]["reviewed"], sorted(DIRECT_HISTORY[:2])
-        )
-        self.assertEqual(recorded["excluded"]["commits"], [DIRECT_HISTORY[2]])
-
-    def test_an_ambiguous_prefix_is_refused_rather_than_chosen(self):
-        # The other half, and why this is a resolution rather than a loosened
-        # comparison: a prefix naming two commits names neither, and picking
-        # one would sweep a range nobody asked for.
-        history = ["abcdef01aa", "abcdef01bb", "9999999999"]
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(
-                mode="direct", count=1, candidates=history, start="abcdef0"
-            )
-        message = str(caught.exception)
-        self.assertIn("names 2 commits", message)
-        self.assertIn("abcdef01aa", message)
-        self.assertIn("abcdef01bb", message)
-        # Enough characters resolves it.
-        self.assertEqual(
-            self.units(
-                self.select(
-                    mode="direct", count=1, candidates=history, start="abcdef01a"
-                )
-            ),
-            ["abcdef01aa"],
-        )
-
-    def test_a_prefix_shorter_than_seven_is_resolved_rather_than_refused(self):
-        # Round 3's blocker. Git's own floor is four characters; a pattern that
-        # refused five rejected an abbreviation git resolves, and it rejected
-        # it before the ambiguity check that is what actually decides whether a
-        # prefix names one commit. Length was doing the refusing, and length is
-        # not the question.
-        self.assertEqual(
-            self.units(self.select(mode="direct", count=1, start="ed908")),
-            [DIRECT_HISTORY[0]],
-        )
-        # Through the command line too, which is the surface the asset uses.
-        walk = self.worktree / "walk.txt"
-        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
-        selection = self.run_cli(
-            "select",
-            "--mode",
-            "direct",
-            "--count",
-            "1",
-            "--candidates",
-            str(walk),
-            "--start",
-            "3b3c",
-        )
-        self.assertEqual(
-            [entry["sha"] for entry in selection["selected"]], [DIRECT_HISTORY[2]]
-        )
-
-    def test_a_short_prefix_is_still_refused_when_it_names_two_commits(self):
-        # The negative control for the floor: lowering it must not turn an
-        # ambiguous prefix into an accepted one.
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(
-                mode="direct",
-                count=1,
-                candidates=["abcdef01aa", "abcdef01bb"],
-                start="abcd",
-            )
-        self.assertIn("names 2 commits", str(caught.exception))
-
-    def test_a_pull_request_number_takes_the_exact_path(self):
-        # Non-vacuity for the prefix rule: it is a SHA rule, and #46 must never
-        # resolve to #466 the way `ed90877` resolves to `ed90877ac1`.
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.select(count=1, start=46)
-        self.assertIn("is not in this repository's merged history", str(caught.exception))
-
-
-class CursorDocumentTests(CursorTransitionCase):
-    """Requirement 7 and the fail-closed rule: what the state file may say."""
-
-    def test_a_missing_document_is_the_only_absence_that_is_not_a_refusal(self):
-        # A repository that has never been swept has no cursor, and that is
-        # what every first invocation looks like. Every other unreadable state
-        # is a refusal, because "unreadable" and "absent" select different
-        # ranges and merging them is how a sweep loses history.
-        self.assertEqual(
-            self.module.load_document(self.worktree), self.module.empty_document()
-        )
-        self.assertEqual(self.state(), self.module.empty_state())
-
-    def test_the_document_round_trips_through_its_own_serialization(self):
-        recorded = self.record(self.select(count=3), exclude=[466])
-        reread = self.state()
-        self.assertEqual(reread, recorded)
-        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
-        self.assertIn(self.module.CURSOR_MARKER, text)
-        self.assertIn("# Project review sweep cursor", text)
-
-    def test_the_original_stop_before_document_migrates_without_losing_exceptions(self):
-        self.module.document_path(self.worktree).write_text(
-            "# Project Review Boundaries\n\n"
-            "Repository-specific exclusive endpoints.\n\n"
-            "- `coghex/kanban` — stop before PR #466 in merge-date order. "
-            "PR #471 merged later and was already reviewed, so skip it. "
-            "Issue #999 records why.\n",
-            encoding="utf-8",
-        )
-        state = self.state()
-        self.assertEqual(state["pr"]["endpoint"]["number"], 466)
-        self.assertEqual(state["pr"]["reviewed"], [466, 471])
-        selection = self.select(count=9)
-        self.assertEqual(self.units(selection), [470, 468])
-        self.assertTrue(selection["boundary_reached"])
-
-        self.record(selection)
-        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
-        self.assertIn(self.module.CURSOR_MARKER, text)
-        self.assertEqual(self.state()["pr"]["endpoint"]["merged_at"],
-                         "2026-08-17T00:00:00Z")
-
-    def test_a_v1_resume_frontier_migrates_to_coverage_not_a_boundary(self):
-        old = {
-            "version": self.module.LEGACY_SCHEMA_VERSION,
-            "repositories": {
-                REPO: {
-                    "pr": {
-                        "endpoint": {
-                            "number": 466,
-                            "merged_at": "2026-08-17T00:00:00Z",
-                        },
-                        "reviewed": [468, 470, 471],
-                    },
-                    "direct": {"endpoint": None, "reviewed": []},
-                    "excluded": {"prs": [], "commits": []},
-                }
-            },
-        }
-        self.module.document_path(self.worktree).write_text(
-            "# Project review sweep cursor\n\n"
-            f"{self.module.LEGACY_CURSOR_MARKER}\n\n"
-            f"```json\n{json.dumps(old)}\n```\n",
-            encoding="utf-8",
-        )
-
-        migrated = self.module.load_document(self.worktree)
-        state = self.module.state_for(migrated, REPO)
-        self.assertEqual(migrated["version"], self.module.SCHEMA_VERSION)
-        self.assertIsNone(state["pr"]["endpoint"])
-        self.assertEqual(state["pr"]["reviewed"], [466, 468, 470, 471])
-        self.assertEqual(self.units(self.select(count=3)), [465, 464, 463])
-
-        self.record(self.select(count=3))
-        text = self.module.document_path(self.worktree).read_text(encoding="utf-8")
-        self.assertIn(self.module.CURSOR_MARKER, text)
-        self.assertNotIn(self.module.LEGACY_CURSOR_MARKER, text)
-
-    def test_an_unparseable_document_stops_the_run(self):
-        for spelling, body in (
-            ("no marker", "# Project review sweep cursor\n\nnothing here.\n"),
-            (
-                "unreadable json",
-                f"{self.module.CURSOR_MARKER}\n\n```json\n{{not json}}\n```\n",
-            ),
-            (
-                "wrong schema version",
-                f'{self.module.CURSOR_MARKER}\n\n```json\n{{"version": 99}}\n```\n',
-            ),
-            (
-                "a reviewed entry that is not a pull request",
-                f'{self.module.CURSOR_MARKER}\n\n```json\n'
-                f'{{"version": {self.module.SCHEMA_VERSION}, "repositories": {{"o/r": {{"pr": '
-                '{"reviewed": ["nope"]}}}}\n```\n',
-            ),
-        ):
-            with self.subTest(spelling=spelling):
-                self.module.document_path(self.worktree).write_text(body, encoding="utf-8")
-                with self.assertRaises(self.module.CursorError):
-                    self.module.load_document(self.worktree)
-
-    def test_the_document_is_written_where_the_workflow_resolved_it(self):
-        self.record(self.select(count=3))
-        self.assertEqual(
-            self.module.document_path(self.worktree),
-            self.worktree / "docs" / "project_review_boundaries.md",
-        )
-        self.assertEqual(
-            self.module.DOCUMENT_RELATIVE_PATH, "docs/project_review_boundaries.md"
-        )
-
-
-class CursorRecordTests(CursorTransitionCase):
-    """The review's fifth spec addition: how a completed batch is folded in."""
-
-    def test_the_pr_boundary_never_moves_without_an_explicit_request(self):
-        self.record([], boundary=464)
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
-        self.record(self.select(count=2))
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
-
-        self.record([], boundary=461)
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 461)
-
-    def test_recording_preserves_an_earlier_exclusion(self):
-        self.record(self.select(count=2), exclude=[471])
-        self.record(self.select(count=2), exclude=[464])
-        self.assertEqual(self.state()["excluded"]["prs"], [464, 471])
-
-    def test_a_reviewed_unit_absent_from_the_candidate_history_is_refused(self):
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.module.record(
-                self.state(),
-                "pr",
-                self.module.normalize_candidates("pr", PR_LISTING),
-                [9999],
-            )
-        self.assertIn("absent from the candidate history", str(caught.exception))
-
-    def test_a_completed_batch_records_at_least_one_unit(self):
-        with self.assertRaises(self.module.CursorError):
-            self.module.record(
-                self.state(),
-                "pr",
-                self.module.normalize_candidates("pr", PR_LISTING),
-                [],
-            )
-
-
-class CursorCommandLineTests(CursorTransitionCase):
-    """The surface the rendered assets actually invoke."""
-
-    def test_select_and_record_round_trip_through_the_command_line(self):
-        listing = self.worktree / "listing.json"
-        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
-        first = self.run_cli(
-            "select", "--mode", "pr", "--count", "3", "--candidates", str(listing)
-        )
-        self.assertEqual([entry["number"] for entry in first["selected"]], [470, 468, 471])
-
-        self.run_cli(
-            "record",
-            "--mode",
-            "pr",
-            "--candidates",
-            str(listing),
-            "--reviewed",
-            "470,468,471",
-        )
-        second = self.run_cli(
-            "select", "--mode", "pr", "--count", "3", "--candidates", str(listing)
-        )
-        self.assertEqual([entry["number"] for entry in second["selected"]], [466, 465, 464])
-        state = self.run_cli("read")["state"]["pr"]
-        self.assertIsNone(state["endpoint"])
-        self.assertEqual(state["reviewed"], [468, 470, 471])
-
-    def test_a_range_bound_holds_through_the_command_line(self):
-        # The surface the asset invokes, since that is where `--end` is spelled
-        # and where an empty one has to mean no bound at all.
-        listing = self.worktree / "listing.json"
-        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
-        bounded = self.run_cli(
-            "select", "--mode", "pr", "--count", "9",
-            "--candidates", str(listing), "--start", "470", "--end", "466",
-        )
-        self.assertEqual(
-            [entry["number"] for entry in bounded["selected"]], [470, 468, 471, 466]
-        )
-        self.assertTrue(bounded["bounded"])
-
-        # Empty flags are the ordinary case, and must not bound anything.
-        unbounded = self.run_cli(
-            "select", "--mode", "pr", "--count", "9",
-            "--candidates", str(listing), "--start", "", "--end", "",
-        )
-        self.assertEqual(len(unbounded["selected"]), len(PR_HISTORY))
-        self.assertFalse(unbounded["bounded"])
-
-    def test_boundary_recording_round_trips_through_the_command_line(self):
-        listing = self.worktree / "listing.json"
-        listing.write_text(json.dumps(PR_LISTING), encoding="utf-8")
-
-        self.run_cli(
-            "record", "--mode", "pr", "--candidates", str(listing),
-            "--boundary", "#466",
-        )
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 466)
-
-        # The asset omits this flag ordinarily, but a templated empty value is
-        # still no request to replace the existing boundary.
-        self.run_cli(
-            "record", "--mode", "pr", "--candidates", str(listing),
-            "--reviewed", "470", "--boundary", "",
-        )
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 466)
-
-        self.run_cli(
-            "record", "--mode", "pr", "--candidates", str(listing),
-            "--boundary", "464",
-        )
-        self.assertEqual(self.state()["pr"]["endpoint"]["number"], 464)
-
-        with self.assertRaises(self.module.CursorError) as caught:
-            self.run_cli(
-                "record", "--mode", "pr", "--candidates", str(listing),
-                "--boundary", "466,464",
-            )
-        self.assertIn("one exclusive older boundary", str(caught.exception))
-
-    def test_a_direct_candidate_listing_may_be_the_plain_sha_walk(self):
-        # `git log --first-parent --format=%H` prints one SHA per line, which
-        # is what the asset pipes in, so the helper reads that shape without a
-        # transformation step of its own.
-        walk = self.worktree / "walk.txt"
-        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
-        selection = self.run_cli(
-            "select", "--mode", "direct", "--count", "2", "--candidates", str(walk)
-        )
-        self.assertEqual(
-            [entry["sha"] for entry in selection["selected"]], list(DIRECT_HISTORY[:2])
-        )
-
-    def test_the_first_direct_batch_starts_at_the_supplied_entry_point(self):
-        # Round 3's other blocker: the shown invocation had no `--start`, so
-        # the first direct batch of a repository that did have PR history
-        # began at index 0 and re-reviewed PR-owned commits. Direct state is
-        # empty at that moment, so nothing else could position it.
-        walk = self.worktree / "walk.txt"
-        walk.write_text("\n".join(DIRECT_HISTORY) + "\n", encoding="utf-8")
-        first = self.run_cli(
-            "select",
-            "--mode",
-            "direct",
-            "--count",
-            "2",
-            "--candidates",
-            str(walk),
-            "--start",
-            DIRECT_HISTORY[3],
-        )
-        self.assertEqual(
-            [entry["sha"] for entry in first["selected"]], list(DIRECT_HISTORY[3:5])
-        )
-        self.assertEqual(first["origin"], "explicit-start")
-
-        # Recorded, the next batch positions itself and needs no entry point --
-        # which is why the same invocation passes an empty one from then on.
-        self.run_cli(
-            "record",
-            "--mode",
-            "direct",
-            "--candidates",
-            str(walk),
-            "--reviewed",
-            ",".join(DIRECT_HISTORY[3:5]),
-        )
-        later = self.run_cli(
-            "select",
-            "--mode",
-            "direct",
-            "--count",
-            "2",
-            "--candidates",
-            str(walk),
-            "--start",
-            "",
-        )
-        self.assertEqual(
-            [entry["sha"] for entry in later["selected"]], list(DIRECT_HISTORY[5:7])
-        )
-        self.assertEqual(later["origin"], "recorded-endpoint")
-
-        # An empty entry point on the *first* batch is the defect itself: with
-        # no state to position it, the walk restarts at HEAD.
-        self.forget_the_cursor()
-        restarted = self.run_cli(
-            "select",
-            "--mode",
-            "direct",
-            "--count",
-            "2",
-            "--candidates",
-            str(walk),
-            "--start",
-            "",
-        )
-        self.assertEqual(restarted["origin"], "history-head")
-        self.assertEqual(
-            [entry["sha"] for entry in restarted["selected"]], list(DIRECT_HISTORY[:2])
-        )
-
-
-
 
 # ---------------------------------------------------------------------------
 # The arc's end-to-end proof (issue #684, requirement 11).
@@ -3453,7 +2769,6 @@ BRAND_BUNDLES = {
         "bundle_root": "claude-plugin/plugins/kanban",
         "ledger": "scripts/project_review_ledger.py",
         "liveness": "scripts/project_review_liveness.py",
-        "cursor": "scripts/project_review_cursor.py",
         "version": "2.1.274 (Claude Code)",
         "invocation_field": "prompt_id",
         "terminal_event": "Stop",
@@ -3463,7 +2778,6 @@ BRAND_BUNDLES = {
         "bundle_root": "codex-plugin/plugins/kanban",
         "ledger": "skills/project-review/scripts/project_review_ledger.py",
         "liveness": "skills/project-review/scripts/project_review_liveness.py",
-        "cursor": "skills/project-review/scripts/project_review_cursor.py",
         "version": "codex-cli 0.154.0",
         "invocation_field": "turn_id",
         "terminal_event": "Stop",
@@ -3492,6 +2806,25 @@ import json, os, sys
 argv = sys.argv[1:]
 with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(argv) + "\\n")
+
+if argv[:1] == ["api"] and argv[1:2] != ["graphql"]:
+    # The commit-to-pull-request association direct mode's first batch walks.
+    # Served from a recorded map so a test can state which pull request owns
+    # which first-parent commit -- which is the whole point of asking GitHub
+    # rather than inferring it from the commit.
+    path = argv[1]
+    prefix = "repos/%s/commits/" % (os.environ["FAKE_GH_REPO"],)
+    if not path.startswith(prefix) or not path.endswith("/pulls"):
+        sys.stderr.write("fake gh: unserved api path: %r\\n" % (path,))
+        raise SystemExit(68)
+    sha = path[len(prefix):-len("/pulls")]
+    owners = json.load(open(os.environ["FAKE_GH_ASSOCIATIONS"], encoding="utf-8"))
+    if sha not in owners:
+        sys.stderr.write("fake gh: no association recorded for %r\\n" % (sha,))
+        raise SystemExit(69)
+    for number in owners[sha]:
+        print(number)
+    raise SystemExit(0)
 
 if argv[:2] != ["api", "graphql"]:
     sys.stderr.write("fake gh: only the graphql inventory call is served: %r\\n" % (argv,))
@@ -3611,6 +2944,112 @@ def e2e_module(kind: str, brand: str):
     return _E2E_MODULES[key]
 
 
+# The prose a consumer's retired record carries above its payload. The parser
+# anchors on the marker and not on this, so what the prose says is not what
+# makes the fixture a fixture -- and `test_the_header_above_the_marker_reaches
+# _the_parser_not_at_all` proves that by parsing the same payload under prose
+# that says nothing at all. Reproduced in shape rather than word for word:
+# quoting it exactly would put the retired module's own name back into tracked
+# test source, which requirement 7 is precisely about.
+V2_CURSOR_HEADER = """# Project review sweep cursor
+
+Machine-owned state for the `project-review` workflow: each repository's
+exclusive older PR boundary, the units completed batches reviewed, the direct
+history endpoint, and the units a user explicitly excluded. PR selection always
+starts at the latest merge and stops before its boundary; a clean batch records
+reviewed coverage exactly as a finding-bearing batch does.
+
+Written by its own helper. Edit it through that helper rather than by hand: the
+payload below is parsed strictly, and an edit it cannot read stops the next
+sweep instead of being ignored.
+"""
+
+
+def v2_cursor_state(reviewed=(), direct_reviewed=(), direct_frontier=None) -> dict:
+    return {
+        "pr": {"endpoint": None, "reviewed": sorted(set(reviewed))},
+        "direct": {
+            "endpoint": None if direct_frontier is None else {"sha": direct_frontier},
+            "reviewed": sorted(set(direct_reviewed)),
+        },
+        "excluded": {"prs": [], "commits": []},
+    }
+
+
+def render_v2_cursor(module, repo, **state) -> str:
+    """One repository's v2 cursor document, as its retired writer rendered it.
+
+    The writer is gone, so this is the only way to produce one -- and it is a
+    fixture that owes a proof, which
+    `CursorFixtureTests.test_the_fixture_round_trips_through_the_surviving_parser`
+    supplies against the parser the ledger module carries.
+    """
+    payload = json.dumps(
+        {"version": 2, "repositories": {repo: v2_cursor_state(**state)}},
+        indent=2,
+        sort_keys=True,
+    )
+    return f"{V2_CURSOR_HEADER}\n{module.CURSOR_MARKER}\n\n```json\n{payload}\n```\n"
+
+
+class CursorFixtureTests(unittest.TestCase):
+    """The retired document's fixture, checked against what still reads it."""
+
+    def test_the_fixture_round_trips_through_the_surviving_parser(self):
+        module = e2e_module("ledger", "claude")
+        rendered = render_v2_cursor(
+            module,
+            E2E_REPO,
+            reviewed=(612, 610),
+            direct_reviewed=("ed90877ac1", "6d54e98bb2"),
+            direct_frontier="6d54e98bb2",
+        )
+        parsed = module.cursor_state_for(
+            module.parse_cursor_document(rendered, "fixture"), E2E_REPO
+        )
+        self.assertEqual(
+            parsed,
+            v2_cursor_state(
+                reviewed=(612, 610),
+                direct_reviewed=("ed90877ac1", "6d54e98bb2"),
+                direct_frontier="6d54e98bb2",
+            ),
+        )
+
+    def test_the_header_above_the_marker_reaches_the_parser_not_at_all(self):
+        # Why the fixture reproduces the record's shape rather than its exact
+        # words. The parser anchors on the marker, so the prose above it is
+        # decoration: the same payload under a header that says nothing reads
+        # back identically. That is what makes a fixture whose header omits
+        # the retired module's own name as faithful as one that quotes it --
+        # and requirement 7 is why it omits it.
+        module = e2e_module("ledger", "claude")
+        state = dict(reviewed=(612, 610), direct_reviewed=("ed90877ac1",))
+        rendered = render_v2_cursor(module, E2E_REPO, **state)
+        bare = rendered[rendered.index(module.CURSOR_MARKER):]
+        self.assertNotIn(V2_CURSOR_HEADER.strip(), bare)
+        self.assertEqual(
+            module.cursor_state_for(
+                module.parse_cursor_document(bare, "fixture"), E2E_REPO
+            ),
+            module.cursor_state_for(
+                module.parse_cursor_document(rendered, "fixture"), E2E_REPO
+            ),
+        )
+
+    def test_a_document_without_the_marker_is_not_read_as_an_absent_one(self):
+        # The negative control: the round trip above would pass just as well
+        # against a parser that accepted anything, and a cursor read as absent
+        # is a consumer's coverage silently discarded.
+        module = e2e_module("ledger", "claude")
+        rendered = render_v2_cursor(module, E2E_REPO, reviewed=(612,))
+        with self.assertRaises(module.LedgerError):
+            module.parse_cursor_document(
+                rendered.replace(module.CURSOR_MARKER, "<!-- not-a-cursor -->"),
+                "fixture",
+            )
+
+
 class WorkflowRun:
     """One reviewed repository, its docs worktree, and one installed bundle."""
 
@@ -3638,14 +3077,13 @@ class WorkflowRun:
         # reading the tracked path would not exercise it.
         self.codex_home = base / "codex-home"
         if brand == "codex":
-            self.bundle = self.codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.55.0"
+            self.bundle = self.codex_home / "plugins" / "cache" / "kanban" / "kanban" / "1.56.0"
         else:
-            self.bundle = base / "claude-plugins" / "kanban" / "1.56.0"
+            self.bundle = base / "claude-plugins" / "kanban" / "1.57.0"
         source_root = REPO_ROOT / self.spec["bundle_root"]
         for relative in (
             self.spec["ledger"],
             self.spec["liveness"],
-            self.spec["cursor"],
             "hooks/hooks.json",
         ):
             target = self.bundle / relative
@@ -3653,7 +3091,6 @@ class WorkflowRun:
             target.write_bytes((source_root / relative).read_bytes())
         self.ledger_path = self.bundle / self.spec["ledger"]
         self.liveness_path = self.bundle / self.spec["liveness"]
-        self.cursor_path = self.bundle / self.spec["cursor"]
 
         # A remote, a primary checkout, and a linked docs-wip worktree: the
         # three locations the asset resolves between.
@@ -3700,6 +3137,8 @@ class WorkflowRun:
         self.gh_log = base / "gh-calls.jsonl"
         self.pages_file = base / "merged.json"
         self.pages_file.write_text("[]", encoding="utf-8")
+        self.associations_file = base / "commit-pulls.json"
+        self.associations_file.write_text("{}", encoding="utf-8")
         self.scratch = base / "scratch"
         self.scratch.mkdir()
         self.env = dict(
@@ -3709,15 +3148,15 @@ class WorkflowRun:
             CODEX_HOME=str(self.codex_home),
             FAKE_GH_LOG=str(self.gh_log),
             FAKE_GH_PAGES=str(self.pages_file),
+            FAKE_GH_ASSOCIATIONS=str(self.associations_file),
             FAKE_GH_REPO=E2E_REPO,
             FAKE_GH_JQ=asset_jq_program(self.asset),
             # `$SCRIPTS` is what both locator fences bind: the directory the
-            # three modules share, which each mode's own fence resolves its
+            # two modules share, which each mode's own fence resolves its
             # own modules against.
             SCRIPTS=str(self.ledger_path.parent),
             LEDGER=str(self.ledger_path),
             LIVENESS=str(self.liveness_path),
-            CURSOR=str(self.cursor_path),
             ROOT=str(self.root),
             REPO=E2E_REPO,
             DOCS_WT=str(self.docs),
@@ -3788,6 +3227,58 @@ class WorkflowRun:
         return module.holder_standing({"host": module.socket.gethostname(), "pid": pid}) == "live"
 
     # -- the reviewed repository's merged history
+
+    def owned_by(self, associations):
+        """Which pull request GitHub says put each first-parent commit here.
+
+        The association direct mode's first batch walks, recorded so a test
+        can state it. A commit with no entry is one the fake refuses to answer
+        for, which is what a walk that asked about the wrong commit looks like.
+        """
+        self.associations_file.write_text(json.dumps(associations), encoding="utf-8")
+
+    def associated_pulls(self, sha):
+        """One association call, made the way the asset spells it."""
+        completed = self.sh(
+            asset_command(self.asset, 'gh api "repos/$REPO/commits/$SHA/pulls"'),
+            SHA=sha,
+        )
+        return [int(line) for line in completed.stdout.split()]
+
+    def entry_from_the_chain(self, merge, oldest_pr, walk):
+        """`$ENTRY`, derived the way the asset's own prose says to derive it.
+
+        The chain is walked downwards from the merge commit, one association
+        call per commit, and the run ends at the first commit whose answer does
+        not name the pull request. This is the derivation under test: it asks
+        GitHub rather than reading anything off the commit, so a shared subject
+        and a branch commit count both reach it as what they are -- facts about
+        the commit that say nothing about who put it here.
+        """
+        entry = merge
+        for sha in walk[walk.index(merge) + 1:]:
+            if oldest_pr not in self.associated_pulls(sha):
+                break
+            entry = sha
+        return entry
+
+    def entry_for_the_oldest_merged(self, inventory, merges, walk):
+        """`$ENTRY`, derived the way the asset says to derive it, ties included.
+
+        `mergedAt` is recorded to the second, so the minimum can be shared.
+        The asset resolves that by position rather than by picking one: every
+        pull request tied at the minimum gets its own entry, and the oldest of
+        them -- the one furthest down the walk -- is the one passed. That is
+        the only choice that leaves every tied pull request's commits above
+        the entry.
+        """
+        oldest = min(merged_at for _, merged_at in inventory)
+        tied = [number for number, merged_at in inventory if merged_at == oldest]
+        entries = [
+            self.entry_from_the_chain(merges[number], number, walk)
+            for number in tied
+        ]
+        return max(entries, key=walk.index)
 
     def merged(self, numbers_and_times):
         self.pages_file.write_text(
@@ -3959,27 +3450,29 @@ class WorkflowRun:
         command += "".join(f' --confirm "{value}"' for value in confirmations)
         return self.sh(command, check=check)
 
-    def write_cursor(self, reviewed):
-        """A v2 cursor, written by the cursor module's own record and writer.
+    def write_cursor(self, reviewed, direct_reviewed=(), direct_frontier=None):
+        """The v2 cursor a consumer holds, in the retired writer's own shape.
 
-        Never hand-built: a cursor shape this migration cannot read has to be
-        a cursor shape the mechanism cannot write, or the fixture is asserting
-        against a document nothing produces.
+        Rendered here because the module that wrote it left both bundles in
+        issue #686 and nothing produces one any more. The half of the
+        mechanism that survives is the parser the ledger carries, and
+        `CursorFixtureTests` proves this rendering round-trips through it --
+        so the fixture is still checked against a mechanism rather than
+        against itself.
         """
-        module = e2e_module("cursor", self.brand)
-        candidates = module.normalize_candidates(
-            "pr",
-            [
-                {"number": row["number"], "mergedAt": row["merged_at"]}
-                for row in json.loads(self.pages_file.read_text(encoding="utf-8"))
-            ],
+        module = e2e_module("ledger", self.brand)
+        path = Path(self.docs) / module.CURSOR_RELATIVE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            render_v2_cursor(
+                module,
+                E2E_REPO,
+                reviewed=reviewed,
+                direct_reviewed=direct_reviewed,
+                direct_frontier=direct_frontier,
+            ),
+            encoding="utf-8",
         )
-        document = module.load_document(self.docs)
-        state = module.record(
-            module.state_for(document, E2E_REPO), "pr", candidates, sorted(reviewed), []
-        )
-        document.setdefault("repositories", {})[E2E_REPO] = state
-        module.write_document(self.docs, document)
 
     # -- the liveness adapter
 
@@ -4148,6 +3641,11 @@ class WorkflowRun:
         self.retained_orphans = retained
         return reclaimed
 
+    def empty_commit(self, message):
+        """One first-parent commit carrying `message`, and its SHA."""
+        e2e_git(self.root, "commit", "-q", "--allow-empty", "-m", message)
+        return e2e_git(self.root, "rev-parse", "HEAD").strip()
+
     def first_parent_history(self, count):
         """`count` first-parent commits in `$ROOT`, newest first."""
         for index in range(count):
@@ -4162,34 +3660,48 @@ class WorkflowRun:
         return walk[:count]
 
     def direct_walk(self, subcommand):
-        """The direct section's walk piped into `select` or `record`.
+        """The direct section's walk piped into `direct-select` or `direct-record`.
 
         Both are the same `git log --first-parent` line with a different
-        helper on the other side of the pipe, so they are told apart by the
-        subcommand rather than by the prefix they share -- and a `record` that
-        stopped being handed the walk stops working here.
+        subcommand on the other side of the pipe, so they are told apart by
+        that -- and a record that stopped being handed the walk stops working
+        here.
         """
         commands = [
             command
             for command in asset_commands_starting(
                 self.asset, 'git -C "$ROOT" log --first-parent'
             )
-            if f'"$CURSOR" {subcommand} ' in command
+            if f'"$LEDGER" {subcommand} ' in command
         ]
         self.case.assertEqual(len(commands), 1, commands)
         return commands[0]
 
-    def direct_select(self, count):
-        """The direct section's own `select`, run as it spells it."""
-        completed = self.sh(
-            self.direct_walk("select"), COUNT=str(count), RANGE_START="", RANGE_END=""
-        )
-        return json.loads(completed.stdout)
+    def direct_select(self, count, entry="", start="", end="", check=True):
+        """The direct section's own selection, run as it spells it.
 
-    def direct_record(self, shas):
-        """The direct section's own `record`, run as it spells it."""
+        An empty `$ENTRY` is no entry commit, which is what every batch after
+        the first passes; the first batch of a repository with no merged pull
+        requests reaches the helper's `--entry-none` path instead, which the
+        asset spells in its own prose rather than in this fence.
+        """
         completed = self.sh(
-            self.direct_walk("record"), REVIEWED=",".join(shas), EXCLUDED=""
+            self.direct_walk("direct-select"),
+            check=check,
+            COUNT=str(count),
+            RANGE_START=start,
+            RANGE_END=end,
+            ENTRY=entry,
+        )
+        return json.loads(completed.stdout) if check else completed
+
+    def direct_record(self, shas, report="", excluded=""):
+        """The direct section's own recording, run as it spells it."""
+        completed = self.sh(
+            self.direct_walk("direct-record"),
+            REVIEWED=",".join(shas),
+            EXCLUDED=excluded,
+            REPORT=report,
         )
         return json.loads(completed.stdout)
 
@@ -4414,7 +3926,7 @@ class WorkflowRunCase:
 class HelperResolution(WorkflowRunCase):
     """The asset's own resolution fences, run with nothing pre-bound."""
 
-    def resolve(self, fences, report, missing=(), unset=("SCRIPTS", "LEDGER", "LIVENESS", "CURSOR")):
+    def resolve(self, fences, report, missing=(), unset=("SCRIPTS", "LEDGER", "LIVENESS")):
         """Run `fences` as one script and report the named variables.
 
         `unset` is what makes this a test of the asset rather than of the
@@ -4442,25 +3954,36 @@ class HelperResolution(WorkflowRunCase):
         )
 
     def locator(self):
-        """The fence that finds the directory the three modules share."""
+        """The fence that finds the directory the two modules share."""
         return next(
             fence
             for fence in asset_fences(self.workflow.asset)
             if 'SCRIPTS=' in fence
         )
 
-    def mode_fence(self, marker):
-        return next(
+    def mode_fence(self, mode):
+        """One mode's own resolution fence.
+
+        Both fences bind `$LEDGER` since issue #686, so the adapter is what
+        tells them apart: PR mode resolves it and direct mode must not, which
+        is the whole of the separation that survives. Exactly one fence of
+        each shape has to exist, or the selection below would be choosing
+        between two and saying nothing about either.
+        """
+        fences = [
             fence
             for fence in asset_fences(self.workflow.asset)
-            if marker in fence
-        )
+            if 'LEDGER="$SCRIPTS' in fence
+            and (('LIVENESS="$SCRIPTS' in fence) == (mode == "pr"))
+        ]
+        self.assertEqual(len(fences), 1, fences)
+        return fences[0]
 
     def test_the_assets_own_lookup_finds_this_brands_installed_bundle(self):
         # The locator plus PR mode's own fence: the two a review runs, and the
         # only two, so what they bind is what a review has.
         completed = self.resolve(
-            [self.locator(), self.mode_fence('LEDGER="$SCRIPTS')],
+            [self.locator(), self.mode_fence("pr")],
             'printf "%s\\n%s\\n" "$LEDGER" "$LIVENESS"',
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -4469,64 +3992,58 @@ class HelperResolution(WorkflowRunCase):
             [self.workflow.ledger_path, self.workflow.liveness_path],
         )
 
-    def test_the_direct_fence_resolves_the_cursor_with_the_other_two_deleted(self):
-        # Round 8's blocker, executed. The ledger module and the adapter are
-        # removed from the installed bundle first, and then direct mode's own
-        # resolution is run unbound: it must still find the cursor, because a
-        # cursor-only batch calls neither of the deleted modules.
+    def test_the_direct_fence_resolves_the_ledger_with_the_adapter_deleted(self):
+        # Round 8's blocker, carried across issue #686. Direct mode takes no
+        # claim, so it starts no keeper and calls the adapter nowhere -- and a
+        # bundle whose adapter is missing has to serve a direct batch. The
+        # adapter is removed from the installed bundle first, and then direct
+        # mode's own resolution is run unbound.
         completed = self.resolve(
-            [self.locator(), self.mode_fence('CURSOR="$SCRIPTS')],
-            'printf "%s\\n" "$CURSOR"',
-            missing=("ledger", "liveness"),
+            [self.locator(), self.mode_fence("direct")],
+            'printf "%s\\n" "$LEDGER"',
+            missing=("liveness",),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
-            Path(completed.stdout.strip()), self.workflow.cursor_path
+            Path(completed.stdout.strip()), self.workflow.ledger_path
         )
 
-    def test_the_pr_fence_resolves_the_ledger_with_the_cursor_deleted(self):
-        # The same boundary from the other side, so the rule is not satisfied
-        # by a fence that simply checks nothing: a review runs with no cursor
-        # module installed at all.
-        completed = self.resolve(
-            [self.locator(), self.mode_fence('LEDGER="$SCRIPTS')],
-            'printf "%s\\n%s\\n" "$LEDGER" "$LIVENESS"',
-            missing=("cursor",),
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(
-            [Path(line) for line in completed.stdout.split()],
-            [self.workflow.ledger_path, self.workflow.liveness_path],
-        )
-
-    def test_a_mode_fence_still_refuses_when_its_own_module_is_missing(self):
-        # Non-vacuity for the two above: the fences do fail, and each fails on
-        # its own mode's module rather than on any missing file.
-        for missing, fence, mode in (
-            ("ledger", 'LEDGER="$SCRIPTS', "pr"),
-            ("cursor", 'CURSOR="$SCRIPTS', "direct"),
-        ):
+    def test_each_mode_fence_refuses_when_the_ledger_module_is_missing(self):
+        # Non-vacuity for the two above: the fences do fail, and both fail on
+        # the module both modes genuinely need. A fence that simply checked
+        # nothing would pass every case above and this one too. The module is
+        # removed once and both fences are then run against the same bundle,
+        # so neither result depends on the order the subtests ran in.
+        (self.workflow.bundle / BRAND_BUNDLES[self.BRAND]["ledger"]).unlink()
+        for mode in ("pr", "direct"):
             with self.subTest(mode=mode):
-                # The deletions accumulate across these two, which changes
-                # nothing: each fence is being refused for its own mode's
-                # module, and the one deleted before it was already not that.
                 completed = self.resolve(
-                    [self.locator(), self.mode_fence(fence)],
-                    "true",
-                    missing=(missing,),
+                    [self.locator(), self.mode_fence(mode)], "true"
                 )
                 self.assertNotEqual(completed.returncode, 0, completed.stdout)
+
+    def test_the_pr_fence_refuses_when_only_the_adapter_is_missing(self):
+        # The separation from the other side: the same deletion that leaves
+        # direct mode working stops a review, so the direct case above is a
+        # property of that fence rather than of a bundle that was complete.
+        completed = self.resolve(
+            [self.locator(), self.mode_fence("pr")],
+            "true",
+            missing=("liveness",),
+        )
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
 
 
 class FreshRepository(WorkflowRunCase):
     def test_a_fresh_repository_starts_from_an_empty_ledger_and_needs_no_migration(self):
-        # Requirement 11's first proof. No cursor and no report, so `read`
-        # answers about a repository with no state, and the first claim takes
-        # the newest merged pull request out of the never-reviewed queue.
+        # Requirement 11's first proof. No pre-ledger record and no report,
+        # so `read` answers about a repository with no state, and the first
+        # claim takes the newest merged pull request out of the never-reviewed
+        # queue.
         self.workflow.merged([(612, "2026-09-01T00:00:00Z"), (610, "2026-08-01T00:00:00Z")])
         self.assertEqual(self.workflow.rows(), {})
-        # No cursor and no report, so the migration establishes an empty
-        # ledger, flags nothing, and imports no coverage at all.
+        # Nothing to import, so the migration establishes an empty ledger,
+        # flags nothing, and imports no coverage at all.
         migrated = json.loads(self.workflow.migrate().stdout)
         self.assertEqual(migrated["status"], "migrated")
         self.assertEqual(migrated["flags"], [])
@@ -5446,62 +4963,65 @@ class OrphanReclaim(WorkflowRunCase):
 
 
 class DirectMode(WorkflowRunCase):
-    """Requirement 7, executed: a direct batch touches no ledger and no claim."""
+    """Requirement 7 (#684) and #686: a direct batch takes no claim and no row."""
 
     def setUp(self):
         super().setUp()
         self.workflow.merged([(612, "2026-09-01T00:00:00Z")])
-        self.shas = self.workflow.first_parent_history(6)
+        history = self.workflow.first_parent_history(7)
+        # The one merged pull request's own commit sits at the head of the
+        # walk and its direct history sits below it, which is how a repository
+        # whose pull-request era began partway through actually looks. `$ENTRY`
+        # is that commit -- what the workflow derives from the inventory -- and
+        # the batch begins at the commit below it.
+        self.entry = history[0]
+        self.shas = history[1:]
 
-    def test_a_direct_request_never_touches_the_ledger_or_the_adapter(self):
-        # Round 7's blocker, executed: the whole direct route, from a
-        # repository that has never had a ledger, with the ledger module and
-        # the adapter removed from the bundle entirely. If the route touched
-        # either, it could not run at all.
-        for name in ("ledger", "liveness"):
-            (self.workflow.bundle / BRAND_BUNDLES[self.BRAND][name]).unlink()
-        self.assertIsNone(self.workflow.ledger_bytes())
+    def migrated(self):
+        """The empty ledger every direct batch resumes from.
 
-        # Round 8's blocker: the route starts at the asset's own resolution,
-        # unbound, rather than at a `$CURSOR` the harness pre-set. With the
-        # other two modules gone this is the step that used to refuse.
-        environment = dict(self.workflow.env)
-        for name in ("SCRIPTS", "LEDGER", "LIVENESS", "CURSOR"):
-            environment.pop(name, None)
-        fences = [
-            fence
-            for fence in asset_fences(self.workflow.asset)
-            if "SCRIPTS=" in fence or 'CURSOR="$SCRIPTS' in fence
-        ]
-        resolved = subprocess.run(
-            ["sh", "-c", "\n".join(fences) + '\nprintf "%s\\n" "$CURSOR"'],
-            capture_output=True, text=True, env=environment,
-            cwd=str(self.workflow.root), timeout=120,
-        )
-        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        Direct mode reads the ledger and refuses to establish one, so the
+        migration runs first here exactly as the asset says it does -- in PR
+        mode, once. What it writes for this repository is an empty ledger with
+        an empty frontier, which is the state a first direct batch positions
+        itself in.
+        """
+        self.workflow.migrate()
+
+    def report_for(self, shas):
+        """Write the report the helper named, and return its path."""
+        selected = self.workflow.direct_select(count=len(shas), entry=self.entry)
+        report = selected["batch"]["report"]
         self.assertEqual(
-            Path(resolved.stdout.strip()), self.workflow.cursor_path
+            report,
+            f"docs/project_review/direct_{shas[0][:7]}-{shas[-1][:7]}.md",
         )
-
-        selected = self.workflow.direct_select(count=2)
-        self.assertEqual(
-            [entry["sha"] for entry in selected["selected"]], list(self.shas[:2])
-        )
-        report = (
-            f"docs/project_review_direct_{self.shas[0][:7]}-{self.shas[1][:7]}.md"
-        )
-        (self.workflow.docs / report).write_text(
-            f"# Project Review Findings: direct commits {self.shas[0]}–{self.shas[1]}\n",
+        target = self.workflow.docs / report
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            f"# Project Review Findings: direct commits {shas[0]}\u2013{shas[-1]}\n",
             encoding="utf-8",
         )
-        recorded = self.workflow.direct_record(self.shas[:2])
-        self.assertEqual(
-            recorded["state"]["direct"]["endpoint"]["sha"], self.shas[1]
-        )
-        # No ledger was created, no attempt was registered, and nothing of the
-        # adapter's exists -- which is the property a repository that has never
-        # run a PR review depends on.
-        self.assertIsNone(self.workflow.ledger_bytes())
+        return report
+
+    def test_a_direct_request_needs_no_liveness_adapter_and_starts_no_keeper(self):
+        # Round 7's blocker carried across issue #686. Direct mode now shares
+        # the ledger, so the adapter is what it must still not need: it is
+        # removed from the installed bundle entirely, and the whole direct
+        # route then runs against a repository whose ledger holds no row.
+        self.migrated()
+        (self.workflow.bundle / BRAND_BUNDLES[self.BRAND]["liveness"]).unlink()
+
+        selected = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(selected["batch"]["origin"], "inventory-entry")
+        self.assertEqual(selected["batch"]["selected"], list(self.shas[:2]))
+        report = self.report_for(self.shas[:2])
+        recorded = self.workflow.direct_record(self.shas[:2], report=report)
+        self.assertEqual(recorded["frontier"]["sha"], self.shas[1])
+
+        # No attempt was registered, no keeper started, and no row or claim
+        # exists -- which is the property a direct batch depends on.
+        self.assertEqual(self.workflow.rows(), {})
         self.assertFalse(self.workflow.runtime_worktrees().exists())
         self.assertFalse(
             (
@@ -5511,33 +5031,216 @@ class DirectMode(WorkflowRunCase):
             ).exists()
         )
 
-    def test_a_direct_batch_records_on_the_cursor_and_leaves_the_ledger_alone(self):
-        before = self.workflow.ledger_bytes()
-        selected = self.workflow.direct_select(count=3)
+    def test_a_direct_batch_checkpoints_the_ledger_and_creates_no_row(self):
+        self.migrated()
+        report = self.report_for(self.shas[:3])
+        # An unrelated staged file, to prove the checkpoint is path-scoped
+        # rather than a commit of whatever the worktree happened to hold.
+        (self.workflow.docs / "unrelated.md").write_text("scratch\n", encoding="utf-8")
+        e2e_git(self.workflow.docs, "add", "unrelated.md")
+
+        recorded = self.workflow.direct_record(self.shas[:3], report=report)
+        self.assertEqual(recorded["frontier"]["sha"], self.shas[2])
         self.assertEqual(
-            [entry["sha"] for entry in selected["selected"]], list(self.shas[:3])
+            recorded["checkpoint"]["paths"],
+            sorted(["docs/project_review/ledger.md", report]),
         )
-        # A direct report is named by the reviewer, not allocated, and it goes
-        # beside the pre-ledger reports rather than under docs/project_review/.
-        report = (
-            f"docs/project_review_direct_{self.shas[0][:7]}-{self.shas[2][:7]}.md"
-        )
-        (self.workflow.docs / report).write_text(
-            f"# Project Review Findings: direct commits {self.shas[0]}–{self.shas[2]}\n",
-            encoding="utf-8",
-        )
-        recorded = self.workflow.direct_record(self.shas[:3])
-        self.assertEqual(
-            recorded["state"]["direct"]["endpoint"]["sha"], self.shas[2]
-        )
-        # No ledger row, no claim, no checkpoint: the ledger is byte-identical.
-        self.assertEqual(self.workflow.ledger_bytes(), before)
+        committed = e2e_git(
+            self.workflow.docs,
+            "show",
+            "--name-only",
+            "--format=",
+            recorded["checkpoint"]["commit"],
+        ).split()
+        self.assertEqual(sorted(committed), sorted(["docs/project_review/ledger.md", report]))
         self.assertEqual(self.workflow.rows(), {})
-        # And the next batch resumes below the recorded frontier.
-        again = self.workflow.direct_select(count=2)
-        self.assertEqual(
-            [entry["sha"] for entry in again["selected"]], list(self.shas[3:5])
+
+        # And the next batch resumes below the recorded frontier, with no
+        # entry commit: `$ENTRY` is empty for every batch after the first.
+        again = self.workflow.direct_select(count=2, entry="")
+        self.assertEqual(again["batch"]["origin"], "recorded-frontier")
+        self.assertEqual(again["batch"]["selected"], list(self.shas[3:5]))
+
+    def squashed_history(self, subject):
+        """A squash landing on top, over history that repeats `subject`.
+
+        The duplicate is the point: the commit below the squash carries the
+        same subject as one of the pull request's own, which is exactly the
+        collision a subject-matching derivation reads as ownership. Nothing
+        about the commit says who put it here, so nothing about the commit is
+        what the derivation may read.
+        """
+        shared = self.workflow.empty_commit(subject)
+        squash = self.workflow.empty_commit("Squash several things (#612)")
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        return squash, shared, walk
+
+    def test_a_squash_over_a_duplicate_subject_owns_only_its_own_commit(self):
+        # Round 2's blocker, at the asset's own level. The derivation the
+        # workflow spells is walked here call by call: the squash is the pull
+        # request's and the commit below it is not, however much they look
+        # alike, so `$ENTRY` is the squash and the shared-subject commit is the
+        # newest thing the batch reviews rather than something it stepped over.
+        self.migrated()
+        squash, shared, walk = self.squashed_history("Update docs")
+        self.workflow.owned_by({squash: [612], shared: []})
+        entry = self.workflow.entry_from_the_chain(squash, 612, walk)
+        self.assertEqual(entry, squash)
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        self.assertEqual(batch["selected"][0], shared)
+        self.assertEqual(batch["gaps"], [squash])
+
+    def test_a_rebased_series_is_carried_down_by_the_same_walk(self):
+        # The other half, so the derivation is not "always the merge commit"
+        # wearing a test: the same call, over a chain GitHub says the pull
+        # request owns three of, reaches the oldest of the three.
+        self.migrated()
+        for index in range(3):
+            self.workflow.empty_commit(f"rebased {index}")
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        series = walk[:3]
+        self.workflow.owned_by(
+            dict({sha: [612] for sha in series}, **{walk[3]: []})
         )
+        entry = self.workflow.entry_from_the_chain(series[0], 612, walk)
+        self.assertEqual(entry, series[-1])
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        for owned in series:
+            self.assertNotIn(owned, batch["selected"])
+        self.assertEqual(batch["selected"], walk[3:5])
+
+    def test_two_pull_requests_merged_in_one_second_do_not_split_the_entry(self):
+        # Round 5's blocker. `mergedAt` has second precision, so two pull
+        # requests can share the minimum and "take the oldest by mergedAt"
+        # stops being a rule. Choosing the newer of the two leaves the other's
+        # own commit below `$ENTRY`, where the batch audits a merged pull
+        # request's work as direct history -- so the tie is resolved by
+        # position, and the oldest entry of the tied set is the one passed.
+        self.migrated()
+        older = self.workflow.empty_commit("PR 610 (#610)")
+        newer = self.workflow.empty_commit("PR 612 (#612)")
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        self.assertEqual(walk[:2], [newer, older])
+        tied = "2026-09-01T00:00:00Z"
+        self.workflow.merged([(612, tied), (610, tied)])
+        self.workflow.owned_by({newer: [612], older: [610], walk[2]: []})
+
+        entry = self.workflow.entry_for_the_oldest_merged(
+            [(612, tied), (610, tied)], {612: newer, 610: older}, walk
+        )
+        # The older of the two tied merges, not whichever the listing named
+        # first: both are the minimum, and only this one leaves both above it.
+        self.assertEqual(entry, older)
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        for owned in (newer, older):
+            self.assertNotIn(owned, batch["selected"])
+        self.assertEqual(batch["selected"], walk[2:4])
+
+        # The negative control, and the defect stated as a comparison: the
+        # other tied entry leaves #610's own commit selectable.
+        wrong = self.workflow.direct_select(count=2, entry=newer)["batch"]
+        self.assertIn(older, wrong["selected"])
+
+    def test_a_clean_batch_records_through_the_command_as_it_is_written(self):
+        # Round 2's other blocker. The asset spells one recording command for
+        # both kinds of batch, so a clean one runs it with `$REPORT` unset --
+        # which reaches the helper as `--report ""`. Run exactly that, from the
+        # rendered fence, with no report written anywhere.
+        self.migrated()
+        selected = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(selected["batch"]["selected"], list(self.shas[:2]))
+        recorded = self.workflow.direct_record(self.shas[:2], report="")
+        self.assertEqual(recorded["status"], "recorded")
+        self.assertIsNone(recorded["report"])
+        self.assertEqual(recorded["frontier"]["sha"], self.shas[1])
+        self.assertEqual(
+            recorded["checkpoint"]["paths"], ["docs/project_review/ledger.md"]
+        )
+        # Nothing was written under the reports directory beside the ledger,
+        # and the next batch resumes below the frontier this one recorded.
+        self.assertEqual(
+            sorted(
+                path.name
+                for path in (self.workflow.docs / "docs" / "project_review").iterdir()
+            ),
+            ["ledger.md"],
+        )
+        again = self.workflow.direct_select(count=1, entry="")
+        self.assertEqual(again["batch"]["selected"], [self.shas[2]])
+
+    def test_a_recorded_frontier_positions_the_next_batch_with_no_github_call(self):
+        # Round 7's blocker, executed. A later direct batch is positioned by
+        # the frontier the previous one recorded, so it owes the inventory and
+        # the commit-to-pull-request association nothing -- and must not be
+        # stoppable by either. The empty `$ENTRY` call is what establishes
+        # that, and it establishes it by returning a batch.
+        self.migrated()
+        first = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(first["batch"]["origin"], "inventory-entry")
+        self.workflow.direct_record(self.shas[:2], report="")
+
+        # Every `gh` call the run has made so far. Direct mode makes none of
+        # its own once positioned, so this is empty -- which is the claim, and
+        # also why it needs the control below: an empty log proves nothing
+        # about a fake nobody could have reached.
+        before = self.workflow.gh_calls()
+        self.assertEqual(before, [])
+        # Put the fake in the state where either call this batch might make
+        # would fail: no association recorded for any commit, and no pages.
+        self.workflow.owned_by({})
+        self.workflow.merged([])
+
+        again = self.workflow.direct_select(count=2, entry="")
+        self.assertEqual(again["batch"]["origin"], "recorded-frontier")
+        self.assertEqual(again["batch"]["selected"], list(self.shas[2:4]))
+        self.assertEqual(self.workflow.gh_calls(), before)
+
+        # The control. The association call the derivation would have made is
+        # reachable from here and fails in this state, so the batch above
+        # succeeded by not making it rather than by making one that worked --
+        # and the log does record a call when one happens.
+        refused = self.workflow.sh(
+            asset_command(self.workflow.asset, 'gh api "repos/$REPO/commits/$SHA/pulls"'),
+            check=False,
+            SHA=self.shas[2],
+        )
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertEqual(len(self.workflow.gh_calls()), 1)
+
+    def test_a_first_batch_is_told_by_the_refusal_and_nothing_else(self):
+        # The other side of that branch, and why the refusal is load-bearing:
+        # it is the only thing that says this repository has no frontier yet,
+        # and it has to leave the run able to derive one and try again.
+        self.migrated()
+        refused = self.workflow.direct_select(count=2, entry="", check=False)
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        for flag in ("--start", "--entry", "--entry-none"):
+            self.assertIn(flag, refused.stderr)
+        self.assertEqual(refused.stdout, "")
+        # Nothing was written, so the same command run with the derived entry
+        # is the batch -- the refusal cost the run a call, not its position.
+        taken = self.workflow.direct_select(count=2, entry=self.entry)
+        self.assertEqual(taken["batch"]["selected"], list(self.shas[:2]))
+
+    def test_a_direct_batch_refuses_a_repository_that_has_no_ledger(self):
+        # The reason the migration above is not a formality: a direct batch
+        # that established the first ledger would resume from an empty
+        # frontier and re-review whatever the previous record covered.
+        self.assertIsNone(self.workflow.ledger_bytes())
+        refused = self.workflow.direct_select(count=2, entry=self.entry, check=False)
+        self.assertEqual(refused.returncode, 2, refused.stdout)
+        self.assertIn("Migrate", refused.stderr)
+        self.assertEqual(refused.stdout, "")
+        self.assertIsNone(self.workflow.ledger_bytes())
 
 
 class LegacyMigration(WorkflowRunCase):
@@ -6479,7 +6182,7 @@ class PackagedConsistencyTests(unittest.TestCase):
         for brand, spec in BRAND_BUNDLES.items():
             root = REPO_ROOT / spec["bundle_root"]
             with self.subTest(brand=brand):
-                for key in ("ledger", "liveness", "cursor"):
+                for key in ("ledger", "liveness"):
                     self.assertTrue((root / spec[key]).is_file(), spec[key])
                 self.assertTrue((root / "hooks" / "hooks.json").is_file())
 
@@ -6487,7 +6190,7 @@ class PackagedConsistencyTests(unittest.TestCase):
         for brand, spec in BRAND_BUNDLES.items():
             content = read(spec["asset"])
             with self.subTest(brand=brand):
-                for key in ("ledger", "liveness", "cursor"):
+                for key in ("ledger", "liveness"):
                     self.assertIn(Path(spec[key]).name, content)
 
 

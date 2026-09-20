@@ -96,8 +96,9 @@ CODEX_ONLY_LINES = (
 DELEGATED_MACHINERY = (
     '"$LEDGER"',
     '"$LIVENESS"',
-    '"$CURSOR"',
     "allocate-report",
+    "direct-select",
+    "direct-record",
     "--owner-pid",
     "--token",
     "worktree add",

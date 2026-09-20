@@ -46,7 +46,6 @@ BRANDS = {
         "bundle_files": (
             "scripts/project_review_liveness.py",
             "scripts/project_review_ledger.py",
-            "scripts/project_review_cursor.py",
             "hooks/hooks.json",
         ),
     },
@@ -64,7 +63,6 @@ BRANDS = {
         "bundle_files": (
             "skills/project-review/scripts/project_review_liveness.py",
             "skills/project-review/scripts/project_review_ledger.py",
-            "skills/project-review/scripts/project_review_cursor.py",
             "hooks/hooks.json",
         ),
     },
@@ -998,8 +996,11 @@ class Packaging(unittest.TestCase):
         # #684 performed the switch-over: the installed workflow's PR mode
         # registers an attempt through this adapter and hands its keeper to the
         # ledger's `claim`, so this module is no longer a mechanism nothing
-        # calls. The cursor survives in the explicit-only direct section until
-        # LEDGER-8 retires it, which is why its presence is asserted too.
+        # calls. #686 retired the sweep cursor, leaving the ledger helper and
+        # this adapter as the two modules an asset resolves -- so the ledger's
+        # presence is asserted beside this one's, and direct mode's own fence
+        # resolving the ledger without the adapter is
+        # tools/test_project_review_workflow.py's contract.
         #
         # What each asset *says* about the adapter is
         # tools/test_project_review_workflow.py's contract; what is pinned here
@@ -1012,7 +1013,7 @@ class Packaging(unittest.TestCase):
         ):
             with self.subTest(asset=asset):
                 text = (REPO_ROOT / asset).read_text(encoding="utf-8")
-                self.assertIn("project_review_cursor.py", text)
+                self.assertIn("project_review_ledger.py", text)
                 self.assertIn("project_review_liveness.py", text)
                 self.assertIn("--owner-pid", text)
                 self.assertNotIn("--liveness-fd", text)

@@ -2,24 +2,25 @@
 """The project-review ledger: per-PR review state, and the migration into it.
 
 Run with: python3 project_review_ledger.py
-          {read,migrate,select,claim,renew,release,fence,allocate-report,record,lease-defaults} --help
+          {read,migrate,select,direct-select,direct-record,claim,renew,release,
+           fence,allocate-report,record,lease-defaults} --help
 
 Issue #680, slice LEDGER-2 of `docs/designs/project_review_ledger_design.md`. The
 sweep cursor this module supersedes records which pull requests a batch
 covered and nothing else: not whether the batch found anything, not the commit
-it was verified against, not when. `project_review_cursor.py` is deliberately
-frugal that way, because its one job is to stop the next sweep from re-reading
-completed history. A ledger has to answer a different question — "what is this
+it was verified against, not when. That cursor was deliberately frugal that
+way, because its one job was to stop the next sweep from re-reading completed
+history. A ledger has to answer a different question — "what is this
 pull request's review state, and on what evidence?" — and that question needs
 a row per pull request rather than a set of numbers.
 
 So this module owns `docs/project_review/ledger.md`: a readable per-repository
-table, a marker of its own, and one strictly parsed fenced JSON payload. It
-ships beside the cursor in both bundles and is exercised only by
-`tools/test_project_review_ledger.py` until LEDGER-6 switches the installed
-workflow over (design D-19). Nothing here reads or writes the cursor document:
-the cursor is the live consumer record until then, and this module only ever
-reads it.
+table, a marker of its own, and one strictly parsed fenced JSON payload. Since
+issue #686 it owns direct-commit progress too, and the cursor module has left
+both bundles. `docs/project_review_boundaries.md` survives only as an input:
+the three shapes it can be in are parsed below, by this module, so a consumer
+who has not migrated is not stranded behind a helper that no longer ships.
+Nothing here writes that document.
 
 Four rules shape the migration, and each is a way the obvious implementation
 would have lied about history:
@@ -123,6 +124,27 @@ one repository lock held as a Git reference in the Git common directory, which
 every linked worktree of the repository shares. The section headed "The
 lease" below carries the rules.
 
+`direct-select` and `direct-record` are the other mode entirely (issue #686,
+slice LEDGER-8): the first-parent commits that predate a repository's
+pull-request workflow, walked newest-first beneath a moving older-history
+frontier. They share this document, the repository lock, and the path-scoped
+checkpoint commit with PR mode, and share nothing else. There is no lease,
+because a direct batch is an explicit single-operator invocation with no queue
+to contend for; there is no row, because design D-16 keeps direct commits out
+of the PR table; and nothing transitions into the mode automatically. The
+frontier, the reviewed set and the exclusions are the ones the cursor held,
+with the cursor's own abbreviation window and its own refusal of a frontier the
+walk does not contain.
+
+One thing there is that the cursor never needed: a handoff. `migrate` read the
+cursor once, and a consumer's direct batches kept recording against it through
+the interim period LEDGER-6 opened, so the two records diverged. The first
+direct invocation after this cutover folds the cursor's half in — reviewed
+SHAs and commit exclusions merged, the older of the two frontiers kept, PR
+state untouched — and records that it did, so the retired document is read
+exactly once and a later edit to it cannot restore state the ledger has moved
+past.
+
 `allocate-report` and `record` complete what a claim was taken for (issue
 #683, slice LEDGER-5): a report name reserved in the ledger before the report
 is written, and one completed attempt -- its outcome, the pinned review
@@ -138,13 +160,11 @@ process-control records -- the lock reference, the heartbeat records, and a
 checkpoint's private index -- are under that root's Git common directory,
 never under `docs/`. It spawns exactly two things: `git`, for the common
 directory, the lock reference and the checkpoint commit, and the renewer,
-which is this same file run through `sys.executable`. The one
-file it reads from anywhere else is `project_review_cursor.py` beside itself,
-which is the parser this migration is required to read the existing record
-through rather than a second implementation of. The merged-pull-request
-listing arrives on standard input for the same reason: an `--inventory <path>`
-would be the obvious convenience and it would also be the one read this module
-makes at a path nothing checked.
+which is this same file run through `sys.executable`. It reads no file beside
+itself at all. The merged-pull-request listing and the first-parent walk both
+arrive on standard input: an `--inventory <path>` or a `--walk <path>` would be
+the obvious convenience and each would also be a read this module makes at a
+path nothing checked.
 
 Everything the document itself cannot prove, it refuses. A ledger with no
 marker, unreadable JSON, a version it does not read, a status outside the four, an
@@ -158,13 +178,14 @@ with legacy rows.
 
 The versions it reads are a closed set too, and a wider one than the version
 it writes: a repository migrated by an earlier release holds a schema version
-1 ledger, whose rows predate the `title` and `merged_at` version 2 adds, or a
+1 ledger, whose rows predate the `title` and `merged_at` version 2 adds, a
 version 2 one, whose rows and repositories predate the `claim` and
-`lease_defaults` version 3 adds. Refusing either would strand that
-repository's only record of its coverage behind the helper that is meant to
-carry it forward. So both are read and upgraded on the way in -- by naming the
-fields each version introduced, never by defaulting whatever a row happens to
-be missing -- and every write publishes version 3.
+`lease_defaults` version 3 adds, or a version 3 one, whose direct progress
+predates the `adopted` and `reports` version 4 adds. Refusing any of them would
+strand that repository's only record of its coverage behind the helper that is
+meant to carry it forward. So all three are read and upgraded on the way in —
+by naming the fields each version introduced, never by defaulting whatever a
+row happens to be missing — and every write publishes version 4.
 """
 
 from __future__ import annotations
@@ -200,18 +221,22 @@ LEDGER_DIRECTORY = posixpath.dirname(LEDGER_RELATIVE_PATH)
 
 # Version 2 adds a row's `title` and `merged_at`, which the merged-pull-request
 # listing supplies (issue #681). Version 3 adds a row's `claim` and a
-# repository's `lease_defaults` (issue #682). Versions 1 and 2 are still read,
-# because a repository migrated by an earlier release has a ledger in one of
-# those shapes and a reader that refused it would strand the only record of
-# that repository's coverage behind a helper that cannot open it. They are read
-# and never written: an older document parses into the current shape with the
-# fields it predates absent, and the next write publishes it as version 3.
-SCHEMA_VERSION = 3
-READABLE_SCHEMA_VERSIONS = (1, 2, 3)
+# repository's `lease_defaults` (issue #682). Version 4 adds `direct.adopted`
+# and `direct.reports`, which direct-commit mode needs once it runs against
+# this document rather than against the sweep cursor (issue #686). Versions 1
+# through 3 are still read, because a repository migrated by an earlier release
+# has a ledger in one of those shapes and a reader that refused it would strand
+# the only record of that repository's coverage behind a helper that cannot
+# open it. They are read and never written: an older document parses into the
+# current shape with the fields it predates absent, and the next write
+# publishes it as version 4.
+SCHEMA_VERSION = 4
+READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
-# Distinct from `<!-- project-review:cursor:v2 -->` on purpose: the two
-# documents coexist until LEDGER-6, and a parser that anchored on the other
-# one's marker would read whichever document it was handed as its own.
+# Distinct from `<!-- project-review:cursor:v2 -->` on purpose: this module
+# parses both documents, and a parser that anchored on the other one's marker
+# would read whichever it was handed as its own -- a consumer's unmigrated
+# record read as a ledger, or the reverse.
 #
 # Its `v1` names the container -- one marker line, one fenced JSON payload
 # after it -- and not the payload's schema, which the payload states itself in
@@ -296,7 +321,7 @@ ROW_KEYS = (
 HISTORY_KEYS = ("kind", "outcome", "commit", "completed_at", "report")
 
 # What `migrate` read the cursor's half of the evidence from, in the order
-# `project_review_cursor.parse_document` itself prefers them.
+# `parse_cursor_document` itself prefers them.
 MIGRATION_SOURCES = ("cursor-v2", "cursor-v1", "boundary-document", "absent")
 
 DOCUMENT_HEADER = """# Project review ledger
@@ -356,48 +381,284 @@ class LedgerError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# The cursor module beside this one
+# The sweep cursor this ledger supersedes
 
-_CURSOR_MODULE = None
+# `docs/project_review_boundaries.md` was the whole of the project-review
+# record before this ledger, and a consumer that has not migrated yet still
+# holds its coverage there and nowhere else. Its three readable shapes are
+# parsed here rather than by the module that used to write it: that module has
+# been retired, and a migration that could not read the document it is meant to
+# carry forward would strand the only record a repository has.
+#
+# Read and never written. Migration imports what the cursor holds; the
+# adoption below folds a consumer's interim direct progress in once; nothing
+# in this module publishes the document again.
+CURSOR_RELATIVE_PATH = "docs/project_review_boundaries.md"
+
+# The reports that were written beside it, which the migration classifies.
+CURSOR_REPORT_GLOB = "project_review_*.md"
+
+CURSOR_SCHEMA_VERSION = 2
+LEGACY_CURSOR_SCHEMA_VERSION = 1
+
+# The marker each machine-owned shape anchors on: a document without one is
+# not that shape, whatever else it may contain.
+CURSOR_MARKER = "<!-- project-review:cursor:v2 -->"
+LEGACY_CURSOR_MARKER = "<!-- project-review:cursor:v1 -->"
+
+CURSOR_PAYLOAD_RE = re.compile(
+    re.escape(CURSOR_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+LEGACY_CURSOR_PAYLOAD_RE = re.compile(
+    re.escape(LEGACY_CURSOR_MARKER) + r"\s*```json\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+
+# The hand-authored shape that predates both, whose continuation lines may
+# name exceptional reviewed pull requests above the stop.
+HAND_AUTHORED_BOUNDARY_RE = re.compile(
+    r"^- `(?P<repo>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)`\s+—\s+"
+    r"stop before PR #(?P<boundary>\d+)(?P<tail>[^\n]*(?:\n  [^\n]*)*)",
+    re.MULTILINE,
+)
+
+# A short SHA is still a SHA, and how short is git's question rather than this
+# module's: `core.abbrev` will not go below four characters, so four is the
+# floor here too. Seven is merely the length `git log --abbrev` happens to emit
+# and a direct-mode report filename happens to carry, and a floor set there
+# refuses a five-character abbreviation git itself resolves -- before
+# `resolve_sha` can say whether it names one commit or several, which is the
+# question that actually decides it.
+#
+# Distinct from `FULL_SHA_RE`, which is what a row's verification commit is
+# held to: that one is never resolved against a listing, so an abbreviation
+# there would name several commits and nothing could expand it.
+ABBREVIATED_SHA_RE = re.compile(r"\A[0-9a-f]{4,40}\Z")
 
 
-def cursor_module():
-    """`project_review_cursor.py`, loaded from beside this file.
+def empty_cursor_state() -> dict:
+    return {
+        "pr": {"endpoint": None, "reviewed": []},
+        "direct": {"endpoint": None, "reviewed": []},
+        "excluded": {"prs": [], "commits": []},
+    }
 
-    Loaded by path rather than imported for the reason `census.py`'s own
-    loader is: the directory holding this module is on `sys.path` when it runs
-    as a script and is not when something imports it by path, and the
-    migration has to resolve the same cursor either way. Memoized so a single
-    run reads one module rather than executing it once per document.
 
-    Reusing that parser is deliberate. It already migrates the v1 payload and
-    the hand-authored document on read, and a second implementation of those
-    rules here would be a second answer to "what did the cursor say".
+def parse_cursor_document(text: str, source: str) -> dict:
+    """Every repository the cursor document holds, or a refusal naming what stopped it.
+
+    The v2 payload is preferred, then the v1 payload -- whose PR endpoint was a
+    resume-below frontier and is retired into coverage on read -- then the
+    hand-authored document. A document carrying none of the three is not this
+    document, and saying so is not the same as saying there is no record.
     """
-    global _CURSOR_MODULE
-    if _CURSOR_MODULE is not None:
-        return _CURSOR_MODULE
-    source = Path(__file__).resolve().parent / "project_review_cursor.py"
-    name = "_project_review_cursor_for_ledger"
-    try:
-        spec = importlib.util.spec_from_file_location(name, source)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"no loader for {source}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        try:
-            spec.loader.exec_module(module)
-        except BaseException:
-            sys.modules.pop(name, None)
-            raise
-    except Exception as error:  # noqa: BLE001 - reported, never raised bare
+    match = CURSOR_PAYLOAD_RE.search(text)
+    legacy_machine_state = False
+    if match is None:
+        match = LEGACY_CURSOR_PAYLOAD_RE.search(text)
+        legacy_machine_state = match is not None
+    if match is None:
+        hand_authored = parse_hand_authored_cursor(text)
+        if hand_authored is not None:
+            return hand_authored
         raise LedgerError(
-            f"the cursor module at {source} could not be loaded ({error}); "
-            "the ledger migration reads the cursor through its own parser, so "
-            "it cannot proceed without it."
-        ) from error
-    _CURSOR_MODULE = module
-    return module
+            f"{source} carries no {CURSOR_MARKER} block, so it is not a "
+            "project-review cursor. Move it aside or repair it; a migration "
+            "will not treat an unreadable record as an absent one."
+        )
+    try:
+        document = json.loads(match.group("payload"))
+    except json.JSONDecodeError as error:
+        raise LedgerError(f"{source} holds unreadable cursor JSON ({error}).") from error
+    if not isinstance(document, dict):
+        raise LedgerError(f"{source} holds a cursor payload that is not an object.")
+    version = document.get("version")
+    expected = LEGACY_CURSOR_SCHEMA_VERSION if legacy_machine_state else CURSOR_SCHEMA_VERSION
+    if version != expected:
+        raise LedgerError(
+            f"{source} declares cursor schema version {version!r}; this helper "
+            f"expected version {expected} for its marker."
+        )
+    repositories = document.get("repositories")
+    if not isinstance(repositories, dict):
+        raise LedgerError(f"{source} declares no `repositories` object.")
+    parsed = {}
+    for name, state in repositories.items():
+        if not REPO_RE.match(str(name)):
+            raise LedgerError(f"{source} names {name!r}, which is not an owner/name.")
+        validated = _validated_cursor_state(state, f"{source}: {name}")
+        if legacy_machine_state:
+            validated = _migrated_v1_cursor_state(validated)
+        parsed[name] = validated
+    return parsed
+
+
+def _migrated_v1_cursor_state(state: dict) -> dict:
+    """Turn the released resume-below PR frontier into exact coverage.
+
+    Version 1 advanced `pr.endpoint` to the oldest reviewed PR in every batch.
+    Treating that value as version 2's fixed stop would silently erase all
+    older history. Retain it as reviewed coverage and remove it as a boundary;
+    direct mode's endpoint already had the intended moving-frontier meaning.
+    """
+    migrated = json.loads(json.dumps(state))
+    endpoint = migrated["pr"]["endpoint"]
+    if endpoint is not None:
+        migrated["pr"]["reviewed"] = sorted(
+            set(migrated["pr"]["reviewed"]) | {endpoint["number"]}
+        )
+        migrated["pr"]["endpoint"] = None
+    return migrated
+
+
+def parse_hand_authored_cursor(text: str):
+    """The original human-authored exclusive-boundary document, or `None`.
+
+    Its continuation lines may name exceptional reviewed PRs above the stop
+    (Synarchy's #1411 is the observed case), so every PR number in that
+    repository's bullet is retained as reviewed coverage. `migrate` withholds
+    the stop itself, because a stop is the one pull request a batch
+    deliberately did not enter.
+    """
+    matches = list(HAND_AUTHORED_BOUNDARY_RE.finditer(text))
+    if not matches:
+        return None
+    parsed = {}
+    for match in matches:
+        repo = match.group("repo")
+        if repo in parsed:
+            raise LedgerError(f"the hand-authored record names {repo!r} more than once.")
+        state = empty_cursor_state()
+        state["pr"]["endpoint"] = {
+            "number": int(match.group("boundary")),
+            "merged_at": "legacy-exclusive-boundary",
+        }
+        state["pr"]["reviewed"] = sorted(
+            {int(number) for number in re.findall(r"\bPR #(\d+)", match.group(0))}
+        )
+        parsed[repo] = state
+    return parsed
+
+
+def _validated_cursor_state(state, source: str) -> dict:
+    if not isinstance(state, dict):
+        raise LedgerError(f"{source} is not an object.")
+    validated = empty_cursor_state()
+    pr = state.get("pr", {})
+    direct = state.get("direct", {})
+    excluded = state.get("excluded", {})
+    if not isinstance(pr, dict) or not isinstance(direct, dict) or not isinstance(excluded, dict):
+        raise LedgerError(
+            f"{source} holds a `pr`, `direct`, or `excluded` value that is not "
+            "an object."
+        )
+    validated["pr"]["reviewed"] = _validated_pr_numbers(
+        pr.get("reviewed", []), f"{source}: pr.reviewed"
+    )
+    validated["direct"]["reviewed"] = _validated_shas(
+        direct.get("reviewed", []), f"{source}: direct.reviewed"
+    )
+    validated["excluded"]["prs"] = _validated_pr_numbers(
+        excluded.get("prs", []), f"{source}: excluded.prs"
+    )
+    validated["excluded"]["commits"] = _validated_shas(
+        excluded.get("commits", []), f"{source}: excluded.commits"
+    )
+    pr_endpoint = pr.get("endpoint")
+    if pr_endpoint is not None:
+        if not isinstance(pr_endpoint, dict):
+            raise LedgerError(f"{source}: pr.endpoint is not an object.")
+        number = pr_endpoint.get("number")
+        merged_at = pr_endpoint.get("merged_at")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise LedgerError(f"{source}: pr.endpoint.number is not a pull-request number.")
+        if not isinstance(merged_at, str) or not merged_at.strip():
+            raise LedgerError(f"{source}: pr.endpoint.merged_at is not a merge timestamp.")
+        validated["pr"]["endpoint"] = {"number": number, "merged_at": merged_at}
+    validated["direct"]["endpoint"] = _validated_frontier(
+        direct.get("endpoint"), f"{source}: direct.endpoint"
+    )
+    return validated
+
+
+def _validated_frontier(endpoint, source: str):
+    """The direct older-history frontier, which is a commit or nothing."""
+    if endpoint is None:
+        return None
+    if not isinstance(endpoint, dict):
+        raise LedgerError(f"{source} is not an object.")
+    sha = endpoint.get("sha")
+    if not isinstance(sha, str) or not ABBREVIATED_SHA_RE.match(sha):
+        raise LedgerError(f"{source}.sha is not a commit SHA.")
+    return {"sha": sha}
+
+
+def _validated_pr_numbers(values, source: str) -> list:
+    if not isinstance(values, list):
+        raise LedgerError(f"{source} is not a list.")
+    numbers = []
+    for value in values:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise LedgerError(
+                f"{source} holds {value!r}, which is not a pull-request number."
+            )
+        numbers.append(value)
+    return sorted(set(numbers))
+
+
+def _validated_shas(values, source: str) -> list:
+    if not isinstance(values, list):
+        raise LedgerError(f"{source} is not a list.")
+    shas = []
+    for value in values:
+        if not isinstance(value, str) or not ABBREVIATED_SHA_RE.match(value):
+            raise LedgerError(f"{source} holds {value!r}, which is not a commit SHA.")
+        shas.append(value)
+    return sorted(set(shas))
+
+
+def cursor_state_for(parsed: dict, repo: str) -> dict:
+    """This repository's cursor entry, defaulted rather than created."""
+    state = parsed.get(repo)
+    return json.loads(json.dumps(state)) if state else empty_cursor_state()
+
+
+def report_coverage(root) -> dict:
+    """What the pre-ledger reports beside the cursor contribute, which is deliberately little.
+
+    A `project_review_<A>-<B>.md` name is produced from the batch's newest and
+    oldest reviewed pull request, so those two numbers were certainly reviewed
+    and are taken as covered. Nothing between them is: the batch may have
+    skipped most of the interval, and a report that says otherwise has already
+    been observed to be wrong.
+
+    A direct-mode report contributes nothing at all. Its interval says nothing
+    trustworthy about which first-parent commits inside it were read, so a
+    commit in that interval is covered only if the record says so.
+    """
+    directory = Path(root) / "docs"
+    reports = []
+    prs = set()
+    if not directory.is_dir():
+        return {"reports": reports, "prs": sorted(prs)}
+    for path in sorted(directory.glob(CURSOR_REPORT_GLOB)):
+        name = path.name
+        if name == posixpath.basename(CURSOR_RELATIVE_PATH):
+            continue
+        stem = name[len("project_review_"): -len(".md")]
+        if stem.startswith("direct_"):
+            reports.append({"path": f"docs/{name}", "kind": "direct", "identified": []})
+            continue
+        identified = []
+        parts = stem.split("-")
+        if all(part.isdigit() for part in parts) and 1 <= len(parts) <= 2:
+            identified = sorted({int(part) for part in parts}, reverse=True)
+            prs.update(identified)
+            reports.append({"path": f"docs/{name}", "kind": "pr", "identified": identified})
+        else:
+            reports.append({"path": f"docs/{name}", "kind": "unrecognized", "identified": []})
+    return {"reports": reports, "prs": sorted(prs)}
 
 
 # --------------------------------------------------------------------------
@@ -411,7 +672,7 @@ def empty_document() -> dict:
 def empty_repository() -> dict:
     return {
         "rows": {},
-        "direct": {"endpoint": None, "reviewed": []},
+        "direct": {"endpoint": None, "reviewed": [], "adopted": None, "reports": []},
         "excluded": {"prs": [], "commits": []},
         "migration": {"source": None, "boundary": None, "withheld_boundary": None},
         "lease_defaults": None,
@@ -559,6 +820,11 @@ def parse_document(text: str, source: str) -> dict:
 # and only the fields that shape genuinely predates are supplied.
 ROW_FIELDS_ADDED_IN = {2: ("title", "merged_at"), 3: ("claim",)}
 REPOSITORY_FIELDS_ADDED_IN = {3: ("lease_defaults",)}
+# `adopted` and `reports` are null and empty in the shape that predates them,
+# and those are the values that mean "no handoff has happened" and "no direct
+# report has been named" -- which is exactly true of a version 3 document,
+# whose direct batches ran against the cursor and named their reports there.
+DIRECT_FIELDS_ADDED_IN = {4: (("adopted", None), ("reports", []))}
 
 
 def _added_since(table: dict, version: int) -> list:
@@ -573,9 +839,10 @@ def _added_since(table: dict, version: int) -> list:
 def _upgraded_repository(state, version: int):
     """One repository's entry read out of an older schema into the current one.
 
-    Rows gain the fields versions 2 and 3 added and the repository gains the
-    field version 3 added, each a field the older writer could not have known
-    about and each null in the shape that predates it. Everything else is
+    Rows gain the fields versions 2 and 3 added, the repository gains the field
+    version 3 added, and its direct progress gains the two version 4 added --
+    each a field the older writer could not have known about and each carrying
+    the value that is the truth of the shape predating it. Everything else is
     passed through untouched so the validation below sees exactly what the
     document said.
     """
@@ -585,6 +852,16 @@ def _upgraded_repository(state, version: int):
         {field: None for field in _added_since(REPOSITORY_FIELDS_ADDED_IN, version) if field not in state},
         **state,
     )
+    direct = state.get("direct")
+    if isinstance(direct, dict):
+        upgraded["direct"] = dict(
+            {
+                field: json.loads(json.dumps(value))
+                for field, value in _added_since(DIRECT_FIELDS_ADDED_IN, version)
+                if field not in direct
+            },
+            **direct,
+        )
     rows = state.get("rows")
     if not isinstance(rows, dict):
         return upgraded
@@ -651,9 +928,17 @@ def state_for(document: dict, repo: str) -> dict:
 
 
 REPOSITORY_KEYS = ("rows", "direct", "excluded", "migration", "lease_defaults")
-DIRECT_KEYS = ("endpoint", "reviewed")
+DIRECT_KEYS = ("endpoint", "reviewed", "adopted", "reports")
 EXCLUDED_KEYS = ("prs", "commits")
 MIGRATION_KEYS = ("source", "boundary", "withheld_boundary")
+ADOPTION_KEYS = ("document", "source", "at")
+DIRECT_REPORT_KEYS = ("path", "newest", "oldest", "at")
+
+# What the one interim handoff read, in the same vocabulary `migrate` records
+# its own read in. `absent` is a consumer that never had a cursor document to
+# hand over, and it is recorded rather than left null so the handoff is not
+# attempted again on every later batch.
+ADOPTION_SOURCES = ("cursor-v2", "cursor-v1", "boundary-document", "absent")
 
 
 DOCUMENT_KEYS = ("version", "repositories")
@@ -743,28 +1028,127 @@ def _validated_repository(state, source: str) -> dict:
 
 
 def _validated_carryover(state, source: str) -> dict:
-    """`direct` and `excluded`, validated by the cursor module rather than again here.
+    """`direct` and `excluded`, held to the rules the sweep cursor held them to.
 
-    Design D-16 keeps direct-commit progress exactly as the cursor held it, so
-    the rules it is held to are the cursor's own: the same endpoint shape, the
-    same SHA spelling, the same exclusion lists. A second implementation of
-    those rules in this file would be a second answer to the same question,
-    and the migration copies these two structures across untouched precisely
-    so there is only one. The refusal is re-raised as a `LedgerError` because
-    the document that failed is this one.
+    Design D-16 keeps direct-commit progress exactly as that cursor held it --
+    the same frontier shape, the same abbreviation window, the same exclusion
+    lists -- so this reads the ledger's two carried structures through the
+    same validators `parse_cursor_document` reads an unmigrated consumer's
+    through. One answer to "is this a commit SHA", whichever document asked.
+
+    The two fields the ledger adds on top of that -- which record the interim
+    cursor handoff and the direct reports this ledger has named -- are its own
+    and are validated here.
     """
-    cursor = cursor_module()
-    try:
-        return cursor._validated_state(
-            {
-                "pr": {"endpoint": None, "reviewed": []},
-                "direct": state.get("direct", {}),
-                "excluded": state.get("excluded", {}),
+    validated = _validated_cursor_state(
+        {
+            "pr": {"endpoint": None, "reviewed": []},
+            "direct": {
+                "endpoint": state["direct"]["endpoint"],
+                "reviewed": state["direct"]["reviewed"],
             },
-            source,
+            "excluded": state.get("excluded", {}),
+        },
+        source,
+    )
+    return {
+        "direct": dict(
+            validated["direct"],
+            adopted=_validated_adoption(
+                state["direct"]["adopted"], f"{source}: direct.adopted"
+            ),
+            reports=_validated_direct_reports(
+                state["direct"]["reports"], f"{source}: direct.reports"
+            ),
+        ),
+        "excluded": validated["excluded"],
+    }
+
+
+def _validated_adoption(adopted, source: str):
+    """The record of the one interim cursor handoff, or `None` before it happened.
+
+    Its presence is what stops a second read of `docs/project_review_boundaries.md`
+    from folding a consumer's frozen cursor back in after the ledger has moved
+    past it, so it is state rather than a note: a field this helper could not
+    read is a handoff it would perform twice.
+    """
+    if adopted is None:
+        return None
+    if not isinstance(adopted, dict):
+        raise LedgerError(f"{source} is not an object.")
+    _require_keys(adopted, ADOPTION_KEYS, source)
+    document = adopted["document"]
+    if document is not None:
+        document = _validated_report_path(document, f"{source}: document")
+    origin = adopted["source"]
+    if origin not in ADOPTION_SOURCES:
+        raise LedgerError(
+            f"{source} declares source {origin!r}, which is not one of "
+            f"{', '.join(ADOPTION_SOURCES)}."
         )
-    except cursor.CursorError as error:
-        raise LedgerError(str(error)) from error
+    if (document is None) != (origin == "absent"):
+        raise LedgerError(
+            f"{source} declares source {origin!r} beside document {document!r}; "
+            "a handoff names the record it read, or it read none and names "
+            "nothing."
+        )
+    return {
+        "document": document,
+        "source": origin,
+        "at": _validated_timestamp(adopted["at"], f"{source}: at"),
+    }
+
+
+def _validated_direct_reports(reports, source: str) -> list:
+    """Every direct-batch report this ledger has named, oldest entry first.
+
+    Named here and not only written to disk, because a name is taken by
+    whichever of the two holds it: a report an operator moved out of the
+    worktree has still been used, and reusing its name would give two batches
+    one filename and make the older one unfindable.
+    """
+    if not isinstance(reports, list):
+        raise LedgerError(f"{source} is not a list.")
+    validated = []
+    seen = set()
+    for index, entry in enumerate(reports):
+        where = f"{source}[{index}]"
+        if not isinstance(entry, dict):
+            raise LedgerError(f"{where} is not an object.")
+        _require_keys(entry, DIRECT_REPORT_KEYS, where)
+        path = _validated_report_path(entry["path"], f"{where}: path")
+        if path in seen:
+            raise LedgerError(
+                f"{where} names {path}, which an earlier entry names already; "
+                "one report recorded twice is two batches this ledger cannot "
+                "tell apart."
+            )
+        seen.add(path)
+        validated.append(
+            {
+                "path": path,
+                "newest": _validated_abbreviated_sha(entry["newest"], f"{where}: newest"),
+                "oldest": _validated_abbreviated_sha(entry["oldest"], f"{where}: oldest"),
+                "at": _validated_timestamp(entry["at"], f"{where}: at"),
+            }
+        )
+    return validated
+
+
+def _validated_abbreviated_sha(value, source: str) -> str:
+    if not isinstance(value, str) or not ABBREVIATED_SHA_RE.match(value):
+        raise LedgerError(f"{source} holds {value!r}, which is not a commit SHA.")
+    return value
+
+
+def _validated_timestamp(value, source: str) -> str:
+    if not isinstance(value, str) or not TIMESTAMP_RE.match(value):
+        raise LedgerError(
+            f"{source} holds {value!r}, which is not a UTC "
+            "YYYY-MM-DDTHH:MM:SSZ timestamp."
+        )
+    return value
 
 
 def _validated_row_key(key, source: str) -> int:
@@ -1164,6 +1548,18 @@ def _render_notes(state: dict) -> list:
             f"- Direct first-parent history: frontier {frontier}, "
             f"{len(direct['reviewed'])} reviewed commit(s). Direct commits keep "
             "their own frontier and never take a row here."
+        )
+    for entry in direct["reports"]:
+        notes.append(
+            f"- Direct batch {entry['newest']}–{entry['oldest']} reported in "
+            f"{_render_report_link(entry['path'])} on {entry['at']}."
+        )
+    adopted = direct["adopted"]
+    if adopted is not None and adopted["source"] != "absent":
+        notes.append(
+            f"- Interim direct progress was handed off from the "
+            f"{adopted['source']} record at `{adopted['document']}` on "
+            f"{adopted['at']}. That record is read once and never again."
         )
     excluded = state["excluded"]
     if excluded["prs"] or excluded["commits"]:
@@ -1790,20 +2186,25 @@ def report_scope(text: str, path: str) -> dict:
 
 
 def migrate(root, repo: str, confirmations=None) -> dict:
-    """Build one repository's ledger from the cursor and the sibling reports.
+    """Build one repository's ledger from the old record and the sibling reports.
 
     Reads, in this order of authority, whatever `docs/project_review_boundaries.md`
     holds -- the v2 cursor, the v1 cursor, or the hand-authored boundary
-    document -- through the cursor module's own parser, then every sibling
-    report that module classifies as a PR report. Writes nothing while any
-    report is flagged, and writes nothing at all over an existing ledger. The
-    cursor document is neither deleted nor rewritten: it remains the live
-    consumer record until LEDGER-6 switches the workflow over.
+    document -- through the parsers above, then every sibling report
+    `report_coverage` classifies as a PR report. Writes nothing while any
+    report is flagged, and writes nothing at all over an existing ledger.
+
+    That document is neither deleted nor rewritten here or anywhere else. It
+    stopped being the live record when LEDGER-6 switched PR mode over and
+    LEDGER-8 switched direct mode, and it survives as an input to exactly two
+    reads: this migration, for a consumer that has never had a ledger, and
+    `adopt_cursor_direct`'s one-time handoff, for a consumer whose direct
+    batches kept recording against it through the interim between those two
+    slices.
     """
     if not REPO_RE.match(str(repo)):
         raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
     confirmations = dict(confirmations or {})
-    cursor = cursor_module()
     path = confined(root, document_path(root))
     # An early refusal so a run that cannot succeed does no reading, and a
     # second one at the moment of creation so two runs that both got past
@@ -1815,9 +2216,9 @@ def migrate(root, repo: str, confirmations=None) -> dict:
             "this root. A second migration would replace completed reviews "
             "with legacy rows; edit the ledger through this helper instead."
         )
-    cursor_relative = cursor.DOCUMENT_RELATIVE_PATH
+    cursor_relative = CURSOR_RELATIVE_PATH
     cursor_path = confined(root, Path(root) / cursor_relative)
-    source, state = _read_cursor(cursor, cursor_path, repo)
+    source, state = _read_cursor(cursor_path, repo)
 
     boundary = state["pr"]["endpoint"]
     reviewed = set(state["pr"]["reviewed"])
@@ -1832,7 +2233,7 @@ def migrate(root, repo: str, confirmations=None) -> dict:
         withheld = boundary["number"]
         reviewed.discard(withheld)
 
-    reports, flags = _report_scopes(cursor, root, confirmations)
+    reports, flags = _report_scopes(root, confirmations)
     unknown = sorted(confirmations)
     if unknown:
         raise LedgerError(
@@ -1870,7 +2271,16 @@ def migrate(root, repo: str, confirmations=None) -> dict:
 
     migrated = empty_repository()
     migrated["rows"] = rows
-    migrated["direct"] = state["direct"]
+    # The frontier and reviewed SHAs cross over; `adopted` deliberately does
+    # not. A consumer whose direct batches kept running against the cursor
+    # after this migration has progress here that this read predates, and
+    # leaving the handoff unrecorded is what lets the first direct batch fold
+    # that interim advance in rather than resuming from a stale frontier.
+    migrated["direct"] = dict(
+        empty_repository()["direct"],
+        endpoint=state["direct"]["endpoint"],
+        reviewed=state["direct"]["reviewed"],
+    )
     migrated["excluded"] = state["excluded"]
     migrated["migration"] = {
         "source": source,
@@ -1943,7 +2353,7 @@ def _name_is_taken(path: Path) -> bool:
     return True
 
 
-def _read_cursor(cursor, cursor_path: Path, repo: str):
+def _read_cursor(cursor_path: Path, repo: str):
     """`(source, state)` from one read of the record.
 
     One read, because there were two: the file was opened to classify its
@@ -1954,8 +2364,8 @@ def _read_cursor(cursor, cursor_path: Path, repo: str):
     reviewed instead of withheld. The ledger is written once and cannot be
     overwritten, so that error would have been permanent.
 
-    Classified with the cursor module's own markers, and parsed with its own
-    parser, so neither half is a second opinion about the same bytes.
+    Classified by the markers above and parsed by the parser above, so
+    neither half is a second opinion about the same bytes.
     """
     try:
         text = cursor_path.read_text(encoding="utf-8")
@@ -1966,33 +2376,36 @@ def _read_cursor(cursor, cursor_path: Path, repo: str):
                 "record is not an absent one, and migrating past it would "
                 "write a ledger this root can never correct."
             ) from error
-        return "absent", cursor.state_for(cursor.empty_document(), repo)
+        return "absent", empty_cursor_state()
     except (OSError, UnicodeDecodeError) as error:
         raise LedgerError(
             f"{cursor_path} could not be read ({error}); an unreadable record "
             "is not an absent one."
         ) from error
-    if cursor.PAYLOAD_RE.search(text):
-        source = "cursor-v2"
-    elif cursor.LEGACY_PAYLOAD_RE.search(text):
-        source = "cursor-v1"
-    else:
-        source = "boundary-document"
+    source = _cursor_shape(text)
     try:
-        document = cursor.parse_document(text, str(cursor_path))
-    except cursor.CursorError as error:
+        parsed = parse_cursor_document(text, str(cursor_path))
+    except LedgerError as error:
         raise LedgerError(
             f"the existing record at {cursor_path} could not be read ({error}); "
-            "the migration reads it through the cursor's own parser and will "
-            "not guess at a record it cannot parse."
+            "the migration will not guess at a record it cannot parse."
         ) from error
-    return source, cursor.state_for(document, repo)
+    return source, cursor_state_for(parsed, repo)
 
 
-def _report_scopes(cursor, root, confirmations: dict):
+def _cursor_shape(text: str) -> str:
+    """Which of the three readable shapes these bytes are, by their own marker."""
+    if CURSOR_PAYLOAD_RE.search(text):
+        return "cursor-v2"
+    if LEGACY_CURSOR_PAYLOAD_RE.search(text):
+        return "cursor-v1"
+    return "boundary-document"
+
+
+def _report_scopes(root, confirmations: dict):
     """Every sibling report, with what it contributes and what it flagged.
 
-    Classification is the cursor module's, not a fresh glob: it already
+    Classification is `report_coverage`'s, not a fresh glob: it already
     separates the cursor document, a PR report, a direct-mode report, and a
     filename it does not recognize, and the same glob that finds the reports
     also finds `project_review_boundaries.md` and
@@ -2012,7 +2425,7 @@ def _report_scopes(cursor, root, confirmations: dict):
             f"{directory} could not be listed ({error}); a directory this "
             "helper cannot enumerate is not one with no reports in it."
         ) from error
-    for entry in cursor.report_coverage(root)["reports"]:
+    for entry in report_coverage(root)["reports"]:
         record = {
             "path": entry["path"],
             "kind": entry["kind"],
@@ -4704,6 +5117,802 @@ def record(
 
 
 # --------------------------------------------------------------------------
+# Direct-commit mode
+
+# A direct batch's report goes beside the ledger, under the one publishable
+# directory design D-18 gives the ledger era, rather than beside the pre-ledger
+# reports in `docs/`. This is what tells its name apart from a pull request's
+# there, whose names are numbers.
+DIRECT_REPORT_PREFIX = "direct_"
+
+# The seven characters a direct-mode report filename has always carried, and
+# the length the two endpoints are abbreviated to when one is named.
+DIRECT_REPORT_ABBREVIATION = 7
+
+# The three ways a first direct batch can be positioned, named in one place so
+# the refusal and the tests spell them the same way.
+ENTRY_FLAGS = "--start, --entry, or --entry-none"
+
+
+def direct_report_path_for(newest: str, oldest: str) -> str:
+    """`docs/project_review/direct_<newest7>-<oldest7>.md` for one batch."""
+    short = DIRECT_REPORT_ABBREVIATION
+    return posixpath.join(
+        LEDGER_DIRECTORY, f"{DIRECT_REPORT_PREFIX}{newest[:short]}-{oldest[:short]}.md"
+    )
+
+
+def read_walk(stream=None) -> list:
+    """The complete first-parent walk, read from standard input.
+
+    `git log --first-parent --format=%H` is what the caller pipes, so a plain
+    listing is the shape this reads; a JSON array of SHAs, or of objects
+    carrying one, is accepted too because that is what a caller assembling the
+    walk programmatically produces.
+
+    Complete, and the caller's to make complete. A walk that began below the
+    recorded frontier would not contain it, and the frontier would then read
+    as state belonging to some other history -- which is a refusal here rather
+    than a sweep past it.
+    """
+    stream = sys.stdin if stream is None else stream
+    text = stream.read()
+    stripped = text.strip()
+    if not stripped:
+        raise LedgerError(
+            "no first-parent walk arrived on standard input; direct-commit "
+            "mode positions every endpoint inside the walk it is given, and an "
+            "empty input is not a repository with no history."
+        )
+    try:
+        raw = json.loads(stripped)
+    except ValueError:
+        raw = stripped.split()
+    return normalize_walk(raw)
+
+
+def normalize_walk(raw) -> list:
+    """The walk in newest-first order, with every SHA proven to be one.
+
+    The order is `git log`'s own and is kept: it is what "older" means for the
+    frontier, and re-sorting it by anything available here would be inventing
+    an ancestry from strings.
+    """
+    if not isinstance(raw, list):
+        raise LedgerError("the first-parent walk is not a list of commits.")
+    walk = []
+    seen = set()
+    for index, item in enumerate(raw):
+        sha = item.get("sha") if isinstance(item, dict) else item
+        if not isinstance(sha, str) or not ABBREVIATED_SHA_RE.match(sha.strip()):
+            raise LedgerError(f"walk entry {index} is not a commit SHA: {item!r}")
+        sha = sha.strip()
+        if sha in seen:
+            raise LedgerError(
+                f"commit {sha} appears twice in the first-parent walk; a walk "
+                "that names one commit in two positions cannot say which of "
+                "them is older."
+            )
+        seen.add(sha)
+        walk.append(sha)
+    return walk
+
+
+def resolve_sha(key: str, walk: list):
+    """The commit in `walk` that `key` names, or `None` when it names none of them.
+
+    A commit has as many spellings as it has abbreviations, and the two ends of
+    this module meet in different ones: `git log --format=%H` prints forty
+    characters, while a user naming a commit reads the seven a direct-mode
+    report filename carries, and a frontier recorded by an earlier run may be
+    either. Exact equality would reject `ed90877` against `ed90877ac1...` -- a
+    real commit, correctly spelled, refused as absent -- so a SHA matches when
+    one is a prefix of the other, in whichever direction.
+
+    Ambiguity is a refusal rather than a choice: a prefix that names two
+    commits names neither, and picking one would sweep a range nobody asked
+    for.
+    """
+    if key in walk:
+        return key
+    matches = [sha for sha in walk if sha.startswith(key) or key.startswith(sha)]
+    if len(matches) > 1:
+        raise LedgerError(
+            f"{key} names {len(matches)} commits in this history "
+            f"({', '.join(sorted(matches))}), so it identifies none of them. "
+            "Name more characters."
+        )
+    return matches[0] if matches else None
+
+
+def resolve_shas(values, walk: list, keep_unmatched: bool = False) -> list:
+    """`values` in the spelling this walk uses.
+
+    A value this walk does not hold is dropped by default, which is the safe
+    direction for the coverage and exclusion sets a selection is built from: a
+    commit the walk does not contain cannot be selected out of it either, so
+    leaving it out changes nothing, while keeping a stale spelling would
+    silently stop a recorded commit from matching the candidate it names.
+
+    `keep_unmatched` is what a recording writes back with. There the value is
+    state rather than a filter, and a commit outside the walk this batch
+    happened to take is not a commit that stopped existing.
+    """
+    resolved = []
+    for value in values:
+        found = resolve_sha(value, walk)
+        if found is not None:
+            resolved.append(found)
+        elif keep_unmatched:
+            resolved.append(value)
+    return resolved
+
+
+def _foreign_frontier_message(sha: str, subject: str) -> str:
+    return (
+        f"the {subject} {sha} is absent from the first-parent walk this "
+        "invocation was given, so it does not belong to this history. Say so "
+        "and stop rather than sweeping past it; if the walk was cut short, "
+        "pipe the whole of `git log --first-parent` instead."
+    )
+
+
+def _require_direct_request(count: int, entry, entry_none: bool) -> None:
+    """What is wrong with the request itself, before any state is read.
+
+    Asked before the lock is taken and before the cursor handoff writes, so a
+    request that could never have been served leaves the document byte for
+    byte as it was -- which is the rule every other refusal in this module
+    keeps.
+    """
+    if count <= 0:
+        raise LedgerError(f"a batch of {count} commits is not a batch.")
+    if entry is not None and entry_none:
+        raise LedgerError(
+            "a first batch is positioned by --entry or declares --entry-none; "
+            "naming an entry commit and an empty inventory at once states two "
+            "different repositories."
+        )
+
+
+def _require_recordable_batch(walk: list, reviewed, excluded) -> None:
+    """What is wrong with a recording, before the handoff writes anything.
+
+    The same rule from the other entry point: a commit this walk does not hold
+    and a batch that reviewed and excluded nothing are both refusals the
+    request carries with it, and neither should cost a document write first.
+    """
+    resolved = [_resolved_direct_or_raise(sha, walk, "reviewed") for sha in reviewed]
+    resolved += [
+        _resolved_direct_or_raise(sha, walk, "excluded") for sha in (excluded or [])
+    ]
+    if not resolved:
+        raise LedgerError(
+            "a completed direct batch records at least one reviewed or "
+            "excluded commit."
+        )
+
+
+def select_direct(
+    state: dict,
+    walk: list,
+    count: int,
+    start=None,
+    end=None,
+    entry=None,
+    entry_none: bool = False,
+) -> dict:
+    """The next direct batch, and everything the workflow has to announce about it.
+
+    The frontier is a resume-below position: a batch continues *beneath* the
+    oldest commit the previous one reviewed, because direct batches really do
+    walk older history downwards. So selection begins one commit below the
+    frontier and takes uncovered, non-excluded commits newest-first from
+    there, and every uncovered, non-excluded commit *above* that position is
+    reported as a gap rather than discarded. An explicit `--start` overrides
+    the position and nothing else.
+
+    The first batch has no frontier to resume from, so it is positioned
+    instead: below the oldest first-parent commit the oldest merged pull
+    request owns (`entry`), or at the head of the walk for a repository whose
+    merged-pull-request inventory was established and came back empty
+    (`entry_none`). Those are the only two automatic positions, and neither is
+    a default: an inventory that could not be established is not an empty one,
+    and starting at HEAD because of it would re-review every pull request's
+    own commits as direct history.
+    """
+    _require_direct_request(count, entry, entry_none)
+    covered = set(resolve_shas(state["direct"]["reviewed"], walk))
+    excluded = set(resolve_shas(state["excluded"]["commits"], walk))
+    position = {sha: index for index, sha in enumerate(walk)}
+
+    frontier = state["direct"]["endpoint"]
+    frontier_key = None
+    if frontier is not None:
+        frontier_key = resolve_sha(frontier["sha"], walk)
+        if frontier_key is None:
+            raise LedgerError(_foreign_frontier_message(frontier["sha"], "recorded frontier"))
+
+    if start is not None:
+        resolved_start = resolve_sha(start, walk)
+        if resolved_start is None:
+            raise LedgerError(
+                f"commit {start} is not in the first-parent walk, so it cannot "
+                "start a batch. Say so and stop; do not review the nearest "
+                "commit that exists."
+            )
+        begin = position[resolved_start]
+        origin = "explicit-start"
+    elif frontier_key is not None:
+        begin = position[frontier_key] + 1
+        origin = "recorded-frontier"
+    elif entry is not None:
+        resolved_entry = resolve_sha(entry, walk)
+        if resolved_entry is None:
+            raise LedgerError(
+                f"the entry commit {entry} is not in the first-parent walk, so "
+                "the oldest merged pull request's own history cannot be placed "
+                "in it. Say so and stop; falling back to the head of the walk "
+                "would review that pull request's commits as direct history."
+            )
+        begin = position[resolved_entry] + 1
+        origin = "inventory-entry"
+    elif entry_none:
+        begin = 0
+        origin = "history-head"
+    else:
+        raise LedgerError(
+            "this repository has no recorded direct frontier, so the first "
+            f"batch has to be positioned: pass one of {ENTRY_FLAGS}. An "
+            "inventory that was absent, failed, or came back incomplete is not "
+            "an empty one, and only a complete listing that named no merged "
+            "pull request permits the head of the walk."
+        )
+
+    stop = len(walk)
+    resolved_end = None
+    if end is not None:
+        resolved_end = resolve_sha(end, walk)
+        if resolved_end is None:
+            raise LedgerError(
+                f"the range ends at commit {end}, which is not in the "
+                "first-parent walk. Say so and stop; do not review the nearest "
+                "commit that exists."
+            )
+        stop = position[resolved_end] + 1
+        if stop <= begin:
+            raise LedgerError(
+                f"the range ends at {end}, which is newer than its starting "
+                "point, so the range holds nothing to review."
+            )
+
+    selected = []
+    skipped = []
+    for index in range(begin, stop):
+        sha = walk[index]
+        if sha in excluded:
+            skipped.append({"commit": sha, "reason": "excluded"})
+            continue
+        if sha in covered:
+            skipped.append({"commit": sha, "reason": "covered"})
+            continue
+        selected.append(sha)
+        if len(selected) == count:
+            break
+
+    # Every uncovered commit above the resume position, reported rather than
+    # discarded. A direct sweep that walked past one silently is the failure
+    # this list exists to make visible: the frontier only ever moves older, so
+    # nothing below it will ever come back to collect them.
+    gaps = [
+        walk[index]
+        for index in range(0, begin)
+        if walk[index] not in covered and walk[index] not in excluded
+    ]
+    short = len(selected) < count
+    bounded = end is not None and short
+    report = (
+        direct_report_path_for(selected[0], selected[-1]) if selected else None
+    )
+    return {
+        "mode": "direct",
+        "count": count,
+        "origin": origin,
+        "begin_index": begin,
+        "frontier": frontier,
+        "selected": selected,
+        "skipped": skipped,
+        "gaps": gaps,
+        "covered": sorted(covered, key=lambda sha: position[sha]),
+        "excluded": sorted(excluded, key=lambda sha: position[sha]),
+        "range_end": resolved_end,
+        "report": report,
+        "short": short,
+        "bounded": bounded,
+        # The walk is the whole history by contract, so a short batch that no
+        # range ended is the history running out rather than a page doing so.
+        "exhausted": short and not bounded,
+    }
+
+
+def record_direct(state: dict, walk: list, reviewed: list, excluded=None) -> dict:
+    """Fold a completed direct batch into the repository's direct progress.
+
+    The frontier advances to the oldest commit the batch reviewed and never to
+    a newer one: older means further down a newest-first walk, so a batch taken
+    above the frontier -- after an explicit `--start`, say -- leaves it where it
+    was. Reviewed commits and exclusions merge rather than replace, so an
+    earlier exclusion survives a later batch.
+
+    A batch that reviewed nothing and excluded nothing records nothing: it is
+    not a completed batch, and advancing anything for it would claim coverage
+    of commits nobody read.
+    """
+    updated = json.loads(json.dumps(state))
+    resolved_reviewed = [
+        _resolved_direct_or_raise(sha, walk, "reviewed") for sha in reviewed
+    ]
+    resolved_excluded = [
+        _resolved_direct_or_raise(sha, walk, "excluded") for sha in (excluded or [])
+    ]
+    if not resolved_reviewed and not resolved_excluded:
+        raise LedgerError(
+            "a completed direct batch records at least one reviewed or "
+            "excluded commit."
+        )
+    position = {sha: index for index, sha in enumerate(walk)}
+    # Everything already recorded is re-spelled the way this walk spells it, so
+    # progress written from a `--format=%h` walk and progress written from a
+    # `%H` walk converge rather than accumulating two names for one commit.
+    updated["direct"]["reviewed"] = sorted(
+        set(resolve_shas(updated["direct"]["reviewed"], walk, keep_unmatched=True))
+        | set(resolved_reviewed)
+    )
+    updated["excluded"]["commits"] = sorted(
+        set(resolve_shas(updated["excluded"]["commits"], walk, keep_unmatched=True))
+        | set(resolved_excluded)
+    )
+    if resolved_reviewed:
+        oldest = max(resolved_reviewed, key=lambda sha: position[sha])
+        updated["direct"]["endpoint"] = _advanced_frontier(
+            updated["direct"]["endpoint"], oldest, position
+        )
+    return updated
+
+
+def _resolved_direct_or_raise(sha, walk: list, role: str) -> str:
+    if not isinstance(sha, str) or not ABBREVIATED_SHA_RE.match(sha):
+        raise LedgerError(f"{sha!r} was reported as {role} and is not a commit SHA.")
+    found = resolve_sha(sha, walk)
+    if found is None:
+        raise LedgerError(
+            f"{sha} was reported as {role} but is absent from the first-parent "
+            "walk, so the frontier it would set cannot be ordered."
+        )
+    return found
+
+
+def _advanced_frontier(current, oldest: str, position: dict):
+    proposed = {"sha": oldest}
+    if current is None:
+        return proposed
+    current_key = resolve_sha(current["sha"], list(position))
+    if current_key is None:
+        raise LedgerError(_foreign_frontier_message(current["sha"], "recorded frontier"))
+    return proposed if position[oldest] > position[current_key] else current
+
+
+def adopt_cursor_direct(root, repo: str, state: dict, walk: list) -> dict:
+    """Fold a consumer's interim cursor direct progress in, once.
+
+    `migrate` reads the cursor once and the workflow kept recording direct
+    batches against it until this slice landed, so a repository migrated
+    during that interim holds direct progress in two places: the ledger's, as
+    of the migration, and the cursor's, as of the last interim batch. This is
+    the handoff between them, and it is performed on the first direct
+    invocation after the cutover rather than by a step somebody has to
+    remember.
+
+    Reviewed SHAs and commit exclusions merge, so neither record's coverage is
+    lost. The frontier becomes the older of the two, because older is what
+    "already swept" means and taking the newer one would re-review everything
+    between them. PR state is not touched at all: the cursor's PR half was
+    imported once by `migrate` and reading it again would resurrect a boundary
+    the ledger has already superseded.
+
+    Recorded either way, including for a consumer that has no cursor document
+    at all, so the read happens once. A later hand edit to the retired document
+    then cannot restore state the ledger has moved past.
+    """
+    if state["direct"]["adopted"] is not None:
+        return {"state": state, "adopted": None}
+    cursor_path = confined(root, Path(root) / CURSOR_RELATIVE_PATH)
+    require_reachable(root, cursor_path)
+    try:
+        text = cursor_path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        if _name_is_taken(cursor_path):
+            raise LedgerError(
+                f"{cursor_path} is a link with nothing behind it; a broken "
+                "record is not an absent one, and handing off past it would "
+                "drop whatever direct progress it held."
+            ) from error
+        text = None
+    except (OSError, UnicodeDecodeError) as error:
+        raise LedgerError(
+            f"{cursor_path} could not be read ({error}); an unreadable record "
+            "is not an absent one."
+        ) from error
+
+    updated = json.loads(json.dumps(state))
+    at = datetime.fromtimestamp(time.time(), timezone.utc).strftime(TIMESTAMP_FORMAT)
+    if text is None:
+        updated["direct"]["adopted"] = {"document": None, "source": "absent", "at": at}
+        return {
+            "state": updated,
+            "adopted": {
+                "document": None,
+                "source": "absent",
+                "at": at,
+                "reviewed": [],
+                "excluded": [],
+                "frontier": updated["direct"]["endpoint"],
+            },
+        }
+    source = _cursor_shape(text)
+    carried = cursor_state_for(parse_cursor_document(text, str(cursor_path)), repo)
+    # Both sides are re-spelled the way this walk spells them before either
+    # set is compared or merged. The two records were written by different
+    # helpers over different walks, so one commit can be `ed90877` in the
+    # cursor and `ed90877ac1...` in the ledger -- and a union of the raw
+    # strings would store it twice, report the second spelling as coverage
+    # this handoff gained, and leave a later `resolve_sha` looking at two
+    # names for one commit.
+    held = _merged_progress(updated["direct"]["reviewed"], carried["direct"]["reviewed"], walk)
+    excluded = _merged_progress(
+        updated["excluded"]["commits"], carried["excluded"]["commits"], walk
+    )
+    gained_reviewed = held["gained"]
+    gained_excluded = excluded["gained"]
+    updated["direct"]["reviewed"] = held["merged"]
+    updated["excluded"]["commits"] = excluded["merged"]
+    updated["direct"]["endpoint"] = _older_frontier(
+        updated["direct"]["endpoint"], carried["direct"]["endpoint"], walk
+    )
+    updated["direct"]["adopted"] = {
+        "document": CURSOR_RELATIVE_PATH,
+        "source": source,
+        "at": at,
+    }
+    return {
+        "state": updated,
+        "adopted": {
+            "document": CURSOR_RELATIVE_PATH,
+            "source": source,
+            "at": at,
+            "reviewed": gained_reviewed,
+            "excluded": gained_excluded,
+            "frontier": updated["direct"]["endpoint"],
+        },
+    }
+
+
+def _merged_progress(recorded, carried, walk: list) -> dict:
+    """One commit set from two, in this walk's spelling, and what the second added.
+
+    `keep_unmatched` on both sides for the reason a recording keeps it: a
+    commit outside the walk this invocation happened to take is not a commit
+    that stopped existing, and dropping it here would discard coverage the
+    handoff exists to preserve.
+    """
+    recorded = resolve_shas(recorded, walk, keep_unmatched=True)
+    carried = resolve_shas(carried, walk, keep_unmatched=True)
+    return {
+        "merged": sorted(set(recorded) | set(carried)),
+        "gained": sorted(set(carried) - set(recorded)),
+    }
+
+
+def _older_frontier(ledger_frontier, cursor_frontier, walk: list):
+    """The older of two frontiers, ordered inside the walk this run was given.
+
+    Ordered rather than compared, because "older" is a position in an ancestry
+    and neither SHA carries one. Both candidates are proven to be in the walk
+    first: a frontier the walk does not hold is state belonging to some other
+    history, and a handoff that quietly dropped it in favour of the one it
+    could place would resume above coverage somebody already established.
+    """
+    if cursor_frontier is None:
+        return ledger_frontier
+    if ledger_frontier is None:
+        return _spelled_frontier(cursor_frontier, walk, "interim cursor's frontier")
+    resolved = []
+    for candidate, subject in (
+        (ledger_frontier, "recorded frontier"),
+        (cursor_frontier, "interim cursor's frontier"),
+    ):
+        resolved.append(_spelled_frontier(candidate, walk, subject)["sha"])
+    position = {sha: index for index, sha in enumerate(walk)}
+    older = max(resolved, key=lambda sha: position[sha])
+    return {"sha": older}
+
+
+def _spelled_frontier(frontier: dict, walk: list, subject: str) -> dict:
+    """One frontier in this walk's own spelling, or a refusal naming it.
+
+    Re-spelled rather than passed through: the two records this handoff merges
+    were written over different walks, so the one it keeps may be the
+    abbreviated spelling -- and storing that back would leave the ledger
+    holding a frontier in a spelling nothing else here uses.
+    """
+    found = resolve_sha(frontier["sha"], walk)
+    if found is None:
+        raise LedgerError(_foreign_frontier_message(frontier["sha"], subject))
+    return {"sha": found}
+
+
+def _direct_state(root, repo: str):
+    """This repository's ledger entry, validated, or a refusal naming why not.
+
+    A ledger has to exist first, for the reason PR selection needs one: the
+    `direct` key is what `migrate` carried a consumer's existing sweep
+    progress into, and a direct batch that established the ledger itself would
+    start from an empty frontier and re-review every commit that progress
+    covered.
+    """
+    path = confined(root, document_path(root))
+    document = load_document(root)
+    if repo not in document.get("repositories", {}):
+        raise LedgerError(
+            f"{path} holds no entry for {repo}, so there is no direct progress "
+            f"to continue. Migrate {repo} first: a direct batch that "
+            "established the ledger itself would resume from an empty frontier "
+            "and re-review whatever the previous record covered."
+        )
+    return document, _validated_repository(
+        state_for(document, repo), f"the ledger read for {repo}"
+    )
+
+
+def direct_select(
+    root,
+    repo: str,
+    walk: list,
+    count: int,
+    start=None,
+    end=None,
+    entry=None,
+    entry_none: bool = False,
+    lock_wait: float = None,
+) -> dict:
+    """Choose the next direct batch, performing the one cursor handoff if it is owed.
+
+    Under the repository lock and no lease: a direct batch is an explicit
+    single-operator invocation with no queue to contend for, so there is
+    nothing for a claim to hold off. The lock is still taken, because the
+    handoff writes and a PR-mode write must not land on top of it.
+
+    Nothing but the handoff is written, and that is written last. A selection
+    is a reading of state, and a batch that is chosen and then abandoned has to
+    leave the frontier where it found it -- so a refusal anywhere below leaves
+    the document byte for byte as it was and the handoff still owed, which the
+    next invocation performs.
+    """
+    if not REPO_RE.match(str(repo)):
+        raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
+    _require_direct_request(count, entry, entry_none)
+    with repository_lock(root, lock_wait):
+        document, state = _direct_state(root, repo)
+        handoff = adopt_cursor_direct(root, repo, state, walk)
+        state = handoff["state"]
+        if entry_none and state["rows"]:
+            # The one half of the caller's inventory answer this document can
+            # check, and it is the dangerous half: a ledger that already holds
+            # rows was built from merged pull requests, so a listing that came
+            # back naming none did not describe this repository. Starting at
+            # the head of the walk on the strength of it would review every one
+            # of those pull requests' own commits as direct history.
+            raise LedgerError(
+                f"--entry-none declares that {repo} has merged no pull request, "
+                f"but this ledger already holds {len(state['rows'])} row(s) for "
+                "it. Name the oldest merged pull request's own oldest "
+                "first-parent commit with --entry instead."
+            )
+        batch = select_direct(
+            state, walk, count, start=start, end=end, entry=entry, entry_none=entry_none
+        )
+        if batch["report"] is not None:
+            held = _report_name_held_on_disk(root, batch["report"])
+            if held is not None:
+                raise LedgerError(
+                    f"the report this batch would write, {batch['report']}, is "
+                    f"already taken on disk at {held}; a direct batch never "
+                    "overwrites one. Review a different range, or move the "
+                    "existing report aside and say so."
+                )
+        written = None
+        if handoff["adopted"] is not None:
+            document["repositories"][repo] = _validated_repository(
+                state, f"the ledger handed off for {repo}"
+            )
+            written = publish_document(root, document)
+        return {
+            "status": "selected" if batch["selected"] else "nothing-to-review",
+            "repo": repo,
+            "document": None if written is None else str(written),
+            "handoff": handoff["adopted"],
+            "batch": batch,
+        }
+
+
+def _report_name_held_on_disk(root, report: str):
+    """Where this report name is already held in the worktree, or `None`.
+
+    The worktree's half of requirement 4's refusal, and the half that has to
+    be asked here: a batch writes its report itself, so by the time `record`
+    reads it the name is held either way, and a file that was already there is
+    one this batch would have overwritten. `_direct_report_bytes` asks the
+    other half -- the ledger's own list of earlier batches, which survives a
+    report somebody moved out of the worktree -- at the moment it records.
+    """
+    path = confined(root, Path(root) / report)
+    require_reachable(root, path)
+    return str(path) if _name_is_taken(path) else None
+
+
+def direct_record(
+    root,
+    repo: str,
+    walk: list,
+    reviewed: list,
+    excluded=(),
+    report=None,
+    lock_wait: float = None,
+) -> dict:
+    """Complete a direct batch: the progress, its report, and one checkpoint commit.
+
+    The checkpoint is the same path-scoped commit a PR record makes -- built in
+    a private index read from the branch's own head, carrying the ledger and
+    this batch's report and nothing else, and never pushed. An unrelated dirty
+    or staged file in the worktree is therefore not in it.
+
+    Refused before anything is written for a batch that reviewed nothing, a
+    commit absent from the walk, a report whose name does not describe this
+    batch, a report the ledger already names, and a report that was never
+    written. Every one of those leaves the ledger and the branch as they were.
+    """
+    if not REPO_RE.match(str(repo)):
+        raise LedgerError(f"{repo!r} is not an owner/name repository identity.")
+    _require_recordable_batch(walk, reviewed, excluded)
+    with repository_lock(root, lock_wait) as common:
+        target = _checkpoint_target(root)
+        document, state = _direct_state(root, repo)
+        handoff = adopt_cursor_direct(root, repo, state, walk)
+        state = handoff["state"]
+        updated = record_direct(state, walk, reviewed, excluded)
+        files = {}
+        recorded_report = None
+        if report is not None:
+            recorded_report = _direct_report_bytes(
+                root, updated, walk, reviewed, report, files
+            )
+        at = datetime.fromtimestamp(time.time(), timezone.utc).strftime(TIMESTAMP_FORMAT)
+        if recorded_report is not None:
+            updated["direct"]["reports"].append(dict(recorded_report, at=at))
+        document["repositories"][repo] = _validated_repository(
+            updated, f"the ledger recorded for {repo}"
+        )
+        files[LEDGER_RELATIVE_PATH] = render_document(document).encode("utf-8")
+        message = f"project-review: record {repo} direct batch"
+        ledger_path = confined(root, document_path(root))
+        # Names this invocation's private checkpoint index and nothing else.
+        # A direct batch holds no lease, so there is no owner token to name it
+        # with, and two concurrent runs under one lock is not a thing that
+        # happens -- but a fixed name would still be one file two worktrees of
+        # the same repository share.
+        index_name = secrets.token_hex(8)
+        try:
+            checkpoint, blobs = _checkpoint_commit(
+                root, common, target, files, message, index_name
+            )
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the direct checkpoint commit could not be built ({error}); "
+                f"nothing was published and the ledger at {ledger_path} was not "
+                "written."
+            ) from error
+        try:
+            _publish_checkpoint(root, target, checkpoint, message)
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the direct checkpoint could not be published ({error}); the "
+                f"branch was not moved and the ledger at {ledger_path} was not "
+                "written."
+            ) from error
+        try:
+            _stage_checkpoint(root, blobs)
+            written = publish_document(root, document)
+        except LedgerError as error:
+            raise CheckpointFailed(
+                f"the checkpoint {checkpoint} is on {target['branch']}, but the "
+                f"ledger at {ledger_path} was not written ({error}). Record "
+                "again to complete the batch.",
+                published=checkpoint,
+            ) from error
+        position = {sha: index for index, sha in enumerate(walk)}
+        return {
+            "status": "recorded",
+            "repo": repo,
+            "handoff": handoff["adopted"],
+            # Newest-first, which is the order the batch was taken in and the
+            # order a reader checks it against the walk in.
+            "reviewed": sorted(resolve_shas(reviewed, walk), key=position.get),
+            "excluded": sorted(resolve_shas(list(excluded), walk), key=position.get),
+            "frontier": updated["direct"]["endpoint"],
+            "report": None if recorded_report is None else recorded_report["path"],
+            "document": str(written),
+            "checkpoint": {
+                "commit": checkpoint,
+                "branch": target["branch"],
+                "parent": target["parent"],
+                "paths": sorted(blobs),
+            },
+        }
+
+
+def _direct_report_bytes(root, state: dict, walk: list, reviewed, report: str, files: dict):
+    """This batch's report, proven to be its own name and its own bytes.
+
+    The name is derived here rather than accepted: it is the batch's newest and
+    oldest reviewed commit abbreviated, which is the whole of what a direct
+    report filename has ever meant, and a report named for some other range
+    would claim coverage of commits this batch did not read.
+    """
+    resolved = [_resolved_direct_or_raise(sha, walk, "reviewed") for sha in reviewed]
+    if not resolved:
+        raise LedgerError(
+            "a direct batch that reviewed nothing writes no report; a report "
+            "names the range its batch read."
+        )
+    position = {sha: index for index, sha in enumerate(walk)}
+    newest = min(resolved, key=lambda sha: position[sha])
+    oldest = max(resolved, key=lambda sha: position[sha])
+    expected = direct_report_path_for(newest, oldest)
+    if report != expected:
+        raise LedgerError(
+            f"--report {report} does not name this batch; the commits it "
+            f"reviewed run {newest} to {oldest}, so its report is {expected}."
+        )
+    if any(entry["path"] == expected for entry in state["direct"]["reports"]):
+        raise LedgerError(
+            f"{expected} is already recorded in this ledger as an earlier "
+            "direct batch's report; a batch never overwrites one."
+        )
+    path = confined(root, Path(root) / expected)
+    require_reachable(root, path)
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as error:
+        raise LedgerError(
+            f"--report {expected} was not written; record names a report that "
+            "exists, and a clean batch names none at all."
+        ) from error
+    except OSError as error:
+        raise LedgerError(f"--report {expected} could not be looked up ({error}).") from error
+    if not stat.S_ISREG(mode):
+        raise LedgerError(
+            f"--report {expected} is not a regular file; the checkpoint commits "
+            "the bytes the report holds, and a link or a directory holds none."
+        )
+    try:
+        files[expected] = path.read_bytes()
+    except OSError as error:
+        raise LedgerError(f"--report {expected} could not be read ({error}).") from error
+    return {"path": expected, "newest": newest[:DIRECT_REPORT_ABBREVIATION],
+            "oldest": oldest[:DIRECT_REPORT_ABBREVIATION]}
+
+
+# --------------------------------------------------------------------------
 # Command line
 
 
@@ -4760,6 +5969,29 @@ def read_inventory(stream=None) -> dict:
         ) from error
 
 
+def _optional_report(raw):
+    """`--report`, with an unset shell variable read as the flag being absent.
+
+    The asset spells one recording command for both kinds of batch, so a clean
+    one reaches this with `--report ""`. Without this, `argparse` hands that
+    through as the empty string, `direct_record` reads a value as a report
+    requested, and the batch is refused for a name that describes no range --
+    which is every clean batch the canonical command runs.
+
+    The same rule `--start`, `--end` and `--entry` already take: an empty
+    string is a variable the caller did not set, not a value it set to
+    nothing.
+    """
+    return raw.strip() if raw and raw.strip() else None
+
+
+def _one_commit(raw, refusal: str):
+    values = _commit_list(raw)
+    if len(values) > 1:
+        raise LedgerError(refusal)
+    return values[0] if values else None
+
+
 def _emit(payload) -> int:
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
@@ -4797,6 +6029,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     selector.add_argument("--root", required=True)
     selector.add_argument("--repo", required=True)
+
+    direct_selector = subparsers.add_parser(
+        "direct-select",
+        help=(
+            "read the complete first-parent walk from standard input and "
+            "choose the next direct-commit batch beneath the frontier"
+        ),
+    )
+    direct_selector.add_argument("--root", required=True)
+    direct_selector.add_argument("--repo", required=True)
+    direct_selector.add_argument("--count", type=int, default=12)
+    direct_selector.add_argument("--start", help="an explicit starting commit")
+    direct_selector.add_argument(
+        "--end",
+        help=(
+            "the older endpoint of an explicit range; the batch stops there "
+            "whatever the count still had left"
+        ),
+    )
+    _add_entry_arguments(direct_selector)
+
+    direct_recorder = subparsers.add_parser(
+        "direct-record",
+        help=(
+            "fold a completed direct-commit batch into the ledger and "
+            "checkpoint it with its report as one local commit"
+        ),
+    )
+    direct_recorder.add_argument("--root", required=True)
+    direct_recorder.add_argument("--repo", required=True)
+    direct_recorder.add_argument(
+        "--reviewed", default="", help="the commits this batch reviewed"
+    )
+    direct_recorder.add_argument(
+        "--exclude", default="", help="commits the user excluded from every later batch"
+    )
+    direct_recorder.add_argument(
+        "--report",
+        help=(
+            "the report this batch wrote, which direct-select named; a clean "
+            "batch passes none"
+        ),
+    )
 
     claimer = subparsers.add_parser(
         "claim",
@@ -4886,6 +6161,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_entry_arguments(command) -> None:
+    """How a first direct batch, which has no frontier to resume from, is positioned.
+
+    Two flags rather than one optional commit, because the absence of an entry
+    commit has two meanings and only one of them permits the head of the walk.
+    A complete merged-pull-request listing that named nothing is a repository
+    with no pull-request history, and a listing that was absent, failed, or came
+    back incomplete is a question nobody answered.
+    """
+    command.add_argument(
+        "--entry",
+        help=(
+            "the oldest first-parent commit the oldest merged pull request "
+            "owns; the batch begins at the commit below it"
+        ),
+    )
+    command.add_argument(
+        "--entry-none",
+        action="store_true",
+        help=(
+            "the merged-pull-request listing was established, complete, and "
+            "named none, so the walk's head is the entry"
+        ),
+    )
+
+
+def _commit_list(raw) -> list:
+    if not raw:
+        return []
+    values = [item for item in re.split(r"[,\s]+", raw.strip()) if item]
+    for value in values:
+        if not ABBREVIATED_SHA_RE.match(value):
+            raise LedgerError(f"{value!r} is not a commit SHA.")
+    return values
+
+
 def _add_claim_identity_arguments(command) -> None:
     command.add_argument("--root", required=True)
     command.add_argument("--repo", required=True)
@@ -4945,6 +6256,34 @@ def main(argv=None) -> int:
 
     if args.command == "select":
         return _emit(select(args.root, args.repo, read_inventory()))
+
+    if args.command == "direct-select":
+        return _emit(
+            direct_select(
+                args.root,
+                args.repo,
+                read_walk(),
+                args.count,
+                start=_one_commit(args.start, "a batch starts at one commit, not several."),
+                end=_one_commit(args.end, "a range ends at one commit, not several."),
+                entry=_one_commit(
+                    args.entry, "one entry commit positions a first batch, not several."
+                ),
+                entry_none=args.entry_none,
+            )
+        )
+
+    if args.command == "direct-record":
+        return _emit(
+            direct_record(
+                args.root,
+                args.repo,
+                read_walk(),
+                _commit_list(args.reviewed),
+                excluded=_commit_list(args.exclude),
+                report=_optional_report(args.report),
+            )
+        )
 
     if args.command == "claim":
         # The signal is checked before standard input is read, so a claim that
