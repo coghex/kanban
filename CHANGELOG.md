@@ -15,6 +15,19 @@ created above it.
 
 ### Unreleased
 
+- `autosolve` no longer tells the user that the merge after approval is a
+  manual step they take, and no longer closes by inviting `finalize`
+  unconditionally. `docs/agent-workflow-contract.md` §2.10 gives ordinary merge
+  authority to the PR drainer and makes manual finalization the user's own
+  fallback for when that drainer cannot be used; where the drainer runs, the
+  old closing line pointed the user away from the thing that would have merged
+  the pull request. All five assets now state that division, note that the
+  drainer is optional so approval promises no merge, and close the approved run
+  with `— this run merges nothing.`; the Grok, Kimi, and Google bundles, which
+  ship no finalize workflow at all, say so instead of naming one. The
+  prohibition is unchanged: the workflow still merges nothing, labels nothing,
+  runs no finalize, and drives no drainer. The Claude bundle is 1.60.0, the
+  Codex bundle 1.59.0, Grok 1.5.0, Kimi 1.4.0, and Google 1.2.0.
 - `draft-report` lands the approved report on the approval that created it,
   through the owning repository's own documentation-landing lane (`push-docs`
   running `tools/docs_land.sh`), and reports the landing commit or the helper's

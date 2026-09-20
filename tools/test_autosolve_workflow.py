@@ -34,15 +34,19 @@ The remaining classes pin what the review of this issue named as the
 workflow's central preserved behaviors: the five-round maximum and the
 first-review-versus-rereview transition (`ReviewLoopTests`), the omission of
 both self-review flags from every executable fence (`SelfReviewFlagTests`),
-stopping at approval without finalizing (`TerminalBehaviorTests`), the
+stopping at approval without finalizing, and saying about the merge that
+follows exactly what `docs/agent-workflow-contract.md` §2.10 says
+(`TerminalBehaviorTests`), the
 trusted-comment boundary carried verbatim from solve (`TrustedCommentTests`),
 the worktree-root fallback reconciled against this repository
 (`WorktreeRootTests`), and one repository identity on every call
 (`RepositoryScopeTests`).
 
-Every rule is measured over BOTH rendered assets, and each class carries a
-control that plants the failure it is meant to catch: a rule matching
-everything would otherwise pass while asserting nothing.
+Every rule is measured over BOTH rendered assets -- and the terminal rules over
+the authored source besides, since rendering is exact and a rule held only
+against the renderings would pass on a source whose next render undoes it. Each
+class carries a control that plants the failure it is meant to catch: a rule
+matching everything would otherwise pass while asserting nothing.
 """
 
 from __future__ import annotations
@@ -180,6 +184,32 @@ def flat(text: str) -> str:
     """`text` with every run of whitespace collapsed to one space, so a phrase
     is found whether or not the source wrapped it across lines."""
     return re.sub(r"\s+", " ", text)
+
+
+def neutral_terminal_texts() -> dict[str, str]:
+    """Every autosolve asset's text in the source's own `{{cmd:}}` spelling,
+    whitespace collapsed, keyed by tracked path.
+
+    The authored source sits beside the two renderings deliberately. Rendering
+    is exact and `--check` enforces it, so a terminal rule measured only over
+    the renderings would still pass on a source whose next render reintroduces
+    what the rule forbids -- and the source is the file an editor reaches for.
+    """
+    texts = {SOURCE: flat(read(SOURCE))}
+    for relative_path, brand in BRAND_OF.items():
+        texts[relative_path] = flat(neutralize(read(relative_path), brand))
+    return texts
+
+
+# The two claims issue #699 retired, in the source's neutral spelling. Both
+# contradicted `docs/agent-workflow-contract.md` §2.10: the first called the
+# merge the user's own step when the drainer owns it, and the second closed by
+# inviting `finalize` with no mention of the drainer-unavailable premise §2.10
+# requires. Written flat because both were wrapped across lines in the source.
+RETIRED_TERMINAL_PHRASES = (
+    "the merge is a deliberate manual step the user takes",
+    "run {{cmd:finalize}} when ready.",
+)
 
 
 def bash_fences(text: str) -> list[str]:
@@ -914,28 +944,97 @@ class ReviewLoopTests(unittest.TestCase):
 
 
 class TerminalBehaviorTests(unittest.TestCase):
-    """Requirement 7's first owner decision: the run stops at
-    `reviewed:approve` and does not auto-run finalize."""
+    """Requirement 7's first owner decision, as issue #699 corrected it: the
+    run stops at `reviewed:approve`, and what it tells the user about the merge
+    that follows matches `docs/agent-workflow-contract.md` §2.10 rather than
+    contradicting it.
 
-    def test_both_renderings_stop_at_approval_without_finalizing(self):
-        for relative_path, brand in BRAND_OF.items():
-            squashed = flat(neutralize(read(relative_path), brand))
+    §2.10 gives ordinary merge authority to `tools/drain_prs.py` and makes
+    manual finalization the user's own fallback for when that drainer cannot be
+    used. The assets used to call the merge "a deliberate manual step the user
+    takes" and close by inviting `finalize` unconditionally, which pointed a
+    user whose drainer was running away from the thing that would have merged
+    the pull request. What does not change is the prohibition: this workflow
+    still merges nothing, labels nothing, runs no finalize, and drives no
+    drainer.
+
+    Measured over the authored source as well as both renderings. Rendering is
+    exact, so a rule held only against the two renderings would pass on a
+    source whose next render puts the defect straight back."""
+
+    def test_every_asset_stops_at_approval_without_finalizing(self):
+        for relative_path, squashed in neutral_terminal_texts().items():
             with self.subTest(asset=relative_path):
                 self.assertIn(
-                    "This workflow never runs {{cmd:finalize}} and never merges",
+                    "This workflow never merges, never labels, never runs "
+                    "{{cmd:finalize}}, and never controls the drainer.",
                     squashed,
                 )
-                self.assertIn("the merge is a deliberate manual step", squashed)
                 self.assertIn("Stop at approval; never merge or finalize.", squashed)
 
+    def test_every_asset_states_the_contract_division_of_merge_authority(self):
+        for relative_path, squashed in neutral_terminal_texts().items():
+            with self.subTest(asset=relative_path):
+                self.assertIn(
+                    "Where a repository's PR drainer is installed, that drainer "
+                    "owns merging eligible approved pull requests",
+                    squashed,
+                )
+                # The drainer is optional, so no asset may promise a merge.
+                self.assertIn(
+                    "it is optional, and a repository may have none, so approval "
+                    "here promises no merge at all",
+                    squashed,
+                )
+                self.assertIn(
+                    "Manual finalization is the user's own fallback for when the "
+                    "drainer cannot be used",
+                    squashed,
+                )
+
+    def test_no_asset_assigns_the_merge_to_the_user_or_invites_finalize(self):
+        for relative_path, squashed in neutral_terminal_texts().items():
+            for phrase in RETIRED_TERMINAL_PHRASES:
+                with self.subTest(asset=relative_path, phrase=phrase):
+                    self.assertNotIn(phrase, squashed)
+
+    def test_the_retired_wording_rule_catches_a_planted_restoration(self):
+        # The control, and the reason every rule above is measured over `flat`
+        # text: the source wrapped BOTH defects across lines -- "deliberate
+        # manual\nstep" and a closing line broken after "run" -- so a
+        # line-oriented search finds neither and would pass while asserting
+        # nothing. Each restoration is planted back wrapped.
+        for planted, caught in (
+            (
+                "never merges: the merge is a deliberate manual\n"
+                "step the user takes, and nothing an approval produces here\n"
+                "converts it into an automatic one.",
+                "the merge is a deliberate manual step the user takes",
+            ),
+            (
+                "PR #<pr> approved after <k> inline review round(s) — run\n"
+                "{{cmd:finalize}} when ready.",
+                "run {{cmd:finalize}} when ready.",
+            ),
+        ):
+            squashed = flat(f"{read(SOURCE)}\n{planted}\n")
+            with self.subTest(planted=planted):
+                self.assertEqual(
+                    [
+                        phrase
+                        for phrase in RETIRED_TERMINAL_PHRASES
+                        if phrase in squashed
+                    ],
+                    [caught],
+                )
+
     def test_the_closing_lines_are_the_four_the_workflow_declares(self):
-        for relative_path, brand in BRAND_OF.items():
-            squashed = flat(neutralize(read(relative_path), brand))
+        for relative_path, squashed in neutral_terminal_texts().items():
             with self.subTest(asset=relative_path):
                 self.assertIn("End with exactly one of:", squashed)
                 for line in (
-                    "PR #<pr> approved after <k> inline review round(s) — run "
-                    "{{cmd:finalize}} when ready.",
+                    "PR #<pr> approved after <k> inline review round(s) — this "
+                    "run merges nothing.",
                     "PR #<pr> still reviewed:changes after 5 rounds — needs your "
                     "input.",
                     "PR #<pr> review publication failed in round <k> — needs your "
@@ -945,11 +1044,11 @@ class TerminalBehaviorTests(unittest.TestCase):
                 ):
                     self.assertIn(line, squashed)
 
-    def test_the_finalize_reference_is_a_handoff_and_not_an_invocation(self):
-        # The one mention of finalize outside the prohibition is the closing
-        # line handing the merge back to the user, so it must never appear in
+    def test_the_finalize_reference_is_prose_and_not_an_invocation(self):
+        # Finalize is named only to say this workflow never runs it and that
+        # invoking it is the user's own fallback, so it must never appear in
         # something an agent executes.
-        for relative_path in RENDERED_ASSETS:
+        for relative_path in (SOURCE, *RENDERED_ASSETS):
             for fence in bash_fences(read(relative_path)):
                 with self.subTest(asset=relative_path):
                     self.assertNotIn("finalize", fence)

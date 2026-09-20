@@ -5,8 +5,10 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 The Kimi bundle is not a Kanban-spawned provider. It packages /solve and
 /autosolve so a Kimi session (the Copilot CLI running a Kimi model) can open
 a kimi-origin pull request and obtain a Codex review without invoking Claude.
-These tests pin that origin, that reviewer, the vendored helpers, and the
-self-review prohibition.
+These tests pin that origin, that reviewer, the vendored helpers, the
+self-review prohibition, and the terminal wording, which must assign merge
+authority where `docs/agent-workflow-contract.md` §2.10 assigns it and must
+name no workflow this bundle does not ship.
 """
 
 from __future__ import annotations
@@ -157,6 +159,28 @@ COPILOT_CLI = shutil.which("copilot")
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 
+# Issue #699's rule, as a function so the planted control below drives exactly
+# what the assets are held to. Both sigils: these three assets were hand-copied
+# from the Claude rendering, and a Codex-spelled `$finalize` names a workflow
+# this bundle ships just as little as `/finalize` does.
+FINALIZE_REFERENCE_RE = re.compile(r"[/$]finalize\b")
+
+
+def finalize_references(text: str) -> list[str]:
+    return FINALIZE_REFERENCE_RE.findall(text)
+
+
+# The two claims issue #699 retired from every autosolve asset. Both
+# contradicted `docs/agent-workflow-contract.md` §2.10, which gives ordinary
+# merge authority to the PR drainer and makes manual finalization the user's
+# own fallback for when that drainer cannot be used. Written flat, and matched
+# against whitespace-collapsed text, because the source wrapped both across
+# lines -- a line-oriented search finds neither.
+RETIRED_TERMINAL_PHRASES = (
+    "the merge is a deliberate manual step the user takes",
+    "run /finalize when ready.",
+)
+
 
 class PluginLayoutTests(unittest.TestCase):
     def test_the_tracked_bundle_inventory_is_exact(self):
@@ -181,10 +205,10 @@ class PluginLayoutTests(unittest.TestCase):
         self.assertEqual(names, ["kanban"])
         self.assertEqual(document["plugins"][0]["source"], "./plugins/kanban")
 
-    def test_the_plugin_manifest_declares_version_1_3_0(self):
+    def test_the_plugin_manifest_declares_version_1_4_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.3.0")
+        self.assertEqual(document["version"], "1.4.0")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -404,6 +428,72 @@ class AutosolveReviewerTests(unittest.TestCase):
         self.assertIn('installed / marketplace / plugin', text)
         self.assertIn('installed / "_direct"', text)
         self.assertIn(KIMI_COORDINATOR_PYTHON, text)
+
+
+class AutosolveTerminalBehaviorTests(unittest.TestCase):
+    """Issue #699. This bundle ships exactly `solve` and `autosolve`, so
+    `/finalize` is not a workflow a Kimi session can run -- and the
+    hand-copied §7 both named it and called the merge "a deliberate manual step
+    the user takes", which contradicts `docs/agent-workflow-contract.md` §2.10.
+    The prohibition is unchanged: this workflow still merges nothing, labels
+    nothing, finalizes nothing, and drives no drainer."""
+
+    def squashed(self) -> str:
+        return re.sub(r"\s+", " ", AUTOSOLVE.read_text(encoding="utf-8"))
+
+    def test_the_prohibition_and_the_contract_division_are_both_stated(self):
+        squashed = self.squashed()
+        self.assertIn("at approval; never merge or finalize.", squashed)
+        self.assertIn(
+            "This workflow never merges, never labels, never finalizes, and "
+            "never controls the drainer.",
+            squashed,
+        )
+        self.assertIn(
+            "Where a repository's PR drainer is installed, that drainer owns "
+            "merging eligible approved pull requests",
+            squashed,
+        )
+        # The drainer is optional, so the asset may not promise a merge.
+        self.assertIn(
+            "it is optional, and a repository may have none, so approval here "
+            "promises no merge at all",
+            squashed,
+        )
+        self.assertIn(
+            "Manual finalization is the user's own fallback for when the "
+            "drainer cannot be used, and this bundle ships no such workflow "
+            "for this session to run.",
+            squashed,
+        )
+
+    def test_the_approved_closing_line_directs_the_reader_to_no_merge(self):
+        squashed = self.squashed()
+        self.assertIn(
+            "PR #<pr> approved after <k> inline review round(s) — this run "
+            "merges nothing.",
+            squashed,
+        )
+        for phrase in RETIRED_TERMINAL_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, squashed)
+
+    def test_the_asset_names_no_finalize_workflow_this_bundle_lacks(self):
+        # The shipped set is derived, not restated: were this bundle ever to
+        # gain a finalize skill, this test would have to be revisited rather
+        # than silently keep forbidding a workflow that had become real.
+        shipped = plugin_bundle_gate.tracked_skill_names(REPO_ROOT, SKILLS_PREFIX)
+        self.assertNotIn("finalize", shipped)
+        self.assertEqual(
+            finalize_references(AUTOSOLVE.read_text(encoding="utf-8")), []
+        )
+
+    def test_the_unshipped_reference_rule_detects_a_planted_mention(self):
+        # The control for the negative assertion above.
+        planted = (
+            AUTOSOLVE.read_text(encoding="utf-8") + "\nrun /finalize when ready.\n"
+        )
+        self.assertEqual(finalize_references(planted), ["/finalize"])
 
 
 class AutosolveCoordinatorLookupTests(unittest.TestCase):

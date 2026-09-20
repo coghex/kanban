@@ -327,7 +327,7 @@ COMMAND_SOURCES = (
             "other vendored workflows as its own steps rather than merely "
             "naming them -- {{cmd:solve}} for the implementation, then "
             "{{cmd:pr-review}} and {{cmd:pr-rereview}} for up to five review "
-            "rounds, handing the merge back through {{cmd:finalize}} -- which "
+            "rounds, stopping at approval and merging nothing -- which "
             "is why it is the critical path within phase 3 and the most "
             "exposed to the others' names changing. Unusually "
             "for this arc D-7 resolved it in the Claude copy's favour: the "

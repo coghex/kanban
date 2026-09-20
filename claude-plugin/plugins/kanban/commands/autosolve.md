@@ -288,14 +288,18 @@ Stop and ask if feedback is unclear, contradictory, or needs a product
 decision. Stop after five rounds.
 
 Approval is where this run ends, not a pause before a merge. This workflow
-never runs /finalize and never merges: the merge is a deliberate manual
-step the user takes, and nothing an approval produces here converts it into an
-automatic one.
+never merges, never labels, never runs /finalize, and never controls the
+drainer. Where a repository's PR drainer is installed, that drainer owns
+merging eligible approved pull requests; it is optional, and a repository may
+have none, so approval here promises no merge at all. Manual finalization is
+the user's own fallback for when the drainer cannot be used, and it is the
+user's to invoke in the turn they ask for it. Nothing an approval produces here
+converts either into something this run sets in motion.
 
 End with exactly one of:
 
 ```text
-PR #<pr> approved after <k> inline review round(s) — run /finalize when ready.
+PR #<pr> approved after <k> inline review round(s) — this run merges nothing.
 PR #<pr> still reviewed:changes after 5 rounds — needs your input.
 PR #<pr> review publication failed in round <k> — needs your input.
 Issue #<issue> landed directly as <commit> — documentation-only, no pull request needed.
