@@ -160,9 +160,15 @@ if os.path.lexists(settings):
                     f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
                 )
             finish(Path(recorded) / "plugins" / plugin / relative)
-        elif kind not in ("git", "github"):
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
                 f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
+            )
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
             )
 installed = Path(copilot_home) / "installed-plugins"
 def installs_this_bundle(name):
@@ -236,9 +242,15 @@ if os.path.lexists(settings):
                     f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
                 )
             finish(Path(recorded) / "plugins" / plugin / relative)
-        elif kind not in ("git", "github"):
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
                 f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
+            )
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
             )
 installed = Path(copilot_home) / "installed-plugins"
 def installs_this_bundle(name):
@@ -1054,9 +1066,14 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_a_remote_kimi_marketplace_source_reaches_the_copied_layouts(self):
-        # Requirement 4: `git` and `github` are both recognized recorded kinds,
-        # and neither may terminate discovery as the shipped locator did.
-        for kind in ("git", "github"):
+        # Requirement 4: a recognized remote kind may not terminate discovery
+        # as the shipped locator did. `github` locates its marketplace by
+        # `repo` and the two URL kinds by `url`.
+        for kind, record in (
+            ("github", {"repo": "coghex/kanban"}),
+            ("git", {"url": "https://example.com/marketplace.git"}),
+            ("url", {"url": "ssh://git@example.com/marketplace.git"}),
+        ):
             with self.subTest(kind=kind):
                 home = self.root / f"kimi-remote-{kind}"
                 expected = self.install_kimi_direct(home)
@@ -1064,15 +1081,40 @@ class InstalledResolutionTests(unittest.TestCase):
                     home,
                     {
                         "extraKnownMarketplaces": {
-                            "kanban-kimi": {
-                                "source": {"source": kind, "repo": "coghex/kanban"}
-                            }
+                            "kanban-kimi": {"source": {"source": kind, **record}}
                         }
                     },
                 )
                 proc = self.run_kimi_locator("", str(home / ".copilot"))
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_malformed_remote_kimi_source_refuses_without_fallback(self):
+        # A recognized kind is not by itself a well-formed record: one naming
+        # no marketplace to have been installed from refuses terminally rather
+        # than falling through to a copied install.
+        for name, record in (
+            ("github-without-repo", {"source": "github"}),
+            ("github-repo-not-a-string", {"source": "github", "repo": ["x"]}),
+            ("github-blank-repo", {"source": "github", "repo": "   "}),
+            ("github-carrying-only-a-url", {"source": "github", "url": "https://x"}),
+            ("git-without-url", {"source": "git"}),
+            ("git-url-not-a-string", {"source": "git", "url": 7}),
+            ("url-without-url", {"source": "url"}),
+        ):
+            with self.subTest(case=name):
+                home = self.root / f"kimi-malformed-remote-{name}"
+                self.install_kimi_direct(home)
+                self.write_kimi_settings(
+                    home,
+                    {"extraKnownMarketplaces": {"kanban-kimi": {"source": record}}},
+                )
+                proc = self.run_kimi_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(
+                    f"for the {record['source']} kanban-kimi source", proc.stderr
+                )
+                self.assertEqual(proc.stdout.strip(), "")
 
     def test_an_unsupported_kimi_source_kind_refuses_without_fallback(self):
         home = self.root / "kimi-unsupported-source"
@@ -1392,9 +1434,14 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_a_remote_google_marketplace_source_reaches_the_copied_layouts(self):
-        # Requirement 4: `git` and `github` are both recognized recorded kinds,
-        # and neither may terminate discovery as the shipped locator did.
-        for kind in ("git", "github"):
+        # Requirement 4: a recognized remote kind may not terminate discovery
+        # as the shipped locator did. `github` locates its marketplace by
+        # `repo` and the two URL kinds by `url`.
+        for kind, record in (
+            ("github", {"repo": "coghex/kanban"}),
+            ("git", {"url": "https://example.com/marketplace.git"}),
+            ("url", {"url": "ssh://git@example.com/marketplace.git"}),
+        ):
             with self.subTest(kind=kind):
                 home = self.root / f"google-remote-{kind}"
                 expected = self.install_google_direct(home)
@@ -1402,15 +1449,40 @@ class InstalledResolutionTests(unittest.TestCase):
                     home,
                     {
                         "extraKnownMarketplaces": {
-                            "kanban-google": {
-                                "source": {"source": kind, "repo": "coghex/kanban"}
-                            }
+                            "kanban-google": {"source": {"source": kind, **record}}
                         }
                     },
                 )
                 proc = self.run_google_locator("", str(home / ".copilot"))
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_malformed_remote_google_source_refuses_without_fallback(self):
+        # A recognized kind is not by itself a well-formed record: one naming
+        # no marketplace to have been installed from refuses terminally rather
+        # than falling through to a copied install.
+        for name, record in (
+            ("github-without-repo", {"source": "github"}),
+            ("github-repo-not-a-string", {"source": "github", "repo": ["x"]}),
+            ("github-blank-repo", {"source": "github", "repo": "   "}),
+            ("github-carrying-only-a-url", {"source": "github", "url": "https://x"}),
+            ("git-without-url", {"source": "git"}),
+            ("git-url-not-a-string", {"source": "git", "url": 7}),
+            ("url-without-url", {"source": "url"}),
+        ):
+            with self.subTest(case=name):
+                home = self.root / f"google-malformed-remote-{name}"
+                self.install_google_direct(home)
+                self.write_google_settings(
+                    home,
+                    {"extraKnownMarketplaces": {"kanban-google": {"source": record}}},
+                )
+                proc = self.run_google_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(
+                    f"for the {record['source']} kanban-google source", proc.stderr
+                )
+                self.assertEqual(proc.stdout.strip(), "")
 
     def test_an_unsupported_google_source_kind_refuses_without_fallback(self):
         home = self.root / "google-unsupported-source"

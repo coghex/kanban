@@ -189,10 +189,11 @@ picking either. Roots are
 identified before the coordinator is looked for, so a root missing it refuses
 instead of silently losing to a competitor. An absent settings file, one with
 no `kanban-kimi` entry, or a `kanban-kimi` entry the CLI recorded from a
-`git` or `github` source reaches that search; unreadable or malformed applicable
-settings, a malformed or unsupported recorded source kind, a relative recorded
-directory path, and a recorded tree missing the coordinator refuse without
-falling through:
+remote `github`, `git`, or `url` source reaches that search; unreadable or
+malformed applicable settings, a recorded source kind that is unsupported or
+does not carry the field that kind locates its marketplace by (`repo` for
+`github`, `url` for the other two), a relative recorded directory path, and a
+recorded tree missing the coordinator refuse without falling through:
 
 ```bash
 COORDINATOR="$(python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
@@ -241,9 +242,15 @@ if os.path.lexists(settings):
                     f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
                 )
             finish(Path(recorded) / "plugins" / plugin / relative)
-        elif kind not in ("git", "github"):
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
                 f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
+            )
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
             )
 installed = Path(copilot_home) / "installed-plugins"
 def installs_this_bundle(name):

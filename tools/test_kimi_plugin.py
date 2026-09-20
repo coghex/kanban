@@ -110,9 +110,15 @@ if os.path.lexists(settings):
                     f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
                 )
             finish(Path(recorded) / "plugins" / plugin / relative)
-        elif kind not in ("git", "github"):
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
                 f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
+            )
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
             )
 installed = Path(copilot_home) / "installed-plugins"
 def installs_this_bundle(name):
@@ -500,9 +506,16 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
     def test_a_remote_marketplace_source_reaches_the_copied_install_layouts(self):
-        # Requirement 4: `git` and `github` are both valid recorded kinds, and
-        # neither may terminate discovery the way the shipped locator did.
-        for kind in ("git", "github"):
+        # Requirement 4: a recognized remote kind may not terminate discovery
+        # the way the shipped locator did. `github` locates its marketplace by
+        # `repo` and the two URL kinds by `url`, per the CLI's plugin reference
+        # and the `source` record Copilot CLI 1.0.85 writes into its own
+        # config.json for a repository install.
+        for kind, record in (
+            ("github", {"repo": "coghex/kanban"}),
+            ("git", {"url": "https://example.com/marketplace.git"}),
+            ("url", {"url": "ssh://git@example.com/marketplace.git"}),
+        ):
             with self.subTest(kind=kind):
                 home = self.root / f"copilot-remote-{kind}"
                 expected = self.install_direct(home)
@@ -510,15 +523,40 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
                     home,
                     {
                         "extraKnownMarketplaces": {
-                            "kanban-kimi": {
-                                "source": {"source": kind, "repo": "coghex/kanban"}
-                            }
+                            "kanban-kimi": {"source": {"source": kind, **record}}
                         }
                     },
                 )
                 proc = self.run_locator("", str(home / ".copilot"))
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_malformed_remote_marketplace_source_refuses_without_fallback(self):
+        # A recognized kind is not by itself a well-formed record: one naming
+        # no marketplace to have been installed from is malformed, and refuses
+        # terminally rather than falling through to a copied install.
+        for name, record in (
+            ("github-without-repo", {"source": "github"}),
+            ("github-repo-not-a-string", {"source": "github", "repo": ["x"]}),
+            ("github-blank-repo", {"source": "github", "repo": "   "}),
+            ("github-carrying-only-a-url", {"source": "github", "url": "https://x"}),
+            ("git-without-url", {"source": "git"}),
+            ("git-url-not-a-string", {"source": "git", "url": 7}),
+            ("url-without-url", {"source": "url"}),
+        ):
+            with self.subTest(case=name):
+                home = self.root / f"copilot-malformed-remote-{name}"
+                self.install_direct(home)
+                self.write_settings(
+                    home,
+                    {"extraKnownMarketplaces": {"kanban-kimi": {"source": record}}},
+                )
+                proc = self.run_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(
+                    f"for the {record['source']} kanban-kimi source", proc.stderr
+                )
+                self.assertEqual(proc.stdout.strip(), "")
 
     def test_an_unsupported_marketplace_source_kind_refuses_without_fallback(self):
         home = self.root / "copilot-unsupported-source"
@@ -730,6 +768,38 @@ class AutosolveCoordinatorLookupTests(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), "")
 
 
+# Output substrings that mean the repository install could not be attempted —
+# no network, no credential, or GitHub refusing service — as opposed to the
+# install contract having changed. Only these turn that one CLI-dependent test
+# into a skip; every other failure of every CLI command below is a failure.
+UNAVAILABLE_SIGNALS = (
+    "could not resolve",
+    "getaddrinfo",
+    "enotfound",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "network",
+    "offline",
+    "unreachable",
+    "connection refused",
+    "timed out",
+    "certificate",
+    "tls",
+    "proxy",
+    "authentication",
+    "unauthorized",
+    "credential",
+    "not logged in",
+    "rate limit",
+    " 401",
+    " 403",
+    " 429",
+    " 502",
+    " 503",
+    " 504",
+)
+
 class RealCopilotInstallTests(unittest.TestCase):
     """Produce the copied install with the real CLI, never by hand.
 
@@ -738,6 +808,12 @@ class RealCopilotInstallTests(unittest.TestCase):
     the entry names `AutosolveCoordinatorLookupTests` builds its
     CLI-independent fixtures from, so a passing suite can never assert
     discovery against a directory no install produces.
+
+    Once the CLI is present, a failing install is a failure, not a skip: a
+    rejected bundle path or a changed install contract is exactly what these
+    exist to catch. The one exception is the repository install, which needs
+    the network and a credential; it skips only when the CLI's own output
+    carries one of `UNAVAILABLE_SIGNALS`, and fails on anything else.
     """
 
     def setUp(self):
@@ -779,12 +855,26 @@ class RealCopilotInstallTests(unittest.TestCase):
             timeout=60,
         )
 
+    def unavailable(self, proc):
+        """The signal, if the CLI could not attempt the install at all."""
+        output = f"{proc.stdout}\n{proc.stderr}".lower()
+        return next(
+            (signal for signal in UNAVAILABLE_SIGNALS if signal in output), None
+        )
+
     def test_a_repository_direct_install_produces_the_pinned_entry_and_resolves(self):
         proc = self.install("coghex/kanban:kimi-plugin/plugins/kanban")
         if proc.returncode != 0:
+            signal = self.unavailable(proc)
+            report = proc.stderr.strip() or proc.stdout.strip()
+            if signal is None:
+                self.fail(
+                    "copilot plugin install failed for a reason that is not the "
+                    f"repository being unreachable: {report}"
+                )
             self.skipTest(
-                "copilot plugin install could not reach the repository: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
+                f"copilot plugin install could not reach the repository ({signal!r}): "
+                f"{report}"
             )
         entries = sorted(
             child.name
@@ -807,11 +897,12 @@ class RealCopilotInstallTests(unittest.TestCase):
 
     def test_a_local_direct_install_produces_a_bare_entry_the_lookup_refuses(self):
         proc = self.install(str(KIMI_PLUGIN))
-        if proc.returncode != 0:
-            self.skipTest(
-                "copilot plugin install rejected the local bundle path: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
-            )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            "copilot plugin install rejected the local bundle path: "
+            f"{proc.stderr.strip() or proc.stdout.strip()}",
+        )
         entries = sorted(
             child.name
             for child in (self.home / "installed-plugins" / "_direct").iterdir()
@@ -835,11 +926,12 @@ class RealCopilotInstallTests(unittest.TestCase):
             timeout=300,
             stdin=subprocess.DEVNULL,
         )
-        if marketplace.returncode != 0:
-            self.skipTest(
-                "copilot plugin marketplace add failed: "
-                f"{marketplace.stderr.strip() or marketplace.stdout.strip()}"
-            )
+        self.assertEqual(
+            marketplace.returncode,
+            0,
+            "copilot plugin marketplace add failed: "
+            f"{marketplace.stderr.strip() or marketplace.stdout.strip()}",
+        )
         installed = self.install("kanban@kanban-kimi")
         self.assertEqual(installed.returncode, 0, installed.stderr)
         settings = json.loads(

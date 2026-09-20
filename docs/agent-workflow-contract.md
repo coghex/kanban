@@ -116,11 +116,13 @@ everything else.
   loads). Copilot CLI 1.0.85 records that absolute root at
   `extraKnownMarketplaces.<name>.source.path`, beside a `source` value of
   `directory`; the locator appends `plugins/kanban/`. An absent settings file,
-  an object with no matching entry, and an entry the CLI recorded from a `git`
-  or `github` source all fall through, while an unreadable or non-object file,
-  a malformed applicable entry, a malformed or unsupported recorded source
-  kind, a non-absolute recorded directory path, or a recorded tree missing the
-  helper refuses without fall-through. What it falls through to is the two
+  an object with no matching entry, and an entry the CLI recorded from a remote
+  `github`, `git`, or `url` source all fall through, while an unreadable or
+  non-object file, a malformed applicable entry, a recorded source kind that is
+  unsupported or does not carry the field that kind locates its marketplace by
+  (`repo` for `github`, `url` for the other two), a non-absolute recorded
+  directory path, or a recorded tree missing the helper refuses without
+  fall-through. What it falls through to is the two
   copied layouts the CLI actually creates under
   `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`), searched as one
   candidate set: the documented marketplace layout

@@ -90,7 +90,9 @@ a `github` source naming the repository and `google-plugin/plugins/kanban`, in
 `enabledPlugins`.
 
 When no local marketplace entry applies — none recorded, or one the CLI
-recorded from a `git` or `github` source — the skills search the two copied
+recorded from a remote `github`, `git`, or `url` source, each of which must
+carry the field that kind locates its marketplace by — the skills search the
+two copied
 layouts the CLI creates, as one candidate set: the documented marketplace
 layout `$COPILOT_HOME/installed-plugins/kanban-google/kanban/`, and a direct
 install
