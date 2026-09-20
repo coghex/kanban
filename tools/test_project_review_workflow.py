@@ -1252,6 +1252,36 @@ GRAPHQL_REPOSITORY_SCOPE = '-F owner="${REPO%%/*}" -F name="${REPO##*/}"'
 REST_PATH_REPOSITORY_SCOPE = '"repos/$REPO/'
 
 # How `$REPO` is filled: from the remote, with no GitHub call of its own.
+# The asset's own global rule about how every `gh` call names the repository,
+# and the three mechanisms it names. Gated against the calls rather than merely
+# quoted: the rule is the reader's only statement of the invariant, and issue
+# #686 added a `gh api` form it did not mention, so a rule that lists fewer
+# mechanisms than the assets use is a rule the next call can quietly fall
+# outside of.
+REPOSITORY_SCOPE_RULE = (
+    "Every `gh` call below names that one identity, in one of three ways: "
+    '`-R "$REPO"` on each of the pull-request and issue reads, `$REPO`\'s own '
+    "owner and name as the query variables of the merged-pull-request "
+    "inventory, and `$REPO` as a path segment of the commit-to-pull-request "
+    "association direct mode\'s first batch takes."
+)
+
+# Each mechanism, and how a call that uses it is recognized. Every actual call
+# matches exactly one, and every one of the three is used by at least one call
+# -- so the rule cannot name a mechanism nothing uses, and no call can use a
+# mechanism the rule does not name.
+SCOPE_MECHANISMS = {
+    "-R flag": lambda tail: REPOSITORY_SCOPE in tail,
+    "graphql variables": lambda tail: (
+        tail.startswith("api graphql") and GRAPHQL_REPOSITORY_SCOPE in tail
+    ),
+    "rest path": lambda tail: (
+        tail.startswith("api ")
+        and not tail.startswith("api graphql")
+        and REST_PATH_REPOSITORY_SCOPE in tail
+    ),
+}
+
 REPOSITORY_RESOLUTION = 'REPO="$(git -C "$ROOT" remote get-url origin'
 
 # `$REPO` names the tracker; `$ROOT` names the checkout. Most of this workflow
@@ -1420,8 +1450,24 @@ DIRECT_MODE = {
         "none."
     ),
     "the oldest pull request's number is set, not assumed": (
-        "`$OLDEST_PR` is that pull request's number, read out of the listing "
-        "above and set here."
+        "`$OLDEST_PR` is the pull request's number, read out of the listing "
+        "above and set here — once for a clear minimum, and once per tied "
+        "pull request when the minimum is shared, since each of them owes its "
+        "own entry before the oldest can be chosen between them."
+    ),
+    "a merge timestamp ties, and the tie is resolved by position": (
+        "**`mergedAt` is recorded to the second, so it ties** — two pull "
+        "requests merged inside one second share a minimum, and the rule has "
+        "to say which. Resolve every tie by position rather than by picking "
+        "one: derive the entry of each pull request tied at that minimum, by "
+        "the rules below, and pass the **oldest** of them — the one furthest "
+        "down the first-parent walk."
+    ),
+    "the oldest tied entry is the only safe one": (
+        "That is the only choice that leaves every tied pull request's own "
+        "commits above the entry; taking the newer of two tied merges leaves "
+        "the other's commits below it, where the batch audits them as direct "
+        "history."
     ),
     "the helper checks the half it can see": (
         "The helper checks the half of that answer it can see for itself: a "
@@ -1464,8 +1510,15 @@ DIRECT_MODE = {
     "a gap above an entry is not an instruction": (
         "**A gap above a first batch's entry is not an instruction to review "
         "it.** The helper reports every uncovered commit above the resume "
-        "position, and on a first batch those are the oldest pull request's "
-        "own: they are PR mode's and are never reviewed here."
+        "position, which on a first batch is everything from the head of the "
+        "walk down to `$ENTRY` — the oldest pull request's own commits, every "
+        "later pull request's, and any commit interleaved among them."
+    ),
+    "the span above an entry is announced without attributing it": (
+        "Announce the span as PR-era history rather than attributing each "
+        "commit to a pull request — the helper reports positions, not "
+        "ownership, and nothing here has asked GitHub who owns anything above "
+        "`$ENTRY`."
     ),
     "the direct walk is never sliced": (
         "**Walk the whole first-parent history, not a slice starting at the "
@@ -1926,6 +1979,32 @@ class RepositoryScopeTests(unittest.TestCase):
                     f"and {number_word(api)} are `gh api` calls",
                     MODULE_DOCSTRING,
                 )
+
+    def test_the_scope_rule_names_every_mechanism_the_calls_use(self):
+        # The asset's global rule, gated against the calls it governs. Issue
+        # #686 added a `gh api` scoping the rule did not mention, and a rule
+        # that lists fewer mechanisms than the assets use is one the next call
+        # can quietly fall outside of. Both directions are asserted: every
+        # call matches exactly one named mechanism, and every named mechanism
+        # is used -- so the rule cannot grow a mechanism nothing uses either.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            with self.subTest(asset=relative_path):
+                self.assertIn(flat(REPOSITORY_SCOPE_RULE), flat(content))
+            used = {name: 0 for name in SCOPE_MECHANISMS}
+            for match in GH_INVOCATION_RE.finditer(content):
+                tail = match.group("tail")
+                matched = [
+                    name
+                    for name, recognizes in SCOPE_MECHANISMS.items()
+                    if recognizes(tail)
+                ]
+                with self.subTest(asset=relative_path, call=match.group(0)):
+                    self.assertEqual(len(matched), 1, matched)
+                used[matched[0]] += 1
+            for name, count in used.items():
+                with self.subTest(asset=relative_path, mechanism=name):
+                    self.assertGreater(count, 0, used)
 
     def test_each_declared_read_is_present_and_scoped(self):
         for relative_path in RENDERED_ASSETS:
@@ -3116,6 +3195,24 @@ class WorkflowRun:
             entry = sha
         return entry
 
+    def entry_for_the_oldest_merged(self, inventory, merges, walk):
+        """`$ENTRY`, derived the way the asset says to derive it, ties included.
+
+        `mergedAt` is recorded to the second, so the minimum can be shared.
+        The asset resolves that by position rather than by picking one: every
+        pull request tied at the minimum gets its own entry, and the oldest of
+        them -- the one furthest down the walk -- is the one passed. That is
+        the only choice that leaves every tied pull request's commits above
+        the entry.
+        """
+        oldest = min(merged_at for _, merged_at in inventory)
+        tied = [number for number, merged_at in inventory if merged_at == oldest]
+        entries = [
+            self.entry_from_the_chain(merges[number], number, walk)
+            for number in tied
+        ]
+        return max(entries, key=walk.index)
+
     def merged(self, numbers_and_times):
         self.pages_file.write_text(
             json.dumps(
@@ -3476,6 +3573,11 @@ class WorkflowRun:
         # asset refuses the global form for the same reason this driver does.
         self.retained_orphans = retained
         return reclaimed
+
+    def empty_commit(self, message):
+        """One first-parent commit carrying `message`, and its SHA."""
+        e2e_git(self.root, "commit", "-q", "--allow-empty", "-m", message)
+        return e2e_git(self.root, "rev-parse", "HEAD").strip()
 
     def first_parent_history(self, count):
         """`count` first-parent commits in `$ROOT`, newest first."""
@@ -4901,13 +5003,8 @@ class DirectMode(WorkflowRunCase):
         about the commit says who put it here, so nothing about the commit is
         what the derivation may read.
         """
-        e2e_git(self.workflow.root, "commit", "-q", "--allow-empty", "-m", subject)
-        shared = e2e_git(self.workflow.root, "rev-parse", "HEAD").strip()
-        e2e_git(
-            self.workflow.root, "commit", "-q", "--allow-empty",
-            "-m", "Squash several things (#612)",
-        )
-        squash = e2e_git(self.workflow.root, "rev-parse", "HEAD").strip()
+        shared = self.workflow.empty_commit(subject)
+        squash = self.workflow.empty_commit("Squash several things (#612)")
         walk = e2e_git(
             self.workflow.root, "log", "--first-parent", "--format=%H"
         ).split()
@@ -4935,10 +5032,7 @@ class DirectMode(WorkflowRunCase):
         # request owns three of, reaches the oldest of the three.
         self.migrated()
         for index in range(3):
-            e2e_git(
-                self.workflow.root, "commit", "-q", "--allow-empty",
-                "-m", f"rebased {index}",
-            )
+            self.workflow.empty_commit(f"rebased {index}")
         walk = e2e_git(
             self.workflow.root, "log", "--first-parent", "--format=%H"
         ).split()
@@ -4953,6 +5047,41 @@ class DirectMode(WorkflowRunCase):
         for owned in series:
             self.assertNotIn(owned, batch["selected"])
         self.assertEqual(batch["selected"], walk[3:5])
+
+    def test_two_pull_requests_merged_in_one_second_do_not_split_the_entry(self):
+        # Round 5's blocker. `mergedAt` has second precision, so two pull
+        # requests can share the minimum and "take the oldest by mergedAt"
+        # stops being a rule. Choosing the newer of the two leaves the other's
+        # own commit below `$ENTRY`, where the batch audits a merged pull
+        # request's work as direct history -- so the tie is resolved by
+        # position, and the oldest entry of the tied set is the one passed.
+        self.migrated()
+        older = self.workflow.empty_commit("PR 610 (#610)")
+        newer = self.workflow.empty_commit("PR 612 (#612)")
+        walk = e2e_git(
+            self.workflow.root, "log", "--first-parent", "--format=%H"
+        ).split()
+        self.assertEqual(walk[:2], [newer, older])
+        tied = "2026-09-01T00:00:00Z"
+        self.workflow.merged([(612, tied), (610, tied)])
+        self.workflow.owned_by({newer: [612], older: [610], walk[2]: []})
+
+        entry = self.workflow.entry_for_the_oldest_merged(
+            [(612, tied), (610, tied)], {612: newer, 610: older}, walk
+        )
+        # The older of the two tied merges, not whichever the listing named
+        # first: both are the minimum, and only this one leaves both above it.
+        self.assertEqual(entry, older)
+
+        batch = self.workflow.direct_select(count=2, entry=entry)["batch"]
+        for owned in (newer, older):
+            self.assertNotIn(owned, batch["selected"])
+        self.assertEqual(batch["selected"], walk[2:4])
+
+        # The negative control, and the defect stated as a comparison: the
+        # other tied entry leaves #610's own commit selectable.
+        wrong = self.workflow.direct_select(count=2, entry=newer)["batch"]
+        self.assertIn(older, wrong["selected"])
 
     def test_a_clean_batch_records_through_the_command_as_it_is_written(self):
         # Round 2's other blocker. The asset spells one recording command for

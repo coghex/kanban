@@ -62,9 +62,14 @@ afterwards. Say which of the two could not be established and ask for a local
 path. Falling back to the working directory is never the repair.
 
 Either path leaves `$REPO` holding one `owner/name` and `$ROOT` a checkout of
-it, before the first `gh` call. Every `gh` call below names that one identity:
-`-R "$REPO"` on each of the pull-request and issue reads, and `$REPO`'s own
-owner and name on the inventory query.
+it, before the first `gh` call. Every `gh` call below names that one identity,
+in one of three ways: `-R "$REPO"` on each of the pull-request and issue reads,
+`$REPO`'s own owner and name as the query variables of the merged-pull-request
+inventory, and `$REPO` as a path segment of the commit-to-pull-request
+association direct mode's first batch takes. The last two are API calls with no
+`-R` to carry, so their variables and their path are where they name the
+repository — and a call that names it nowhere reads whatever repository the
+session happens to be sitting in.
 
 **Announce, then read:** name the resolved `$REPO` and the `$ROOT` it was
 matched against before the first `gh` call below. Reporting what was resolved is
@@ -999,7 +1004,15 @@ selected, and nothing is claimed** by answering it.
   pull-request history for the direct batch to run into.
 - **The listing came back complete and named some:** take the oldest by
   `mergedAt` and pass its oldest first-parent-owned commit as `--entry`. The
-  helper begins at the commit below it.
+  helper begins at the commit below it. **`mergedAt` is recorded to the
+  second, so it ties** — two pull requests merged inside one second share a
+  minimum, and the rule has to say which. Resolve every tie by position
+  rather than by picking one: derive the entry of each pull request tied at
+  that minimum, by the rules below, and pass the **oldest** of them — the one
+  furthest down the first-parent walk. That is the only choice that leaves
+  every tied pull request's own commits above the entry; taking the newer of
+  two tied merges leaves the other's commits below it, where the batch audits
+  them as direct history.
 - **The listing was absent, failed, or came back incomplete:** stop and say so.
   An unanswered question is not an empty repository, and `--entry-none` over one
   restarts the walk at HEAD and re-reviews every pull request's own commits as
@@ -1013,9 +1026,12 @@ listing that lost pages, or a repository whose ledger has no rows yet — is
 yours, and the flags are how you state it.
 
 **Which commit that is depends on how the pull request landed**, and all three
-cases occur in real histories. `$OLDEST_PR` is that pull request's number, read
-out of the listing above and set here. Take its merge commit and ask what kind
-of commit it is, reading the status before anything else runs:
+cases occur in real histories. `$OLDEST_PR` is the pull request's number, read
+out of the listing above and set here — once for a clear minimum, and once
+per tied pull request when the minimum is shared, since each of them owes its
+own entry before the oldest can be chosen between them. Take its merge commit
+and ask what kind of commit it is, reading the status before anything else
+runs:
 
 ```bash
 MERGE="$(gh pr view "$OLDEST_PR" -R "$REPO" --json mergeCommit --jq .mergeCommit.oid)"
@@ -1057,10 +1073,15 @@ association above is GitHub's own record of which pull request put a commit on
 this branch, and it survives a rebase rewriting the commit's SHA.
 
 **A gap above a first batch's entry is not an instruction to review it.** The
-helper reports every uncovered commit above the resume position, and on a first
-batch those are the oldest pull request's own: they are PR mode's and are never
-reviewed here. Announce them as that, and say so; the helper cannot tell them
-from a commit an explicit start skipped, so the distinction is yours.
+helper reports every uncovered commit above the resume position, which on a
+first batch is everything from the head of the walk down to `$ENTRY` — the
+oldest pull request's own commits, every later pull request's, and any commit
+interleaved among them. That whole span is the pull-request era, and it is PR
+mode's: requirement 2 leaves first-parent commits interleaved among merged pull
+requests to the PR review, and this mode has no row to record any of them
+against. Announce the span as PR-era history rather than attributing each
+commit to a pull request — the helper reports positions, not ownership, and
+nothing here has asked GitHub who owns anything above `$ENTRY`.
 
 ### Taking the batch
 
