@@ -90,23 +90,21 @@ the fixed-later and already-tracked one-liner handling, and the clean-review
 rule that writes no report but still records its attempt are vendored as they
 read today, so each is pinned rather than merely rendered.
 
-`project_review_cursor.py` ships in neither bundle since issue #686. Its
+The sweep cursor module ships in neither bundle since issue #686. Its
 direct-mode state transitions moved to `tools/test_project_review_ledger.py`,
 where they run against `project_review_ledger.py`'s own `direct-select` and
 `direct-record` over temporary repositories with real first-parent history; its
 PR-mode half was already superseded by the ledger in issue #684, and the
-document it wrote survives only as a migration input that module's own parsers
-read.
+document it wrote survives as an input two readers still parse.
 
-Nothing here loads it. It is still spelled below, in four places and each one
-an assertion that it is gone: `REFUSED_HELPER_LOOKUPS`, which refuses an asset
-that resolved it again; `test_no_asset_names_the_retired_cursor_module` and
-`test_the_retired_cursor_module_ships_in_neither_bundle`, which are that
-absence over the assets and over the bundles; and `V2_CURSOR_HEADER`, which
-reproduces the document's own prose because that is what a consumer who has
-not migrated actually holds. Requirement 7 asks that nothing *depends* on the
-module, and naming it to prove it is absent is how that is kept rather than a
-way around it.
+Requirement 7 asks that no asset, test or manifest name it, and this module
+keeps that by never spelling it -- including in the assertions that it is
+gone. Those are exact sets instead: `BUNDLED_MODULE_NAMES` is what each
+bundle's project-review scripts directory holds and what the assets resolve,
+asserted as equality rather than as the absence of one retired name. That is
+the stronger claim of the two -- it fails for a module that came back, and for
+any other module that appeared beside it -- and it needs no retired literal to
+make it.
 
 `LedgerEndToEndTests` is the arc's end-to-end proof (issue #684, requirement
 11). It drives the shipped ledger and liveness modules through the invocation
@@ -239,11 +237,20 @@ REFUSED_HELPER_LOOKUPS = (
     "$DOCS_WT/project_review_ledger.py",
     "$ROOT/tools/project_review_ledger.py",
     "scripts/project_review_ledger.py' 2>/dev/null",
-    # The module issue #686 retired. Named here rather than merely absent from
-    # the lists above, so an asset that resolved it again fails this module
-    # rather than only the bundle manifests.
-    "project_review_cursor.py",
 )
+
+# What each bundle's project-review scripts directory holds, and what the
+# rendered assets resolve out of it. An exact set on both sides: the module
+# issue #686 retired is gone because this set does not contain it, and so is
+# any other module that might appear beside these two. A list of names to
+# refuse would have to grow once per retirement and would say nothing about a
+# module nobody thought to refuse.
+BUNDLED_MODULE_NAMES = frozenset(
+    {"project_review_ledger.py", "project_review_liveness.py"}
+)
+
+# How a module's name is recognized in an asset or a directory listing.
+BUNDLED_MODULE_RE = re.compile(r"project_review_[a-z_]+\.py")
 
 # What the direct-mode fence must not require. Direct mode takes no claim and
 # starts no keeper, so a bundle whose liveness adapter is missing has to serve
@@ -2498,14 +2505,16 @@ class DirectModeTests(unittest.TestCase):
                 with self.subTest(asset=relative_path, spelling=spelling):
                     self.assertNotIn(spelling, direct)
 
-    def test_no_asset_names_the_retired_cursor_module(self):
-        # Issue #686 requirement 7 as an absence over the whole body, not only
-        # over the direct section: the module is gone from both bundles, so an
-        # asset still resolving it would resolve nothing and stop the mode it
-        # was resolved for.
+    def test_each_asset_names_exactly_the_modules_its_bundle_ships(self):
+        # Issue #686 requirement 7, as an equality over the whole body rather
+        # than as the absence of one retired name. The module that slice
+        # retired is gone because it is not in this set; so is any other
+        # module an asset might resolve out of a bundle that does not ship it,
+        # which would resolve nothing and stop the mode it was resolved for.
         for relative_path in (*RENDERED_ASSETS, SOURCE):
+            named = set(BUNDLED_MODULE_RE.findall(read(relative_path)))
             with self.subTest(asset=relative_path):
-                self.assertNotIn("project_review_cursor", read(relative_path))
+                self.assertEqual(named, set(BUNDLED_MODULE_NAMES))
 
     def test_the_direct_mode_rules_reach_both_brands(self):
         for relative_path in RENDERED_ASSETS:
@@ -2641,14 +2650,22 @@ class BundledHelperTests(unittest.TestCase):
                 self.assertTrue(claude, copies["claude"])
                 self.assertEqual(claude, codex)
 
-    def test_the_retired_cursor_module_ships_in_neither_bundle(self):
-        # Issue #686 requirement 7. The module is not merely unreferenced: it
-        # is gone, so a bundle that still carried it would install a second
-        # answer to what a repository's direct progress is.
+    def test_each_bundle_ships_exactly_those_modules_and_no_other(self):
+        # Issue #686 requirement 7, from the shipping side. The retired module
+        # is not merely unreferenced: it is gone, and a bundle that still
+        # carried it would install a second answer to what a repository's
+        # direct progress is. Asserted as the directory's whole
+        # project-review contents, so a module that came back fails here
+        # whether or not any asset resolves it.
         for bundle in BUNDLED_HELPERS["ledger"].values():
-            retired = (REPO_ROOT / bundle).parent / "project_review_cursor.py"
+            directory = (REPO_ROOT / bundle).parent
+            shipped = {
+                path.name
+                for path in directory.iterdir()
+                if BUNDLED_MODULE_RE.fullmatch(path.name)
+            }
             with self.subTest(bundle=bundle):
-                self.assertFalse(retired.exists(), retired)
+                self.assertEqual(shipped, set(BUNDLED_MODULE_NAMES))
 
     def test_the_ledger_helper_spawns_only_git(self):
         # Its whole repository reach: the common directory, the lock
@@ -2900,11 +2917,13 @@ def e2e_module(kind: str, brand: str):
     return _E2E_MODULES[key]
 
 
-# The header the retired `project_review_cursor.py` wrote above its payload.
-# Reproduced verbatim rather than paraphrased: the parser anchors on the marker
-# and not on this, so a fixture whose prose drifted would still parse -- and a
-# fixture that parsed for the wrong reason proves nothing about the documents
-# real consumers hold.
+# The prose a consumer's retired record carries above its payload. The parser
+# anchors on the marker and not on this, so what the prose says is not what
+# makes the fixture a fixture -- and `test_the_header_above_the_marker_reaches
+# _the_parser_not_at_all` proves that by parsing the same payload under prose
+# that says nothing at all. Reproduced in shape rather than word for word:
+# quoting it exactly would put the retired module's own name back into tracked
+# test source, which requirement 7 is precisely about.
 V2_CURSOR_HEADER = """# Project review sweep cursor
 
 Machine-owned state for the `project-review` workflow: each repository's
@@ -2913,9 +2932,9 @@ history endpoint, and the units a user explicitly excluded. PR selection always
 starts at the latest merge and stops before its boundary; a clean batch records
 reviewed coverage exactly as a finding-bearing batch does.
 
-Written by `project_review_cursor.py`. Edit it through that helper rather than
-by hand: the payload below is parsed strictly, and an edit it cannot read stops
-the next sweep instead of being ignored.
+Written by its own helper. Edit it through that helper rather than by hand: the
+payload below is parsed strictly, and an edit it cannot read stops the next
+sweep instead of being ignored.
 """
 
 
@@ -2967,6 +2986,27 @@ class CursorFixtureTests(unittest.TestCase):
                 reviewed=(612, 610),
                 direct_reviewed=("ed90877ac1", "6d54e98bb2"),
                 direct_frontier="6d54e98bb2",
+            ),
+        )
+
+    def test_the_header_above_the_marker_reaches_the_parser_not_at_all(self):
+        # Why the fixture reproduces the record's shape rather than its exact
+        # words. The parser anchors on the marker, so the prose above it is
+        # decoration: the same payload under a header that says nothing reads
+        # back identically. That is what makes a fixture whose header omits
+        # the retired module's own name as faithful as one that quotes it --
+        # and requirement 7 is why it omits it.
+        module = e2e_module("ledger", "claude")
+        state = dict(reviewed=(612, 610), direct_reviewed=("ed90877ac1",))
+        rendered = render_v2_cursor(module, E2E_REPO, **state)
+        bare = rendered[rendered.index(module.CURSOR_MARKER):]
+        self.assertNotIn(V2_CURSOR_HEADER.strip(), bare)
+        self.assertEqual(
+            module.cursor_state_for(
+                module.parse_cursor_document(bare, "fixture"), E2E_REPO
+            ),
+            module.cursor_state_for(
+                module.parse_cursor_document(rendered, "fixture"), E2E_REPO
             ),
         )
 

@@ -167,6 +167,17 @@ def load_ledger_helper(brand: str):
 LEDGER_MODULES = {brand: load_ledger_helper(brand) for brand in LEDGER_HELPERS}
 LEDGER = LEDGER_MODULES["claude"]
 
+# What each bundle's project-review scripts directory holds, and what the
+# rendered assets resolve out of it. An exact set on both sides, so the module
+# issue #686 retired is gone because it is not in it -- and so is any other
+# module that might appear beside these two. Naming the retired one to assert
+# its absence would put it back into tracked test source, which is what
+# requirement 7 asks of this module.
+BUNDLED_MODULE_NAMES = frozenset(
+    {"project_review_ledger.py", "project_review_liveness.py"}
+)
+BUNDLED_MODULE_RE = re.compile(r"project_review_[a-z_]+\.py")
+
 
 # --------------------------------------------------------------------------
 # Fixtures
@@ -179,10 +190,11 @@ def write_report(root, name: str, body: str) -> str:
     return f"docs/{name}"
 
 
-# The header the retired `project_review_cursor.py` wrote above its payload,
-# reproduced verbatim. The parser anchors on the marker rather than on this, so
-# a fixture whose prose drifted would parse anyway -- and a fixture that parsed
-# for the wrong reason proves nothing about the documents real consumers hold.
+# The prose a consumer's retired record carries above its payload. The parser
+# anchors on the marker rather than on this, which `CursorFixtureTests` proves
+# by parsing the same payload under prose that says nothing at all -- so the
+# shape is reproduced without quoting the retired module's own name, which
+# requirement 7 is precisely about.
 V2_CURSOR_HEADER = """# Project review sweep cursor
 
 Machine-owned state for the `project-review` workflow: each repository's
@@ -191,9 +203,9 @@ history endpoint, and the units a user explicitly excluded. PR selection always
 starts at the latest merge and stops before its boundary; a clean batch records
 reviewed coverage exactly as a finding-bearing batch does.
 
-Written by `project_review_cursor.py`. Edit it through that helper rather than
-by hand: the payload below is parsed strictly, and an edit it cannot read stops
-the next sweep instead of being ignored.
+Written by its own helper. Edit it through that helper rather than by hand: the
+payload below is parsed strictly, and an edit it cannot read stops the next
+sweep instead of being ignored.
 """
 
 
@@ -6759,6 +6771,28 @@ class CursorFixtureTests(LedgerTestCase):
                     self.assertEqual(parsed["pr"]["reviewed"], [533, 601, 602])
                     self.assertEqual(parsed["direct"], entry["direct"])
 
+    def test_the_header_above_the_marker_reaches_the_parser_not_at_all(self):
+        # Why `render_cursor` reproduces the record's shape rather than its
+        # exact words. The parser anchors on the marker, so the prose above it
+        # is decoration: the same payload under a header that says nothing
+        # reads back identically, and under one that says something else too.
+        # That is what makes a fixture whose header omits the retired module's
+        # own name as faithful as one that quotes it.
+        entry = cursor_state(reviewed=[602], direct_reviewed=[DIRECT_HISTORY[0]])
+        rendered = render_cursor({REPO: entry})
+        payload = rendered[rendered.index(LEDGER.CURSOR_MARKER):]
+        for name, text in (
+            ("no header at all", payload),
+            ("some other prose", "# Something else entirely\n\n" + payload),
+        ):
+            with self.subTest(header=name):
+                self.assertEqual(
+                    LEDGER.cursor_state_for(
+                        LEDGER.parse_cursor_document(text, "fixture"), REPO
+                    ),
+                    entry,
+                )
+
     def test_a_document_without_a_marker_is_not_read_as_an_absent_one(self):
         # The negative control: the round trip above would pass just as well
         # against a parser that accepted anything, and a record read as absent
@@ -6781,15 +6815,23 @@ class BundledLedgerHelperTests(unittest.TestCase):
         self.assertTrue(claude, CLAUDE_LEDGER_HELPER)
         self.assertEqual(claude, codex)
 
-    def test_no_copy_ships_beside_the_retired_cursor_module(self):
-        # Issue #686 moved the sweep cursor's three parsers into this module and
-        # dropped the module itself from both bundles. A copy still shipping
-        # beside it would install a second answer to what a repository's
-        # direct progress is, and the two would diverge on the first batch.
+    def test_each_copy_ships_beside_exactly_the_modules_expected(self):
+        # Issue #686 moved the sweep cursor's three parsers into this module
+        # and dropped the module itself from both bundles. A copy still
+        # shipping beside it would install a second answer to what a
+        # repository's direct progress is, and the two would diverge on the
+        # first batch. Asserted as the whole set rather than as that one
+        # name's absence: the retired module is gone because it is not in the
+        # set, and so is anything else that might turn up beside these two.
         for relative_path in LEDGER_HELPERS.values():
+            directory = (REPO_ROOT / relative_path).parent
+            shipped = {
+                path.name
+                for path in directory.iterdir()
+                if BUNDLED_MODULE_RE.fullmatch(path.name)
+            }
             with self.subTest(copy=relative_path):
-                sibling = (REPO_ROOT / relative_path).parent / "project_review_cursor.py"
-                self.assertFalse(sibling.exists(), str(sibling))
+                self.assertEqual(shipped, set(BUNDLED_MODULE_NAMES))
 
     def test_both_copies_load_and_agree_on_their_document_contract(self):
         claude, codex = LEDGER_MODULES["claude"], LEDGER_MODULES["codex"]
@@ -6860,13 +6902,16 @@ class BundledLedgerHelperTests(unittest.TestCase):
     def test_each_rendered_asset_resolves_this_module_in_both_modes(self):
         # The non-vacuity control for the scan above, and the record of what
         # LEDGER-8 (#686) changed: both modes now run on this module, and the
-        # cursor module it replaced is named by neither asset. An asset that
+        # set of modules an asset resolves is exactly what its bundle ships,
+        # so the module this one replaced is named by neither. An asset that
         # named nothing at all would pass the scan above by naming nothing.
         for relative_path in RENDERED_ASSETS:
             content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             with self.subTest(asset=relative_path):
-                self.assertIn("project_review_ledger.py", content)
-                self.assertNotIn("project_review_cursor.py", content)
+                self.assertEqual(
+                    set(BUNDLED_MODULE_RE.findall(content)),
+                    set(BUNDLED_MODULE_NAMES),
+                )
                 for subcommand in ("claim", "direct-select", "direct-record"):
                     self.assertIn(f'"$LEDGER" {subcommand} ', content)
 
