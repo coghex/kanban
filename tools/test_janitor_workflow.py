@@ -2537,9 +2537,17 @@ ATTEMPT_SWEEP_CONTRACT = {
     ),
     "what is over and never cleanable": (
         "An `attempt-unknown` refusal, an `unverifiable` keeper, a launch "
-        "inventory that could not be read, and a state the adapter did not "
-        "report at all are `over` at most and `cleanable` never; each is "
-        "reported by path with its reason and retained."
+        "inventory that could not be read, a directory this census could not "
+        "fully measure, and a state the adapter did not report at all are "
+        "`over` at most and `cleanable` never; each is reported by path with "
+        "its reason and retained."
+    ),
+    "an unmeasured directory is not cleanable either": (
+        "*Near-miss:* an attempt whose age or footprint the census reports as "
+        "unknown is not `cleanable` either, however clean its `tree/` is: the "
+        "removal is recursive and the `tree/` gate covers the pinned checkout "
+        "alone, so a subdirectory that could not be listed is exactly where "
+        "something worth keeping would sit unseen."
     ),
     "the adapter's answer is not re-derived": (
         "Never re-derive an attempt's state from the filesystem, from the "

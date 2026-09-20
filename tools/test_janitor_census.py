@@ -921,8 +921,17 @@ class AttemptInventoryTests(AttemptFixture):
         self.assertIsNone(row["files"])
         self.assertIsNone(row["bytes"])
         self.assertIn("Permission denied", row["measurement_error"])
-        # Reported, and still classified: the size is unknown, the state is not.
-        self.assertIs(row["cleanable"], True)
+        # Over, because that is the adapter's answer and nothing here changes
+        # it -- and never cleanable, because the removal is recursive and a
+        # directory this census could not walk is one whose contents nothing
+        # has accounted for. The `tree/` gate covers the pinned checkout alone.
+        self.assertIs(row["over"], True)
+        self.assertIs(row["cleanable"], False)
+        self.assertIn(
+            "this census could not fully measure the directory, so its "
+            "contents are unaccounted for",
+            row["retention_reasons"],
+        )
         self.assertTrue(
             any("could not be measured" in warning
                 for warning in self.document["warnings"]),

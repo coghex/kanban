@@ -526,8 +526,8 @@ def attempt_status(root: Path, adapter: Path, attempt: str) -> dict[str, Any]:
             "keeper_standing": standing, "unfinished_launches": sorted(launches)}
 
 
-def attempt_disposition(state: str, keeper_standing: Any,
-                        unfinished: Any) -> dict[str, Any]:
+def attempt_disposition(state: str, keeper_standing: Any, unfinished: Any,
+                        *, measured: bool = True) -> dict[str, Any]:
     """Whether one attempt is over, whether it is provably idle, and why not.
 
     Two questions rather than one, because they exclude different things.
@@ -552,6 +552,17 @@ def attempt_disposition(state: str, keeper_standing: Any,
     exactly the backgrounded command that outlives a cancellation -- so this
     reads the former and nothing else. A non-empty list retains, and so does a
     `None`: a launch inventory this program could not read is not an empty one.
+
+    `measured` is the third retaining fact, and it is about this program rather
+    than the adapter: an attempt whose age or footprint could not be taken is
+    one whose directory this census could not fully read, and the removal it
+    would be offered for is recursive. A subdirectory that cannot be listed is
+    exactly where something worth keeping would sit unseen -- the `tree/` gate
+    proves the pinned *checkout* is clean and says nothing about the rest of the
+    directory -- so an unknown size retains even when the adapter's own two
+    answers are positive. It does not make the attempt any less `over`: whether
+    an invocation is holding it is the adapter's question, and nothing here
+    changes that answer.
     """
     if state == "error":
         return {"over": None, "cleanable": False,
@@ -561,6 +572,11 @@ def attempt_disposition(state: str, keeper_standing: Any,
         return {"over": False, "cleanable": False,
                 "retention_reasons": ["a live keeper is holding this attempt"]}
     reasons: list[str] = []
+    if not measured:
+        reasons.append(
+            "this census could not fully measure the directory, so its "
+            "contents are unaccounted for"
+        )
     if state == "unknown":
         reasons.append(
             "the adapter no longer knows this attempt, so neither its keeper "
@@ -690,6 +706,7 @@ def project_review_attempts(root: Path, common_dir: Path,
             attempt_disposition(
                 status["state"], status["keeper_standing"],
                 status["unfinished_launches"],
+                measured="measurement_error" not in row,
             )
         )
         rows.append(row)
@@ -1147,6 +1164,14 @@ def self_test() -> None:
         "wrapped launches are still running: build"]
     unreadable = attempt_disposition("ended", None, None)
     assert unreadable["over"] is True and unreadable["cleanable"] is False
+    # A directory this census could not fully read is still over -- that is the
+    # adapter's answer -- and is never offered a recursive removal.
+    unmeasured = attempt_disposition("ended", "gone", [], measured=False)
+    assert unmeasured["over"] is True and unmeasured["cleanable"] is False
+    assert unmeasured["retention_reasons"] == [
+        "this census could not fully measure the directory, so its contents "
+        "are unaccounted for"]
+    assert attempt_disposition("active", "live", [], measured=False)["over"] is False
     broken = attempt_disposition("error", None, None)
     assert broken["over"] is None and broken["cleanable"] is False
     # Resolved from this file's own bundle, which is also the only way either

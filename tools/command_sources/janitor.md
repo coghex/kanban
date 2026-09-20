@@ -128,9 +128,10 @@ removal: the adapter has to have *established* both halves — the attempt `ende
 or its keeper positively `gone`, and an explicitly empty `unfinished_launches` —
 because the question is never "is there a reason to keep this directory" but
 "can this run prove nothing is using it". An `attempt-unknown` refusal, an
-`unverifiable` keeper, a launch inventory that could not be read, and a state the
-adapter did not report at all are `over` at most and `cleanable` never; each is
-reported by path with its reason and retained.
+`unverifiable` keeper, a launch inventory that could not be read, a directory
+this census could not fully measure, and a state the adapter did not report at
+all are `over` at most and `cleanable` never; each is reported by path with its
+reason and retained.
 
 **Keep the first pass small.** Do not fetch PR bodies, issue titles, comments,
 checks, logs, full diffs, or stash patches in bulk. Do not enumerate ignored
@@ -347,7 +348,11 @@ beside each gate are the cases that most often read as a pass and are not.
   *Near-miss:* an attempt that is `over` is not thereby `cleanable` — an
   `attempt-unknown` refusal and an `unverifiable` keeper each mean the adapter
   could not establish that nothing is using the directory, which is the opposite
-  of proof that nothing is.
+  of proof that nothing is. *Near-miss:* an attempt whose age or footprint the
+  census reports as unknown is not `cleanable` either, however clean its `tree/`
+  is: the removal is recursive and the `tree/` gate covers the pinned checkout
+  alone, so a subdirectory that could not be listed is exactly where something
+  worth keeping would sit unseen.
 - **Tracking-ref prune:** `ls-remote` proves the origin head absent.
   *Near-miss:* a `refs/remotes/` entry with no local branch proves nothing on
   its own — a stale tracking ref is exactly what that looks like.
