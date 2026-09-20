@@ -95,6 +95,35 @@ loading test history, and it reads the terse repository-local retention ledger
 decisions outside every worktree. Those two arguments are the whole invocation:
 pass nothing else.
 
+**Project-review attempt directories are a collection of their own.** Every
+/project-review invocation works in one directory named for its liveness
+attempt, under the Git common directory and inside no working tree at all
+(`<git common dir>/kanban-project-review/worktrees/<attempt>/`). An invocation
+that reaches its own cleanup removes it; a cancellation cannot, so the directory
+outlives the run and nothing else sweeps it until that repository's *next*
+project-review — which in a repository reviewed weekly, or reviewed once, is
+never. The census reports each one with its attempt id, the state the liveness
+adapter gives it, its age, and the space it occupies, and it resolves that
+adapter from its own bundle exactly as §0 resolved the census itself, so a
+repository that tracks no Kanban tooling is audited anyway. A repository with no
+such directory, or with an empty one, reports nothing and is not an anomaly.
+
+**The adapter's answer is the only state signal, and two of its answers are not
+the same answer.** An attempt is `over` when no invocation can be holding it:
+the adapter reports `ended`; or it reports `active` with a `keeper_standing`
+other than `live`, which is what a keeper killed outright leaves behind, since
+it writes no ended record; or it refuses the attempt as `attempt-unknown`, which
+is what an attempt pruned after seven days looks like. An `active` attempt with
+a `live` keeper belongs to an invocation running right now, however old its
+directory is. `cleanable` is the stronger answer, and only it may be offered a
+removal: the adapter has to have *established* both halves — the attempt `ended`
+or its keeper positively `gone`, and an explicitly empty `unfinished_launches` —
+because the question is never "is there a reason to keep this directory" but
+"can this run prove nothing is using it". An `attempt-unknown` refusal, an
+`unverifiable` keeper, a launch inventory that could not be read, and a state the
+adapter did not report at all are `over` at most and `cleanable` never; each is
+reported by path with its reason and retained.
+
 **Keep the first pass small.** Do not fetch PR bodies, issue titles, comments,
 checks, logs, full diffs, or stash patches in bulk. Do not enumerate ignored
 files globally, scan shared worktree roots, or crawl `.git`; the census reads
@@ -156,6 +185,18 @@ item being confirmed, and run one per candidate rather than one per category.
   unknown target, or a dirty checkout, is retain-only. Repository-declared
   permanent worktrees — the documentation-authoring worktree above all — are
   never removal candidates and are not listed as ones.
+- **Project-review attempts:** the liveness adapter's answer, which the census
+  already carries, is authoritative here the way the drainer controller's status
+  is. Never re-derive an attempt's state from the filesystem, from the
+  directory's age, or from a process listing — those are the three readings that
+  make an abandoned-looking directory out of a running invocation. Confirm the
+  rest against Git: the attempt's `tree/` is registered at that exact path in
+  the porcelain listing above, and its status is empty *including untracked
+  files*. An attempt with a non-empty `unfinished_launches` is reported with the
+  labels still running and offered no removal at all, because deleting a
+  worktree a live process is working in is the one outcome nothing later
+  repairs. An attempt whose state the adapter could not report is
+  `pipeline attention` rather than cleanup.
 - **Coordinated tests:** the coordinator-owned detached test base is permanent
   read-only infrastructure. For a per-run worktree, inspect its coordinator
   record and preserve a dirty evidentiary harness. Use the coordinator's own
@@ -290,6 +331,15 @@ beside each gate are the cases that most often read as a pass and are not.
 - **Review metadata prune:** the directory is already missing *and* the
   `--expire now` dry run names it. *Near-miss:* an entry the dry run does not
   name is still registered, whatever the filesystem suggests.
+- **Project-review attempt removal:** the census reports the attempt
+  `cleanable`, which is the adapter establishing both halves at once, the
+  recorded attempt id and directory path, that path lying directly under the
+  attempt root the census named, the `tree/` registered at that exact path in
+  the porcelain listing, and an empty status for it *including untracked files*.
+  *Near-miss:* an attempt that is `over` is not thereby `cleanable` — an
+  `attempt-unknown` refusal and an `unverifiable` keeper each mean the adapter
+  could not establish that nothing is using the directory, which is the opposite
+  of proof that nothing is.
 - **Tracking-ref prune:** `ls-remote` proves the origin head absent.
   *Near-miss:* a `refs/remotes/` entry with no local branch proves nothing on
   its own — a stale tracking ref is exactly what that looks like.
@@ -300,7 +350,8 @@ beside each gate are the cases that most often read as a pass and are not.
 
 Dirty or unmerged work, limbo worktrees, permanent-worktree content, every
 recovery object, coordinated-test worktrees, unknown branches and unknown
-review targets, and any ambiguous disposition are **excluded from `all-safe`**
+review targets, every project-review attempt that is `over` without being
+`cleanable`, and any ambiguous disposition are **excluded from `all-safe`**
 and always require item-level approval. "Keep; no remediation" is a valid
 result.
 
@@ -313,6 +364,15 @@ disposition, and the exact command or workflow that would carry it out.
 Collapse a clear area into one sentence rather than printing an empty category.
 State explicitly what `all-safe` excludes, then **stop for approval and touch
 nothing**. Accept "all-safe", a group, or single item ids.
+
+**The census inventories more than the report shows, and the project-review
+attempts are where those two differ.** The census reports every attempt
+directory because a complete inventory is what makes an absent one meaningful;
+a healthy attempt — `active` with a live keeper — is somebody's running
+invocation and is not an anomaly, so it is not listed as one. What reaches the
+report is the attempts that are `over`: as `safe cleanup` where the census also
+calls them `cleanable`, and as `retain/decision`, by path and with the reason,
+where it does not.
 
 ## 5. Apply approved items
 
@@ -328,10 +388,12 @@ Recheck each item's gates immediately before its own command and skip anything
 that changed. **Every command below acts on one approved item and nothing else.**
 A partial approval is the normal result of §4, so a command that would also reach
 an item the user did not approve is refused rather than run. Apply items
-individually, recording deleted branch and ref SHAs in the result. Never use
-`rm -rf`, force-remove a dirty worktree, delete an unmerged branch, drop
-unproved recovery state, force-push, reset, or hand-edit the drainer's locks,
-queue state, scheduler state, or incidents.
+individually, recording deleted branch and ref SHAs in the result. Never delete
+an unmerged branch, drop unproved recovery state, force-push, reset, or
+hand-edit the drainer's locks, queue state, scheduler state, or incidents.
+Never use `rm -rf` and never force-remove a dirty worktree: the one exception
+to either is a single approved, revalidated project-review attempt directory,
+and its own chain below is what holds both to that one path.
 
 Each command is a template: every variable in it comes from the approved item,
 and `$DEFAULT` from the census's own `default_branch`.
@@ -419,6 +481,54 @@ A stale origin-tracking ref is deleted the same way, one ref at a time:
 `git fetch --prune origin` would additionally remove every other ref that
 happens to be stale, including refs this run never reported and the user never
 saw.
+
+**An approved project-review attempt is removed as a checkout and then as a
+directory**, in that order and as one `&&` chain, because it is the only
+approved item that is a directory rather than a Git object:
+
+```bash
+[ -n "$ATTEMPT" ] && [ "$ATTEMPT_DIR" = "$RUNTIME/$ATTEMPT" ] &&
+  [ -d "$ATTEMPT_DIR" ] &&
+  { [ ! -e "$ATTEMPT_DIR/tree" ] ||
+      git -C "$ROOT" worktree remove --force "$ATTEMPT_DIR/tree"; } &&
+  [ ! -e "$ATTEMPT_DIR/tree" ] &&
+  rm -rf -- "$ATTEMPT_DIR" &&
+  [ ! -e "$ATTEMPT_DIR" ]
+```
+
+`$RUNTIME` is the attempt root the census named and `$ATTEMPT` and
+`$ATTEMPT_DIR` are the approved item's own id and path, so the first two tests
+are what confine the recursive removal to one directory that the census
+reported, directly under the root it reported, named for the attempt that was
+approved. A reconstructed path is not that, and neither is a path that reaches
+any other directory: this is the workflow's one `rm -rf`, and those tests are
+the whole of its reach.
+
+**`--force` here waives nothing the gate has not already proved.** It is the
+flag that lets `git worktree remove` delete a checkout with modified or
+untracked files, which is exactly what §3's own condition — an empty status
+*including untracked files*, rechecked immediately above — has just refused. So
+the dirty-worktree prohibition stands: a project-review attempt whose `tree/`
+holds anything at all fails its gate and is never reached by this chain, and
+`--force` is carried only so that a clean checkout Git considers unusual for
+another reason cannot strand a directory the operator approved.
+
+**A step that fails stops the chain and reports what is on disk**, which is not
+always the directory. The `&&` chain is what makes the ordinary refusal safe: a
+`worktree remove` that fails never reaches the removal, so the directory is
+retained whole and reported by path with the step that failed. A removal that
+fails *after* the checkout came out is the case a "retained" report would lie
+about — the checkout is gone and the directory is not — so report the partial
+result instead: the attempt id, which step succeeded, and the path still on
+disk, which is what the next pass or the next /project-review will meet.
+
+The metadata prune below follows only when the porcelain listing still carries a
+record for that `tree/`. `git worktree remove` takes the record out with the
+directory, so the ordinary case leaves nothing to prune; when one does survive,
+it goes through the same gate with that one record name as the whole of
+`$APPROVED_RECORDS`. Approving one attempt authorizes pruning that attempt's own
+record and no other — a record belonging to a person or to another agent is not
+approved by having been in the way.
 
 **The worktree metadata prune is the one operation Git offers no per-item form
 for**, so it is refused unless every record it would remove is approved:

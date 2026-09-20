@@ -2041,7 +2041,11 @@ mutation reappear on the other (issues #544/#575, #608).
   `claude-plugin/plugins/kanban/commands/janitor.md`), both rendered from the
   one authored source `tools/command_sources/janitor.md` by
   `tools/render_command_sources.py`, reasoning over the `janitor-census/v1`
-  document both bundles' `scripts/census.py` emits (§4, issue #574). There is
+  document both bundles' `scripts/census.py` emits (§4, issue #574) — a document
+  that since issue #706 also carries every project-review attempt directory
+  (§2.13, issue #684) with the state §2.13's adapter gives it, read through that
+  adapter's `status` subcommand and resolved from the census's own bundle rather
+  than from the audited checkout. There is
   no Haskell invocation, so `janitor` is deliberately absent from the
   name-parity sets in `tools/test_codex_plugin.py` and
   `tools/test_claude_plugin.py`. It is not a drafting workflow, and is not part
@@ -2063,17 +2067,45 @@ mutation reappear on the other (issues #544/#575, #608).
   endpoint reads are of the URLs Git reports rather than of the `owner/name`
   the report names or the redacted spelling it announces, because a reduction
   and a redaction each make two different endpoints look like one.
-- **Refusal:** a destination that cannot be proved refuses the push and changes
+- **Refusal for that deletion:** a destination that cannot be proved refuses
+  the push and changes
   nothing else. No branch is deleted, no remote configuration is touched, and
   the branch is reported as visible cleanup debt naming the destination that
   failed the proof. An empty answer is a refusal, not a pass.
+- **Gate for a project-review attempt directory removal** (issue #706): the
+  census reports that attempt `cleanable`, which is §2.13's adapter having
+  established both halves through its own `status` subcommand — the attempt
+  `ended`, or `active` with its keeper positively `gone`, *and* an explicitly
+  empty `unfinished_launches` — the report records the attempt id and the
+  directory path, that path lies directly under the attempt root the census
+  named, the attempt's `tree/` is registered at that exact path in
+  `git worktree list --porcelain`, its status is empty including untracked
+  files, and the user approves that item on its own. Only then is the chain
+  run: `git worktree remove --force` on the `tree/`, a recursive removal of that
+  one directory, and — only if a worktree record for that `tree/` survived — the
+  metadata prune below, with that one record name as the whole of its approved
+  set. `--force` waives nothing the empty-status condition has not already
+  proved, and the recursive removal is this workflow's only one: it is confined
+  to the approved path by testing that path against the census's own attempt
+  root and attempt id before anything is deleted. An `attempt-unknown` refusal,
+  an `unverifiable` keeper, an unreadable launch inventory, and a state the
+  adapter did not report are `over` at most and never `cleanable`; each is
+  reported by path with its reason and retained. An `active` attempt with a
+  live keeper is a running invocation and is not reported as an anomaly at all.
+- **Refusal for that removal:** a step that fails stops the chain. A refused `worktree remove`
+  never reaches the removal, so the directory is retained whole and reported
+  with the step that failed; a removal that fails after the checkout came out is
+  reported as the partial result it is, naming what is still on disk, rather
+  than as a retained directory.
 - **Required authority:** GitHub read on the audited issues, pull requests,
   comment feeds and checks; GitHub write only to release a stale claim, which
   is its assignees and its `wip` label and nothing else. Local write, per
   approved item, to remove a worktree, delete a local branch, delete a ref or a
   stale tracking ref through `git update-ref -d <ref> <old-value>`, drop a
-  stash, prune worktree metadata, and fast-forward the default branch. Remote
-  write to exactly one endpoint: the one the gate above proved.
+  stash, prune worktree metadata, remove one approved project-review attempt's
+  pinned worktree and recursively remove that one attempt directory, and
+  fast-forward the default branch. Remote write to exactly one endpoint: the
+  one the branch-deletion gate above proved.
 - **Durable state:** none of its own beyond the repository-local retention
   ledger `janitor-retain.json` in the Git common directory, which records
   machine-local keep decisions outside every worktree and is mutated only with
@@ -3030,7 +3062,11 @@ still declares no `personal-path` row of its own, for the reason the
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
 worked checkout and deletes it, `janitor` (issue #575) does the same with the
 `worktree prune --dry-run` listing its metadata-prune gate subtracts the
-approved records from — a pipe would have discarded the dry run's own exit
+approved records from — and since issue #706 reaches `rm` for a second purpose
+that is not a scratch file at all: the recursive removal of one approved,
+revalidated project-review attempt directory, which §2.11's gate confines to a
+path the census named by testing it against that census's own attempt root and
+attempt id first, and which is this workflow's only recursive removal — a pipe would have discarded the dry run's own exit
 status, which the gate's `&&` chain has to test, since a failed dry run and a
 listing with nothing unapproved in it produce the same empty result — and
 `finalize` (issue #544) does the same with
@@ -3105,9 +3141,13 @@ each sibling and removes one only on positive evidence that nothing is using
 it — the attempt still known to the adapter, its keeper reported ended or
 positively gone, its launch records readable, and no launch of it unfinished.
 Anything else retains the directory by name and with the reason, for a later
-pass or for `janitor` (#706): an attempt the adapter no longer knows, a keeper
-whose standing it cannot establish, a launch record it cannot read, or a wrapped
-command that outlived the cancellation. Removing a worktree a live process is
+pass or for `janitor`, whose census carries these directories and whose own
+removal gate §2.11 states (#706): an attempt the adapter no longer knows, a
+keeper whose standing it cannot establish, a launch record it cannot read, or a
+wrapped command that outlived the cancellation. `janitor` refuses that first
+class exactly as this pass does — an attempt the adapter cannot place is `over`
+without being cleanable there too — so what the operator gets is the schedule,
+not a weaker rule. Removing a worktree a live process is
 working in is the one outcome nothing later repairs, so the pass fails closed
 and a cancellation's directory is taken by the first invocation that can prove
 otherwise — the next one in the ordinary case, and not in every case. It is

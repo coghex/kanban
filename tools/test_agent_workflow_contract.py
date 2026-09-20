@@ -535,7 +535,7 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # Issue #574's janitor census is vendored on the same terms and pinned here
 # with them, along with the third `kanban_config.py` copy it loads from beside
 # itself. What this extractor recovers from the census is `git` and `gh`
-# only: its two remaining spawns pass `sys.executable` as the first element of
+# only: its three remaining spawns pass `sys.executable` as the first element of
 # the argument list, which is not a string literal, so
 # CENSUS_DYNAMIC_EXECUTABLES below pins those separately rather than letting
 # them pass as "nothing discovered".
@@ -558,10 +558,11 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
 
 # Both shipped copies of the janitor census, and the manifest rows each one
 # has to carry. `discovered_python_commands` reads a literal first argument
-# only, so the census's two `sys.executable` spawns -- the drainer controller
-# and the optional test coordinator -- reach no extractor at all; the pin
-# below names the spelling those calls use and the row that covers it, and
-# CensusDynamicExecutableTests holds the tree to both.
+# only, so the census's three `sys.executable` spawns -- the drainer
+# controller, the optional test coordinator, and since issue #706 the
+# project-review liveness adapter its attempt census reads -- reach no
+# extractor at all; the pin below names the spelling those calls use and the
+# row that covers it, and CensusDynamicExecutableTests holds the tree to both.
 CENSUS_SURFACE_FILES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
@@ -4673,12 +4674,13 @@ class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
 
 
 class CensusDynamicExecutableTests(unittest.TestCase):
-    """Issue #574. The janitor census spawns two programs through
+    """Issue #574. The janitor census spawns three programs through
     `sys.executable` rather than through a literal command name, and
     `discovered_python_commands` deliberately ignores a non-literal first
     argument. So listing the census on a brand surface reconciles its `git` and
-    `gh` calls and reconciles *nothing at all* about the drainer controller and
-    the test-coordinator probe -- the two spawns the whole slice is about.
+    `gh` calls and reconciles *nothing at all* about the drainer controller, the
+    test-coordinator probe, and the project-review liveness adapter issue #706
+    added -- the spawns the whole slice is about.
 
     These hold both halves: that the set of non-literal spawns in the shipped
     program is exactly the one spelling pinned above, and that the command that

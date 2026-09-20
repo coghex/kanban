@@ -159,15 +159,20 @@ FENCE_MARKERS = (
     ("recovery", "stash show -p"),
     ("census-refresh", 'python3 "$CENSUS" --repo "$ROOT" --fetch'),
     ("deletions", 'worktree remove "$WORKTREE"'),
+    ("attempt-directory", 'rm -rf -- "$ATTEMPT_DIR"'),
     ("metadata-prune", "worktree prune --expire now"),
     ("claim-release", "gh issue edit"),
     ("fast-forward", "merge --ff-only"),
 )
 FENCE_COUNT = len(FENCE_MARKERS)
+# Position by name, so a fence inserted in the middle of §5 -- as issue #706's
+# attempt removal is -- moves every later index without a test having to be
+# renumbered by hand. A stale literal would silently script the wrong block.
+FENCE_INDEX = {name: index for index, (name, _) in enumerate(FENCE_MARKERS)}
 # Everything an agent runs before the report-and-stop. The two census fences
 # are byte-identical, so they are addressed by index rather than by content.
-PRE_APPROVAL_FENCES = tuple(range(0, 9))
-APPLY_FENCES = (9, 10, 11, 12, 13)
+PRE_APPROVAL_FENCES = tuple(range(0, FENCE_INDEX["census-refresh"]))
+APPLY_FENCES = tuple(range(FENCE_INDEX["census-refresh"], FENCE_COUNT))
 
 # The scenario every run below is scripted against.
 REPO_SLUG = "coghex/kanban"
@@ -186,6 +191,11 @@ TRACKING_REF = "refs/remotes/origin/issue-3-gone"
 TRACKING_SHA = "aabbccddeeff00112233445566778899aabbccdd"
 SHA = "1a2b3c4d5e6f70819293a4b5c6d7e8f900112233"
 ASSIGNEE = "coghex"
+# One approved project-review attempt, as the census reports it: the root it
+# named, the attempt id, and the directory path. The fence tests the path
+# against the first two before it deletes anything, so a fixture that supplied
+# only the path would never reach the removal at all.
+ATTEMPT = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 
 # What `git worktree prune --dry-run --expire now --verbose` prints, in the
 # format git actually uses, for two prunable records. The workflow subtracts the
@@ -228,6 +238,7 @@ CENSUS_DOCUMENT = json.dumps(
 GIT_MUTATIONS = {
     "prune worktree metadata": ["worktree", "prune", "--expire"],
     "remove a worktree": ["worktree", "remove"],
+    "remove an attempt's pinned worktree": ["worktree", "remove", "--force"],
     "delete a local branch": ["branch", "-d"],
     "delete a remote branch": ["push", "origin"],
     "drop a stash": ["stash", "drop"],
@@ -480,6 +491,17 @@ class Harness:
         self.cached_census = cached
         self.decoy_census = decoy
 
+        # A project-review attempt directory, with the detached checkout its
+        # own invocation pinned and the inventory step 1 assembled. Real
+        # directories, because the fence that removes them tests the filesystem
+        # rather than asking `git` about it.
+        self.attempt_runtime = root / "attempt-runtime"
+        self.attempt_dir = self.attempt_runtime / ATTEMPT
+        self.attempt_tree = self.attempt_dir / "tree"
+        self.attempt_tree.mkdir(parents=True)
+        (self.attempt_tree / "checked-out").write_text("x\n", encoding="utf-8")
+        (self.attempt_dir / "inventory.json").write_text("[]\n", encoding="utf-8")
+
     def script_commands(self) -> None:
         self.fake.script("git", ["rev-parse", "--show-toplevel"],
                          stdout=CHECKOUT_ROOT + "\n")
@@ -519,6 +541,15 @@ class Harness:
             "git",
             ["-C", CHECKOUT_ROOT, "rev-parse", "--verify", "--quiet"],
             stdout=self.stash_head + "\n",
+        )
+        # Before the plain `worktree remove` below, because fake_cli answers
+        # with the first scripted entry whose match is a prefix of the call and
+        # `worktree remove` is a prefix of this one.
+        self.fake.script(
+            "git",
+            ["-C", CHECKOUT_ROOT, "worktree", "remove", "--force"],
+            stdout="",
+            side_effects=[{"remove_tree": str(self.attempt_tree)}],
         )
         for tail in (
             ["worktree", "prune", "--expire"],
@@ -570,6 +601,9 @@ class Harness:
             "TRACKING_SHA": TRACKING_SHA,
             "SHA": SHA,
             "ASSIGNEE": ASSIGNEE,
+            "ATTEMPT": ATTEMPT,
+            "ATTEMPT_DIR": str(self.attempt_dir),
+            "RUNTIME": str(self.attempt_runtime),
             "DEFAULT": DEFAULT_BRANCH,
             "APPROVED_RECORDS": "\n".join(self.approved_records),
         }
@@ -765,7 +799,7 @@ class CensusInvocationTests(HarnessCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path])
-                result = harness.run(self.script(relative_path, (0, 1, 9)))
+                result = harness.run(self.script(relative_path, (0, 1, FENCE_INDEX["census-refresh"])))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
                     harness.python_calls(), [self.expected_argv(harness)]
@@ -871,7 +905,7 @@ class MutationBoundaryTests(HarnessCase):
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path])
                 result = harness.run(
-                    self.script(relative_path, (0, 1, 13))
+                    self.script(relative_path, (0, 1, FENCE_INDEX["fast-forward"]))
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 merges = [
@@ -902,7 +936,7 @@ class PerItemApprovalTests(HarnessCase):
                 harness = self.harness(
                     BRAND_OF[relative_path], approved_records=(PRUNABLE_RECORDS[0],)
                 )
-                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                result = harness.run(self.script(relative_path, (0, 1, FENCE_INDEX["metadata-prune"])))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(
                     any(
@@ -919,7 +953,7 @@ class PerItemApprovalTests(HarnessCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path])
-                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                result = harness.run(self.script(relative_path, (0, 1, FENCE_INDEX["metadata-prune"])))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(
                     any(
@@ -934,7 +968,7 @@ class PerItemApprovalTests(HarnessCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path], approved_records=())
-                result = harness.run(self.script(relative_path, (0, 1, 11)))
+                result = harness.run(self.script(relative_path, (0, 1, FENCE_INDEX["metadata-prune"])))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(
                     any(
@@ -950,7 +984,7 @@ class PerItemApprovalTests(HarnessCase):
         for relative_path in RENDERED_ASSETS:
             with self.subTest(asset=relative_path):
                 harness = self.harness(BRAND_OF[relative_path])
-                result = harness.run(self.script(relative_path, (0, 1, 10)))
+                result = harness.run(self.script(relative_path, (0, 1, FENCE_INDEX["deletions"])))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 deletions = [
                     call
@@ -1884,6 +1918,131 @@ class RealGitApplyTests(HarnessCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.stash_entries(work), [])
 
+    def attempt_repository(self) -> tuple[Path, Path, Path]:
+        """A repository with one project-review attempt directory in it.
+
+        The `tree/` is a real detached worktree of that repository, because the
+        fence removes it with `git worktree remove` and the whole point of that
+        step is that Git's own record goes with the directory.
+        """
+        work = self.repository()
+        runtime = work.parent / "attempt-runtime"
+        attempt_dir = runtime / ATTEMPT
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "inventory.json").write_text("[]\n", encoding="utf-8")
+        self.git("worktree", "add", "-q", "--detach", str(attempt_dir / "tree"),
+                 cwd=work)
+        self.assertIn("tree", self.registered_records(work))
+        return work, runtime, attempt_dir
+
+    def run_attempt_fence(self, relative_path: str, work: Path, runtime: Path,
+                          attempt_dir: Path, *, attempt: str = ATTEMPT):
+        return self.run_fence(
+            self.fences(relative_path)["attempt-directory"],
+            work,
+            RUNTIME=str(runtime),
+            ATTEMPT=attempt,
+            ATTEMPT_DIR=str(attempt_dir),
+        )
+
+    def test_an_approved_attempt_loses_its_checkout_its_record_and_itself(self):
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, runtime, attempt_dir = self.attempt_repository()
+                result = self.run_attempt_fence(
+                    relative_path, work, runtime, attempt_dir
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(attempt_dir.exists())
+                # And nothing survives for the metadata prune to reach, which is
+                # why the body makes that step conditional rather than routine.
+                self.assertEqual(self.registered_records(work), {work.name})
+                self.assertTrue(runtime.is_dir())
+
+    def test_a_path_outside_the_reported_attempt_root_is_refused(self):
+        # The guard that makes this the only `rm -rf` in the workflow: a path
+        # that is not the census's own `<root>/<attempt>` is not deleted, and
+        # a neighbouring directory under the same root is not either.
+        for relative_path in RENDERED_ASSETS:
+            work, runtime, attempt_dir = self.attempt_repository()
+            neighbour = runtime / ("f" * 32)
+            neighbour.mkdir()
+            (neighbour / "inventory.json").write_text("[]\n", encoding="utf-8")
+            for label, directory, attempt in (
+                ("a neighbouring attempt", neighbour, ATTEMPT),
+                ("the attempt root itself", runtime, ATTEMPT),
+                ("a reconstructed path", attempt_dir.parent / "elsewhere", ATTEMPT),
+                ("an empty attempt id", attempt_dir, ""),
+            ):
+                with self.subTest(asset=relative_path, target=label):
+                    result = self.run_attempt_fence(
+                        relative_path, work, runtime, directory, attempt=attempt
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertTrue(neighbour.is_dir())
+                    self.assertTrue(attempt_dir.is_dir())
+                    self.assertTrue((attempt_dir / "tree").is_dir())
+                    self.assertIn("tree", self.registered_records(work))
+
+    def test_approving_an_attempt_authorizes_no_unrelated_prune(self):
+        # The review's own case: the attempt removal succeeds and takes its own
+        # worktree record with it, so the only record left for the prune to
+        # reach belongs to something this run never reported. Approving the
+        # attempt does not approve that, and the prune is refused.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, runtime, attempt_dir = self.attempt_repository()
+                self.git("worktree", "add", "-q", str(work.parent / "someone-else"),
+                         "-b", "someone-else", cwd=work)
+                shutil.rmtree(work.parent / "someone-else")
+                removal = self.run_attempt_fence(
+                    relative_path, work, runtime, attempt_dir
+                )
+                self.assertEqual(removal.returncode, 0, removal.stderr)
+                before = self.registered_records(work)
+                self.assertIn("someone-else", before)
+                prune = self.run_fence(
+                    self.fences(relative_path)["metadata-prune"],
+                    work,
+                    APPROVED_RECORDS="tree",
+                )
+                self.assertNotEqual(prune.returncode, 0, prune.stdout)
+                self.assertEqual(self.registered_records(work), before)
+
+    def test_a_refused_worktree_removal_retains_the_whole_directory(self):
+        # A locked worktree is what a single `--force` does not override, which
+        # is also the proof that this `--force` is not "force everything": the
+        # chain stops, the checkout stays, and the directory is untouched.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, runtime, attempt_dir = self.attempt_repository()
+                self.git("worktree", "lock", str(attempt_dir / "tree"), cwd=work)
+                result = self.run_attempt_fence(
+                    relative_path, work, runtime, attempt_dir
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertTrue((attempt_dir / "tree").is_dir())
+                self.assertTrue((attempt_dir / "inventory.json").is_file())
+                self.assertIn("tree", self.registered_records(work))
+
+    def test_a_failed_directory_removal_leaves_the_partial_state_on_disk(self):
+        # The case the body says must be reported as a partial result rather
+        # than as a retained directory: the checkout came out and the directory
+        # did not, so "retained" would be false. The chain still fails, which is
+        # what makes the run report it at all.
+        for relative_path in RENDERED_ASSETS:
+            with self.subTest(asset=relative_path):
+                work, runtime, attempt_dir = self.attempt_repository()
+                runtime.chmod(0o500)
+                self.addCleanup(runtime.chmod, 0o700)
+                result = self.run_attempt_fence(
+                    relative_path, work, runtime, attempt_dir
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertTrue(attempt_dir.is_dir())
+                self.assertFalse((attempt_dir / "tree").exists())
+                self.assertEqual(self.registered_records(work), {work.name})
+
 
 class RepositoryScopeTests(unittest.TestCase):
     """Every `gh` call names the repository this run resolved."""
@@ -1989,6 +2148,19 @@ ALL_SAFE_GATES = {
             "registered, whatever the filesystem suggests.",
         ),
     },
+    "project-review attempt removal": {
+        "conditions": (
+            "the census reports the attempt `cleanable`, which is the adapter "
+            "establishing both halves at once",
+            "the recorded attempt id and directory path",
+            "that path lying directly under the attempt root the census named",
+            "the `tree/` registered at that exact path in the porcelain listing",
+            "an empty status for it *including untracked files*",
+        ),
+        "near_misses": (
+            "*Near-miss:* an attempt that is `over` is not thereby `cleanable`",
+        ),
+    },
     "tracking-ref prune": {
         "conditions": ("`ls-remote` proves the origin head absent",),
         "near_misses": (
@@ -2018,6 +2190,7 @@ ALL_SAFE_EXCLUSIONS = (
     "every recovery object",
     "coordinated-test worktrees",
     "unknown branches and unknown review targets",
+    "every project-review attempt that is `over` without being\n`cleanable`",
     "any ambiguous disposition",
     "**excluded from `all-safe`**",
     "always require item-level approval",
@@ -2312,6 +2485,154 @@ class FoldedJudgementTests(unittest.TestCase):
                 self.assertNotIn("recovery-state.md", text)
                 self.assertNotIn("worktree-content.md", text)
 
+
+# Issue #706's attempt sweep, as the sentences an agent reads. Every one is a
+# rule the census cannot enforce on its own: the census reports two answers and
+# these are what make the workflow act on the weaker one by retaining.
+ATTEMPT_SWEEP_CONTRACT = {
+    "the attempt directory is a collection of its own": (
+        "**Project-review attempt directories are a collection of their own.**"
+    ),
+    "a cancellation cannot clean up after itself": (
+        "An invocation that reaches its own cleanup removes it; a cancellation "
+        "cannot, so the directory outlives the run and nothing else sweeps it "
+        "until that repository's *next* project-review — which in a repository "
+        "reviewed weekly, or reviewed once, is never."
+    ),
+    "the four facts each attempt carries": (
+        "The census reports each one with its attempt id, the state the "
+        "liveness adapter gives it, its age, and the space it occupies"
+    ),
+    "the adapter comes from the census's own bundle": (
+        "it resolves that adapter from its own bundle exactly as §0 resolved "
+        "the census itself, so a repository that tracks no Kanban tooling is "
+        "audited anyway"
+    ),
+    "an absent or empty root is not an anomaly": (
+        "A repository with no such directory, or with an empty one, reports "
+        "nothing and is not an anomaly."
+    ),
+    "over and cleanable are two answers": (
+        "**The adapter's answer is the only state signal, and two of its "
+        "answers are not the same answer.**"
+    ),
+    "what makes an attempt over": (
+        "the adapter reports `ended`; or it reports `active` with a "
+        "`keeper_standing` other than `live`, which is what a keeper killed "
+        "outright leaves behind, since it writes no ended record; or it refuses "
+        "the attempt as `attempt-unknown`, which is what an attempt pruned "
+        "after seven days looks like"
+    ),
+    "a live keeper is somebody's invocation": (
+        "An `active` attempt with a `live` keeper belongs to an invocation "
+        "running right now, however old its directory is."
+    ),
+    "cleanable needs both halves established": (
+        "the attempt `ended` or its keeper positively `gone`, and an "
+        "explicitly empty `unfinished_launches`"
+    ),
+    "the question is never whether to keep": (
+        "the question is never \"is there a reason to keep this directory\" but "
+        "\"can this run prove nothing is using it\""
+    ),
+    "what is over and never cleanable": (
+        "An `attempt-unknown` refusal, an `unverifiable` keeper, a launch "
+        "inventory that could not be read, and a state the adapter did not "
+        "report at all are `over` at most and `cleanable` never; each is "
+        "reported by path with its reason and retained."
+    ),
+    "the adapter's answer is not re-derived": (
+        "Never re-derive an attempt's state from the filesystem, from the "
+        "directory's age, or from a process listing"
+    ),
+    "a running launch is offered no removal": (
+        "An attempt with a non-empty `unfinished_launches` is reported with the "
+        "labels still running and offered no removal at all, because deleting a "
+        "worktree a live process is working in is the one outcome nothing later "
+        "repairs."
+    ),
+    "an unresolved state is attention, not cleanup": (
+        "An attempt whose state the adapter could not report is\n"
+        "`pipeline attention` rather than cleanup."
+    ),
+    "the inventory is wider than the report": (
+        "**The census inventories more than the report shows, and the "
+        "project-review attempts are where those two differ.**"
+    ),
+    "what reaches the report": (
+        "What reaches the report is the attempts that are `over`: as "
+        "`safe cleanup` where the census also calls them `cleanable`, and as "
+        "`retain/decision`, by path and with the reason, where it does not."
+    ),
+    "the one rm -rf and the one force, named as exceptions": (
+        "Never use `rm -rf` and never force-remove a dirty worktree: the one "
+        "exception to either is a single approved, revalidated project-review "
+        "attempt directory, and its own chain below is what holds both to that "
+        "one path."
+    ),
+    "the guards are the whole of the removal's reach": (
+        "the first two tests are what confine the recursive removal to one "
+        "directory that the census reported, directly under the root it "
+        "reported, named for the attempt that was approved"
+    ),
+    "force waives nothing the gate proved": (
+        "**`--force` here waives nothing the gate has not already proved.**"
+    ),
+    "the dirty-worktree prohibition stands": (
+        "a project-review attempt whose `tree/` holds anything at all fails "
+        "its gate and is never reached by this chain"
+    ),
+    "a partial failure is reported as one": (
+        "A removal that fails *after* the checkout came out is the case a "
+        "\"retained\" report would lie about — the checkout is gone and the "
+        "directory is not — so report the partial result instead"
+    ),
+    "the prune follows only a surviving record": (
+        "The metadata prune below follows only when the porcelain listing still "
+        "carries a record for that `tree/`."
+    ),
+    "one attempt approves one record": (
+        "Approving one attempt authorizes pruning that attempt's own record and "
+        "no other — a record belonging to a person or to another agent is not "
+        "approved by having been in the way."
+    ),
+}
+
+
+class AttemptSweepContractTests(unittest.TestCase):
+    def test_every_rule_survives_in_both_renderings(self):
+        for relative_path in RENDERED_ASSETS:
+            text = read(relative_path)
+            for label, phrase in sorted(ATTEMPT_SWEEP_CONTRACT.items()):
+                with self.subTest(asset=relative_path, rule=label):
+                    self.assertEqual(missing(text, (phrase,)), [])
+
+    def test_the_control_catches_a_dropped_rule(self):
+        text = read(CODEX_ASSET)
+        for label, phrase in sorted(ATTEMPT_SWEEP_CONTRACT.items()):
+            with self.subTest(rule=label):
+                planted = flat(text).replace(flat(phrase), "")
+                self.assertNotEqual(missing(planted, (phrase,)), [])
+
+    def test_the_body_names_the_collection_the_program_emits(self):
+        # The rules above are about a shape the shipped census really produces,
+        # not an invented one: it keeps `over` and `cleanable` apart under those
+        # names, and it reads the launch report that answers on the command.
+        for brand, program in sorted(CENSUS_PROGRAMS.items()):
+            with self.subTest(brand=brand):
+                source = read(program)
+                self.assertIn('"project_review_attempts"', source)
+                self.assertIn('document.get("unfinished_launches")', source)
+                self.assertIn(
+                    'PROJECT_REVIEW_RUNTIME = "kanban-project-review/worktrees"',
+                    source,
+                )
+                # The silence-window report answers a different question and is
+                # the one this collection must not read. Asserted on the quoted
+                # spelling, because reading a field means naming it as a string
+                # -- the prose beside the reader says in backticks why it is not
+                # read, and that sentence is not the defect.
+                self.assertNotIn('"exempt_launches"', source)
 
 # The compact-census discipline: what a first pass must not do. Kept because it
 # is the difference between an audit and a rate-limit incident, and it lives
