@@ -2693,6 +2693,27 @@ class PublicationTests(unittest.TestCase):
                 with self.subTest(path=path, fragment=fragment):
                     self.assertNotIn(fragment, asset)
 
+    def test_neither_the_helper_nor_the_contract_routes_a_novel_document_to_a_pull_request(self):
+        # The same claim, one level down. The publication module's reason for
+        # declining a novel document, and the contract passage on the module's
+        # write binding, both used to restate the enrollment pull request as
+        # every repository's rule; a processing asset relays that reason on a
+        # non-ordinary outcome. The three helper copies are held identical
+        # elsewhere, so the source copy stands for all of them here.
+        subjects = ("tools/publish_coordination_doc.py", CONTRACT_PATH)
+        for path in subjects:
+            text = canonical(self.asset_text(path))
+            for fragment in (
+                "stays local until a pull request adds it",
+                "enrollment-by-pull-request rule stands",
+            ):
+                with self.subTest(path=path, fragment=fragment):
+                    self.assertNotIn(fragment, text)
+        self.assertIn(
+            "documentation-landing lane",
+            canonical(self.asset_text("tools/publish_coordination_doc.py")),
+        )
+
     def test_the_report_pair_lands_on_approval(self):
         self.assertEqual(len(REPORT_DRAFTING_ASSETS), 2)
         for path in REPORT_DRAFTING_ASSETS:

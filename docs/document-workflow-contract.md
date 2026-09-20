@@ -786,9 +786,9 @@ both the preflight's blob and the recorded predecessor continues as
 refused even when the record names it. The record says what the module last
 wrote, not what this run decided over; consulted ahead of the binding it would
 let a run prepared over an older copy overwrite a newer disposition another run
-recorded in between. A novel document is still never published from here
-(#237's enrollment-by-pull-request rule stands); only its local write is
-licensed.
+recorded in between. A novel document is still never published from here —
+it lands through the owning repository's documentation-landing lane, as §9.1
+sets out — and only its local write is licensed.
 Which predecessor it is changes nothing else: the replacement is guarded against
 the exact bytes the decision was made from, a staged document is still refused,
 and a write that lands in between still wins.

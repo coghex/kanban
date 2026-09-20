@@ -22,8 +22,10 @@ created above it.
   document needs an enrollment pull request first: that is what Kanban's own
   §7 gate says of an untracked path, and the helper's gate decides for every
   other repository, where a lane with no §7 split lands the document directly.
-  `design-epic` still lands nothing on its own. The Claude bundle is 1.59.0
-  and the Codex bundle 1.58.0.
+  `design-epic` still lands nothing on its own, and a run that bypassed the
+  approval gate lands only when the bypass instruction asked for it. The
+  publication module's reason for declining a novel document names that lane
+  too. The Claude bundle is 1.59.0 and the Codex bundle 1.58.0.
 - `project-review` reviews exactly one merged pull request per successful
   invocation, chosen and claimed through the new `project_review_ledger.py` the
   bundles ship: a complete paginated merged-pull-request inventory, a lease
