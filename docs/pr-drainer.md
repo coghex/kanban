@@ -1447,10 +1447,15 @@ called any live process with a matching number an external drainer — and
 process IDs get reused, so on a machine that had been up a while that could be
 your own shell: reported as a drainer, refusing to start the real one, and
 lined up to be sent an interrupt by the next `stop`. That is fixed for a
-drainer that has finished, which is every case you are likely to meet it in. It
-is not fixed for the instant in which one is starting and has taken the lock
-without having written its PID yet: there the lock is held and the file still
-says the run before, so the old answer comes back for as long as that takes.
+drainer that has finished, which is every case you are likely to meet it in,
+and for one that starts while the command is looking — the PID is read after
+the lock has been found held, not before, so a drainer that takes the lock and
+writes its PID mid-check is reported as itself. It is not fixed for the instant
+in which one is starting and has taken the lock without having written its PID
+yet: there the lock is held and the file still says the run before, so the old
+answer comes back for as long as that takes. Nothing a reader does can close
+that one, because until the new drainer writes its PID there is nothing on disk
+that names it.
 
 The run your service manager starts is the other. It catches its own refusal
 and answers with an exit code: a current controller answers a failing one —

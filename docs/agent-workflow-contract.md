@@ -3390,12 +3390,17 @@ brand's asset speaking a tool its declaration does not carry.
   names: the file is persistent, so that PID outlives the run that wrote it and
   names a live process again once the operating system reuses the number, and
   the document is therefore read only to name a holder the lock has already
-  established (#694). That covers every state a completed run leaves; it does
+  established, and read after it rather than sampled before, since a run can
+  take the lock and publish between two reads
+  (#694; `drain_prs_service.external_drainer_pid` is where that order lives).
+  That covers every state a completed run leaves and any acquisition that
+  completes mid-snapshot; it does
   not cover the interval between a run taking the lock file and publishing its
   PID, where the lock is held and the document still names the run before, so a
   reused PID is reported and signalled there still — bounded and recorded on
-  `drain_prs_service.lock_file_is_held` rather than closed, since closing it
-  means clearing the document at acquisition and the acquisition order
+  `drain_prs_service.lock_file_is_held` rather than closed, since no reading
+  order reaches it and closing it
+  means clearing the document at acquisition, which the acquisition order
   deliberately does not. That branch signals the PID it names with `os.kill` and asks the
   service manager for nothing, so no allowlist over what the manager was asked
   could observe it, and a relocation's refusal to run while a drainer is live

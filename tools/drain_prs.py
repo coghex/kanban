@@ -5384,9 +5384,12 @@ def describe_lock_holder(root: Path, *, self_holds_lock_file: bool = False) -> s
     the number (#694). This function reaches it only after
     lock_file_is_held() has established that somebody holds the lock, and the
     two readers named above ask those same two questions in that same order:
-    drain_prs_service.status_snapshot() before classifying a drainer
-    `external`, install_drainer.repository_drainer_running() before refusing
-    an install or a relocation.
+    drain_prs_service.external_drainer_pid(), which is what
+    status_snapshot() classifies `external` from, and
+    install_drainer.repository_drainer_running() before refusing an install or
+    a relocation. Sampling the PID before the probe instead would report the
+    run before, since a run can take the lock and publish between the two
+    reads.
 
     Holding the lock is not the same as having published under it, which is
     why this function has a "still starting up" answer at all. In the window

@@ -3332,6 +3332,42 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         self.assertEqual(sent, [(child.pid, signal.SIGINT)])
         self.assertIsNone(child.poll())
 
+    def test_a_publish_that_lands_during_the_probe_is_the_pid_reported(self):
+        """The document is read after ownership is established, not before.
+
+        The lock and the document move independently, so a run can acquire
+        *and* publish between any two reads. A PID sampled before the probe
+        then names neither the holder nor what the file says by the time the
+        probe answers — it names the run before, and a reused number makes
+        that an unrelated process `stop_service` would signal, which is #694's
+        hazard in a state the fix otherwise covers.
+
+        Driven through the probe itself: the acquisition completes while the
+        snapshot is mid-flight, which is the only moment the ordering is
+        observable.
+        """
+        self.scripted_backend()
+        previous = self.unrelated_live_process()
+        self.publish_unheld_document(previous.pid)
+        self.hold_the_checkout_lock()
+        real = drain_prs_service.lock_file_is_held
+
+        def probe_then_publish(path):
+            held = real(path)
+            # The holder reaches `_publish_lock_owner` here, overwriting the
+            # previous run's PID with its own.
+            self.publish_unheld_document(os.getpid())
+            return held
+
+        with mock.patch.object(
+            drain_prs_service, "lock_file_is_held", side_effect=probe_then_publish
+        ):
+            snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "external")
+        self.assertEqual(snapshot["drainer_pid"], os.getpid())
+        self.assertNotEqual(snapshot["drainer_pid"], previous.pid)
+        self.assertIsNone(previous.poll())
+
     def test_the_publish_window_still_reports_the_previous_runs_pid(self):
         """The bound on the fix, pinned rather than left to prose.
 

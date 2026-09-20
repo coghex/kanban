@@ -3412,15 +3412,21 @@ above are unchanged, and persistence the user switched off is not a failure.
   stays in it and names something live again the moment the operating system
   reuses that number. Reading the document alone would therefore classify a
   stopped drainer as `external`, refuse to start it, and aim that `os.kill` at
-  whatever had inherited the PID. What the held-lock test settles is every
-  state a completed run leaves, which is where that arises; it does not settle
-  the interval between a run taking the lock file and publishing its PID,
-  during which the lock is genuinely held and the document genuinely names the
-  run before, so a reused PID is reported and signalled there still. Closing
-  that would mean clearing the document at acquisition, which the acquisition
-  order deliberately does not do, so it is bounded and recorded rather than
-  removed. A lock held while its document names nothing live is `stopped` with
-  no PID reported, since the only number available to report would be the
+  whatever had inherited the PID. The order is part of this: the lock is
+  established as held and the document is read afterwards, never sampled
+  before, since a run can take the lock and publish between two reads and a
+  PID sampled first would name the run before. What that settles is every
+  state a completed run leaves, which is where the defect arises, and any
+  acquisition that completes while the snapshot is being taken. It does not
+  settle the interval between a run taking the lock file and publishing its
+  PID, during which the lock is genuinely held, nothing on disk yet names the
+  holder, and the document still names the run before — so a reused PID is
+  reported and signalled there still. No reading order closes that one;
+  closing it means clearing the document at acquisition, which the acquisition
+  order deliberately does not do so that a losing contender cannot erase the
+  holder it is about to report. It is therefore bounded and recorded rather
+  than removed. A lock held while its document names nothing live is `stopped`
+  with no PID reported, since the only number available to report would be the
   previous run's. What bounds the branch for
   a controller predating #367 is the lock document itself:
   a drainer publishes its PID in a shape such a copy's bare `int()` cannot

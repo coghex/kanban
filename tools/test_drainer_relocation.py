@@ -3282,12 +3282,23 @@ _PRE_GATE_EXTERNAL = (
     (
         "#555",
         "the checkout run lock is the one input to a snapshot that no seal "
-        "covers; this arc left the classification reading it exactly as it "
-        "was, so the copy goes on calling `external` a live holder there and "
-        "goes on reaching that holder through the restored decoder rather "
-        "than through anything added here",
+        "covers, so the copy goes on calling `external` a holder it finds "
+        "there, and goes on reaching that holder through the restored decoder "
+        "rather than through anything added here",
         "status_snapshot",
-        ("locked_pid = lock_pid(job.repo_path)", 'state = "external"'),
+        ("external_drainer_pid(job.repo_path)", 'state = "external"'),
+    ),
+    (
+        "#694",
+        "that classification now establishes ownership before it names a "
+        "holder, and this is the hop it does both in; the copy reaches the "
+        "restored decoder through here, because this is the one function that "
+        "reads the document at all",
+        "external_drainer_pid",
+        (
+            "lock_pid(repo_path)",
+            "lock_file_is_held(checkout_lock_path(repo_path))",
+        ),
     ),
 )
 
