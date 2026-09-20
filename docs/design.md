@@ -3401,12 +3401,24 @@ above are unchanged, and persistence the user switched off is not a failure.
   protected artifact or the manager. That snapshot has two inputs and the seals
   cover only one: the status file is under the sealed runtime root, while the
   checkout's own `.git/drain_prs.lock` is moved and closed by nothing, and a
-  live holder there alone classifies the state `external` — a branch that
+  drainer that currently holds that lock classifies the state `external` — a
+  branch that
   signals the PID it names with `os.kill`, asks the service manager for
   nothing, and is reachable by a drainer started from that checkout after the
-  relocation finished. What bounds that branch is the lock document itself:
+  relocation finished. Current ownership is what reaches it, and the PID in the
+  lock's document is only which process to name once ownership is established.
+  The two are not the same question: the lock file is persistent, released by
+  closing descriptors and never unlinked or truncated, so a finished run's PID
+  stays in it and names something live again the moment the operating system
+  reuses that number. Reading the document alone would therefore classify a
+  stopped drainer as `external`, refuse to start it, and aim that `os.kill` at
+  whatever had inherited the PID. What bounds the branch for
+  a controller predating #367 is the lock document itself:
   a drainer publishes its PID in a shape such a copy's bare `int()` cannot
-  parse, so it finds no holder and delivers no signal. And the `run` a service
+  parse, so it finds no holder and delivers no signal. A lock held by a run
+  that has not published its PID yet is `stopped` with no PID reported, for
+  the same reason: the only number available to report would be the previous
+  run's. And the `run` a service
   manager launches catches its own startup refusals and
   answers with an exit code, which a controller from this change onward makes a
   failing one so that neither the manager nor Kanban reading the job through it

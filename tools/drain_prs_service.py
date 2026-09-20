@@ -1215,12 +1215,76 @@ def decode_lock_holder(text: str) -> int | None:
         return None
 
 
+def checkout_lock_path(repo_path: Path) -> Path:
+    """Where this module looks for a checkout's run lock.
+
+    One spelling so that `lock_pid` and the ownership probe cannot end up
+    reading different files. It is not the only resolution of that path in the
+    tree -- `drain_prs.lock_path_for` builds it for the checkout a run locks,
+    and `install_drainer.repository_drainer_running` asks `git` for the git
+    directory first -- which is why `lock_file_is_held` below takes a path
+    rather than a checkout.
+    """
+    return repo_path / ".git" / "drain_prs.lock"
+
+
 def lock_pid(repo_path: Path) -> int | None:
-    path = repo_path / ".git" / "drain_prs.lock"
+    """The PID this checkout's run lock document names, which is not the same
+    question as whether anyone holds that lock.
+
+    The file is persistent: `RunLock.close` releases the lock by closing its
+    descriptors and nothing ever unlinks or truncates the file afterwards, so
+    the last holder's PID stays in it across a completed run. Reading one here
+    therefore establishes only that a drainer once ran from this checkout.
+    `lock_file_is_held` below is what establishes that one is running now, and
+    a caller that needs ownership has to ask it too (#694).
+    """
     try:
-        return decode_lock_holder(path.read_text(encoding="utf-8"))
+        return decode_lock_holder(
+            checkout_lock_path(repo_path).read_text(encoding="utf-8")
+        )
     except (FileNotFoundError, OSError, ValueError):
         return None
+
+
+def lock_file_is_held(lock_path: Path) -> bool:
+    """Whether some process holds that run lock right now, probed without
+    writing.
+
+    The one spelling of current ownership, here rather than in the drainer
+    because `tools/drain_prs.py` imports this module and not the other way
+    round — the same direction `encode_lock_holder` and `decode_lock_holder`
+    already run in. `drain_prs.lock_file_is_held`,
+    `drain_prs_service.status_snapshot` and
+    `install_drainer.repository_drainer_running` all decide ownership through
+    this one probe, so none of them can disagree about who holds a checkout.
+
+    Taking a lock we immediately drop leaves nothing behind, and an absent or
+    unreadable file cannot be held by anyone.
+
+    That instant is the cost, and it is why a caller must consult this only
+    where the answer changes the outcome. A drainer acquires with `LOCK_NB`
+    and fails permanently on contention rather than waiting, so probing on
+    every poll or every stabilization iteration would give a starting
+    foreground drainer a new way to die, naming a dry-run inspection that was
+    never there. The residual collision that leaves is of the same shape #694
+    puts out of scope: a real run whose acquisition lands inside the instant
+    this probe holds the lock is refused as though a run were already live.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        # Closing releases whatever this probe just took.
+        os.close(fd)
+    return False
 
 
 def in_progress_operation(repo_path: Path) -> str | None:
@@ -1797,6 +1861,23 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     same GitHub repository, which is genuinely this repository's drainer and
     is reported as running. `active_repo` names which checkout it runs from,
     and `install_job` and `start_service` refuse to add a second one.
+
+    A drainer running outside the service manager is classified `external`
+    from current ownership of the checkout run lock, never from the PID that
+    lock's document names. The document is persistent across a completed run,
+    so the PID in it outlives its drainer, and an operating system that reuses
+    the number hands this function a live process that was never a drainer —
+    which read as `external` before #694, blocking `start` and aiming
+    `stop_service`'s `os.kill` at an unrelated user session. Both questions
+    are asked: `lock_file_is_held` says the lock is held, and only then does
+    `lock_pid` name who holds it.
+
+    A lock held while its document names no live PID — a drainer between
+    taking the lock file and publishing its PID, or a document that cannot be
+    decoded — stays `stopped` with a null `drainer_pid`, exactly as it read
+    before. Widening that window to `external` would have to carry the
+    previous run's PID to report anything at all, which is the reused-PID
+    hazard again by another route.
     """
     stored = read_json(job.status_path) or {}
     active_repo = stored_repo_path(stored)
@@ -1808,12 +1889,20 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     locked_alive = pid_alive(locked_pid)
 
     operation: str | None = None
+    external_pid: int | None = None
     if runner_alive and child_alive:
         state = "running"
     elif runner_alive:
         state = "starting"
-    elif locked_alive:
+    elif locked_alive and lock_file_is_held(checkout_lock_path(job.repo_path)):
+        # The only branch whose answer the probe changes, and so the only one
+        # that pays for it: a live runner already settles the state, and a
+        # document naming no live process cannot name an external drainer
+        # whether the lock is held or not. Short-circuiting leaves the lock
+        # untaken in both of those cases, which is what keeps a poll or a
+        # stabilization loop from contending with a starting drainer.
         state = "external"
+        external_pid = locked_pid
     else:
         # Only probed for a drainer that is not running: this is the one state
         # in which starting is the next question, and an unfinished operation
@@ -1848,7 +1937,11 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
         # launchd is what it correctly assumes.
         "service_manager": backend.backend_name(),
         "runner_pid": runner_pid if runner_alive else None,
-        "drainer_pid": child_pid if child_alive else (locked_pid if locked_alive else None),
+        # A lock-derived PID is reported only where the lock is genuinely
+        # held, so nothing downstream — `start_service`'s refusal message,
+        # `stop_service`'s signal, Kanban's sidebar — is ever handed the
+        # stale number a completed run left in the document.
+        "drainer_pid": child_pid if child_alive else external_pid,
         "started_at": stored.get("started_at") if runner_alive else None,
         "repo": str(job.repo_path),
         "repository": job.identity,

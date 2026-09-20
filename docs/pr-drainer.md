@@ -1274,6 +1274,13 @@ installation.
   polling service or a single-PR run. This lock is per *checkout*, and remains
   a secondary guard: two clones of one repository are excluded from running
   concurrently by their shared canonical identity, which the lock cannot see.
+  Both files stay where they are after a run exits — queued and concurrent
+  users need the lock object to be stable — so the PID written in them is the
+  last run's until the next one overwrites it. What says a drainer is running
+  now is the lock actually being held; the PID is only which process to name
+  once it is. Nothing here reads a PID out of an unheld lock and calls it a
+  drainer, because on a machine that has since reused that number it would be
+  naming somebody else's process.
 
 A Linux host that installed the drainer before these paths took each platform's
 own convention has its installation at the `~/Library` spellings. The next
@@ -1426,6 +1433,16 @@ bound to the old one. It cannot read it: a drainer records its PID in a form
 that command does not understand, so it sees no drainer and says "already
 stopped" instead. Nothing about this depends on the old command behaving
 differently, which is the point — it cannot be changed.
+
+A current command looks at that same file differently, and it is worth knowing
+why if you ever read one by hand. The PID in it is not a claim that a drainer
+is running; the lock file is kept after a run finishes, so what you are reading
+may be last week's drainer. A current command asks whether the lock is held
+right now, and only then reads the PID to say who holds it. Earlier versions
+called any live process with a matching number an external drainer — and
+process IDs get reused, so on a machine that had been up a while that could be
+your own shell: reported as a drainer, refusing to start the real one, and
+lined up to be sent an interrupt by the next `stop`.
 
 The run your service manager starts is the other. It catches its own refusal
 and answers with an exit code: a current controller answers a failing one —

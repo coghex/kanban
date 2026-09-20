@@ -197,18 +197,31 @@ def pid_alive(pid: int) -> bool:
 
 
 def repository_drainer_running(repo: Path) -> bool:
-    """Whether a `drain_prs.py` run holds this checkout's own lock.
+    """Whether a `drain_prs.py` run holds this checkout's own lock right now.
 
-    Decoded through `drain_prs_service.decode_lock_holder`, which is the one
-    place the lock document's shape is known, so this refusal and the
-    controller's `external` classification can never disagree about who holds
-    a checkout.
+    Two questions, asked through the controller's own spellings in the order
+    the controller asks them, so this refusal and the `external`
+    classification can never disagree about who holds a checkout.
+    `drain_prs_service.lock_file_is_held` establishes that the lock is held at
+    all; only then is the document read, through
+    `drain_prs_service.decode_lock_holder` — the one place its shape is known
+    — to name the live process holding it.
+
+    The document alone never answered this. The lock file is persistent, so a
+    completed run leaves its PID behind, and a reused PID turned a stopped
+    drainer into a "stop it first" refusal that blocked relocation and install
+    (#694). A held lock whose document names no live process is likewise not a
+    running drainer here: that is a run between taking the lock and publishing
+    its PID, and reporting it would mean reporting a PID nobody has written
+    yet — the same answer the controller gives that window.
     """
     git_dir = Path(
         run(["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"])
         .stdout.strip()
     )
     lock_path = git_dir / "drain_prs.lock"
+    if not drain_prs_service.lock_file_is_held(lock_path):
+        return False
     try:
         pid = drain_prs_service.decode_lock_holder(
             lock_path.read_text(encoding="utf-8")
