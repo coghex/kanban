@@ -229,10 +229,14 @@ observation reachable only as a preserved blob. Writing the file directly
 instead would contradict the only-writer rule, and the document it left behind
 would be refused by the next publication as no longer matching the tip.
 
-A report that `/draft-report` has created but that no pull request has enrolled yet
-is in the same position: it exists locally but is absent from the publication
-tip, so the helper declines both to publish it and to write into it. Report that
-outcome plainly rather than describing the observation as captured.
+A report that `/draft-report` has created but that has not landed on the
+publication tip — its landing refused, not yet requested, or not yet made —
+is in the same position: it exists locally but is absent from the tip, so the
+helper declines both to publish it and to write into it. The tip is the
+condition, not a pull request: a report that landed through the repository's
+own landing lane is on the tip like any other, whether or not a pull request
+ever carried it. Report that outcome plainly rather than describing the
+observation as captured.
 
 ## Record the approved mutation
 
@@ -464,8 +468,8 @@ only two of them left an observation in the report:
   plainly with the write root and path.
 - **Nothing was written.** The report is unchanged and the observation is **not
   captured** — this is the outcome for a document absent from the publication
-  tip, an unenrolled report included, and for a working copy the helper did
-  not write. Say exactly that, name the preserved `approved_blob` and that
+  tip, a report that has not landed yet included, and for a working copy the
+  helper did not write. Say exactly that, name the preserved `approved_blob` and that
   `git cat-file -p` recovers it, and do not describe
   the run as having noted the problem. Reporting capture here would leave the
   user believing a report holds an observation it does not, which is the one

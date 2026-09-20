@@ -203,8 +203,10 @@ follow from their subject being a document that already exists:
   and the approved observation reachable only as a preserved blob. Writing it
   directly instead would contradict the only-writer rule and leave a document
   the next publication refuses as not matching the tip. A report `draft-report`
-  created but no pull request has enrolled is in the same position, and these
-  assets report that outcome rather than describing the observation as captured.
+  created but that has not landed on the publication tip — the tip is the
+  condition, whether or not a pull request ever carried the report — is in the
+  same position, and these assets report that outcome rather than describing
+  the observation as captured.
 - **They acquire no tracker transaction.** They create, link, label, and comment
   on nothing, so §9.6's rule that a disposition mutating no tracker acquires no
   transaction covers them outright. A record acquired here would be one nothing

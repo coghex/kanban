@@ -2693,19 +2693,25 @@ class PublicationTests(unittest.TestCase):
                 with self.subTest(path=path, fragment=fragment):
                     self.assertNotIn(fragment, asset)
 
-    def test_neither_the_helper_nor_the_contract_routes_a_novel_document_to_a_pull_request(self):
-        # The same claim, one level down. The publication module's reason for
-        # declining a novel document, and the contract passage on the module's
-        # write binding, both used to restate the enrollment pull request as
-        # every repository's rule; a processing asset relays that reason on a
-        # non-ordinary outcome. The three helper copies are held identical
-        # elsewhere, so the source copy stands for all of them here.
-        subjects = ("tools/publish_coordination_doc.py", CONTRACT_PATH)
+    def test_nothing_downstream_equates_no_pull_request_with_absent_from_the_tip(self):
+        # The same claim, one level down and one asset over. The publication
+        # module's reason for declining a novel document, the contract passage
+        # on the module's write binding, and both note-problem variants all
+        # used to restate the enrollment pull request as every repository's
+        # rule — note-problem by reading "no pull request has enrolled it" as
+        # "absent from the publication tip", which would refuse to append to a
+        # report the repository's own lane had landed. A processing asset
+        # relays the module's reason on a non-ordinary outcome. The three
+        # helper copies are held identical elsewhere, so the source copy
+        # stands for all of them here.
+        subjects = ("tools/publish_coordination_doc.py", CONTRACT_PATH) + NOTE_ASSETS
         for path in subjects:
             text = canonical(self.asset_text(path))
             for fragment in (
                 "stays local until a pull request adds it",
                 "enrollment-by-pull-request rule stands",
+                "no pull request has enrolled",
+                "an unenrolled report",
             ):
                 with self.subTest(path=path, fragment=fragment):
                     self.assertNotIn(fragment, text)
@@ -2713,6 +2719,11 @@ class PublicationTests(unittest.TestCase):
             "documentation-landing lane",
             canonical(self.asset_text("tools/publish_coordination_doc.py")),
         )
+        for path in NOTE_ASSETS:
+            with self.subTest(path=path):
+                text = canonical(self.asset_text(path))
+                self.assertIn("has not landed on the publication tip", text)
+                self.assertIn("the tip is the condition, not a pull request", text)
 
     def test_the_report_pair_lands_on_approval(self):
         self.assertEqual(len(REPORT_DRAFTING_ASSETS), 2)
