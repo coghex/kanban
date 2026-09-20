@@ -285,9 +285,20 @@ CONTRACT_STATEMENTS = {
     "publication-note-problem-has-no-transaction": (
         "they mutate no tracker, so they acquire no §9.6 transaction"
     ),
-    "publication-drafting-assets-stay-local": (
+    "publication-drafting-assets-do-not-use-the-module": (
         "The four drafting assets — /design-epic, $design-epic, "
-        "/draft-report, and $draft-report — publish nothing at all"
+        "/draft-report, and $draft-report — publish nothing through this module"
+    ),
+    "publication-drafting-assets-land-through-the-lane": (
+        "a new document lands through the owning repository's own "
+        "documentation-landing lane instead"
+    ),
+    "publication-report-pair-lands-on-approval": (
+        "/draft-report and $draft-report invoke that landing once, immediately "
+        "after the approved report is written"
+    ),
+    "publication-design-pair-lands-nothing": (
+        "/design-epic and $design-epic land nothing on their own"
     ),
     "publication-unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
@@ -1079,28 +1090,52 @@ EPIC_PATH_CLAUSES = {
     ),
 }
 
-BOOTSTRAP_CLAUSES = {
-    "novel-document-is-local": (
-        "a document this workflow newly creates is local and unpublished, and "
-        "this workflow never publishes one"
+# §9.1's landing rule for a novel document, stated by every drafting asset.
+# Before this, the four assets claimed a new document could never land without
+# an enrollment pull request. That is true of coghex/kanban, whose §7 gate
+# refuses an untracked path, and false of every consuming repository whose
+# landing helper declares no lane split: there the helper accepts the path, and
+# the assets were sending the user to open a pull request the repository's own
+# lane never asked for. The rule now names the lane and leaves the verdict to
+# its gate.
+LANDING_CLAUSES = {
+    "not-through-the-module": (
+        "never goes through the publication module the processing assets invoke"
     ),
-    "unmatched-is-pr-atomic": (
-        "an unmatched path is pr-atomic by the fail-closed default"
+    "the-module-creates-nothing": "and never creates one",
+    "lands-through-the-repository-lane": (
+        "lands through the owning repository's own documentation-landing lane "
+        "instead"
     ),
-    "never-directly-publishable": (
-        "there is no moment at which a novel document is directly publishable"
-    ),
-    "first-publication-needs-a-pull-request": (
-        "its first publication requires a separate pull request that adds both "
-        "the document and its coordination classification"
-    ),
-    "only-then-may-processing-publish": (
-        "only after that pull request lands may a later processing run publish "
-        "direct-to-master mutations to it"
+    "the-gate-decides": "whose gate decides whether the path may land directly",
+    "kanban-refuses-unclassified": (
+        "an unclassified path is pr-atomic and the helper refuses it until a "
+        "pull request adds it and its §7 classification"
     ),
     "enrollment-is-out-of-scope": (
-        "creating that enrollment pull request is not this workflow's job either"
+        "opening that pull request is not this workflow's job"
     ),
+}
+
+# The report pair lands on approval; the design pair deliberately does not.
+# Each half is the other's negative control below, so a fragment vague enough
+# to match both drafting kinds fails rather than asserting nothing.
+REPORT_LANDING_CLAUSES = {
+    "approval-is-the-landing-request": (
+        "the user's approval of the displayed draft is the user-directed "
+        "landing request"
+    ),
+    "approval-is-announced-first": (
+        "approving the exact content shown is approving that it lands"
+    ),
+    "lands-only-this-report": (
+        "with the report's repository-relative path and nothing else"
+    ),
+    "a-refusal-keeps-it-local": "the report stays in the docs worktree",
+}
+
+DESIGN_LANDING_CLAUSES = {
+    "lands-nothing-on-its-own": "this workflow lands nothing on its own",
 }
 
 PROCESSING_ASSETS = DISPOSITION_APPLYING_ASSETS
@@ -1185,13 +1220,18 @@ NOTE_HANDOFF_CLAUSES = {
 NOTE_FORBIDDEN_CREATE_PROSE = "create a missing report"
 
 # The assets that create a novel document and therefore state §9.1's rule that
-# it stays local until separately classified and published.
+# it lands through the repository's documentation-landing lane rather than the
+# publication module.
 DRAFTING_ASSETS = (
     "claude-plugin/plugins/kanban/commands/design-epic.md",
     "claude-plugin/plugins/kanban/commands/draft-report.md",
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md",
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md",
 )
+
+# The two halves of that set, by whether the asset lands on approval.
+REPORT_DRAFTING_ASSETS = tuple(p for p in DRAFTING_ASSETS if "draft-report" in p)
+DESIGN_DRAFTING_ASSETS = tuple(p for p in DRAFTING_ASSETS if "design-epic" in p)
 
 # Issue #278: the ownership-resolution step every declared asset states, as the
 # load-bearing prose fragments. Compared against canonical() output for the
@@ -1632,11 +1672,27 @@ def missing_handoff_clauses(text):
     )
 
 
-def missing_bootstrap_clauses(text):
-    """The §9.1 novel-document clauses `text` no longer states, by key."""
+def missing_landing_clauses(text):
+    """The §9.1 novel-document landing clauses `text` no longer states, by key."""
     asset = canonical(text)
     return sorted(
-        key for key, clause in BOOTSTRAP_CLAUSES.items() if clause not in asset
+        key for key, clause in LANDING_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_report_landing_clauses(text):
+    """The land-on-approval clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in REPORT_LANDING_CLAUSES.items() if clause not in asset
+    )
+
+
+def missing_design_landing_clauses(text):
+    """The no-landing-of-its-own clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in DESIGN_LANDING_CLAUSES.items() if clause not in asset
     )
 
 
@@ -2589,22 +2645,84 @@ class PublicationTests(unittest.TestCase):
     def test_every_drafting_asset_states_the_novel_document_rule(self):
         for path in DRAFTING_ASSETS:
             with self.subTest(path=path):
-                missing = missing_bootstrap_clauses(self.asset_text(path))
+                missing = missing_landing_clauses(self.asset_text(path))
                 self.assertEqual(
                     missing,
                     [],
-                    f"{path} no longer states that its novel output remains local "
-                    f"until separately classified and published: {missing}",
+                    f"{path} no longer states that its novel output lands through "
+                    f"the repository's documentation-landing lane: {missing}",
                 )
 
-    def test_removing_the_bootstrap_rule_from_an_asset_is_reported(self):
+    def test_removing_the_landing_rule_from_an_asset_is_reported(self):
         for path in DRAFTING_ASSETS:
             asset = canonical(self.asset_text(path))
-            for key, clause in BOOTSTRAP_CLAUSES.items():
+            for key, clause in LANDING_CLAUSES.items():
                 with self.subTest(path=path, clause=key):
                     self.assertEqual(
-                        missing_bootstrap_clauses(asset.replace(clause, "")), [key]
+                        missing_landing_clauses(asset.replace(clause, "")), [key]
                     )
+
+    def test_no_drafting_asset_claims_a_pull_request_is_always_required(self):
+        # The defect this rule replaced, pinned so it cannot come back: the
+        # claim was true of coghex/kanban alone and sent every other
+        # repository's user to open a pull request its own lane never asked
+        # for.
+        for path in DRAFTING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for fragment in (
+                "there is no moment at which a novel document is directly "
+                "publishable",
+                "its first publication requires a separate pull request",
+            ):
+                with self.subTest(path=path, fragment=fragment):
+                    self.assertNotIn(fragment, asset)
+
+    def test_the_report_pair_lands_on_approval(self):
+        self.assertEqual(len(REPORT_DRAFTING_ASSETS), 2)
+        for path in REPORT_DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    missing_report_landing_clauses(self.asset_text(path)), []
+                )
+                asset = canonical(self.asset_text(path))
+                for key, clause in REPORT_LANDING_CLAUSES.items():
+                    with self.subTest(path=path, clause=key):
+                        self.assertEqual(
+                            missing_report_landing_clauses(asset.replace(clause, "")),
+                            [key],
+                        )
+
+    def test_the_design_pair_lands_nothing_on_its_own(self):
+        self.assertEqual(len(DESIGN_DRAFTING_ASSETS), 2)
+        for path in DESIGN_DRAFTING_ASSETS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    missing_design_landing_clauses(self.asset_text(path)), []
+                )
+                asset = canonical(self.asset_text(path))
+                for key, clause in DESIGN_LANDING_CLAUSES.items():
+                    with self.subTest(path=path, clause=key):
+                        self.assertEqual(
+                            missing_design_landing_clauses(asset.replace(clause, "")),
+                            [key],
+                        )
+
+    def test_each_drafting_half_is_the_other_half_s_negative_control(self):
+        # A land-on-approval fragment loose enough to match the design pair,
+        # or a lands-nothing fragment loose enough to match the report pair,
+        # would pass the two tests above while asserting nothing.
+        for path in DESIGN_DRAFTING_ASSETS:
+            with self.subTest(path=path, rule="report"):
+                self.assertEqual(
+                    sorted(missing_report_landing_clauses(self.asset_text(path))),
+                    sorted(REPORT_LANDING_CLAUSES),
+                )
+        for path in REPORT_DRAFTING_ASSETS:
+            with self.subTest(path=path, rule="design"):
+                self.assertEqual(
+                    sorted(missing_design_landing_clauses(self.asset_text(path))),
+                    sorted(DESIGN_LANDING_CLAUSES),
+                )
 
     def test_neither_note_asset_promises_to_create_a_missing_report(self):
         for path in NOTE_ASSETS:
@@ -2660,7 +2778,7 @@ class PublicationTests(unittest.TestCase):
         # path into a publishing asset would fail no test.
         for path in DRAFTING_ASSETS:
             with self.subTest(path=path):
-                self.assertEqual(missing_bootstrap_clauses(self.asset_text(path)), [])
+                self.assertEqual(missing_landing_clauses(self.asset_text(path)), [])
 
     def test_no_drafting_asset_invokes_the_helper(self):
         # Scoped to DRAFTING_ASSETS alone: note-problem is a capture asset that
