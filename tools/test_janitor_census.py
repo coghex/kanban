@@ -586,6 +586,10 @@ elif mode == "unknown-state":
 elif mode == "unknown-standing":
     print('{"status": "active", "keeper_standing": "probably-fine", '
           '"unfinished_launches": []}')
+elif mode == "unhashable-state":
+    print('{"status": [], "keeper_standing": "gone", "unfinished_launches": []}')
+elif mode == "unhashable-standing":
+    print('{"status": "active", "keeper_standing": {}, "unfinished_launches": []}')
 elif mode == "no-launch-inventory":
     print('{"status": "ended", "keeper_standing": "gone"}')
 elif mode == "other-refusal":
@@ -991,6 +995,14 @@ class AttemptStatusReadingTests(AttemptFixture):
             ("not-an-object", "did not report a JSON object"),
             ("unknown-state", "unknown state"),
             ("unknown-standing", "unknown keeper standing"),
+            # A field JSON allows and this program does not expect. Set
+            # membership is not total -- `[] in frozenset(...)` raises
+            # TypeError -- so an unguarded vocabulary check would abort the
+            # whole census here rather than reporting one attempt's error.
+            # `census_through` asserts the program exited 0, which is what
+            # catches that.
+            ("unhashable-state", "unknown state"),
+            ("unhashable-standing", "unknown keeper standing"),
             ("no-launch-inventory", "unfinished_launches"),
             ("other-refusal", "attempt-invalid"),
             ("bare-failure", "exit 3"),

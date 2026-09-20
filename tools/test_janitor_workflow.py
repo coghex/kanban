@@ -2559,10 +2559,20 @@ ATTEMPT_SWEEP_CONTRACT = {
         "**The census inventories more than the report shows, and the "
         "project-review attempts are where those two differ.**"
     ),
+    "an unresolved attempt is not dropped by a rule about over": (
+        "an attempt whose `over` the census could not answer at all, because "
+        "the adapter was missing or its `status` unusable, is neither healthy "
+        "nor over and is exactly the row a rule about `over` would drop. It "
+        "goes in as `pipeline attention` with the error the census recorded."
+    ),
+    "every row but the healthy one reaches the report": (
+        "**Every other row reaches the report**, and `over` is not the test "
+        "for that"
+    ),
     "what reaches the report": (
-        "What reaches the report is the attempts that are `over`: as "
-        "`safe cleanup` where the census also calls them `cleanable`, and as "
-        "`retain/decision`, by path and with the reason, where it does not."
+        "an attempt that is `over` goes in as `safe cleanup` where the census "
+        "also calls it `cleanable`, and as `retain/decision`, by path and with "
+        "the reason, where it does not"
     ),
     "the one rm -rf and the one force, named as exceptions": (
         "Never use `rm -rf` and never force-remove a dirty worktree: the one "

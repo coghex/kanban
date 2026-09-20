@@ -370,10 +370,15 @@ nothing**. Accept "all-safe", a group, or single item ids.
 attempts are where those two differ.** The census reports every attempt
 directory because a complete inventory is what makes an absent one meaningful;
 a healthy attempt — `active` with a live keeper — is somebody's running
-invocation and is not an anomaly, so it is not listed as one. What reaches the
-report is the attempts that are `over`: as `safe cleanup` where the census also
-calls them `cleanable`, and as `retain/decision`, by path and with the reason,
-where it does not.
+invocation and is not an anomaly, so it is not listed as one. **Every other row
+reaches the report**, and `over` is not the test for that: an attempt that is
+`over` goes in as `safe cleanup` where the census also calls it `cleanable`, and
+as `retain/decision`, by path and with the reason, where it does not — while an
+attempt whose `over` the census could not answer at all, because the adapter was
+missing or its `status` unusable, is neither healthy nor over and is exactly the
+row a rule about `over` would drop. It goes in as `pipeline attention` with the
+error the census recorded. An inspection that failed is never a clean result,
+and here it would be an invisible one.
 
 ## 5. Apply approved items
 

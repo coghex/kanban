@@ -479,11 +479,19 @@ def attempt_status(root: Path, adapter: Path, attempt: str) -> dict[str, Any]:
             raise ValueError(f"invalid status JSON: {error}") from None
         if not isinstance(document, dict):
             raise ValueError("status did not report a JSON object")
+        # Each membership test is guarded by its own `isinstance`, because a
+        # set membership test is not a total function: `[] in frozenset(...)`
+        # raises TypeError, which is not a ValueError and would leave this
+        # census with no document at all. A field JSON allows and this program
+        # does not expect has to be one attempt's error, the way every other
+        # unusable answer here is.
         state = document.get("status")
-        if state not in ATTEMPT_STATES:
+        if not isinstance(state, str) or state not in ATTEMPT_STATES:
             raise ValueError(f"status reported the unknown state {state!r}")
         standing = document.get("keeper_standing")
-        if standing is not None and standing not in KEEPER_STANDINGS:
+        if standing is not None and (
+            not isinstance(standing, str) or standing not in KEEPER_STANDINGS
+        ):
             raise ValueError(
                 f"status reported the unknown keeper standing {standing!r}"
             )
@@ -603,16 +611,19 @@ def project_review_attempts(root: Path, common_dir: Path,
         row: dict[str, Any] = {"attempt": name, "path": str(path)}
         try:
             modified = path.stat().st_mtime
-        except OSError as error:
-            row["modified"] = None
-            row["age_seconds"] = None
-            row["measurement_error"] = str(error)
-            warnings.append(f"project-review attempt {name} could not be aged: {error}")
-        else:
+            # Inside the guard with the `stat`, not beside it: a timestamp this
+            # platform cannot represent raises from here rather than from the
+            # `stat`, and an age that cannot be computed is one row's unknown
+            # rather than the whole census's failure.
             row["modified"] = datetime.fromtimestamp(
                 modified, timezone.utc
             ).isoformat()
             row["age_seconds"] = round(max(0.0, now - modified), 3)
+        except (OSError, OverflowError, ValueError) as error:
+            row["modified"] = None
+            row["age_seconds"] = None
+            row["measurement_error"] = str(error)
+            warnings.append(f"project-review attempt {name} could not be aged: {error}")
         footprint = directory_footprint(path)
         row["files"] = footprint["files"]
         row["bytes"] = footprint["bytes"]
