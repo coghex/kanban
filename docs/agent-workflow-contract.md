@@ -2390,7 +2390,8 @@ A registration refusal stops that run before any claim.
   the smoke-test procedure, and the observed timings on both installed runtimes.
 - **Mandatory/optional:** optional. The only caller is `project-review`'s PR
   mode, which is a user-invoked action; its explicit-only direct-commit mode
-  registers nothing. A session that never registers an attempt pays a short hook
+  takes no claim, so it registers nothing and resolves this adapter nowhere
+  (issue #686). A session that never registers an attempt pays a short hook
   process on each tool event and writes nothing.
 
 ### 2.14 Serial project review (`$auto-project-review` / `/auto-project-review`)

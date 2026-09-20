@@ -631,11 +631,14 @@ class DocumentParsingTests(LedgerTestCase):
         self.assertIn(LEDGER.LEDGER_MARKER, str(raised.exception))
 
     def test_the_cursor_marker_does_not_satisfy_the_ledger_parser(self):
-        # The two documents coexist until LEDGER-6, and the markers are
-        # distinct precisely so neither parser reads the other's document as
-        # its own. Handing the ledger a real cursor is the strongest form of
-        # that check, so the cursor here is one the fixture renders in the
-        # shape its retired writer published.
+        # This module parses both documents now, so the markers are what
+        # keeps each parser off the other's: a consumer's retired record
+        # reaching `parse_document` is a migration input arriving where the
+        # ledger was expected, and reading it as a ledger would replace that
+        # consumer's coverage with whatever the payload happened to hold.
+        # Handing the ledger a real one is the strongest form of that check,
+        # so the cursor here is one the fixture renders in the shape its
+        # retired writer published.
         record_cursor(self.root, reviewed=[602, 601])
         cursor_text = cursor_path(self.root).read_text(encoding="utf-8")
         with self.assertRaises(LEDGER.LedgerError) as raised:
@@ -6807,7 +6810,15 @@ class CursorFixtureTests(LedgerTestCase):
 
 
 class BundledLedgerHelperTests(unittest.TestCase):
-    """The module ships in both bundles and nothing invokes it yet."""
+    """The module ships in both bundles, and both modes of the command call it.
+
+    It was a mechanism nothing invoked when issue #680 vendored it. LEDGER-6
+    (#684) switched PR mode onto it and LEDGER-8 (#686) switched direct mode,
+    so the installed `project-review` workflow is now its caller in both --
+    which is what the resolution test below asserts, and what makes the
+    byte-identical-copies test a statement about two installs rather than two
+    unused files.
+    """
 
     def test_both_bundles_carry_the_helper_and_the_copies_are_identical(self):
         claude = (REPO_ROOT / CLAUDE_LEDGER_HELPER).read_bytes()
@@ -6866,9 +6877,10 @@ class BundledLedgerHelperTests(unittest.TestCase):
         )
 
     def test_only_the_project_review_workflow_resolves_this_module(self):
-        # Design D-19, after LEDGER-6 (#684) performed the switch-over: the
-        # installed `project-review` command is now this module's caller, and
-        # it is the only one. Asserted over the whole of both bundles rather
+        # Design D-19, after LEDGER-6 (#684) and LEDGER-8 (#686) performed
+        # the switch-over in PR mode and then in direct mode: the installed
+        # `project-review` command is this module's caller in both, and it is
+        # the only one. Asserted over the whole of both bundles rather
         # than over the two rendered assets alone, because a manifest, another
         # skill, or a sibling script naming it would make it reachable from a
         # workflow that was never given this authority.

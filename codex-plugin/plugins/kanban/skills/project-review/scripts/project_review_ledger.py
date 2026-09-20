@@ -233,9 +233,10 @@ LEDGER_DIRECTORY = posixpath.dirname(LEDGER_RELATIVE_PATH)
 SCHEMA_VERSION = 4
 READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
-# Distinct from `<!-- project-review:cursor:v2 -->` on purpose: the two
-# documents coexist until LEDGER-6, and a parser that anchored on the other
-# one's marker would read whichever document it was handed as its own.
+# Distinct from `<!-- project-review:cursor:v2 -->` on purpose: this module
+# parses both documents, and a parser that anchored on the other one's marker
+# would read whichever it was handed as its own -- a consumer's unmigrated
+# record read as a ledger, or the reverse.
 #
 # Its `v1` names the container -- one marker line, one fenced JSON payload
 # after it -- and not the payload's schema, which the payload states itself in
