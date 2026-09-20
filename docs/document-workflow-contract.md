@@ -90,8 +90,9 @@ design-capture workflow rather than guessing which representation wins.
 `/draft-report` and `$draft-report` turn free-form notes or an audit request
 into one
 evidence-backed findings report, present the complete draft, and create the
-file only after explicit approval. Neither files an issue or chooses a
-disposition; every status box either writes is unchecked.
+file only after explicit approval, which also lands it through the owning
+repository's documentation-landing lane (§9.1). Neither files an issue or
+chooses a disposition; every status box either writes is unchecked.
 
 Together with `/note-problem` and `$note-problem` in §3.7 these are the report
 **write side**: one starts a report, the other grows an existing one. Both are
@@ -202,8 +203,10 @@ follow from their subject being a document that already exists:
   and the approved observation reachable only as a preserved blob. Writing it
   directly instead would contradict the only-writer rule and leave a document
   the next publication refuses as not matching the tip. A report `draft-report`
-  created but no pull request has enrolled is in the same position, and these
-  assets report that outcome rather than describing the observation as captured.
+  created but that has not landed on the publication tip — the tip is the
+  condition, whether or not a pull request ever carried the report — is in the
+  same position, and these assets report that outcome rather than describing
+  the observation as captured.
 - **They acquire no tracker transaction.** They create, link, label, and comment
   on nothing, so §9.6's rule that a disposition mutating no tracker acquires no
   transaction covers them outright. A record acquired here would be one nothing
@@ -354,9 +357,12 @@ parses §2 and fails if:
 - a publishing asset carries any part of the publication sequence itself rather
   than invoking that module, or writes the document instead of handing over its
   approved content;
-- a drafting asset stops stating that a novel document remains local until it is
-  separately classified and published, or either `note-problem` variant is
-  reclassified into that rule instead of the same-run publication rule its
+- a drafting asset stops stating that a novel document lands through the
+  owning repository's documentation-landing lane rather than through the
+  publication module, either `draft-report` variant stops landing the approved
+  report on the approval that announced it, either `design-epic` variant
+  starts landing on its own, or either `note-problem` variant is reclassified
+  into the drafting rule instead of the same-run publication rule its
   existing-document subject requires;
 - this document drops §9's `pr-atomic` fail-closed rule, its one-artifact
   boundary, or its rule that publication is reported only on reachability;
@@ -523,17 +529,34 @@ same run that mutates it, rather than left for a later manual commit.
   to them unchanged, the rule that the module is the document's only writer
   included.
 - The four **drafting** assets — `/design-epic`, `$design-epic`,
-  `/draft-report`, and `$draft-report` — publish nothing at all. A document one
-  of them newly creates is local and unpublished. Its first publication requires
-  a separate pull request that adds both the document and its `coordination`
-  classification; only after that pull request lands may a later processing run
-  publish direct-to-`master` mutations to it. Automating that enrollment pull
-  request is outside this contract.
+  `/draft-report`, and `$draft-report` — publish nothing through this module.
+  A document one of them newly creates is absent from the publication tip, and
+  the module never creates a document (§9.4), so a new document lands through
+  the owning repository's own documentation-landing lane instead: `/push-docs`
+  or `$push-docs` running `tools/docs_land.sh`, whose gate decides whether the
+  path may land directly. For `coghex/kanban` that gate is §7 as
+  `tools/docs_land_paths.py` reads it from the publication tip, so a path no
+  row covers is `pr-atomic` and is refused until a pull request adds the
+  document and its `coordination` classification; only after that pull request
+  lands may a later processing run publish direct-to-`master` mutations to it,
+  and automating that enrollment pull request is outside this contract. A
+  consuming repository whose helper declares no lane split lands the new
+  document directly. `/draft-report` and `$draft-report` invoke that landing
+  once, immediately after the approved report is written: their approval gate
+  announces the landing before the user answers, so the approval of the
+  displayed draft is the user-directed request `push-docs` requires. A run
+  that skipped that gate at the user's instruction has no approval to stand
+  on and lands only if the bypass instruction itself asked for the landing.
+  `/design-epic` and `$design-epic` land nothing on their own, because a design
+  is edited across many conversations and the user chooses when a state of it
+  is worth publishing.
 
-The split follows from §7 rather than from convenience: the classifier's subject
-inventory is `git ls-files '*.md'`, so a document a drafting asset just created
-is not yet tracked, matches no row, and is therefore `pr-atomic`. There is no
-moment at which a novel document is directly publishable.
+The split follows from §9.4 rather than from convenience: the module writes only
+over a document the tip carries or its own recorded predecessor, so a document a
+drafting asset just created gives it nothing to publish. Whether such a document
+may land directly is the landing helper's question — answered by §7 for Kanban's
+own repository, where an untracked path matches no row, and by the helper's own
+inventory everywhere else — never this module's.
 
 `note-problem` sits on the publishing side because its subject is the opposite
 case: a report that already exists and may already be classified
@@ -544,7 +567,7 @@ why it creates nothing: the module never creates an absent document — it
 writes a document that is not on the tip only over the working copy the run's
 own preflight observed (§9.4) — so creating one stays entirely with the
 drafting assets, which write their own file precisely because they publish
-nothing.
+nothing through it.
 
 ### 9.2 Eligibility, and the fail-closed default
 
@@ -765,9 +788,9 @@ both the preflight's blob and the recorded predecessor continues as
 refused even when the record names it. The record says what the module last
 wrote, not what this run decided over; consulted ahead of the binding it would
 let a run prepared over an older copy overwrite a newer disposition another run
-recorded in between. A novel document is still never published from here
-(#237's enrollment-by-pull-request rule stands); only its local write is
-licensed.
+recorded in between. A novel document is still never published from here —
+it lands through the owning repository's documentation-landing lane, as §9.1
+sets out — and only its local write is licensed.
 Which predecessor it is changes nothing else: the replacement is guarded against
 the exact bytes the decision was made from, a staged document is still refused,
 and a write that lands in between still wins.

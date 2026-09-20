@@ -213,8 +213,9 @@ not a request that must already be organized or precisely worded.
 1. Present the intended path and the complete proposed Markdown report in the
    final response. Do not summarize in place of the draft or omit chapters for
    length.
-2. State explicitly that no report file has been written yet, then ask the user
-   to approve the draft or request changes.
+2. State explicitly that no report file has been written yet and that approval
+   also lands the written report through /push-docs, as Landing describes,
+   then ask the user to approve the draft or request changes.
 3. Do not create or edit the report before explicit approval. The initial
    request to run `/draft-report`, create a report, or investigate a subject is
    authorization to prepare the draft, not approval of unseen content.
@@ -222,7 +223,8 @@ not a request that must already be organized or precisely worded.
    updated version again. Approval applies only to the latest version the user
    has seen.
 5. Skip this gate only when the user explicitly instructs this invocation to
-   bypass draft review and write without approval.
+   bypass draft review and write without approval. A skipped gate authorizes
+   no landing; Landing says what a bypassed run may do.
 
 ## Write the approved report
 
@@ -235,29 +237,46 @@ not a request that must already be organized or precisely worded.
 3. Re-run the checklist/key/order verification against the written file and
    confirm that no terminal status marker was introduced.
 
-## Publication
+## Landing
 
-A document this workflow newly creates is local and unpublished, and this
-workflow never publishes one. It is not yet tracked, so no row of
-`docs/agent-workflow-contract.md` §7 matches its path, and an unmatched path is
-`pr-atomic` by the fail-closed default — there is no moment at which a novel
-document is directly publishable. Its first publication requires a separate pull
-request that adds both the document and its `coordination` classification. Only
-after that pull request lands may a later processing run publish
-direct-to-`master` mutations to it. Creating that enrollment pull request is not
-this workflow's job either; say plainly that the document is local so the user
-can decide.
+A document this workflow newly creates never goes through the publication
+module the processing assets invoke: that module publishes an approved mutation
+to a document the publication tip already carries, and never creates one. A new
+report lands through the owning repository's own documentation-landing lane
+instead — /push-docs and the `tools/docs_land.sh` helper it runs, run from
+`$DOC_ROOT` so the helper it resolves is the owning repository's — whose gate
+decides whether the path may land directly.
 
-An existing document this workflow resumes is unaffected by the above: whether
-its edits publish is the processing workflows' question, answered against the
-same §7 rows.
+The user's approval of the displayed draft is the user-directed landing request
+/push-docs requires, because the approval gate announces the landing before the
+user answers: approving the exact content shown is approving that it lands. So
+once the report is written and verified, invoke /push-docs with the report's
+repository-relative path and nothing else — the landing reaches only this
+report, never another document waiting in the docs worktree — and relay its
+answer. A run that skipped the approval gate has no approval to stand on: land
+only when the bypass instruction itself explicitly asked for the landing as
+well, and otherwise leave the report in the docs worktree, unlanded, and say
+so in the handoff. The answer to relay:
+
+- landed: quote the landing commit;
+- refused by the helper's gate, or stopped by one of its warnings: the report
+  stays in the docs worktree; say so and quote the refusal. In `coghex/kanban`
+  an unclassified path is `pr-atomic` and the helper refuses it until a pull
+  request adds it and its §7 classification; opening that pull request is not
+  this workflow's job;
+- no landing helper in `$DOC_ROOT`: the report stays in the docs worktree,
+  unlanded; say so.
+
+A report that stays in the docs worktree is still complete: /process-report
+resumes it there. An existing document this workflow resumes is unaffected by
+the above: whether its edits publish is the processing workflows' question.
 
 ## Boundaries
 
 - Draft and, after approval, create a findings report, not an issue backlog,
   implementation plan, or patch.
-- Do not modify implementation code, file issues, mutate GitHub, or choose issue
-  dispositions.
+- Do not modify implementation code, file issues, or choose issue dispositions,
+  and touch GitHub only through the one landing the Landing section describes.
 - Do not invent a minimum finding count. A narrow input may yield one finding;
   a clean audit may yield none. If none survive verification, explain that and
   do not create an empty report unless the user explicitly wants the audit
@@ -271,18 +290,19 @@ same §7 rows.
 
 Before approval, report the intended path, finding count, item-key range, major
 chapters, and any omitted or uncertain source notes. End by stating that no file
-has been written and asking the user to approve the displayed draft or request
-changes.
+has been written, that approval also lands the report as Landing describes, and
+asking the user to approve the displayed draft or request changes.
 
 After approval and creation, report the created path, finding count, item-key
-range, major chapters, and any omitted or uncertain source notes. End by stating
-that the report is ready for `/process-report`, which will handle exactly one
-finding per invocation.
+range, major chapters, any omitted or uncertain source notes, and the landing's
+answer — the landing commit, or why the report stays in the docs worktree. End
+by stating that the report is ready for `/process-report`, which will handle
+exactly one finding per invocation.
 
 <!-- Transposed from the tracked Codex skill
      codex-plugin/plugins/kanban/skills/draft-report/SKILL.md at commit
-     86cd55c57d96875b02d529d75259ca62ee446f48, SHA-256
-     6e38987ad4d072918f53c3f40d3aa36cd7f439c0eb81a341523f7e43f66ab9aa.
+     514124a00783ca4cdd29a994d1b93b744146fb50, SHA-256
+     87a1540f01c522bfde8acb88e21d9a6a45b4ba6b90e5d3d2e72e9416fa1adf4a.
      It differs from that source only in Claude command frontmatter,
      $ARGUMENTS plumbing, Claude tool names, and Claude-sigil workflow
      cross-references; it introduces no new behavior. -->
