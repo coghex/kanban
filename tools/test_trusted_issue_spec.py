@@ -120,6 +120,7 @@ from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+marketplace, plugin, bundle = "kanban-kimi", "kanban", "kimi-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"trusted helper was not found at {candidate}")
@@ -140,35 +141,55 @@ if os.path.lexists(settings):
         raise SystemExit(
             f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
         )
-    if isinstance(marketplaces, dict) and "kanban-kimi" in marketplaces:
-        entry = marketplaces["kanban-kimi"]
+    if isinstance(marketplaces, dict) and marketplace in marketplaces:
+        entry = marketplaces[marketplace]
         if not isinstance(entry, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} have a malformed kanban-kimi entry."
+                f"Copilot settings at {settings} have a malformed {marketplace} entry."
             )
         source = entry.get("source")
-        if not isinstance(source, dict) or source.get("source") != "directory":
+        if not isinstance(source, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} do not name kanban-kimi as a directory source."
+                f"Copilot settings at {settings} have a malformed {marketplace} source."
             )
-        recorded = source.get("path")
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        kind = source.get("source")
+        if kind == "directory":
+            recorded = source.get("path")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise SystemExit(
+                    f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
+                )
+            finish(Path(recorded) / "plugins" / plugin / relative)
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
-                f"Copilot settings at {settings} do not name an absolute kanban-kimi path: {recorded!r}."
+                f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
             )
-        finish(Path(recorded) / "plugins" / "kanban" / relative)
-matches = sorted(
-    candidate
-    for candidate in (Path(copilot_home) / "installed-plugins").glob(
-        "kanban-*/" + relative.as_posix()
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
+            )
+installed = Path(copilot_home) / "installed-plugins"
+def installs_this_bundle(name):
+    repository, separator, subdirectory = name.rpartition("--")
+    return separator == "--" and subdirectory == bundle and "--" in repository
+roots = []
+from_marketplace = installed / marketplace / plugin
+if from_marketplace.is_dir():
+    roots.append(from_marketplace)
+direct = installed / "_direct"
+if direct.is_dir():
+    roots += sorted(
+        child
+        for child in direct.iterdir()
+        if child.is_dir() and installs_this_bundle(child.name)
     )
-    if candidate.is_file()
-)
-if not matches:
-    raise SystemExit("trusted helper was not found: $KIMI_PLUGIN_ROOT is unset, the kanban-kimi marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
+if not roots:
+    raise SystemExit(f"trusted helper was not found: $KIMI_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+if len(roots) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
+finish(roots[0] / relative)
 '''
 KIMI_HELPER_LOOKUP = (
     'python3 - "${KIMI_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
@@ -181,6 +202,7 @@ from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+marketplace, plugin, bundle = "kanban-google", "kanban", "google-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"trusted helper was not found at {candidate}")
@@ -201,41 +223,68 @@ if os.path.lexists(settings):
         raise SystemExit(
             f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
         )
-    if isinstance(marketplaces, dict) and "kanban-google" in marketplaces:
-        entry = marketplaces["kanban-google"]
+    if isinstance(marketplaces, dict) and marketplace in marketplaces:
+        entry = marketplaces[marketplace]
         if not isinstance(entry, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} have a malformed kanban-google entry."
+                f"Copilot settings at {settings} have a malformed {marketplace} entry."
             )
         source = entry.get("source")
-        if not isinstance(source, dict) or source.get("source") != "directory":
+        if not isinstance(source, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} do not name kanban-google as a directory source."
+                f"Copilot settings at {settings} have a malformed {marketplace} source."
             )
-        recorded = source.get("path")
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        kind = source.get("source")
+        if kind == "directory":
+            recorded = source.get("path")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise SystemExit(
+                    f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
+                )
+            finish(Path(recorded) / "plugins" / plugin / relative)
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
-                f"Copilot settings at {settings} do not name an absolute kanban-google path: {recorded!r}."
+                f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
             )
-        finish(Path(recorded) / "plugins" / "kanban" / relative)
-matches = sorted(
-    candidate
-    for candidate in (Path(copilot_home) / "installed-plugins").glob(
-        "kanban-*/" + relative.as_posix()
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
+            )
+installed = Path(copilot_home) / "installed-plugins"
+def installs_this_bundle(name):
+    repository, separator, subdirectory = name.rpartition("--")
+    return separator == "--" and subdirectory == bundle and "--" in repository
+roots = []
+from_marketplace = installed / marketplace / plugin
+if from_marketplace.is_dir():
+    roots.append(from_marketplace)
+direct = installed / "_direct"
+if direct.is_dir():
+    roots += sorted(
+        child
+        for child in direct.iterdir()
+        if child.is_dir() and installs_this_bundle(child.name)
     )
-    if candidate.is_file()
-)
-if not matches:
-    raise SystemExit("trusted helper was not found: $GOOGLE_PLUGIN_ROOT is unset, the kanban-google marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
+if not roots:
+    raise SystemExit(f"trusted helper was not found: $GOOGLE_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+if len(roots) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
+finish(roots[0] / relative)
 '''
 GOOGLE_HELPER_LOOKUP = (
     'python3 - "${GOOGLE_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
     + GOOGLE_HELPER_PYTHON
     + "PY"
 )
+
+# The entry names `copilot plugin install coghex/kanban:<bundle>/plugins/kanban`
+# writes under `$COPILOT_HOME/installed-plugins/_direct/`, observed with GitHub
+# Copilot CLI 1.0.85 and re-pinned against the real CLI by RealCopilotInstallTests
+# in tools/test_kimi_plugin.py and tools/test_google_plugin.py.
+KIMI_DIRECT_ENTRY = "coghex--kanban--kimi-plugin-plugins-kanban"
+GOOGLE_DIRECT_ENTRY = "coghex--kanban--google-plugin-plugins-kanban"
 
 # Every value GitHub documents for author_association. None of them grants a
 # comment body, which is the whole point: the reviewer gate in
@@ -927,58 +976,53 @@ class InstalledResolutionTests(unittest.TestCase):
             timeout=60,
         )
 
-    def install_kimi_bundle(self, home: Path) -> Path:
-        # The copied layout of a git-sourced Copilot marketplace install:
-        # $COPILOT_HOME/installed-plugins/kanban-<hash>/.
-        installed = (
-            home
-            / ".copilot"
-            / "installed-plugins"
-            / "kanban-b0441dc6"
-            / "skills"
-            / "solve"
-            / "scripts"
-        )
-        installed.mkdir(parents=True)
-        target = installed / "trusted_issue_spec.py"
+    def plant_kimi_helper(self, root: Path) -> Path:
+        target = root / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(KIMI_HELPER.read_bytes())
         target.chmod(0o755)
         return target
 
-    def install_kimi_marketplace_source(self, root: Path) -> Path:
-        installed = (
-            root
-            / "marketplace"
-            / "plugins"
-            / "kanban"
-            / "skills"
-            / "solve"
-            / "scripts"
+    def install_kimi_direct(self, home: Path, name: str = KIMI_DIRECT_ENTRY) -> Path:
+        # The direct-install layout `copilot plugin install
+        # coghex/kanban:kimi-plugin/plugins/kanban` writes. The entry name is
+        # not invented here: RealCopilotInstallTests in
+        # tools/test_kimi_plugin.py pins it against the real CLI.
+        return self.plant_kimi_helper(
+            home / ".copilot" / "installed-plugins" / "_direct" / name
         )
-        installed.mkdir(parents=True)
-        target = installed / "trusted_issue_spec.py"
-        target.write_bytes(KIMI_HELPER.read_bytes())
-        target.chmod(0o755)
-        return target
+
+    def install_kimi_marketplace_layout(
+        self, home: Path, marketplace: str = "kanban-kimi"
+    ) -> Path:
+        # The documented `installed-plugins/<marketplace>/<plugin>/` layout.
+        return self.plant_kimi_helper(
+            home / ".copilot" / "installed-plugins" / marketplace / "kanban"
+        )
+
+    def install_kimi_marketplace_source(self, root: Path) -> Path:
+        return self.plant_kimi_helper(root / "marketplace" / "plugins" / "kanban")
+
+    def write_kimi_settings(self, home: Path, document) -> None:
+        copilot_home = home / ".copilot"
+        copilot_home.mkdir(parents=True, exist_ok=True)
+        (copilot_home / "settings.json").write_text(
+            json.dumps(document) + "\n", encoding="utf-8"
+        )
 
     def register_kimi_local_marketplace(self, home: Path, marketplace: Path) -> None:
         # What `copilot plugin marketplace add <local path>` records: the
         # bundle loads live from that directory, so the path in settings.json
         # is the resolution.
-        copilot_home = home / ".copilot"
-        copilot_home.mkdir(parents=True, exist_ok=True)
-        (copilot_home / "settings.json").write_text(
-            json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-kimi": {
-                            "source": {"source": "directory", "path": str(marketplace)}
-                        }
+        self.write_kimi_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-kimi": {
+                        "source": {"source": "directory", "path": str(marketplace)}
                     }
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            },
         )
 
     def run_kimi_locator(self, plugin_root: str, copilot_home: str):
@@ -996,12 +1040,19 @@ class InstalledResolutionTests(unittest.TestCase):
             KIMI_HELPER_PYTHON,
             KIMI_SOLVE.read_text(encoding="utf-8"),
             "the Kimi solve skill must prefer $KIMI_PLUGIN_ROOT, then the "
-            "recorded local marketplace path, else one hashed install",
+            "recorded local marketplace path, then the copied install layouts",
         )
 
-    def test_the_kimi_lookup_resolves_from_an_explicit_copilot_home(self):
-        home = self.root / "kimi-home"
-        expected = self.install_kimi_bundle(home)
+    def test_the_kimi_lookup_resolves_from_a_direct_install(self):
+        home = self.root / "kimi-direct"
+        expected = self.install_kimi_direct(home)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_kimi_lookup_resolves_from_the_documented_marketplace_layout(self):
+        home = self.root / "kimi-marketplace-layout"
+        expected = self.install_kimi_marketplace_layout(home)
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -1014,12 +1065,78 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_a_remote_kimi_marketplace_source_reaches_the_copied_layouts(self):
+        # Requirement 4: a recognized remote kind may not terminate discovery
+        # as the shipped locator did. `github` locates its marketplace by
+        # `repo` and the two URL kinds by `url`.
+        for kind, record in (
+            ("github", {"repo": "coghex/kanban"}),
+            ("git", {"url": "https://example.com/marketplace.git"}),
+            ("url", {"url": "ssh://git@example.com/marketplace.git"}),
+        ):
+            with self.subTest(kind=kind):
+                home = self.root / f"kimi-remote-{kind}"
+                expected = self.install_kimi_direct(home)
+                self.write_kimi_settings(
+                    home,
+                    {
+                        "extraKnownMarketplaces": {
+                            "kanban-kimi": {"source": {"source": kind, **record}}
+                        }
+                    },
+                )
+                proc = self.run_kimi_locator("", str(home / ".copilot"))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_malformed_remote_kimi_source_refuses_without_fallback(self):
+        # A recognized kind is not by itself a well-formed record: one naming
+        # no marketplace to have been installed from refuses terminally rather
+        # than falling through to a copied install.
+        for name, record in (
+            ("github-without-repo", {"source": "github"}),
+            ("github-repo-not-a-string", {"source": "github", "repo": ["x"]}),
+            ("github-blank-repo", {"source": "github", "repo": "   "}),
+            ("github-carrying-only-a-url", {"source": "github", "url": "https://x"}),
+            ("git-without-url", {"source": "git"}),
+            ("git-url-not-a-string", {"source": "git", "url": 7}),
+            ("url-without-url", {"source": "url"}),
+        ):
+            with self.subTest(case=name):
+                home = self.root / f"kimi-malformed-remote-{name}"
+                self.install_kimi_direct(home)
+                self.write_kimi_settings(
+                    home,
+                    {"extraKnownMarketplaces": {"kanban-kimi": {"source": record}}},
+                )
+                proc = self.run_kimi_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(
+                    f"for the {record['source']} kanban-kimi source", proc.stderr
+                )
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_unsupported_kimi_source_kind_refuses_without_fallback(self):
+        home = self.root / "kimi-unsupported-source"
+        self.install_kimi_direct(home)
+        self.write_kimi_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-kimi": {"source": {"source": "carrier-pigeon"}}
+                }
+            },
+        )
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("unsupported kanban-kimi source kind", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_kimi_settings_without_its_marketplace_fall_through_to_the_copy(self):
         home = self.root / "kimi-unrelated-marketplace"
-        expected = self.install_kimi_bundle(home)
-        (home / ".copilot" / "settings.json").write_text(
-            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
-            encoding="utf-8",
+        expected = self.install_kimi_direct(home)
+        self.write_kimi_settings(
+            home, {"extraKnownMarketplaces": {"somewhere-else": {}}}
         )
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1033,12 +1150,8 @@ class InstalledResolutionTests(unittest.TestCase):
             "entry-not-object": json.dumps(
                 {"extraKnownMarketplaces": {"kanban-kimi": []}}
             ),
-            "source-not-directory": json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-kimi": {"source": {"source": "github"}}
-                    }
-                }
+            "source-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-kimi": {"source": "directory"}}}
             ),
             "relative-path": json.dumps(
                 {
@@ -1053,7 +1166,7 @@ class InstalledResolutionTests(unittest.TestCase):
         for name, contents in cases.items():
             with self.subTest(case=name):
                 home = self.root / f"kimi-malformed-{name}"
-                self.install_kimi_bundle(home)
+                self.install_kimi_direct(home)
                 settings = home / ".copilot" / "settings.json"
                 settings.write_text(contents + "\n", encoding="utf-8")
                 proc = self.run_kimi_locator("", str(home / ".copilot"))
@@ -1063,7 +1176,7 @@ class InstalledResolutionTests(unittest.TestCase):
 
     def test_a_dangling_kimi_settings_symlink_refuses_without_copy_fallback(self):
         home = self.root / "kimi-dangling-settings"
-        self.install_kimi_bundle(home)
+        self.install_kimi_direct(home)
         settings = home / ".copilot" / "settings.json"
         settings.symlink_to(settings.with_name("missing-settings.json"))
         proc = self.run_kimi_locator("", str(home / ".copilot"))
@@ -1074,7 +1187,7 @@ class InstalledResolutionTests(unittest.TestCase):
 
     def test_a_kimi_marketplace_missing_the_helper_refuses_without_fallback(self):
         home = self.root / "kimi-marketplace-missing-helper"
-        self.install_kimi_bundle(home)
+        self.install_kimi_direct(home)
         marketplace = self.root / "empty-kimi-marketplace"
         marketplace.mkdir()
         self.register_kimi_local_marketplace(home, marketplace)
@@ -1092,9 +1205,19 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_kimi_plugin_root_wins_over_both_copied_layouts(self):
+        home = self.root / "kimi-plugin-root-precedence"
+        self.install_kimi_direct(home)
+        self.install_kimi_marketplace_layout(home)
+        expected = self.install_kimi_marketplace_source(self.root)
+        plugin_root = expected.parents[3]
+        proc = self.run_kimi_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
     def test_a_missing_helper_under_kimi_plugin_root_refuses_without_fallback(self):
         home = self.root / "kimi-plugin-root-missing"
-        self.install_kimi_bundle(home)
+        self.install_kimi_direct(home)
         plugin_root = self.root / "empty-kimi-plugin"
         plugin_root.mkdir()
         proc = self.run_kimi_locator(str(plugin_root), str(home / ".copilot"))
@@ -1102,41 +1225,96 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertIn("trusted helper was not found at", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
-    def test_the_kimi_lookup_fails_closed_when_two_kanban_installs_match(self):
-        home = self.root / "kimi-ambiguous"
-        first = self.install_kimi_bundle(home)
-        second = (
-            home
-            / ".copilot"
-            / "installed-plugins"
-            / "kanban-aaaaaaaa"
-            / "skills"
-            / "solve"
-            / "scripts"
-            / "trusted_issue_spec.py"
+    def test_the_kimi_lookup_fails_closed_when_both_copied_layouts_are_eligible(self):
+        home = self.root / "kimi-ambiguous-layouts"
+        direct = self.install_kimi_direct(home)
+        layout = self.install_kimi_marketplace_layout(home)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+        self.assertTrue(direct.is_file() and layout.is_file())
+
+    def test_the_kimi_lookup_fails_closed_when_two_direct_installs_match(self):
+        home = self.root / "kimi-ambiguous-direct"
+        first = self.install_kimi_direct(home)
+        self.install_kimi_direct(
+            home, "someone--fork--kimi-plugin-plugins-kanban"
         )
-        second.parent.mkdir(parents=True, exist_ok=True)
-        second.write_bytes(KIMI_HELPER.read_bytes())
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("ambiguous Kanban installs", proc.stderr)
         self.assertTrue(first.is_file())
 
+    def test_a_sole_kimi_candidate_missing_the_helper_refuses(self):
+        # Roots are identified before the helper is looked for, so an install
+        # missing it refuses rather than emptying the candidate set.
+        home = self.root / "kimi-missing-helper"
+        (
+            home / ".copilot" / "installed-plugins" / "_direct" / KIMI_DIRECT_ENTRY
+        ).mkdir(parents=True)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_empty_kimi_candidate_does_not_lose_silently_to_a_competitor(self):
+        home = self.root / "kimi-missing-and-competing"
+        (
+            home / ".copilot" / "installed-plugins" / "_direct" / KIMI_DIRECT_ENTRY
+        ).mkdir(parents=True)
+        self.install_kimi_marketplace_layout(home)
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_wrong_brand_install_is_not_adopted_for_kimi(self):
+        home = self.root / "kimi-wrong-brand"
+        self.install_kimi_direct(
+            home, "coghex--kanban--google-plugin-plugins-kanban"
+        )
+        self.install_kimi_marketplace_layout(home, marketplace="kanban-google")
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_mixed_brand_home_resolves_kimi_alone(self):
+        home = self.root / "kimi-mixed-brand"
+        expected = self.install_kimi_direct(home)
+        self.install_kimi_direct(
+            home, "coghex--kanban--google-plugin-plugins-kanban"
+        )
+        self.install_kimi_marketplace_layout(home, marketplace="kanban-google")
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_bare_plugin_named_kimi_direct_entry_is_not_adopted(self):
+        # A local-path `copilot plugin install <dir>` names its entry after the
+        # plugin alone, and both Copilot bundles ship the plugin name `kanban`,
+        # so such an entry identifies no bundle and is refused.
+        home = self.root / "kimi-bare-entry"
+        self.install_kimi_direct(home, "kanban")
+        proc = self.run_kimi_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_the_kimi_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
         home = self.root / "kimi-competitor"
-        expected = self.install_kimi_bundle(home)
-        other = (
+        expected = self.install_kimi_direct(home)
+        self.plant_kimi_helper(
+            home / ".copilot" / "installed-plugins" / "otherplugin" / "kanban"
+        )
+        self.plant_kimi_helper(
             home
             / ".copilot"
             / "installed-plugins"
-            / "otherplugin-deadbeef"
-            / "skills"
-            / "solve"
-            / "scripts"
-            / "trusted_issue_spec.py"
+            / "_direct"
+            / "someone--other--tools-plugins-kanban"
         )
-        other.parent.mkdir(parents=True)
-        other.write_bytes(KIMI_HELPER.read_bytes())
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -1147,11 +1325,12 @@ class InstalledResolutionTests(unittest.TestCase):
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertNotIn("installed-plugins/kanban-*", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
     def test_the_resolved_kimi_copy_runs_from_the_worked_repository(self):
         home = self.root / "kimi-runnable-home"
-        expected = self.install_kimi_bundle(home)
+        expected = self.install_kimi_direct(home)
         proc = self.run_kimi_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         run = subprocess.run(
@@ -1165,53 +1344,53 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("self-test passed", run.stdout)
 
-    def install_google_bundle(self, home: Path) -> Path:
-        installed = (
-            home
-            / ".copilot"
-            / "installed-plugins"
-            / "kanban-c0441dc7"
-            / "skills"
-            / "solve"
-            / "scripts"
-        )
-        installed.mkdir(parents=True)
-        target = installed / "trusted_issue_spec.py"
+    def plant_google_helper(self, root: Path) -> Path:
+        target = root / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(GOOGLE_HELPER.read_bytes())
         target.chmod(0o755)
         return target
+
+    def install_google_direct(self, home: Path, name: str = GOOGLE_DIRECT_ENTRY) -> Path:
+        # The direct-install layout `copilot plugin install
+        # coghex/kanban:google-plugin/plugins/kanban` writes. The entry name is
+        # not invented here: RealCopilotInstallTests in
+        # tools/test_google_plugin.py pins it against the real CLI.
+        return self.plant_google_helper(
+            home / ".copilot" / "installed-plugins" / "_direct" / name
+        )
+
+    def install_google_marketplace_layout(
+        self, home: Path, marketplace: str = "kanban-google"
+    ) -> Path:
+        # The documented `installed-plugins/<marketplace>/<plugin>/` layout.
+        return self.plant_google_helper(
+            home / ".copilot" / "installed-plugins" / marketplace / "kanban"
+        )
 
     def install_google_marketplace_source(self, root: Path) -> Path:
-        installed = (
-            root
-            / "marketplace"
-            / "plugins"
-            / "kanban"
-            / "skills"
-            / "solve"
-            / "scripts"
-        )
-        installed.mkdir(parents=True)
-        target = installed / "trusted_issue_spec.py"
-        target.write_bytes(GOOGLE_HELPER.read_bytes())
-        target.chmod(0o755)
-        return target
+        return self.plant_google_helper(root / "marketplace" / "plugins" / "kanban")
 
-    def register_google_local_marketplace(self, home: Path, marketplace: Path) -> None:
+    def write_google_settings(self, home: Path, document) -> None:
         copilot_home = home / ".copilot"
         copilot_home.mkdir(parents=True, exist_ok=True)
         (copilot_home / "settings.json").write_text(
-            json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-google": {
-                            "source": {"source": "directory", "path": str(marketplace)}
-                        }
+            json.dumps(document) + "\n", encoding="utf-8"
+        )
+
+    def register_google_local_marketplace(self, home: Path, marketplace: Path) -> None:
+        # What `copilot plugin marketplace add <local path>` records: the
+        # bundle loads live from that directory, so the path in settings.json
+        # is the resolution.
+        self.write_google_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-google": {
+                        "source": {"source": "directory", "path": str(marketplace)}
                     }
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            },
         )
 
     def run_google_locator(self, plugin_root: str, copilot_home: str):
@@ -1229,12 +1408,19 @@ class InstalledResolutionTests(unittest.TestCase):
             GOOGLE_HELPER_PYTHON,
             GOOGLE_SOLVE.read_text(encoding="utf-8"),
             "the Google solve skill must prefer $GOOGLE_PLUGIN_ROOT, then the "
-            "recorded local marketplace path, else one hashed install",
+            "recorded local marketplace path, then the copied install layouts",
         )
 
-    def test_the_google_lookup_resolves_from_an_explicit_copilot_home(self):
-        home = self.root / "google-home"
-        expected = self.install_google_bundle(home)
+    def test_the_google_lookup_resolves_from_a_direct_install(self):
+        home = self.root / "google-direct"
+        expected = self.install_google_direct(home)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_the_google_lookup_resolves_from_the_documented_marketplace_layout(self):
+        home = self.root / "google-marketplace-layout"
+        expected = self.install_google_marketplace_layout(home)
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -1247,12 +1433,78 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_a_remote_google_marketplace_source_reaches_the_copied_layouts(self):
+        # Requirement 4: a recognized remote kind may not terminate discovery
+        # as the shipped locator did. `github` locates its marketplace by
+        # `repo` and the two URL kinds by `url`.
+        for kind, record in (
+            ("github", {"repo": "coghex/kanban"}),
+            ("git", {"url": "https://example.com/marketplace.git"}),
+            ("url", {"url": "ssh://git@example.com/marketplace.git"}),
+        ):
+            with self.subTest(kind=kind):
+                home = self.root / f"google-remote-{kind}"
+                expected = self.install_google_direct(home)
+                self.write_google_settings(
+                    home,
+                    {
+                        "extraKnownMarketplaces": {
+                            "kanban-google": {"source": {"source": kind, **record}}
+                        }
+                    },
+                )
+                proc = self.run_google_locator("", str(home / ".copilot"))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_malformed_remote_google_source_refuses_without_fallback(self):
+        # A recognized kind is not by itself a well-formed record: one naming
+        # no marketplace to have been installed from refuses terminally rather
+        # than falling through to a copied install.
+        for name, record in (
+            ("github-without-repo", {"source": "github"}),
+            ("github-repo-not-a-string", {"source": "github", "repo": ["x"]}),
+            ("github-blank-repo", {"source": "github", "repo": "   "}),
+            ("github-carrying-only-a-url", {"source": "github", "url": "https://x"}),
+            ("git-without-url", {"source": "git"}),
+            ("git-url-not-a-string", {"source": "git", "url": 7}),
+            ("url-without-url", {"source": "url"}),
+        ):
+            with self.subTest(case=name):
+                home = self.root / f"google-malformed-remote-{name}"
+                self.install_google_direct(home)
+                self.write_google_settings(
+                    home,
+                    {"extraKnownMarketplaces": {"kanban-google": {"source": record}}},
+                )
+                proc = self.run_google_locator("", str(home / ".copilot"))
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(
+                    f"for the {record['source']} kanban-google source", proc.stderr
+                )
+                self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_unsupported_google_source_kind_refuses_without_fallback(self):
+        home = self.root / "google-unsupported-source"
+        self.install_google_direct(home)
+        self.write_google_settings(
+            home,
+            {
+                "extraKnownMarketplaces": {
+                    "kanban-google": {"source": {"source": "carrier-pigeon"}}
+                }
+            },
+        )
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("unsupported kanban-google source kind", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_google_settings_without_its_marketplace_fall_through_to_the_copy(self):
         home = self.root / "google-unrelated-marketplace"
-        expected = self.install_google_bundle(home)
-        (home / ".copilot" / "settings.json").write_text(
-            json.dumps({"extraKnownMarketplaces": {"somewhere-else": {}}}) + "\n",
-            encoding="utf-8",
+        expected = self.install_google_direct(home)
+        self.write_google_settings(
+            home, {"extraKnownMarketplaces": {"somewhere-else": {}}}
         )
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1266,12 +1518,8 @@ class InstalledResolutionTests(unittest.TestCase):
             "entry-not-object": json.dumps(
                 {"extraKnownMarketplaces": {"kanban-google": []}}
             ),
-            "source-not-directory": json.dumps(
-                {
-                    "extraKnownMarketplaces": {
-                        "kanban-google": {"source": {"source": "github"}}
-                    }
-                }
+            "source-not-object": json.dumps(
+                {"extraKnownMarketplaces": {"kanban-google": {"source": "directory"}}}
             ),
             "relative-path": json.dumps(
                 {
@@ -1286,7 +1534,7 @@ class InstalledResolutionTests(unittest.TestCase):
         for name, contents in cases.items():
             with self.subTest(case=name):
                 home = self.root / f"google-malformed-{name}"
-                self.install_google_bundle(home)
+                self.install_google_direct(home)
                 settings = home / ".copilot" / "settings.json"
                 settings.write_text(contents + "\n", encoding="utf-8")
                 proc = self.run_google_locator("", str(home / ".copilot"))
@@ -1296,7 +1544,7 @@ class InstalledResolutionTests(unittest.TestCase):
 
     def test_a_dangling_google_settings_symlink_refuses_without_copy_fallback(self):
         home = self.root / "google-dangling-settings"
-        self.install_google_bundle(home)
+        self.install_google_direct(home)
         settings = home / ".copilot" / "settings.json"
         settings.symlink_to(settings.with_name("missing-settings.json"))
         proc = self.run_google_locator("", str(home / ".copilot"))
@@ -1307,7 +1555,7 @@ class InstalledResolutionTests(unittest.TestCase):
 
     def test_a_google_marketplace_missing_the_helper_refuses_without_fallback(self):
         home = self.root / "google-marketplace-missing-helper"
-        self.install_google_bundle(home)
+        self.install_google_direct(home)
         marketplace = self.root / "empty-google-marketplace"
         marketplace.mkdir()
         self.register_google_local_marketplace(home, marketplace)
@@ -1325,9 +1573,19 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
 
+    def test_google_plugin_root_wins_over_both_copied_layouts(self):
+        home = self.root / "google-plugin-root-precedence"
+        self.install_google_direct(home)
+        self.install_google_marketplace_layout(home)
+        expected = self.install_google_marketplace_source(self.root)
+        plugin_root = expected.parents[3]
+        proc = self.run_google_locator(str(plugin_root), str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
     def test_a_missing_helper_under_google_plugin_root_refuses_without_fallback(self):
         home = self.root / "google-plugin-root-missing"
-        self.install_google_bundle(home)
+        self.install_google_direct(home)
         plugin_root = self.root / "empty-google-plugin"
         plugin_root.mkdir()
         proc = self.run_google_locator(str(plugin_root), str(home / ".copilot"))
@@ -1335,41 +1593,96 @@ class InstalledResolutionTests(unittest.TestCase):
         self.assertIn("trusted helper was not found at", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
-    def test_the_google_lookup_fails_closed_when_two_kanban_installs_match(self):
-        home = self.root / "google-ambiguous"
-        first = self.install_google_bundle(home)
-        second = (
-            home
-            / ".copilot"
-            / "installed-plugins"
-            / "kanban-aaaaaaaa"
-            / "skills"
-            / "solve"
-            / "scripts"
-            / "trusted_issue_spec.py"
+    def test_the_google_lookup_fails_closed_when_both_copied_layouts_are_eligible(self):
+        home = self.root / "google-ambiguous-layouts"
+        direct = self.install_google_direct(home)
+        layout = self.install_google_marketplace_layout(home)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+        self.assertTrue(direct.is_file() and layout.is_file())
+
+    def test_the_google_lookup_fails_closed_when_two_direct_installs_match(self):
+        home = self.root / "google-ambiguous-direct"
+        first = self.install_google_direct(home)
+        self.install_google_direct(
+            home, "someone--fork--google-plugin-plugins-kanban"
         )
-        second.parent.mkdir(parents=True, exist_ok=True)
-        second.write_bytes(GOOGLE_HELPER.read_bytes())
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("ambiguous Kanban installs", proc.stderr)
         self.assertTrue(first.is_file())
 
+    def test_a_sole_google_candidate_missing_the_helper_refuses(self):
+        # Roots are identified before the helper is looked for, so an install
+        # missing it refuses rather than emptying the candidate set.
+        home = self.root / "google-missing-helper"
+        (
+            home / ".copilot" / "installed-plugins" / "_direct" / GOOGLE_DIRECT_ENTRY
+        ).mkdir(parents=True)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found at", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_an_empty_google_candidate_does_not_lose_silently_to_a_competitor(self):
+        home = self.root / "google-missing-and-competing"
+        (
+            home / ".copilot" / "installed-plugins" / "_direct" / GOOGLE_DIRECT_ENTRY
+        ).mkdir(parents=True)
+        self.install_google_marketplace_layout(home)
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("ambiguous Kanban installs", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_wrong_brand_install_is_not_adopted_for_google(self):
+        home = self.root / "google-wrong-brand"
+        self.install_google_direct(
+            home, "coghex--kanban--kimi-plugin-plugins-kanban"
+        )
+        self.install_google_marketplace_layout(home, marketplace="kanban-kimi")
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_a_mixed_brand_home_resolves_google_alone(self):
+        home = self.root / "google-mixed-brand"
+        expected = self.install_google_direct(home)
+        self.install_google_direct(
+            home, "coghex--kanban--kimi-plugin-plugins-kanban"
+        )
+        self.install_google_marketplace_layout(home, marketplace="kanban-kimi")
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
+
+    def test_a_bare_plugin_named_google_direct_entry_is_not_adopted(self):
+        # A local-path `copilot plugin install <dir>` names its entry after the
+        # plugin alone, and both Copilot bundles ship the plugin name `kanban`,
+        # so such an entry identifies no bundle and is refused.
+        home = self.root / "google-bare-entry"
+        self.install_google_direct(home, "kanban")
+        proc = self.run_google_locator("", str(home / ".copilot"))
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "")
+
     def test_the_google_lookup_ignores_a_competing_plugin_with_the_same_relative_path(self):
         home = self.root / "google-competitor"
-        expected = self.install_google_bundle(home)
-        other = (
+        expected = self.install_google_direct(home)
+        self.plant_google_helper(
+            home / ".copilot" / "installed-plugins" / "otherplugin" / "kanban"
+        )
+        self.plant_google_helper(
             home
             / ".copilot"
             / "installed-plugins"
-            / "otherplugin-deadbeef"
-            / "skills"
-            / "solve"
-            / "scripts"
-            / "trusted_issue_spec.py"
+            / "_direct"
+            / "someone--other--tools-plugins-kanban"
         )
-        other.parent.mkdir(parents=True)
-        other.write_bytes(GOOGLE_HELPER.read_bytes())
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(expected), proc.stderr)
@@ -1380,11 +1693,12 @@ class InstalledResolutionTests(unittest.TestCase):
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("trusted helper was not found:", proc.stderr)
+        self.assertNotIn("installed-plugins/kanban-*", proc.stderr)
         self.assertEqual(proc.stdout.strip(), "")
 
     def test_the_resolved_google_copy_runs_from_the_worked_repository(self):
         home = self.root / "google-runnable-home"
-        expected = self.install_google_bundle(home)
+        expected = self.install_google_direct(home)
         proc = self.run_google_locator("", str(home / ".copilot"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         run = subprocess.run(
@@ -1760,9 +2074,9 @@ class SolveRepositoryScopeTests(unittest.TestCase):
         # under `$CODEX_HOME`, `${CLAUDE_PLUGIN_ROOT}`,
         # `$GROK_PLUGIN_ROOT` / `$GROK_HOME/installed-plugins/kanban-<hash>`,
         # `$KIMI_PLUGIN_ROOT` / the recorded `kanban-kimi` marketplace path /
-        # `$COPILOT_HOME/installed-plugins/kanban-<hash>`,
+        # the copied layouts under `$COPILOT_HOME/installed-plugins/`,
         # or `$GOOGLE_PLUGIN_ROOT` / the recorded `kanban-google` marketplace path /
-        # `$COPILOT_HOME/installed-plugins/kanban-<hash>` — so the invocation is
+        # those same copied layouts — so the invocation is
         # matched by what it targets rather than by any one literal spelling, and
         # every match found must carry the identity.
         for brand, text in self.documents():

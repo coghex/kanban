@@ -113,14 +113,27 @@ everything else.
   `$GOOGLE_PLUGIN_ROOT` when the launcher set it, then the `kanban-kimi` or
   `kanban-google` marketplace's recorded local path in
   `$COPILOT_HOME/settings.json` (how a local Copilot marketplace install
-  loads). Copilot CLI 1.0.83 records that absolute root at
+  loads). Copilot CLI 1.0.85 records that absolute root at
   `extraKnownMarketplaces.<name>.source.path`, beside a `source` value of
-  `directory`; the locator appends `plugins/kanban/`. An absent settings file
-  or object with no matching entry falls through, while an unreadable or
-  non-object file, a malformed applicable entry, a non-absolute recorded path,
-  or a recorded tree missing the helper refuses without fall-through. With no
-  local marketplace entry it searches
-  `$COPILOT_HOME/installed-plugins/kanban-<hash>/` (default `~/.copilot`).
+  `directory`; the locator appends `plugins/kanban/`. An absent settings file,
+  an object with no matching entry, and an entry the CLI recorded from a remote
+  `github`, `git`, or `url` source all fall through, while an unreadable or
+  non-object file, a malformed applicable entry, a recorded source kind that is
+  unsupported or does not carry the field that kind locates its marketplace by
+  (`repo` for `github`, `url` for the other two), a non-absolute recorded
+  directory path, or a recorded tree missing the helper refuses without
+  fall-through. What it falls through to is the two
+  copied layouts the CLI actually creates under
+  `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`), searched as one
+  candidate set: the documented marketplace layout
+  `<marketplace-name>/<plugin-name>/`, so `kanban-kimi/kanban/` or
+  `kanban-google/kanban/`, and a direct install
+  `_direct/<owner>--<repo>--<bundle path>/`, so
+  `_direct/coghex--kanban--kimi-plugin-plugins-kanban/` or its Google
+  equivalent. Both are anchored to that bundle's own marketplace, plugin, and
+  bundle path rather than to any `kanban-*` directory, roots are identified
+  before the helper is looked for, and zero roots, several roots, or a sole
+  root missing the helper each refuse without fall-through.
   None resolves a checkout-relative or personal-skill path, because the
   workflow runs with the worked repository as the working directory. The packaged
   `issue-rereview` assets
@@ -2993,7 +3006,9 @@ hashed `installed-plugins/kanban-<hash>/` tree inside it, or at
 `$COPILOT_HOME` (default `~/.copilot`) is the Copilot CLI's own directory, and
 the Kimi and Google `/solve` and `/autosolve` lookups read the recorded
 `kanban-kimi` or `kanban-google` marketplace path from its `settings.json` or
-search the copied `installed-plugins/kanban-<hash>/` tree inside it, after
+search the two copied layouts the CLI creates inside it —
+`installed-plugins/<marketplace-name>/<plugin-name>/` and
+`installed-plugins/_direct/<owner>--<repo>--<bundle path>/` — after
 `$KIMI_PLUGIN_ROOT` or `$GOOGLE_PLUGIN_ROOT` when the launcher set that to the
 loaded plugin.
 

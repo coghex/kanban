@@ -94,7 +94,7 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 1. Resolve the repository root and default branch. Fetch `origin`. The GitHub repository identity is the `$REPO` established above; do not resolve it again and do not derive it from the local checkout directory name.
 2. Keep newly created worktrees outside the source-checkout directory. Set `WORKTREES_ROOT=${WORKTREES_ROOT:-"$HOME/worktrees"}` and use the repository-scoped directory `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>`, named by the established identity. Create its parent if needed. If no same-issue recovery worktree was found above, create that worktree from the latest `origin/<default-branch>`; otherwise continue in the recovered worktree. `git worktree list` remains the sole collision/recovery source and therefore continues to recognize legacy worktrees at their existing paths. Never move, rename, or bulk-clean legacy worktrees as part of solving. Use absolute paths for every later command because tool working directories are not persistent.
-3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GOOGLE_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-google` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the copied install layout `$COPILOT_HOME/installed-plugins/kanban-<hash>/` (default `~/.copilot`). An absent settings file or one with no `kanban-google` entry reaches that final search; unreadable or malformed applicable settings, a relative recorded path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
+3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GOOGLE_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-google` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the two copied layouts the Copilot CLI actually creates under `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace layout `kanban-google/kanban/`, and a direct install `_direct/<owner>--<repo>--google-plugin-plugins-kanban/`. Those two form one candidate set — an absent marketplace-layout install still admits a direct one, and two eligible roots across them refuse as ambiguous rather than picking either. Roots are identified before the helper is looked for, so a root missing the helper refuses instead of silently losing to a competitor. An absent settings file, one with no `kanban-google` entry, or a `kanban-google` entry the CLI recorded from a remote `github`, `git`, or `url` source reaches that search; unreadable or malformed applicable settings, a recorded source kind that is unsupported or does not carry the field that kind locates its marketplace by (`repo` for `github`, `url` for the other two), a relative recorded directory path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
 
    ```bash
    TRUSTED_SPEC="$(python3 - "${GOOGLE_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
@@ -103,6 +103,7 @@ from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+marketplace, plugin, bundle = "kanban-google", "kanban", "google-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"trusted helper was not found at {candidate}")
@@ -123,35 +124,55 @@ if os.path.lexists(settings):
         raise SystemExit(
             f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
         )
-    if isinstance(marketplaces, dict) and "kanban-google" in marketplaces:
-        entry = marketplaces["kanban-google"]
+    if isinstance(marketplaces, dict) and marketplace in marketplaces:
+        entry = marketplaces[marketplace]
         if not isinstance(entry, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} have a malformed kanban-google entry."
+                f"Copilot settings at {settings} have a malformed {marketplace} entry."
             )
         source = entry.get("source")
-        if not isinstance(source, dict) or source.get("source") != "directory":
+        if not isinstance(source, dict):
             raise SystemExit(
-                f"Copilot settings at {settings} do not name kanban-google as a directory source."
+                f"Copilot settings at {settings} have a malformed {marketplace} source."
             )
-        recorded = source.get("path")
-        if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+        kind = source.get("source")
+        if kind == "directory":
+            recorded = source.get("path")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise SystemExit(
+                    f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
+                )
+            finish(Path(recorded) / "plugins" / plugin / relative)
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
             raise SystemExit(
-                f"Copilot settings at {settings} do not name an absolute kanban-google path: {recorded!r}."
+                f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
             )
-        finish(Path(recorded) / "plugins" / "kanban" / relative)
-matches = sorted(
-    candidate
-    for candidate in (Path(copilot_home) / "installed-plugins").glob(
-        "kanban-*/" + relative.as_posix()
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
+            )
+installed = Path(copilot_home) / "installed-plugins"
+def installs_this_bundle(name):
+    repository, separator, subdirectory = name.rpartition("--")
+    return separator == "--" and subdirectory == bundle and "--" in repository
+roots = []
+from_marketplace = installed / marketplace / plugin
+if from_marketplace.is_dir():
+    roots.append(from_marketplace)
+direct = installed / "_direct"
+if direct.is_dir():
+    roots += sorted(
+        child
+        for child in direct.iterdir()
+        if child.is_dir() and installs_this_bundle(child.name)
     )
-    if candidate.is_file()
-)
-if not matches:
-    raise SystemExit("trusted helper was not found: $GOOGLE_PLUGIN_ROOT is unset, the kanban-google marketplace has no recorded local path, and $COPILOT_HOME/installed-plugins/kanban-* matches nothing")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
+if not roots:
+    raise SystemExit(f"trusted helper was not found: $GOOGLE_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+if len(roots) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
+finish(roots[0] / relative)
 PY
 )"
    python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>
