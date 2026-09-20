@@ -24,6 +24,11 @@ from pathlib import Path
 from unittest import mock
 
 import plugin_bundle_gate
+# The solve locator is declared and unit-tested beside the other four
+# trusted-helper lookups; importing it here is what lets the real-CLI
+# fixtures below run BOTH of this bundle's locators against one install
+# rather than keeping a second copy of the same fenced Python.
+import test_trusted_issue_spec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KIMI_PLUGIN = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
@@ -800,6 +805,19 @@ UNAVAILABLE_SIGNALS = (
     " 504",
 )
 
+# Both locators this bundle ships, as (what each calls the thing it looks for,
+# the fenced Python that looks for it, the path it must resolve inside an
+# install root). RealCopilotInstallTests runs every one of them against each
+# install the real CLI produces.
+BUNDLE_LOCATORS = (
+    ("coordinator", KIMI_COORDINATOR_PYTHON, Path("scripts") / "review_pr.py"),
+    (
+        "trusted helper",
+        test_trusted_issue_spec.KIMI_HELPER_PYTHON,
+        Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py",
+    ),
+)
+
 class RealCopilotInstallTests(unittest.TestCase):
     """Produce the copied install with the real CLI, never by hand.
 
@@ -814,6 +832,10 @@ class RealCopilotInstallTests(unittest.TestCase):
     exist to catch. The one exception is the repository install, which needs
     the network and a credential; it skips only when the CLI's own output
     carries one of `UNAVAILABLE_SIGNALS`, and fails on anything else.
+
+    Every case runs both of this bundle's locators, solve's and autosolve's,
+    against the one install: a layout that resolves the coordinator and not
+    the trusted-comment helper is half a discovery.
     """
 
     def setUp(self):
@@ -845,10 +867,10 @@ class RealCopilotInstallTests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
 
-    def run_locator(self, plugin_root: str = ""):
+    def run_locator(self, source: str, plugin_root: str = ""):
         return subprocess.run(
             ["python3", "-", plugin_root, str(self.home)],
-            input=KIMI_COORDINATOR_PYTHON,
+            input=source,
             capture_output=True,
             text=True,
             cwd=str(self.workdir),
@@ -881,19 +903,12 @@ class RealCopilotInstallTests(unittest.TestCase):
             for child in (self.home / "installed-plugins" / "_direct").iterdir()
         )
         self.assertEqual(entries, [DIRECT_ENTRY], entries)
-        located = self.run_locator()
-        self.assertEqual(located.returncode, 0, located.stderr)
-        self.assertEqual(
-            located.stdout.strip(),
-            str(
-                self.home
-                / "installed-plugins"
-                / "_direct"
-                / DIRECT_ENTRY
-                / "scripts"
-                / "review_pr.py"
-            ),
-        )
+        root = self.home / "installed-plugins" / "_direct" / DIRECT_ENTRY
+        for noun, source, relative in BUNDLE_LOCATORS:
+            with self.subTest(locator=noun):
+                located = self.run_locator(source)
+                self.assertEqual(located.returncode, 0, located.stderr)
+                self.assertEqual(located.stdout.strip(), str(root / relative))
 
     def test_a_local_direct_install_produces_a_bare_entry_the_lookup_refuses(self):
         proc = self.install(str(KIMI_PLUGIN))
@@ -908,9 +923,11 @@ class RealCopilotInstallTests(unittest.TestCase):
             for child in (self.home / "installed-plugins" / "_direct").iterdir()
         )
         self.assertEqual(entries, ["kanban"], entries)
-        located = self.run_locator()
-        self.assertNotEqual(located.returncode, 0, located.stdout)
-        self.assertIn("coordinator was not found:", located.stderr)
+        for noun, source, _relative in BUNDLE_LOCATORS:
+            with self.subTest(locator=noun):
+                located = self.run_locator(source)
+                self.assertNotEqual(located.returncode, 0, located.stdout)
+                self.assertIn(f"{noun} was not found:", located.stderr)
 
     def test_a_local_marketplace_install_records_a_directory_source(self):
         marketplace = subprocess.run(
@@ -943,9 +960,13 @@ class RealCopilotInstallTests(unittest.TestCase):
         # Nothing is copied for a directory marketplace, which is why the
         # recorded path is the only thing that resolves this install.
         self.assertFalse((self.home / "installed-plugins").exists())
-        located = self.run_locator()
-        self.assertEqual(located.returncode, 0, located.stderr)
-        self.assertEqual(located.stdout.strip(), str(COORDINATOR))
+        for noun, source, relative in BUNDLE_LOCATORS:
+            with self.subTest(locator=noun):
+                located = self.run_locator(source)
+                self.assertEqual(located.returncode, 0, located.stderr)
+                self.assertEqual(
+                    located.stdout.strip(), str(KIMI_PLUGIN / relative)
+                )
 
 
 def load_kimi_review_pr():
