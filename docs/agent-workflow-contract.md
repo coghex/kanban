@@ -4048,6 +4048,7 @@ The `coordination` documents are
 `docs/project_review_561-545.md`,
 `docs/project_review_600-573.md`,
 `docs/project_review_602-562.md`,
+`docs/project_review_660-648.md`,
 `docs/ui-bugs.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
@@ -4187,6 +4188,7 @@ docs/project_review_533-517.md | coordination | audit-report
 docs/project_review_561-545.md | coordination | audit-report
 docs/project_review_600-573.md | coordination | audit-report
 docs/project_review_602-562.md | coordination | audit-report
+docs/project_review_660-648.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
 docs/ui-bugs.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
