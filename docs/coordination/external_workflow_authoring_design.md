@@ -18,7 +18,7 @@ concrete precondition
 - [x] EPIC. Author the external bundles' solve and autosolve workflows from a rendered source — [#715]
 - [x] EXT-1. Generalize the command renderer beyond two brands — [#716]
 - [x] EXT-2. Render the external solve workflows from an authored source — [#717]
-- [ ] EXT-3. Render the external autosolve workflows from an authored source
+- [x] EXT-3. Render the external autosolve workflows from an authored source — [#718]
 
 ## Epic contract
 
