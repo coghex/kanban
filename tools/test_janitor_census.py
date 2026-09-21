@@ -18,6 +18,13 @@ answer reads as a *clean* one and the workflow's next step is a deletion:
   nothing is retained.
 - The optional test-coordinator probe stays fail-soft: a host with no
   coordinator is the ordinary case, not an error.
+- Issue #706's project-review attempt inventory asks the liveness adapter for
+  every attempt's state and keeps two answers apart: whether the attempt is
+  *over*, which is what keeps a running invocation's directory out of the
+  report, and whether it is provably *idle*, which is the only answer a
+  removal may be offered for. An attempt the adapter no longer knows is over
+  and never idle, and the whole hazard is that collapsing the two reads as a
+  green light to delete a checkout.
 
 Only the Claude copy is imported for behavior; `tools/test_document_workflow_contract.py`
 and the byte-equality check below are what make one execution cover both.
@@ -29,6 +36,9 @@ import contextlib
 import importlib.util
 import json
 import os
+import secrets
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -75,6 +85,7 @@ CENSUS_KEYS = {
     "drainer",
     "drainer_untracked_holdings",
     "test_coordinator",
+    "project_review_attempts",
     "github",
     "signals",
     "warnings",
@@ -529,6 +540,710 @@ class FetchDoesNotPruneTests(CensusFixture):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn('"fetch", "--no-prune", "origin"', source)
                 self.assertNotIn('"fetch", "origin"', source)
+
+
+# Issue #706's attempt census. `project-review` (issue #684) gives every
+# invocation one directory named for the liveness attempt that owns it, and a
+# cancellation is the exit that cannot remove its own; the adapter issue #687
+# ships is the only thing entitled to say whether one of those directories is
+# still in use.
+LIVENESS_ADAPTER = "project_review_liveness.py"
+LIVENESS_LEDGER = "project_review_ledger.py"
+CENSUS_CONFIG_MODULE = "kanban_config.py"
+BUNDLE_SOURCE = CENSUS_PATH.parent
+ATTEMPT_RECORD_KEYS = (
+    "attempt", "runtime", "runtime_version", "session_id", "invocation_id",
+    "repo", "silence_seconds", "registered_at", "keeper",
+)
+
+# Four attempt ids for the acceptance scenario, plus the fifth that is over and
+# still has a command running in it. Valid 32-hex tokens, because the adapter
+# refuses anything else before it reads a record.
+ATTEMPTS = {
+    "live": "a" * 32,
+    "ended": "b" * 32,
+    "killed": "c" * 32,
+    "pruned": "d" * 32,
+    "busy": "e" * 32,
+}
+
+# A stand-in adapter, for the malformed answers the real one never gives. The
+# real adapter drives every state below that it can actually produce; this
+# drives the ones that are about the census's own reading of a `status`
+# document -- a body that is not JSON, a state outside the vocabulary, a
+# keeper standing outside it, a missing launch inventory, and a refusal that is
+# not `attempt-unknown`.
+STUB_ADAPTER = """\
+import sys
+mode = %(mode)r
+if mode == "not-json":
+    print("this is not a document")
+elif mode == "not-an-object":
+    print("[]")
+elif mode == "unknown-state":
+    print('{"status": "winding-down", "keeper_standing": "gone", '
+          '"unfinished_launches": []}')
+elif mode == "unknown-standing":
+    print('{"status": "active", "keeper_standing": "probably-fine", '
+          '"unfinished_launches": []}')
+elif mode == "unhashable-state":
+    print('{"status": [], "keeper_standing": "gone", "unfinished_launches": []}')
+elif mode == "unhashable-standing":
+    print('{"status": "active", "keeper_standing": {}, "unfinished_launches": []}')
+elif mode == "no-launch-inventory":
+    print('{"status": "ended", "keeper_standing": "gone"}')
+elif mode == "other-refusal":
+    print("project-review liveness: refused (attempt-invalid): no", file=sys.stderr)
+    raise SystemExit(2)
+elif mode == "bare-failure":
+    raise SystemExit(3)
+"""
+
+
+def reaped_pid() -> int:
+    """A pid whose process has exited and been waited on, so it is `gone`.
+
+    Reaped rather than merely exited: the ledger's own standing test reports an
+    unreaped zombie as gone too, and a fixture that relied on that would be
+    asserting the platform's zombie reading rather than this census's.
+    """
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    return child.pid
+
+
+class AttemptFixture(CensusFixture):
+    """A repository with real `project-review` attempt records in it.
+
+    The records are the adapter's own -- `attempt.json`, `ended.json`, and the
+    launch records under `launches/` -- and every classification below is read
+    back through `project_review_liveness.py status`, which is the one
+    interface issue #706 is entitled to read. Nothing here reimplements the
+    adapter's judgement.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.host = socket.gethostname()
+        self.live_pid = os.getpid()
+        self.gone_pid = reaped_pid()
+        self.runtime = self.common_dir / census.PROJECT_REVIEW_RUNTIME
+        self.records = (
+            self.common_dir / "kanban-project-review" / "liveness" / "attempts"
+        )
+
+    def write_json(self, path: Path, value) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+    def attempt_directory(self, attempt: str) -> Path:
+        directory = self.runtime / attempt
+        directory.mkdir(parents=True, exist_ok=True)
+        # The inventory step 1 of that workflow assembles, so the directory has
+        # a measurable footprint that is not the pinned checkout's.
+        (directory / "inventory.json").write_text("[]\n", encoding="utf-8")
+        return directory
+
+    def register(self, attempt: str, keeper_pid: int | None,
+                 *, directory: bool = True) -> Path | None:
+        self.write_json(
+            self.records / attempt / "attempt.json",
+            {
+                "attempt": attempt,
+                "runtime": "claude",
+                "runtime_version": "2.1.276",
+                "session_id": "session",
+                "invocation_id": "invocation",
+                "repo": "owner/name",
+                "silence_seconds": 600,
+                "registered_at": 0,
+                "keeper": (
+                    None if keeper_pid is None
+                    else {"host": self.host, "pid": keeper_pid}
+                ),
+            },
+        )
+        # `directory=False` leaves the runtime path alone, for a test that puts
+        # something other than a directory there.
+        return self.attempt_directory(attempt) if directory else None
+
+    def end(self, attempt: str) -> None:
+        self.write_json(
+            self.records / attempt / "ended.json",
+            {"attempt": attempt, "reason": "completed", "at": 1},
+        )
+
+    def launch(self, attempt: str, label: str, command_pid: int) -> None:
+        self.write_json(
+            self.records / attempt / "launches" / f"{label}.wrapper.json",
+            {"label": label, "host": self.host, "pid": self.gone_pid,
+             "command_pid": command_pid},
+        )
+
+    def pin_a_worktree(self, attempt: str) -> Path:
+        tree = self.runtime / attempt / "tree"
+        git(self.repo, "worktree", "add", "--detach", str(tree), "HEAD")
+        return tree
+
+    def plant_the_acceptance_scenario(self) -> None:
+        """The four the issue names, plus the fifth its acceptance adds."""
+        self.register(ATTEMPTS["live"], self.live_pid)
+        self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        # A keeper killed outright writes no ended record, so this one still
+        # reads `active` -- the case that reading `active` alone would strand.
+        self.register(ATTEMPTS["killed"], self.gone_pid)
+        # And this one has no records at all, which is what an attempt pruned
+        # after seven days looks like to the adapter.
+        self.attempt_directory(ATTEMPTS["pruned"])
+        self.register(ATTEMPTS["busy"], self.gone_pid)
+        self.end(ATTEMPTS["busy"])
+        self.launch(ATTEMPTS["busy"], "cabal-test", self.live_pid)
+
+    def attempts(self, **overrides) -> dict[str, dict]:
+        document = self.run_census(**overrides)
+        self.document = document
+        rows = document["project_review_attempts"]["attempts"]
+        self.assertIsNotNone(rows, document["warnings"])
+        by_id = {ATTEMPTS.get(name, name): name for name in ATTEMPTS}
+        return {by_id.get(row["attempt"], row["attempt"]): row for row in rows}
+
+    def synthetic_bundle(self, layout: str, *, adapter: str | None = None) -> Path:
+        """A copy of this census in one of the two shipped bundle layouts.
+
+        Copied rather than imported in place, because the whole question is
+        where the census looks for the adapter *relative to itself*: the Claude
+        bundle has one shared `scripts/` directory and the Codex bundle gives
+        every skill its own, so the tracked tree can only ever exercise one of
+        the two candidate paths per copy.
+        """
+        bundle = self.root / f"bundle-{layout}-{secrets.token_hex(4)}"
+        if layout == "codex":
+            scripts = bundle / "skills" / "janitor" / "scripts"
+            adapter_dir = bundle / "skills" / "project-review" / "scripts"
+        else:
+            scripts = bundle / "scripts"
+            adapter_dir = scripts
+        scripts.mkdir(parents=True)
+        for name in ("census.py", CENSUS_CONFIG_MODULE):
+            shutil.copy(BUNDLE_SOURCE / name, scripts / name)
+        if adapter is None:
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            for name in (LIVENESS_ADAPTER, LIVENESS_LEDGER):
+                shutil.copy(BUNDLE_SOURCE / name, adapter_dir / name)
+        elif adapter != "absent":
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            (adapter_dir / LIVENESS_ADAPTER).write_text(
+                STUB_ADAPTER % {"mode": adapter}, encoding="utf-8"
+            )
+        return scripts / "census.py"
+
+    def census_through(self, program: Path) -> dict:
+        with self.pinned_environment():
+            done = subprocess.run(
+                [sys.executable, str(program), "--repo", str(self.repo),
+                 "--local-only"],
+                text=True,
+                capture_output=True,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return json.loads(done.stdout)
+
+
+class AttemptInventoryTests(AttemptFixture):
+    def test_a_repository_that_never_ran_project_review_reports_nothing(self):
+        # Requirement 6. Absent is an empty list, never an anomaly and never a
+        # `null`: there is nothing to diagnose about a directory that was never
+        # created.
+        document = self.run_census()
+        self.assertEqual(
+            document["project_review_attempts"],
+            {"root": str(self.runtime), "present": False, "adapter": None,
+             "attempts": []},
+        )
+        self.assertEqual(document["warnings"], [])
+        self.assertEqual(document["counts"]["project_review_attempts"], 0)
+        self.assertEqual(
+            document["counts"]["cleanable_project_review_attempts"], 0
+        )
+
+    def test_an_empty_attempt_root_reports_nothing(self):
+        self.runtime.mkdir(parents=True)
+        document = self.run_census()
+        self.assertEqual(document["project_review_attempts"]["present"], True)
+        self.assertEqual(document["project_review_attempts"]["attempts"], [])
+        self.assertEqual(document["warnings"], [])
+
+    def test_exactly_the_three_over_attempts_are_reported_over(self):
+        # The acceptance scenario. Three of the four are over; the fourth is a
+        # running invocation and is left alone however old its directory is.
+        self.plant_the_acceptance_scenario()
+        rows = self.attempts()
+        self.assertEqual(set(rows), set(ATTEMPTS))
+        self.assertEqual(
+            {name for name, row in rows.items() if row["over"]},
+            {"ended", "killed", "pruned", "busy"},
+        )
+        self.assertIs(rows["live"]["over"], False)
+        self.assertEqual(rows["live"]["state"], "active")
+        self.assertEqual(rows["live"]["keeper_standing"], "live")
+        self.assertEqual(
+            rows["live"]["retention_reasons"],
+            ["a live keeper is holding this attempt"],
+        )
+
+    def test_only_the_provably_idle_attempts_are_cleanable(self):
+        # The distinction issue #706's review insists on. `ended` and the
+        # killed keeper are established; the pruned attempt and the busy one
+        # are over and are offered nothing.
+        self.plant_the_acceptance_scenario()
+        rows = self.attempts()
+        self.assertEqual(
+            {name for name, row in rows.items() if row["cleanable"]},
+            {"ended", "killed"},
+        )
+        self.assertEqual(rows["ended"]["state"], "ended")
+        self.assertEqual(rows["killed"]["state"], "active")
+        self.assertEqual(rows["killed"]["keeper_standing"], "gone")
+        self.assertEqual(rows["ended"]["retention_reasons"], [])
+        self.assertEqual(self.document["counts"]["project_review_attempts"], 5)
+        self.assertEqual(
+            self.document["counts"]["cleanable_project_review_attempts"], 2
+        )
+
+    def test_a_pruned_attempt_is_over_and_never_cleanable(self):
+        self.plant_the_acceptance_scenario()
+        row = self.attempts()["pruned"]
+        self.assertEqual(row["state"], "unknown")
+        self.assertEqual(row["refusal"], "attempt-unknown")
+        self.assertIs(row["over"], True)
+        self.assertIs(row["cleanable"], False)
+        self.assertEqual(
+            row["retention_reasons"],
+            ["the adapter no longer knows this attempt, so neither its keeper "
+             "nor its launches can be established"],
+        )
+
+    def test_a_surviving_command_names_itself_and_blocks_the_removal(self):
+        # Requirement 3, and the labels the report has to carry. The wrapper is
+        # gone and its command is not, which is exactly what a `SIGKILL`ed
+        # wrapper leaves behind.
+        self.plant_the_acceptance_scenario()
+        row = self.attempts()["busy"]
+        self.assertEqual(row["state"], "ended")
+        self.assertEqual(row["unfinished_launches"], ["cabal-test"])
+        self.assertIs(row["over"], True)
+        self.assertIs(row["cleanable"], False)
+        self.assertEqual(
+            row["retention_reasons"],
+            ["wrapped launches are still running: cabal-test"],
+        )
+
+    def test_a_keeper_that_cannot_be_verified_is_not_gone(self):
+        # A keeper recorded on another host cannot be looked up from here, so
+        # the adapter answers `unverifiable`. Over, because it is not live;
+        # never cleanable, because that is not proof of anything.
+        attempt = ATTEMPTS["killed"]
+        self.write_json(
+            self.records / attempt / "attempt.json",
+            {
+                "attempt": attempt, "runtime": "claude",
+                "runtime_version": "2.1.276", "session_id": "session",
+                "invocation_id": "invocation", "repo": "owner/name",
+                "silence_seconds": 600, "registered_at": 0,
+                "keeper": {"host": self.host + "-elsewhere", "pid": 1},
+            },
+        )
+        self.attempt_directory(attempt)
+        row = self.attempts()["killed"]
+        self.assertEqual(row["keeper_standing"], "unverifiable")
+        self.assertIs(row["over"], True)
+        self.assertIs(row["cleanable"], False)
+        self.assertEqual(
+            row["retention_reasons"],
+            ["the keeper's standing is unverifiable rather than gone"],
+        )
+
+    def test_every_attempt_carries_its_id_age_and_footprint(self):
+        # Requirement 1's four facts. The footprint counts the pinned checkout
+        # too, because that is what the directory actually costs.
+        self.plant_the_acceptance_scenario()
+        self.pin_a_worktree(ATTEMPTS["ended"])
+        rows = self.attempts()
+        for name, row in sorted(rows.items()):
+            with self.subTest(attempt=name):
+                self.assertEqual(row["attempt"], ATTEMPTS[name])
+                self.assertEqual(row["path"], str(self.runtime / ATTEMPTS[name]))
+                self.assertGreaterEqual(row["age_seconds"], 0)
+                self.assertIn("+00:00", row["modified"])
+                self.assertGreaterEqual(row["files"], 1)
+                self.assertGreater(row["bytes"], 0)
+                self.assertNotIn("measurement_error", row)
+        self.assertGreater(rows["ended"]["files"], rows["killed"]["files"])
+
+    def test_a_symlink_counts_once_as_itself_and_is_never_followed(self):
+        # The footprint is what the directory costs, so a symlink is an entry
+        # with a size of its own: skipping one under-reports the attempt, and
+        # following one reports the target tree's bytes as this directory's.
+        outside = self.root / "outside"
+        (outside / "nested").mkdir(parents=True)
+        (outside / "nested" / "large").write_text("x" * 4096, encoding="utf-8")
+        attempt = self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        (attempt / "real").write_text("ab\n", encoding="utf-8")
+        (attempt / "to-a-file").symlink_to(attempt / "real")
+        (attempt / "dangling").symlink_to(attempt / "never-existed")
+        (attempt / "to-a-directory").symlink_to(outside)
+        row = self.attempts()["ended"]
+        links = [attempt / name
+                 for name in ("to-a-file", "dangling", "to-a-directory")]
+        expected_files = [attempt / "inventory.json", attempt / "real"]
+        self.assertEqual(row["files"], len(expected_files) + len(links))
+        self.assertEqual(
+            row["bytes"],
+            sum(path.stat().st_size for path in expected_files)
+            + sum(path.lstat().st_size for path in links),
+        )
+        # And nothing of the linked tree is in that total, which is the half a
+        # measurement that followed links would get wrong.
+        self.assertLess(row["bytes"], (outside / "nested" / "large").stat().st_size)
+
+    def test_a_subdirectory_that_cannot_be_listed_makes_the_size_unknown(self):
+        # `os.walk` ignores an unreadable directory by default, which would
+        # report a smaller footprint rather than no footprint -- and a smaller
+        # one reads as a measurement.
+        attempt = self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        closed = attempt / "closed"
+        closed.mkdir()
+        (closed / "hidden").write_text("x" * 64, encoding="utf-8")
+        closed.chmod(0o000)
+        self.addCleanup(closed.chmod, 0o700)
+        row = self.attempts()["ended"]
+        self.assertIsNone(row["files"])
+        self.assertIsNone(row["bytes"])
+        self.assertIn("Permission denied", row["measurement_error"])
+        # Over, because that is the adapter's answer and nothing here changes
+        # it -- and never cleanable, because the removal is recursive and a
+        # directory this census could not walk is one whose contents nothing
+        # has accounted for. The `tree/` gate covers the pinned checkout alone.
+        self.assertIs(row["over"], True)
+        self.assertIs(row["cleanable"], False)
+        self.assertIn(
+            "this census could not fully measure the directory, so its "
+            "contents are unaccounted for",
+            row["retention_reasons"],
+        )
+        self.assertTrue(
+            any("could not be measured" in warning
+                for warning in self.document["warnings"]),
+            self.document["warnings"],
+        )
+
+    def test_a_pinned_attempt_worktree_is_attributed_to_its_attempt(self):
+        # Otherwise a live invocation's detached checkout reads as an
+        # unexplained worktree, and the workflow's ordinary worktree-removal
+        # gate would be the one applied to it.
+        self.plant_the_acceptance_scenario()
+        tree = self.pin_a_worktree(ATTEMPTS["live"])
+        rows = self.attempts()
+        self.assertEqual(rows["live"]["tree"],
+                         {"path": str(tree), "present": True, "registered": True})
+        self.assertEqual(rows["ended"]["tree"]["present"], False)
+        self.assertEqual(rows["ended"]["tree"]["registered"], False)
+        attributed = {
+            wt["path"]: wt.get("project_review_attempt")
+            for wt in self.document["worktrees"]
+        }
+        self.assertEqual(attributed.get(str(tree)), ATTEMPTS["live"])
+        self.assertIsNone(attributed[str(self.repo.resolve())])
+
+    def test_a_state_that_changes_is_reread_rather_than_remembered(self):
+        # The revalidation the workflow does immediately before an approved
+        # removal: the same directory answers differently once its keeper is
+        # gone, because the answer comes from the adapter every time.
+        self.register(ATTEMPTS["live"], self.live_pid)
+        self.assertIs(self.attempts()["live"]["over"], False)
+        self.end(ATTEMPTS["live"])
+        after = self.attempts()["live"]
+        self.assertIs(after["over"], True)
+        self.assertIs(after["cleanable"], True)
+
+
+class AttemptAdapterResolutionTests(AttemptFixture):
+    """The adapter comes from the census's own bundle, in either layout."""
+
+    def test_the_shared_scripts_layout_resolves_the_adapter_beside_it(self):
+        self.plant_the_acceptance_scenario()
+        document = self.census_through(self.synthetic_bundle("claude"))
+        collection = document["project_review_attempts"]
+        self.assertEqual(
+            collection["adapter"],
+            str(Path(collection["adapter"]).parent / LIVENESS_ADAPTER),
+        )
+        self.assertEqual(Path(collection["adapter"]).parent.name, "scripts")
+        self.assertEqual(
+            {row["attempt"] for row in collection["attempts"] if row["cleanable"]},
+            {ATTEMPTS["ended"], ATTEMPTS["killed"]},
+        )
+
+    def test_the_per_skill_layout_resolves_its_sibling_skill_s_adapter(self):
+        self.plant_the_acceptance_scenario()
+        document = self.census_through(self.synthetic_bundle("codex"))
+        collection = document["project_review_attempts"]
+        self.assertEqual(
+            Path(collection["adapter"]).parent.parent.name, "project-review"
+        )
+        self.assertEqual(
+            {row["attempt"] for row in collection["attempts"] if row["cleanable"]},
+            {ATTEMPTS["ended"], ATTEMPTS["killed"]},
+        )
+
+    def test_a_bundle_with_no_adapter_reports_unresolved_rather_than_clean(self):
+        # The spec addition: a missing helper is a visible error, never an
+        # empty or safe result. Every attempt is reported and none is
+        # cleanable, so the operator sees five directories and no green light.
+        self.plant_the_acceptance_scenario()
+        document = self.census_through(
+            self.synthetic_bundle("claude", adapter="absent")
+        )
+        collection = document["project_review_attempts"]
+        self.assertIsNone(collection["adapter"])
+        self.assertEqual(len(collection["attempts"]), len(ATTEMPTS))
+        for row in collection["attempts"]:
+            with self.subTest(attempt=row["attempt"]):
+                self.assertEqual(row["state"], "error")
+                self.assertIsNone(row["over"])
+                self.assertIs(row["cleanable"], False)
+                self.assertIn("ships no project-review liveness adapter",
+                              row["status_error"])
+        self.assertTrue(
+            any("liveness adapter unavailable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
+        self.assertEqual(
+            document["counts"]["cleanable_project_review_attempts"], 0
+        )
+
+    def test_the_audited_checkout_is_never_where_the_adapter_comes_from(self):
+        # A repository under audit need not track any Kanban tooling, and one
+        # that happens to carry a file of that name is not this bundle's.
+        self.plant_the_acceptance_scenario()
+        decoy = self.repo / "scripts"
+        decoy.mkdir()
+        (decoy / LIVENESS_ADAPTER).write_text("raise SystemExit(9)\n", encoding="utf-8")
+        document = self.census_through(self.synthetic_bundle("claude"))
+        adapter = document["project_review_attempts"]["adapter"]
+        self.assertNotIn(str(self.repo), adapter)
+
+
+class AttemptStatusReadingTests(AttemptFixture):
+    """A `status` answer this census cannot use is an error, not a pass."""
+
+    def rows_with(self, mode: str) -> list[dict]:
+        self.plant_the_acceptance_scenario()
+        document = self.census_through(
+            self.synthetic_bundle("claude", adapter=mode)
+        )
+        self.collection = document["project_review_attempts"]
+        self.warnings = document["warnings"]
+        return self.collection["attempts"]
+
+    def test_an_unusable_answer_leaves_every_attempt_unresolved(self):
+        for mode, expected in (
+            ("not-json", "invalid status JSON"),
+            ("not-an-object", "did not report a JSON object"),
+            ("unknown-state", "unknown state"),
+            ("unknown-standing", "unknown keeper standing"),
+            # A field JSON allows and this program does not expect. Set
+            # membership is not total -- `[] in frozenset(...)` raises
+            # TypeError -- so an unguarded vocabulary check would abort the
+            # whole census here rather than reporting one attempt's error.
+            # `census_through` asserts the program exited 0, which is what
+            # catches that.
+            ("unhashable-state", "unknown state"),
+            ("unhashable-standing", "unknown keeper standing"),
+            ("no-launch-inventory", "unfinished_launches"),
+            ("other-refusal", "attempt-invalid"),
+            ("bare-failure", "exit 3"),
+        ):
+            with self.subTest(mode=mode):
+                rows = self.rows_with(mode)
+                self.assertEqual(len(rows), len(ATTEMPTS))
+                for row in rows:
+                    self.assertEqual(row["state"], "error", row)
+                    self.assertIsNone(row["over"])
+                    self.assertIs(row["cleanable"], False)
+                    self.assertIn(expected, row["status_error"])
+                self.assertTrue(
+                    any("state unresolved" in warning for warning in self.warnings),
+                    self.warnings,
+                )
+
+    def test_a_directory_whose_name_is_no_attempt_id_is_retained(self):
+        # The adapter refuses a name that is not one of its tokens, and that
+        # refusal is not `attempt-unknown`: it says nothing about whether
+        # anything is running, so the directory is reported and kept.
+        (self.runtime / "not-an-attempt-id").mkdir(parents=True)
+        rows = self.attempts()
+        row = rows["not-an-attempt-id"]
+        self.assertEqual(row["state"], "error")
+        self.assertEqual(row["refusal"], "attempt-invalid")
+        self.assertIsNone(row["over"])
+        self.assertIs(row["cleanable"], False)
+
+    def test_an_adapter_that_cannot_be_run_loses_one_attempt_not_the_census(self):
+        # `run` raises on a spawn failure and on its own timeout, and a wedged
+        # adapter call must not take the rest of the document with it: the other
+        # collections survive, the remaining attempts are still asked, and the
+        # one that failed is a visible error rather than an absence.
+        self.plant_the_acceptance_scenario()
+        real_run = census.run
+        wedged = ATTEMPTS["live"]
+        spawns = []
+
+        def wedge_one_attempt(argv, cwd, **kwargs):
+            if len(argv) > 1 and argv[1].endswith(LIVENESS_ADAPTER):
+                spawns.append(argv[-1])
+                if argv[-1] == wedged:
+                    raise census.CensusError("status: timed out after 90 seconds")
+            return real_run(argv, cwd, **kwargs)
+
+        with mock.patch.object(census, "run", wedge_one_attempt):
+            rows = self.attempts()
+        # Every attempt was asked, including the four after the one that failed.
+        self.assertEqual(sorted(spawns), sorted(ATTEMPTS.values()))
+        self.assertEqual(rows["live"]["state"], "error")
+        self.assertIn("timed out", rows["live"]["status_error"])
+        self.assertIsNone(rows["live"]["over"])
+        self.assertIs(rows["live"]["cleanable"], False)
+        # And the rest answered exactly as they do without the failure.
+        self.assertEqual(
+            {name for name, row in rows.items() if row["cleanable"]},
+            {"ended", "killed"},
+        )
+        self.assertEqual(self.document["default_branch"], "master")
+        self.assertTrue(
+            any("state unresolved" in warning
+                for warning in self.document["warnings"]),
+            self.document["warnings"],
+        )
+
+    def test_an_untraversable_parent_is_not_reported_as_an_absent_root(self):
+        # `os.path.lexists` answers False for a path whose ancestor cannot be
+        # traversed exactly as it does for one that is not there, so a
+        # `kanban-project-review` directory the operator cannot read would look
+        # like a repository that has never run the workflow -- with every
+        # attempt under it invisible and no warning to diagnose.
+        self.attempt_directory(ATTEMPTS["ended"])
+        parent = self.runtime.parent
+        parent.chmod(0o000)
+        self.addCleanup(parent.chmod, 0o700)
+        document = self.run_census()
+        collection = document["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("Permission denied", collection["error"])
+        self.assertIsNone(document["counts"]["project_review_attempts"])
+        self.assertIsNone(
+            document["counts"]["cleanable_project_review_attempts"]
+        )
+        self.assertTrue(
+            any("attempt directory unreadable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
+
+    def test_a_file_where_the_attempt_root_s_parent_belongs_is_not_absence(self):
+        # The other way the lookup fails without the path being absent. Nothing
+        # can live under it, but this program did not establish that, and
+        # "absent" is the one answer that reads as nothing to clean up.
+        self.runtime.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.parent.write_text("not a directory\n", encoding="utf-8")
+        self.addCleanup(self.runtime.parent.unlink)
+        collection = self.run_census()["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("is not a directory", collection["error"])
+
+    def test_a_symlinked_attempt_root_is_refused_rather_than_followed(self):
+        # The hazard in full: the root is a link to a directory outside the
+        # repository, so every attempt under it spells as one of this
+        # repository's own while resolving somewhere the janitor must never
+        # delete -- and the removal fence's guard compares that spelling.
+        outside = self.root / "somebody-elses-work"
+        (outside / ATTEMPTS["ended"]).mkdir(parents=True)
+        (outside / ATTEMPTS["ended"] / "PRECIOUS.txt").write_text(
+            "not the janitor's\n", encoding="utf-8"
+        )
+        self.register(ATTEMPTS["ended"], self.gone_pid, directory=False)
+        self.end(ATTEMPTS["ended"])
+        self.runtime.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.symlink_to(outside)
+        document = self.run_census()
+        collection = document["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("is a symlink", collection["error"])
+        self.assertTrue(
+            any("attempt directory unreadable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
+
+    def test_a_symlinked_parent_component_is_refused_too(self):
+        # `worktrees` itself is real here; its parent is the link, and every
+        # attempt under it still spells as one of this repository's own.
+        outside = self.root / "elsewhere"
+        (outside / "worktrees" / ATTEMPTS["ended"]).mkdir(parents=True)
+        self.runtime.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.parent.symlink_to(outside)
+        self.addCleanup(self.runtime.parent.unlink)
+        collection = self.run_census()["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("is a symlink", collection["error"])
+
+    def test_a_symlinked_attempt_is_reported_and_never_cleanable(self):
+        # A link among real components: the root is this repository's, so the
+        # inventory is readable, and the one entry that does not resolve where
+        # it is spelled is still reported -- a missing row would read as one
+        # fewer attempt -- with no state and no removal.
+        outside = self.root / "outside-attempt"
+        outside.mkdir()
+        self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        (self.runtime / ATTEMPTS["killed"]).symlink_to(outside)
+        rows = self.attempts()
+        self.assertEqual(rows["ended"]["cleanable"], True)
+        # The listing refuses a symlinked entry outright, so it never becomes a
+        # row at all -- which is the strongest form of "never cleanable".
+        self.assertNotIn("killed", rows)
+        self.assertEqual(set(rows), {"ended"})
+
+    def test_an_unreadable_attempt_root_is_null_rather_than_empty(self):
+        # The rule the retain ledger follows, on this collection: a directory
+        # that exists and cannot be listed is not an empty one.
+        self.runtime.mkdir(parents=True)
+        self.attempt_directory(ATTEMPTS["ended"])
+        self.runtime.chmod(0o000)
+        self.addCleanup(self.runtime.chmod, 0o700)
+        document = self.run_census()
+        collection = document["project_review_attempts"]
+        self.assertEqual(collection["present"], True)
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("Permission denied", collection["error"])
+        self.assertIsNone(document["counts"]["project_review_attempts"])
+        self.assertIsNone(
+            document["counts"]["cleanable_project_review_attempts"]
+        )
+        self.assertTrue(
+            any("attempt directory unreadable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
 
 
 if __name__ == "__main__":
