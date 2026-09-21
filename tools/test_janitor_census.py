@@ -644,7 +644,8 @@ class AttemptFixture(CensusFixture):
         (directory / "inventory.json").write_text("[]\n", encoding="utf-8")
         return directory
 
-    def register(self, attempt: str, keeper_pid: int | None) -> Path:
+    def register(self, attempt: str, keeper_pid: int | None,
+                 *, directory: bool = True) -> Path | None:
         self.write_json(
             self.records / attempt / "attempt.json",
             {
@@ -662,7 +663,9 @@ class AttemptFixture(CensusFixture):
                 ),
             },
         )
-        return self.attempt_directory(attempt)
+        # `directory=False` leaves the runtime path alone, for a test that puts
+        # something other than a directory there.
+        return self.attempt_directory(attempt) if directory else None
 
     def end(self, attempt: str) -> None:
         self.write_json(
@@ -1163,7 +1166,62 @@ class AttemptStatusReadingTests(AttemptFixture):
         collection = self.run_census()["project_review_attempts"]
         self.assertIsNone(collection["present"])
         self.assertIsNone(collection["attempts"])
-        self.assertIn("Not a directory", collection["error"])
+        self.assertIn("is not a directory", collection["error"])
+
+    def test_a_symlinked_attempt_root_is_refused_rather_than_followed(self):
+        # The hazard in full: the root is a link to a directory outside the
+        # repository, so every attempt under it spells as one of this
+        # repository's own while resolving somewhere the janitor must never
+        # delete -- and the removal fence's guard compares that spelling.
+        outside = self.root / "somebody-elses-work"
+        (outside / ATTEMPTS["ended"]).mkdir(parents=True)
+        (outside / ATTEMPTS["ended"] / "PRECIOUS.txt").write_text(
+            "not the janitor's\n", encoding="utf-8"
+        )
+        self.register(ATTEMPTS["ended"], self.gone_pid, directory=False)
+        self.end(ATTEMPTS["ended"])
+        self.runtime.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.symlink_to(outside)
+        document = self.run_census()
+        collection = document["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("is a symlink", collection["error"])
+        self.assertTrue(
+            any("attempt directory unreadable" in warning
+                for warning in document["warnings"]),
+            document["warnings"],
+        )
+
+    def test_a_symlinked_parent_component_is_refused_too(self):
+        # `worktrees` itself is real here; its parent is the link, and every
+        # attempt under it still spells as one of this repository's own.
+        outside = self.root / "elsewhere"
+        (outside / "worktrees" / ATTEMPTS["ended"]).mkdir(parents=True)
+        self.runtime.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.parent.symlink_to(outside)
+        self.addCleanup(self.runtime.parent.unlink)
+        collection = self.run_census()["project_review_attempts"]
+        self.assertIsNone(collection["present"])
+        self.assertIsNone(collection["attempts"])
+        self.assertIn("is a symlink", collection["error"])
+
+    def test_a_symlinked_attempt_is_reported_and_never_cleanable(self):
+        # A link among real components: the root is this repository's, so the
+        # inventory is readable, and the one entry that does not resolve where
+        # it is spelled is still reported -- a missing row would read as one
+        # fewer attempt -- with no state and no removal.
+        outside = self.root / "outside-attempt"
+        outside.mkdir()
+        self.register(ATTEMPTS["ended"], self.gone_pid)
+        self.end(ATTEMPTS["ended"])
+        (self.runtime / ATTEMPTS["killed"]).symlink_to(outside)
+        rows = self.attempts()
+        self.assertEqual(rows["ended"]["cleanable"], True)
+        # The listing refuses a symlinked entry outright, so it never becomes a
+        # row at all -- which is the strongest form of "never cleanable".
+        self.assertNotIn("killed", rows)
+        self.assertEqual(set(rows), {"ended"})
 
     def test_an_unreadable_attempt_root_is_null_rather_than_empty(self):
         # The rule the retain ledger follows, on this collection: a directory

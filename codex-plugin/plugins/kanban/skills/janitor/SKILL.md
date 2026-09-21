@@ -106,7 +106,12 @@ project-review — which in a repository reviewed weekly, or reviewed once, is
 never. The census reports each one with its attempt id, the state the liveness
 adapter gives it, its age, and the space it occupies, and it resolves that
 adapter from its own bundle exactly as §0 resolved the census itself, so a
-repository that tracks no Kanban tooling is audited anyway. A repository with no
+repository that tracks no Kanban tooling is audited anyway. Every component of
+that root from the Git common directory down must be a real directory: a symlink
+at either one redirects the whole inventory while each attempt under it still
+spells as one of this repository's own, and an attempt this census reports is one
+an operator may approve a recursive removal for. A linked component is therefore
+an unreadable inventory rather than a followed one. A repository with no
 such directory, or with an empty one, reports nothing and is not an anomaly — but
 an attempt root this census could not read is neither of those cases, and does
 not get that reading: it reports `null` for the inventory rather than an empty
@@ -339,8 +344,9 @@ beside each gate are the cases that most often read as a pass and are not.
 - **Project-review attempt removal:** the census reports the attempt
   `cleanable`, which is the adapter establishing both halves at once, the
   recorded attempt id and directory path, that path lying directly under the
-  attempt root the census named, the `tree/` registered at that exact path in
-  the porcelain listing, and an empty status for it *including untracked files*.
+  attempt root the census named — with no component of it a symlink, so the path
+  leads where it is spelled — the `tree/` registered at that exact path in the
+  porcelain listing, and an empty status for it *including untracked files*.
   *Near-miss:* an attempt that is `over` is not thereby `cleanable` — an
   `attempt-unknown` refusal and an `unverifiable` keeper each mean the adapter
   could not establish that nothing is using the directory, which is the opposite
@@ -502,6 +508,7 @@ approved item that is a directory rather than a Git object:
 
 ```bash
 [ -n "$ATTEMPT" ] && [ "$ATTEMPT_DIR" = "$RUNTIME/$ATTEMPT" ] &&
+  [ ! -L "$RUNTIME" ] && [ ! -L "$ATTEMPT_DIR" ] &&
   [ -d "$ATTEMPT_DIR" ] &&
   { [ ! -e "$ATTEMPT_DIR/tree" ] ||
       git -C "$ROOT" worktree remove --force "$ATTEMPT_DIR/tree"; } &&
@@ -517,6 +524,15 @@ reported, directly under the root it reported, named for the attempt that was
 approved. A reconstructed path is not that, and neither is a path that reaches
 any other directory: this is the workflow's one `rm -rf`, and those tests are
 the whole of its reach.
+
+**A matching spelling is not containment, which is what the two `-L` tests are
+for.** `[ "$ATTEMPT_DIR" = "$RUNTIME/$ATTEMPT" ]` compares strings, and a
+symlink anywhere along that path satisfies it exactly while `rm -rf` follows the
+link and deletes whatever is on the other side. The census refuses to report an
+attempt at all unless every component from the Git common directory down is a
+real directory, so a linked root never reaches this fence; these two tests
+re-prove the parts this fence itself names, because the destructive step should
+not depend only on a guarantee made by an earlier read.
 
 **`--force` here waives nothing the gate has not already proved.** It is the
 flag that lets `git worktree remove` delete a checkout with modified or

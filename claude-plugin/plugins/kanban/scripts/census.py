@@ -30,12 +30,14 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 STATUS_LIMIT = 200
@@ -407,6 +409,65 @@ def liveness_adapter() -> Path:
     )
 
 
+def owned_runtime_directory(common_dir: Path) -> Path:
+    """The attempt root, proved to be this repository's own directory.
+
+    The janitor's approved removal of an attempt is recursive, so what this
+    program reports is not merely a path but a claim about *where that path
+    leads*. Every component `project-review` itself creates -- the
+    `kanban-project-review` directory and the `worktrees` directory inside it --
+    is checked here to be a real directory rather than a symlink, because a link
+    at either one redirects the whole inventory somewhere else while every
+    attempt under it still spells as `<attempt root>/<attempt>`. That spelling is
+    what the removal's own guard compares, so a link here turns a census row into
+    a recursive delete outside the repository.
+
+    `lstat` and `stat.S_ISDIR` rather than `Path.is_dir()`, which follows the
+    link it is being asked about, and rather than a `realpath` comparison over
+    the whole ancestor chain, which would resolve components *above* the Git
+    common directory too: `/tmp` is a symlink to `/private/tmp` on macOS, and a
+    checkout under a symlinked home is ordinary, so that comparison refuses
+    healthy repositories. Containment is proved from the common directory down,
+    which is the part this mechanism owns.
+
+    `FileNotFoundError` propagates: a component that is not there is the absent
+    case, and absence is the caller's to report. Every other failure raises
+    `CensusError` naming the component, because this program did not establish
+    what is there.
+    """
+    directory = common_dir
+    for component in PurePosixPath(PROJECT_REVIEW_RUNTIME).parts:
+        directory = directory / component
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode):
+            kind = "a symlink" if stat.S_ISLNK(info.st_mode) else "not a directory"
+            raise CensusError(
+                f"the project-review attempt root is unusable: {directory} is "
+                f"{kind}, so nothing under it is this repository's own"
+            )
+    return directory
+
+
+def contained_attempt(runtime: Path, name: str) -> Path | None:
+    """`runtime/name` when it resolves to exactly that, else None.
+
+    The second proof, independent of the component walk above and of the
+    `not entry.is_symlink()` filter the listing applies. Both of those read the
+    filesystem at a different moment than this does, and the answer this program
+    publishes is acted on later still -- so the cheap check that the path leads
+    where it is spelled is worth making once more, here, on the resolved form.
+    Both sides are resolved, so a symlink *above* the Git common directory
+    cancels rather than refusing a healthy repository.
+    """
+    attempt = runtime / name
+    try:
+        resolved = os.path.realpath(attempt, strict=True)
+        expected = os.path.join(os.path.realpath(runtime, strict=True), name)
+    except OSError:
+        return None
+    return attempt if resolved == expected else None
+
+
 def directory_footprint(path: Path) -> dict[str, Any]:
     """How many files a directory holds and how many bytes they occupy.
 
@@ -616,18 +677,23 @@ def project_review_attempts(root: Path, common_dir: Path,
     cannot read would report `present: false` with an empty list and no warning
     — every attempt under it invisible, and the reading indistinguishable from a
     repository that has never run the workflow. Only `FileNotFoundError` is
-    absence here. Everything else, an unreadable ancestor and a file where the
-    parent should be alike, is `present: None` with `attempts: None` and the
-    error, because this program did not find out.
+    absence here. Everything else -- an unreadable ancestor, a file where a
+    component should be, a *symlink* where one should be -- is `present: None`
+    with `attempts: None` and the error, because this program did not find out.
+
+    A symlink is in that list rather than merely being unfollowed, and
+    `owned_runtime_directory` says why: an attempt this census reports is one the
+    janitor may be asked to delete recursively, so the reported path has to lead
+    where it is spelled.
     """
     directory = common_dir / PROJECT_REVIEW_RUNTIME
     result: dict[str, Any] = {"root": str(directory), "present": False,
                               "adapter": None, "attempts": []}
     try:
-        os.lstat(directory)
+        directory = owned_runtime_directory(common_dir)
     except FileNotFoundError:
         return result
-    except OSError as error:
+    except (CensusError, OSError) as error:
         result["present"] = None
         result["attempts"] = None
         result["error"] = str(error)
@@ -694,7 +760,18 @@ def project_review_attempts(root: Path, common_dir: Path,
             "registered": str(tree) in registered
             or os.path.realpath(tree) in registered,
         }
-        if adapter is None:
+        if contained_attempt(directory, name) is None:
+            # The listing already refused a symlinked entry and the walk above
+            # proved the chain, so this is the answer to "did either change
+            # since". Reported as a row rather than dropped -- a missing row
+            # reads as one fewer attempt -- and never cleanable, because what
+            # this path leads to is exactly what could not be established.
+            status = {
+                "state": "error", "refusal": None,
+                "error": f"{path} does not resolve to where it is spelled",
+                "keeper_standing": None, "unfinished_launches": None,
+            }
+        elif adapter is None:
             status = {
                 "state": "error", "refusal": None,
                 "error": "this bundle ships no project-review liveness adapter",
@@ -1202,6 +1279,34 @@ def self_test() -> None:
     assert project_review_attempts(
         Path("/nonexistent"), Path("/nonexistent") / "census-self-test", set(), []
     )["attempts"] == []
+    # Containment is proved from the Git common directory down and never by
+    # resolving the whole ancestor chain, so a symlink above it -- `/tmp` on
+    # macOS, a checkout under a symlinked home -- is not a refusal.
+    with tempfile.TemporaryDirectory() as scratch:
+        common = Path(scratch) / "common"
+        runtime = common / PROJECT_REVIEW_RUNTIME
+        (runtime / ("0" * 32)).mkdir(parents=True)
+        assert owned_runtime_directory(common) == runtime
+        assert contained_attempt(runtime, "0" * 32) == runtime / ("0" * 32)
+        elsewhere = Path(scratch) / "elsewhere"
+        (elsewhere / ("1" * 32)).mkdir(parents=True)
+        (runtime / ("1" * 32)).symlink_to(elsewhere / ("1" * 32))
+        assert contained_attempt(runtime, "1" * 32) is None
+        assert contained_attempt(runtime, "2" * 32) is None
+        # And a link at either component this mechanism owns refuses the root
+        # outright, because every attempt under it would still spell as one of
+        # this repository's own.
+        for component in ("kanban-project-review", "kanban-project-review/worktrees"):
+            linked = Path(scratch) / f"linked-{component.count('/')}"
+            target = linked / component
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(elsewhere)
+            try:
+                owned_runtime_directory(linked)
+            except CensusError as error:
+                assert "is a symlink" in str(error), error
+            else:
+                raise AssertionError(f"a symlinked {component} was accepted")
     print("census self-test: PASS")
 
 

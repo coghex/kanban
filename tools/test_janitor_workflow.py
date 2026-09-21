@@ -2009,6 +2009,38 @@ class RealGitApplyTests(HarnessCase):
                 self.assertNotEqual(prune.returncode, 0, prune.stdout)
                 self.assertEqual(self.registered_records(work), before)
 
+    def test_a_symlinked_root_or_attempt_is_refused_and_deletes_nothing(self):
+        # A matching spelling is not containment. `$ATTEMPT_DIR` equals
+        # `$RUNTIME/$ATTEMPT` character for character in both shapes below, and
+        # `rm -rf` would follow the link and delete an external tree. The census
+        # refuses to report such an attempt at all; these are the fence's own
+        # tests, because the destructive step should not rest only on that.
+        for relative_path in RENDERED_ASSETS:
+            for label in ("the attempt root", "the attempt directory"):
+                with self.subTest(asset=relative_path, linked=label):
+                    work = self.repository()
+                    outside = work.parent / "somebody-elses-work"
+                    runtime = work.parent / "attempt-runtime"
+                    if label == "the attempt root":
+                        (outside / ATTEMPT).mkdir(parents=True)
+                        precious = outside / ATTEMPT / "PRECIOUS.txt"
+                        runtime.symlink_to(outside)
+                    else:
+                        outside.mkdir(parents=True)
+                        precious = outside / "PRECIOUS.txt"
+                        runtime.mkdir()
+                        (runtime / ATTEMPT).symlink_to(outside)
+                    precious.write_text("not the janitor's\n", encoding="utf-8")
+                    attempt_dir = runtime / ATTEMPT
+                    # The guard the fence would rely on if spelling were enough.
+                    self.assertEqual(str(attempt_dir), f"{runtime}/{ATTEMPT}")
+                    result = self.run_attempt_fence(
+                        relative_path, work, runtime, attempt_dir
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertTrue(precious.is_file(), "the external tree was deleted")
+                    self.assertTrue(outside.is_dir())
+
     def test_a_refused_worktree_removal_retains_the_whole_directory(self):
         # A locked worktree is what a single `--force` does not override, which
         # is also the proof that this `--force` is not "force everything": the
@@ -2154,6 +2186,8 @@ ALL_SAFE_GATES = {
             "establishing both halves at once",
             "the recorded attempt id and directory path",
             "that path lying directly under the attempt root the census named",
+            "with no component of it a symlink, so the path leads where it is "
+            "spelled",
             "the `tree/` registered at that exact path in the porcelain listing",
             "an empty status for it *including untracked files*",
         ),
@@ -2502,6 +2536,28 @@ ATTEMPT_SWEEP_CONTRACT = {
     "the four facts each attempt carries": (
         "The census reports each one with its attempt id, the state the "
         "liveness adapter gives it, its age, and the space it occupies"
+    ),
+    "every component of the root is this repository's own": (
+        "Every component of that root from the Git common directory down must "
+        "be a real directory: a symlink at either one redirects the whole "
+        "inventory while each attempt under it still spells as one of this "
+        "repository's own, and an attempt this census reports is one an "
+        "operator may approve a recursive removal for. A linked component is "
+        "therefore an unreadable inventory rather than a followed one."
+    ),
+    "a matching spelling is not containment": (
+        "**A matching spelling is not containment, which is what the two `-L` "
+        "tests are for.**"
+    ),
+    "why a link defeats a string comparison": (
+        "compares strings, and a symlink anywhere along that path satisfies it "
+        "exactly while `rm -rf` follows the link and deletes whatever is on "
+        "the other side"
+    ),
+    "the fence re-proves what the census guaranteed": (
+        "these two tests re-prove the parts this fence itself names, because "
+        "the destructive step should not depend only on a guarantee made by an "
+        "earlier read"
     ),
     "the adapter comes from the census's own bundle": (
         "it resolves that adapter from its own bundle exactly as §0 resolved "

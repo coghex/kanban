@@ -2078,16 +2078,22 @@ mutation reappear on the other (issues #544/#575, #608).
   `ended`, or `active` with its keeper positively `gone`, *and* an explicitly
   empty `unfinished_launches` — the report records the attempt id and the
   directory path, that path lies directly under the attempt root the census
-  named, the attempt's `tree/` is registered at that exact path in
-  `git worktree list --porcelain`, its status is empty including untracked
-  files, and the user approves that item on its own. Only then is the chain
+  named, no component of that root from the Git common directory down is a
+  symlink — the census refuses the whole inventory as unreadable when one is,
+  because a link there redirects every attempt under it while each still spells
+  as one of this repository's own — the attempt's `tree/` is registered at that
+  exact path in `git worktree list --porcelain`, its status is empty including
+  untracked files, and the user approves that item on its own. Only then is the chain
   run: `git worktree remove --force` on the `tree/`, a recursive removal of that
   one directory, and — only if a worktree record for that `tree/` survived — the
   metadata prune below, with that one record name as the whole of its approved
   set. `--force` waives nothing the empty-status condition has not already
   proved, and the recursive removal is this workflow's only one: it is confined
   to the approved path by testing that path against the census's own attempt
-  root and attempt id before anything is deleted. An `attempt-unknown` refusal,
+  root and attempt id, and by testing that neither the root nor the attempt
+  directory is a symlink, before anything is deleted: that equality compares
+  strings, and a link anywhere along the path satisfies it exactly while the
+  removal follows the link off the repository. An `attempt-unknown` refusal,
   an `unverifiable` keeper, an unreadable launch inventory, and a state the
   adapter did not report are `over` at most and never `cleanable`; each is
   reported by path with its reason and retained. An `active` attempt with a
