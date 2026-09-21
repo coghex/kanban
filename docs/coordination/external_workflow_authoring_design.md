@@ -16,7 +16,7 @@ concrete precondition
 ## Processing status
 
 - [x] EPIC. Author the external bundles' solve and autosolve workflows from a rendered source — [#715]
-- [ ] EXT-1. Generalize the command renderer beyond two brands
+- [x] EXT-1. Generalize the command renderer beyond two brands — [#716]
 - [ ] EXT-2. Render the external solve workflows from an authored source
 - [ ] EXT-3. Render the external autosolve workflows from an authored source
 
