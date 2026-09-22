@@ -256,8 +256,7 @@ DEFAULT_ROSTER = ModelRoster(
         ),
         "claude": ProviderCatalog(
             models=(
-                "claude-sonnet-5",
-                "claude-opus-5",
+                "claude-opus-5-5",
                 "claude-fable-5",
                 "claude-fable-5-1",
             ),
@@ -268,15 +267,15 @@ DEFAULT_ROSTER = ModelRoster(
         ("solve", "codex"): Assignment(
             "gpt-6-sol", "high", "GPT-6-Sol high"
         ),
-        ("solve", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("solve", "claude"): Assignment("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("pr_review", "codex"): Assignment(
             "gpt-6-sol", "xhigh", "GPT-6-Sol xhigh"
         ),
-        ("pr_review", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("pr_review", "claude"): Assignment("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
         ("pr_revise", "codex"): Assignment(
             "gpt-6-sol", "high", "GPT-6-Sol high"
         ),
-        ("pr_revise", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("pr_revise", "claude"): Assignment("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_review", "codex"): Assignment(
             "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
         ),
@@ -296,7 +295,7 @@ DEFAULT_ROSTER = ModelRoster(
             "gpt-6-sol", "medium", "GPT-6-Sol medium"
         ),
         ("drain_rereview", "claude"): Assignment(
-            "claude-opus-5", "medium", "Opus 5 medium"
+            "claude-opus-5-5", "medium", "Opus 5.5 medium"
         ),
     },
 )

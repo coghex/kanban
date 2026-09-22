@@ -25,11 +25,11 @@
 ║┃                          ┃┃     │ of the payload so a partial  ┃ Agent models                                                     ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃     │ write is detectable on load. ┃ Operating mode: dual · set by agents in models.toml              ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃     ╰──────────────────────────────┃ solve          codex   gpt-6-sol · high                 default  ┃────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃                                    ┃ solve          claude  claude-sonnet-5 · high           default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                    ┃ solve          claude  claude-opus-5-5 · high           default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
 ║┃                          ┃┃                                    ┃ pr_review      codex   gpt-6-sol · xhigh                default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
-║┃                          ┃┃  ▸ #701  Input routing hardening  0┃ pr_review      claude  claude-opus-5 · xhigh            default  ┃                      ┃  │ snapshot loader                    │ ┃║
+║┃                          ┃┃  ▸ #701  Input routing hardening  0┃ pr_review      claude  claude-opus-5-5 · xhigh          default  ┃                      ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃  complete                          ┃ pr_revise      codex   gpt-6-sol · high                 default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
-║┃                          ┃┃  STANDALONE                        ┃ pr_revise      claude  claude-sonnet-5 · high           default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
+║┃                          ┃┃  STANDALONE                        ┃ pr_revise      claude  claude-opus-5-5 · high           default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃  ╭─────────────────────────────────┃ issue_review   codex   gpt-6-astra · xhigh              default  ┃                      ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ #756 Define the persistence     ┃ issue_review   claude  claude-fable-5-1 · xhigh         default  ┃                      ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │ contract                        ┃ issue_revise   claude  claude-fable-5-1 · high          default  ┃                      ┃  │ versioned envelope and reports a   │ ┃║

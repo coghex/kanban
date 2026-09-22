@@ -1226,7 +1226,7 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
 
     def test_single_agent_selects_the_sole_loaded_providers_cell(self):
         for agents, provider, expected in (
-            ('["claude"]', "claude", ("claude-opus-5", "medium")),
+            ('["claude"]', "claude", ("claude-opus-5-5", "medium")),
             ('["codex"]', "codex", ("gpt-6-sol", "medium")),
         ):
             with self.subTest(agents=agents):
@@ -1279,7 +1279,7 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
                             )
         argv = json.loads(log.read_text(encoding="utf-8"))
         self.assertEqual(argv[0], "-p")
-        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5-5")
         self.assertEqual(argv[argv.index("--effort") + 1], "medium")
         self.assertIn("bypassPermissions", argv)
         # No Codex flag leaked into the other brand's vector.
@@ -1308,7 +1308,7 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
         # assignment, so the reviewer that runs, the reviewer the prompt says
         # it is, and the reviewer the marker names cannot disagree.
         for agents, provider, display in (
-            ('["claude"]', "claude", "Opus 5 medium"),
+            ('["claude"]', "claude", "Opus 5.5 medium"),
             ('["codex"]', "codex", "GPT-6-Sol medium"),
         ):
             with self.subTest(agents=agents):

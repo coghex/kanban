@@ -231,7 +231,7 @@ spec = describe "the settings overlay's model roster" $ do
 
   describe "cycling a value" $ do
     it "wraps through the provider's declared model order in both directions" $ do
-      cycledModel (SettingsCycleModel 1) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-opus-5"
+      cycledModel (SettingsCycleModel 1) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5"
       cycledModel (SettingsCycleModel (-1)) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5-1"
       cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-6-astra"
       cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-6-sol"
@@ -243,14 +243,14 @@ spec = describe "the settings overlay's model roster" $ do
 
     it "names the wire model and effort in the display, replacing a curated label" $
       editedAssignment (SettingsCycleModel 1) defaults (SolveRole, ClaudeProvider)
-        `shouldBe` Just (Assignment "claude-opus-5" "high" "claude-opus-5 high")
+        `shouldBe` Just (Assignment "claude-fable-5" "high" "claude-fable-5 high")
 
     -- The other direction of the same rule: back on the compiled pair, the
     -- curated label and the default marker both return.
     it "restores the complete compiled assignment when the pair matches it again" $ do
       let edited = proposed (SettingsCycleModel 1) defaults (SolveRole, ClaudeProvider)
       editedAssignment (SettingsCycleModel (-1)) (Right edited) (SolveRole, ClaudeProvider)
-        `shouldBe` Just (Assignment "claude-sonnet-5" "high" "Sonnet 5 high")
+        `shouldBe` Just (Assignment "claude-opus-5-5" "high" "Opus 5.5 high")
       proposed (SettingsCycleModel (-1)) (Right edited) (SolveRole, ClaudeProvider) `shouldBe` defaultRoster
 
     it "writes nothing when the catalog has nowhere else to cycle to" $ do
@@ -439,7 +439,7 @@ editedRoster :: ModelRoster
 editedRoster =
   defaultRoster
     { rosterAssignments =
-        Map.insert (SolveRole, ClaudeProvider) (Assignment "claude-opus-5" "high" "claude-opus-5 high") defaultRoster.rosterAssignments
+        Map.insert (SolveRole, ClaudeProvider) (Assignment "claude-fable-5" "high" "claude-fable-5 high") defaultRoster.rosterAssignments
     }
 
 -- | The same, on the one cell the caution is about.
@@ -456,10 +456,10 @@ singleValueRoster :: ModelRoster
 singleValueRoster =
   ModelRoster
     { rosterAgents = [ClaudeProvider],
-      rosterProviders = Map.singleton ClaudeProvider (ProviderCatalog ["claude-sonnet-5"] ["high"]),
+      rosterProviders = Map.singleton ClaudeProvider (ProviderCatalog ["claude-opus-5-5"] ["high"]),
       rosterAssignments =
         Map.fromList
-          [ ((role, ClaudeProvider), Assignment "claude-sonnet-5" "high" "Sonnet 5 high")
+          [ ((role, ClaudeProvider), Assignment "claude-opus-5-5" "high" "Opus 5.5 high")
           | role <- allRoles
           ]
     }

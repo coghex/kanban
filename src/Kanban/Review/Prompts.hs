@@ -237,8 +237,8 @@ reviewDeveloperInstructions workflowConfig roster coordinator =
       | claudeRevisionAvailable roster coordinator =
           [ "Whenever revision requires "
               <> claudeRevisionName roster
-              <> ", you MUST call kanban_run_claude. Never invoke claude, claude-code, or another Claude executable through a shell or command tool. The Kanban tool owns authenticated execution and returns Sonnet's text.",
-            "The kanban_run_claude prompt must be standalone: include the issue body, relevant chronological comments/effective specification, repository evidence, blockers, and request exact amendment content. Sonnet runs in plan mode and must not be asked to edit files, post comments, or change labels.",
+              <> ", you MUST call kanban_run_claude. Never invoke claude, claude-code, or another Claude executable through a shell or command tool. The Kanban tool owns authenticated execution and returns the Claude reviewer's text.",
+            "The kanban_run_claude prompt must be standalone: include the issue body, relevant chronological comments/effective specification, repository evidence, blockers, and request exact amendment content. The Claude reviewer runs in plan mode and must not be asked to edit files, post comments, or change labels.",
             "REVISION switches back to the issue author's brand: Codex-origin amendment content is authored by you as "
               <> coordinatorName roster CodexProvider
               <> "; Claude-origin amendment content is authored by "

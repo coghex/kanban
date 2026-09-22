@@ -321,7 +321,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
             )
             .replace(
                 '[roles.issue_gate.claude]\nmodel = "claude-fable-5-1"\neffort = "high"',
-                '[roles.issue_gate.claude]\nmodel = "claude-sonnet-5"\neffort = "medium"',
+                '[roles.issue_gate.claude]\nmodel = "claude-opus-5-5"\neffort = "medium"',
             )
         )
         module = self.backend()
@@ -331,7 +331,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="low"', codex_argv)
 
         claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
-        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-sonnet-5")
+        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-opus-5-5")
         self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "medium")
 
     def test_the_environment_beats_the_file_for_model_and_effort_alike(self):

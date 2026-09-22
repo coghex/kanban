@@ -1034,7 +1034,7 @@ claudeReviewTurn :: ByteString.ByteString -> ByteString.ByteString -> [ByteStrin
 claudeReviewTurn thinking spoken =
   [ "printf '{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_name\":\"SessionStart\",\"session_id\":\"%s\"}\\n' \"$session\"",
     "printf '{\"type\":\"system\",\"subtype\":\"hook_response\",\"hook_name\":\"SessionStart\",\"session_id\":\"%s\"}\\n' \"$session\"",
-    "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\",\"uuid\":\"turn-%s\",\"model\":\"claude-opus-5\",\"tools\":[],\"mcp_servers\":[]}\\n' \"$session\" \"$turn\"",
+    "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\",\"uuid\":\"turn-%s\",\"model\":\"claude-opus-5-5\",\"tools\":[],\"mcp_servers\":[]}\\n' \"$session\" \"$turn\"",
     "printf '{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"requesting\",\"session_id\":\"%s\"}\\n' \"$session\"",
     "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}},\"session_id\":\"%s\"}\\n' \"$session\"",
     "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"" <> thinking <> "\"}},\"session_id\":\"%s\"}\\n' \"$session\"",

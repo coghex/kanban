@@ -304,7 +304,7 @@ EXPECTED_COMMAND_NAMES = (
 # (docs/agent-workflow-contract.md §2.1-§2.2). Claude Code's own command
 # frontmatter genuinely supports `model:` (see the personal
 # ~/.claude/commands/pr-revise.md this issue replaces, which set
-# `model: "claude-sonnet-5"` and `effort: "xhigh"`), so this is a real risk
+# an explicit model and `effort: "xhigh"`), so this is a real risk
 # to guard, not just defense in depth.
 FORBIDDEN_FRONTMATTER_KEYS = {
     "model",
@@ -1098,7 +1098,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         claude_cell = roster_cell(roster_source, "roles.pr_review.claude")
         self.assertEqual(codex_cell["model"], "gpt-6-sol")
         self.assertEqual(codex_cell["effort"], "xhigh")
-        self.assertEqual(claude_cell["model"], "claude-opus-5")
+        self.assertEqual(claude_cell["model"], "claude-opus-5-5")
         self.assertEqual(claude_cell["effort"], "xhigh")
 
         # The literals must be gone from the Haskell source, or this gate

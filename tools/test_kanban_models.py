@@ -79,7 +79,7 @@ class CompiledDefaultsTests(unittest.TestCase):
             (("issue_gate", "claude"), ("claude-fable-5-1", "high")),
             (("drain_rereview", "codex"), ("gpt-6-sol", "medium")),
             (("pr_review", "codex"), ("gpt-6-sol", "xhigh")),
-            (("pr_review", "claude"), ("claude-opus-5", "xhigh")),
+            (("pr_review", "claude"), ("claude-opus-5-5", "xhigh")),
         ):
             with self.subTest(cell=cell):
                 assignment = kanban_models.DEFAULT_ROSTER.assignment_for(*cell)
@@ -106,18 +106,18 @@ class CompiledAssignmentTests(unittest.TestCase):
 
     EXPECTED_CELLS = {
         ("solve", "codex"): ("gpt-6-sol", "high", "GPT-6-Sol high"),
-        ("solve", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("solve", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("pr_review", "codex"): ("gpt-6-sol", "xhigh", "GPT-6-Sol xhigh"),
-        ("pr_review", "claude"): ("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("pr_review", "claude"): ("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
         ("pr_revise", "codex"): ("gpt-6-sol", "high", "GPT-6-Sol high"),
-        ("pr_revise", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("pr_revise", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_review", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
         ("issue_review", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
         ("issue_revise", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
         ("issue_gate", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
         ("issue_gate", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
         ("drain_rereview", "codex"): ("gpt-6-sol", "medium", "GPT-6-Sol medium"),
-        ("drain_rereview", "claude"): ("claude-opus-5", "medium", "Opus 5 medium"),
+        ("drain_rereview", "claude"): ("claude-opus-5-5", "medium", "Opus 5.5 medium"),
     }
 
     def test_every_cell_carries_its_compiled_assignment(self):
@@ -165,7 +165,7 @@ class CompiledAssignmentTests(unittest.TestCase):
         self.assertNotIn("gpt-5.4", codex)
         self.assertEqual(
             claude,
-            ("claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
+            ("claude-opus-5-5", "claude-fable-5", "claude-fable-5-1"),
         )
         # Every assigned model is selectable, which is what the roster's own
         # validation demands of an operator's file too.
@@ -566,7 +566,7 @@ class DefectVocabularyTests(unittest.TestCase):
         # The provider table goes; the assignments stay, so the cells that name
         # it have no catalog to validate against.
         text = EXAMPLE.replace(
-            '[providers.claude]\nmodels = ["claude-sonnet-5", "claude-opus-5", '
+            '[providers.claude]\nmodels = ["claude-opus-5-5", '
             '"claude-fable-5", "claude-fable-5-1"]\n'
             'efforts = ["low", "medium", "high", "xhigh"]\n',
             "",
@@ -644,7 +644,7 @@ class DefectVocabularyTests(unittest.TestCase):
                 'models = ["gpt-5.4"]\n'
                 'efforts = ["high"]\n'
                 "[providers.claude]\n"
-                'models = ["claude-opus-5"]\n'
+                'models = ["claude-opus-5-5"]\n'
                 'efforts = ["xhigh"]\n'
                 "[roles.issue_gate.codex]\n"
                 'model = "gpt-5.4"\n'
@@ -667,7 +667,7 @@ class DefectVocabularyTests(unittest.TestCase):
             self.edited(
                 ('[roles.solve.codex]\nmodel = "gpt-6-sol"',
                  '[roles.solve.codex]\nmodel = "gpt-9"'),
-                ('[roles.solve.claude]\nmodel = "claude-sonnet-5"',
+                ('[roles.solve.claude]\nmodel = "claude-opus-5-5"',
                  '[roles.solve.claude]\nmodel = "claude-9"'),
             )
         )

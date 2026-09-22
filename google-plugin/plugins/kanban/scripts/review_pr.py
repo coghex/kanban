@@ -43,7 +43,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # the self-reviewed known-origin case, invoke_codex/invoke_claude below
 # fully construct the subprocess they spawn, so — for this plugin's
 # bundled coordinator only — they pin it and can therefore verify and
-# publish it, matching the exact gpt-6-sol/claude-opus-5 at xhigh
+# publish it, matching the exact gpt-6-sol/claude-opus-5-5 at xhigh
 # values the roles.pr_review.codex and roles.pr_review.claude cells of
 # models.toml.example declare -- the cells Kanban's own
 # PullRequestReview/PullRequestRereview spawns resolve from the model
@@ -56,7 +56,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # visibility — is what pins that one.
 CODEX_NESTED_REVIEW_MODEL = "gpt-6-sol"
 CODEX_NESTED_REVIEW_EFFORT = "xhigh"
-CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
+CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5-5"
 CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
 
 _KANBAN_MODELS_MODULE = None

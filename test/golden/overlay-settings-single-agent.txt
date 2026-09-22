@@ -24,13 +24,13 @@
 ║┃                          ┃┃     │ Write the envelope header ahe┃ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ┃e membership        │ ┃  │ ordinary wheel events.             │ ┃║
 ║┃                          ┃┃     │ of the payload so a partial  ┃ Agent models                                                     ┃                    │ ┃  │ ✓ CI 14/14 · clean                 │ ┃║
 ║┃                          ┃┃     │ write is detectable on load. ┃ Operating mode: single-agent · set by agents in models.toml      ┃calculating         │ ┃  ╰────────────────────────────────────╯ ┃║
-║┃                          ┃┃     ╰──────────────────────────────┃ solve          claude  claude-sonnet-5 · high           default  ┃────────────────────╯ ┃                                         ┃║
-║┃                          ┃┃                                    ┃ pr_review      claude  claude-opus-5 · xhigh            default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃                                    ┃ pr_revise      claude  claude-sonnet-5 · high           default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
+║┃                          ┃┃     ╰──────────────────────────────┃ solve          claude  claude-opus-5-5 · high           default  ┃────────────────────╯ ┃                                         ┃║
+║┃                          ┃┃                                    ┃ pr_review      claude  claude-opus-5-5 · xhigh          default  ┃                      ┃  ╭────────────────────────────────────╮ ┃║
+║┃                          ┃┃                                    ┃ pr_revise      claude  claude-opus-5-5 · high           default  ┃                      ┃  │ PR #861 Adopt the envelope in the  │ ┃║
 ║┃                          ┃┃  ▸ #701  Input routing hardening  0┃ issue_review   claude  claude-fable-5-1 · xhigh         default  ┃                      ┃  │ snapshot loader                    │ ┃║
 ║┃                          ┃┃  complete                          ┃ issue_revise   claude  claude-fable-5-1 · high          default  ┃                      ┃  │  reviewed:approve   feature        │ ┃║
 ║┃                          ┃┃  STANDALONE                        ┃ issue_gate     claude  claude-fable-5-1 · high          default  ┃                      ┃  │ #901 · agent-name → master ·       │ ┃║
-║┃                          ┃┃  ╭─────────────────────────────────┃ drain_rereview claude  claude-opus-5 · medium           default  ┃                      ┃  │ updated 3h ago                     │ ┃║
+║┃                          ┃┃  ╭─────────────────────────────────┃ drain_rereview claude  claude-opus-5-5 · medium         default  ┃                      ┃  │ updated 3h ago                     │ ┃║
 ║┃                          ┃┃  │ #756 Define the persistence     ┃                                                                  ┃                      ┃  │ Reads the cache through the        │ ┃║
 ║┃                          ┃┃  │ contract                        ┃                                                                  ┃                      ┃  │ versioned envelope and reports a   │ ┃║
 ║┃                          ┃┃  │  architecture                   ┃                                                                  ┃                      ┃  │ truncated payload.                 │ ┃║
