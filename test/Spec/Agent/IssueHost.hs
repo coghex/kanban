@@ -3032,7 +3032,7 @@ sampleResult =
       reviewResultStage = IssueRevision,
       reviewResultApproved = False,
       reviewResultReviewerRoute = "codex",
-      reviewResultModels = ["gpt-5.6-sol@xhigh"],
+      reviewResultModels = ["gpt-6-sol@xhigh"],
       reviewResultCommentUrl = Just "https://example.test/1",
       reviewResultBlockingReasons = []
     }
@@ -3049,7 +3049,7 @@ canonicalResult =
       canonicalReviewIssue = 594,
       canonicalReviewOrigin = "claude",
       canonicalReviewRequiredReviewers = Just "codex",
-      canonicalReviewRequiredModels = Just "gpt-5.6-sol@xhigh",
+      canonicalReviewRequiredModels = Just "gpt-6-sol@xhigh",
       canonicalReviewReasons = []
     }
 

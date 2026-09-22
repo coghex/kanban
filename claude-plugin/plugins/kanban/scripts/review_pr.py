@@ -43,7 +43,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # the self-reviewed known-origin case, invoke_codex/invoke_claude below
 # fully construct the subprocess they spawn, so — for this plugin's
 # bundled coordinator only — they pin it and can therefore verify and
-# publish it, matching the exact gpt-5.6-sol/claude-opus-5 at xhigh
+# publish it, matching the exact gpt-6-sol/claude-opus-5 at xhigh
 # values the roles.pr_review.codex and roles.pr_review.claude cells of
 # models.toml.example declare -- the cells Kanban's own
 # PullRequestReview/PullRequestRereview spawns resolve from the model
@@ -54,7 +54,7 @@ UNVERIFIED_MODEL_TOKEN = "unspecified"
 # the self-reviewed path is unaffected and still cannot verify a model,
 # since Kanban's own top-level spawn — outside this coordinator's
 # visibility — is what pins that one.
-CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-sol"
+CODEX_NESTED_REVIEW_MODEL = "gpt-6-sol"
 CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
@@ -2171,7 +2171,7 @@ def self_test() -> None:
         "CHANGES_REQUESTED",
     )
     pinned_match = REVIEW_MARKER_RE.fullmatch(pinned)
-    assert pinned_match and pinned_match.group("models") == "gpt-5.6-sol@xhigh"
+    assert pinned_match and pinned_match.group("models") == "gpt-6-sol@xhigh"
     print("self-test passed")
 
 

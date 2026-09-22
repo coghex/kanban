@@ -371,8 +371,8 @@ defaultRoster =
         Map.fromList
           [ ( CodexProvider,
               ProviderCatalog
-                { catalogModels = ["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"],
-                  catalogEfforts = ["minimal", "low", "medium", "high", "xhigh"]
+                { catalogModels = ["gpt-6-sol", "gpt-6-astra"],
+                  catalogEfforts = ["low", "medium", "high", "xhigh", "max"]
                 }
             ),
             ( ClaudeProvider,
@@ -384,18 +384,18 @@ defaultRoster =
           ],
       rosterAssignments =
         Map.fromList
-          [ ((SolveRole, CodexProvider), Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
+          [ ((SolveRole, CodexProvider), Assignment "gpt-6-sol" "high" "GPT-6-Sol high"),
             ((SolveRole, ClaudeProvider), Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
-            ((PrReviewRole, CodexProvider), Assignment "gpt-5.6-sol" "xhigh" "GPT-5.6-Sol xhigh"),
+            ((PrReviewRole, CodexProvider), Assignment "gpt-6-sol" "xhigh" "GPT-6-Sol xhigh"),
             ((PrReviewRole, ClaudeProvider), Assignment "claude-opus-5" "xhigh" "Opus 5 xhigh"),
-            ((PrReviseRole, CodexProvider), Assignment "gpt-5.6-terra" "high" "GPT-5.6-Terra high"),
+            ((PrReviseRole, CodexProvider), Assignment "gpt-6-sol" "high" "GPT-6-Sol high"),
             ((PrReviseRole, ClaudeProvider), Assignment "claude-sonnet-5" "high" "Sonnet 5 high"),
             ((IssueReviewRole, CodexProvider), Assignment "gpt-6-astra" "xhigh" "GPT-6-Astra xhigh"),
             ((IssueReviewRole, ClaudeProvider), Assignment "claude-fable-5-1" "xhigh" "Fable 5.1 xhigh"),
             ((IssueReviseRole, ClaudeProvider), Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
             ((IssueGateRole, CodexProvider), Assignment "gpt-6-astra" "high" "GPT-6-Astra high"),
             ((IssueGateRole, ClaudeProvider), Assignment "claude-fable-5-1" "high" "Fable 5.1 high"),
-            ((DrainRereviewRole, CodexProvider), Assignment "gpt-5.6-terra" "medium" "GPT-5.6-Terra medium"),
+            ((DrainRereviewRole, CodexProvider), Assignment "gpt-6-sol" "medium" "GPT-6-Sol medium"),
             ((DrainRereviewRole, ClaudeProvider), Assignment "claude-opus-5" "medium" "Opus 5 medium")
           ]
     }

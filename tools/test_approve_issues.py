@@ -317,7 +317,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
             .replace(
                 '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
-                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-sol"\neffort = "low"',
             )
             .replace(
                 '[roles.issue_gate.claude]\nmodel = "claude-fable-5-1"\neffort = "high"',
@@ -327,7 +327,7 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         module = self.backend()
 
         codex_argv = self.invoke(module, module.CODEX_REVIEWER)
-        self.assertEqual(codex_argv[codex_argv.index("-m") + 1], "gpt-5.5")
+        self.assertEqual(codex_argv[codex_argv.index("-m") + 1], "gpt-6-sol")
         self.assertIn('model_reasoning_effort="low"', codex_argv)
 
         claude_argv = self.invoke(module, module.CLAUDE_REVIEWER)
@@ -341,16 +341,16 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
                 '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
-                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-sol"\neffort = "low"',
             )
         )
         module = self.backend(
-            APPROVE_ISSUES_CODEX_MODEL="gpt-5.6-terra",
+            APPROVE_ISSUES_CODEX_MODEL="gpt-6-astra",
             APPROVE_ISSUES_CODEX_EFFORT="high",
             APPROVE_ISSUES_CLAUDE_EFFORT="medium",
         )
         argv = self.invoke(module, module.CODEX_REVIEWER)
-        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-terra")
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
         self.assertIn('model_reasoning_effort="high"', argv)
         # The claude model was left to the file; only its effort was overridden.
         self.assertEqual(module.CLAUDE_REVIEWER.model, "claude-fable-5-1")
@@ -360,18 +360,18 @@ class RosterBackedIssueGateTests(unittest.TestCase):
         self.write_roster(
             MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
                 '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"\neffort = "high"',
-                '[roles.issue_gate.codex]\nmodel = "gpt-5.5"\neffort = "low"',
+                '[roles.issue_gate.codex]\nmodel = "gpt-6-sol"\neffort = "low"',
             )
         )
         module = self.backend()
         self.assertEqual(
-            module.reviewer_models([module.CODEX_REVIEWER]), "gpt-5.5@low"
+            module.reviewer_models([module.CODEX_REVIEWER]), "gpt-6-sol@low"
         )
         # And the same assignment is what the gate accepts as current, so a
         # marker this run publishes validates on the next --check rather than
         # reading as stale the moment it is written.
         self.assertIn(
-            "gpt-5.5@low",
+            "gpt-6-sol@low",
             module.accepted_reviewer_models([module.CODEX_REVIEWER]),
         )
 

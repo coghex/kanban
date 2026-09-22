@@ -12,10 +12,10 @@
 ║┃ in 1d 18h · Sat 09:10    ┃┃    │ pages. This is visib┃                                                                                      ┃rving the │ ┃  │ persistence registry changed on    │ ┃║
 ║┃ ┏━━━┓                    ┃┃    ╰─────────────────────┃ [N]  #812 ⠋                                                                          ┃          │ ┃  │ master.                            │ ┃║
 ║┃ ┃ ↻ ┃                    ┃┃                          ┃ claude · display:solve.claude is autosolving                                         ┃          │ ┃  │ ✓ CI 12/12 · merge conflict        │ ┃║
-║┃ ┗━━━┛                    ┃┃                          ┃ reviewer: GPT-5.6-Sol xhigh                                                          ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
+║┃ ┗━━━┛                    ┃┃                          ┃ reviewer: GPT-6-Sol xhigh                                                            ┃──────────╯ ┃  ╰────────────────────────────────────╯ ┃║
 ║┃                          ┃┃  ▾ #700  Persistence cont┃ workflow: autosolve                                                                  ┃            ┃                                         ┃║
 ║┃                          ┃┃  1/2 complete            ┃ solver: claude · Sonnet 5 high                                                       ┃──────────╮ ┃  ╭────────────────────────────────────╮ ┃║
-║┃                          ┃┃  └─ ╭────────────────────┃ reviewer: GPT-5.6-Sol xhigh                                                          ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
+║┃                          ┃┃  └─ ╭────────────────────┃ reviewer: GPT-6-Sol xhigh                                                            ┃ve        │ ┃  │ PR #823 Fix modal scroll routing   │ ┃║
 ║┃                          ┃┃     │ A1 · tracker #700  ┃                                                                                      ┃          │ ┃  │  reviewed:approve   input   ui     │ ┃║
 ║┃                          ┃┃     │ #711 Adopt the vers┃                                                                                      ┃          │ ┃  │ #812 · agent-name → master ·       │ ┃║
 ║┃                          ┃┃     │ envelope           ┃                                                                                      ┃r ·       │ ┃  │ updated 3h ago                     │ ┃║

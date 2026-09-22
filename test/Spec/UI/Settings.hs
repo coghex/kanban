@@ -126,7 +126,7 @@ spec = describe "the settings overlay's model roster" $ do
       section `shouldSatisfy` Data.Text.isInfixOf "Press d to replace the file's contents"
       section `shouldSatisfy` Data.Text.isInfixOf "is not kept"
       -- And no fabricated rows beside it: not one compiled model is named.
-      section `shouldSatisfy` (not . Data.Text.isInfixOf "gpt-5.6-terra")
+      section `shouldSatisfy` (not . Data.Text.isInfixOf "gpt-6-sol")
       section `shouldSatisfy` (not . Data.Text.isInfixOf "claude-")
 
   -- Requirement 5 of #486: the mode is shown here and set nowhere here. The
@@ -233,8 +233,8 @@ spec = describe "the settings overlay's model roster" $ do
     it "wraps through the provider's declared model order in both directions" $ do
       cycledModel (SettingsCycleModel 1) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-opus-5"
       cycledModel (SettingsCycleModel (-1)) (SolveRole, ClaudeProvider) `shouldBe` Just "claude-fable-5-1"
-      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-5.5"
-      cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-5.5"
+      cycledModel (SettingsCycleModel (-1)) (SolveRole, CodexProvider) `shouldBe` Just "gpt-6-astra"
+      cycledModel (SettingsCycleModel 1) (IssueGateRole, CodexProvider) `shouldBe` Just "gpt-6-sol"
 
     it "steps through the declared effort vocabulary in both directions" $ do
       cycledEffort (SettingsCycleEffort 1) (SolveRole, CodexProvider) `shouldBe` Just "xhigh"
@@ -277,7 +277,7 @@ spec = describe "the settings overlay's model roster" $ do
       case outcome SettingsResetAssignment (Right narrowedCodexRoster) (Just (SolveRole, CodexProvider)) of
         SettingsRefused message -> do
           message `shouldSatisfy` Data.Text.isInfixOf "solve.codex"
-          message `shouldSatisfy` Data.Text.isInfixOf "model gpt-5.6-terra"
+          message `shouldSatisfy` Data.Text.isInfixOf "model gpt-6-sol"
         other -> expectationFailure ("expected a refusal and got " <> show other)
 
     it "writes nothing for a cell already at its compiled default" $
@@ -430,7 +430,7 @@ relabelledRoster :: ModelRoster
 relabelledRoster =
   defaultRoster
     { rosterAssignments =
-        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-5.6-terra" "high" "the usual") defaultRoster.rosterAssignments
+        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-6-sol" "high" "the usual") defaultRoster.rosterAssignments
     }
 
 -- | One cell edited off its compiled default, as an edit through this screen
@@ -473,10 +473,10 @@ narrowedCodexRoster =
     { rosterProviders =
         Map.insert
           CodexProvider
-          (ProviderCatalog ["gpt-5.5", "gpt-5.6-sol", "gpt-6-astra"] ["medium", "high", "xhigh"])
+          (ProviderCatalog ["gpt-6-astra"] ["medium", "high", "xhigh"])
           defaultRoster.rosterProviders,
       rosterAssignments =
-        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-5.5" "high" "gpt-5.5 high") defaultRoster.rosterAssignments
+        Map.insert (SolveRole, CodexProvider) (Assignment "gpt-6-astra" "high" "gpt-6-astra high") defaultRoster.rosterAssignments
     }
 
 -- | Claude loaded and Codex not, so a Codex cell is a cell no row was drawn

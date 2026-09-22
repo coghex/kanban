@@ -905,13 +905,13 @@ spec = do
     -- pinned against the compiled defaults so an unintended one is a failure.
     it "keeps every default label byte-identical except the two this slice corrects" $ do
       let defaults = Right defaultRoster
-      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-5.6-Terra high"
+      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-6-Sol high"
       solveChooserDisplay defaults ClaudeSolver `shouldBe` "Sonnet 5 high"
-      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-5.6-Terra high"
+      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-6-Sol high"
       solveReviewerDisplay defaults CodexSolver `shouldBe` "Opus 5 xhigh"
-      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-5.6-Sol xhigh"
+      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-6-Sol xhigh"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
-        `shouldBe` "codex · GPT-5.6-Sol xhigh"
+        `shouldBe` "codex · GPT-6-Sol xhigh"
       withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
         claudeTranscriptStart (claudeStartDisplay client)
           `shouldBe` "\n[sonnet] Starting authenticated Fable 5.1 high…\n"

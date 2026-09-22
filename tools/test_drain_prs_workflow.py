@@ -836,7 +836,7 @@ class DrainerDescriptionTests(unittest.TestCase):
                 "the drainer rereviews that exact head in a throwaway detached "
                 "worktree, at the provider, model and effort the roster's "
                 "`drain_rereview` cell names for this installation's operating "
-                "mode: the codex cell — GPT-5.6-Terra at medium by default — "
+                "mode: the codex cell — GPT-6-Sol at medium by default — "
                 "when both providers are loaded, and the sole loaded provider's "
                 "own cell when one is.",
                 flattened,

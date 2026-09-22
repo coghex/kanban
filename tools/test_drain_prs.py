@@ -1055,7 +1055,7 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
 
     def edited_example(self, model: str, effort: str) -> str:
         text = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
-        old = '[roles.drain_rereview.codex]\nmodel = "gpt-5.6-terra"\neffort = "medium"'
+        old = '[roles.drain_rereview.codex]\nmodel = "gpt-6-sol"\neffort = "medium"'
         assert old in text
         return text.replace(
             old, f'[roles.drain_rereview.codex]\nmodel = "{model}"\neffort = "{effort}"'
@@ -1064,10 +1064,10 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
     def test_no_roster_file_preserves_todays_values_exactly(self):
         with self.rooted():
             assignment = drain_prs.refresh_finalize_assignment()
-        self.assertEqual((assignment.model, assignment.effort), ("gpt-5.6-terra", "medium"))
+        self.assertEqual((assignment.model, assignment.effort), ("gpt-6-sol", "medium"))
 
     def test_a_roster_file_moves_the_model_the_fake_cli_is_given(self):
-        self.write_roster(self.edited_example("gpt-5.5", "low"))
+        self.write_roster(self.edited_example("gpt-6-astra", "low"))
         log = self.root / "codex.argv.json"
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
@@ -1102,7 +1102,7 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
                                     make_ctx(), pr, dry_run=False
                                 )
         argv = json.loads(log.read_text(encoding="utf-8"))
-        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.5")
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
         self.assertIn('model_reasoning_effort="low"', argv)
 
     def _run_recording(self, worktree, log, bin_dir):
@@ -1160,10 +1160,10 @@ class RosterBackedDrainRereviewTests(unittest.TestCase):
     def test_the_assignment_is_re_read_rather_than_frozen(self):
         # A roster edit takes effect on the next pass without restarting the
         # managed service, which is what the per-cycle refresh is for.
-        self.write_roster(self.edited_example("gpt-5.5", "low"))
+        self.write_roster(self.edited_example("gpt-6-astra", "low"))
         with self.rooted():
             first = drain_prs.refresh_finalize_assignment()
-            self.assertEqual(first.model, "gpt-5.5")
+            self.assertEqual(first.model, "gpt-6-astra")
             self.write_roster(self.edited_example("gpt-6-astra", "high"))
             second = drain_prs.refresh_finalize_assignment()
         self.assertEqual((second.model, second.effort), ("gpt-6-astra", "high"))
@@ -1221,13 +1221,13 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
             assignment = drain_prs.refresh_finalize_assignment()
             self.assertEqual(drain_prs.finalize_reviewer_provider(), "codex")
         self.assertEqual(
-            (assignment.model, assignment.effort), ("gpt-5.6-terra", "medium")
+            (assignment.model, assignment.effort), ("gpt-6-sol", "medium")
         )
 
     def test_single_agent_selects_the_sole_loaded_providers_cell(self):
         for agents, provider, expected in (
             ('["claude"]', "claude", ("claude-opus-5", "medium")),
-            ('["codex"]', "codex", ("gpt-5.6-terra", "medium")),
+            ('["codex"]', "codex", ("gpt-6-sol", "medium")),
         ):
             with self.subTest(agents=agents):
                 drain_prs.FINALIZE_ASSIGNMENT = None
@@ -1309,7 +1309,7 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
         # it is, and the reviewer the marker names cannot disagree.
         for agents, provider, display in (
             ('["claude"]', "claude", "Opus 5 medium"),
-            ('["codex"]', "codex", "GPT-5.6-Terra medium"),
+            ('["codex"]', "codex", "GPT-6-Sol medium"),
         ):
             with self.subTest(agents=agents):
                 drain_prs.FINALIZE_ASSIGNMENT = None

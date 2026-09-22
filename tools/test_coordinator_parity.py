@@ -155,7 +155,7 @@ DOCUMENTED_DIVERGENCE = r'''@@
 +# the self-reviewed known-origin case, invoke_codex/invoke_claude below
 +# fully construct the subprocess they spawn, so — for this plugin's
 +# bundled coordinator only — they pin it and can therefore verify and
-+# publish it, matching the exact gpt-5.6-sol/claude-opus-5 at xhigh
++# publish it, matching the exact gpt-6-sol/claude-opus-5 at xhigh
 +# values the roles.pr_review.codex and roles.pr_review.claude cells of
 +# models.toml.example declare -- the cells Kanban's own
 +# PullRequestReview/PullRequestRereview spawns resolve from the model
@@ -166,7 +166,7 @@ DOCUMENTED_DIVERGENCE = r'''@@
 +# the self-reviewed path is unaffected and still cannot verify a model,
 +# since Kanban's own top-level spawn — outside this coordinator's
 +# visibility — is what pins that one.
-+CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-sol"
++CODEX_NESTED_REVIEW_MODEL = "gpt-6-sol"
 +CODEX_NESTED_REVIEW_EFFORT = "xhigh"
 +CLAUDE_NESTED_REVIEW_MODEL = "claude-opus-5"
 +CLAUDE_NESTED_REVIEW_EFFORT = "xhigh"
@@ -335,7 +335,7 @@ DOCUMENTED_DIVERGENCE = r'''@@
 +        "CHANGES_REQUESTED",
 +    )
 +    pinned_match = REVIEW_MARKER_RE.fullmatch(pinned)
-+    assert pinned_match and pinned_match.group("models") == "gpt-5.6-sol@xhigh"
++    assert pinned_match and pinned_match.group("models") == "gpt-6-sol@xhigh"
      print("self-test passed")'''
 
 # Claude vs Grok: the Grok copy is the Claude pinning coordinator plus
@@ -959,7 +959,7 @@ class CoordinatorBoundedDivergenceTests(unittest.TestCase):
         # what diverges. Reading one would let an unrelated difference be
         # recorded here under a neighbour that happens to mention a model.
         smuggled = documented_units(
-            "@@\n CODEX_NESTED_REVIEW_MODEL = \"gpt-5.6-sol\"\n"
+            "@@\n CODEX_NESTED_REVIEW_MODEL = \"gpt-6-sol\"\n"
             "-REVIEW_TIMEOUT_SECONDS = 7200\n+REVIEW_TIMEOUT_SECONDS = 60"
         )
         self.assertEqual(len(smuggled), 1)
@@ -1316,10 +1316,10 @@ class PlantedDivergenceTests(unittest.TestCase):
             self.codex_source,
             self.plant(
                 self.claude_source,
-                'CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-sol"\n'
+                'CODEX_NESTED_REVIEW_MODEL = "gpt-6-sol"\n'
                 'CODEX_NESTED_REVIEW_EFFORT = "xhigh"\n',
                 'CODEX_NESTED_REVIEW_EFFORT = "xhigh"\n'
-                'CODEX_NESTED_REVIEW_MODEL = "gpt-5.6-sol"\n',
+                'CODEX_NESTED_REVIEW_MODEL = "gpt-6-sol"\n',
             ),
             "reordering two lines inside a recorded divergent unit was not caught",
         )
