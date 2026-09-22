@@ -50,7 +50,7 @@ spec =
                      displayOf PrReviewRole ClaudeProvider
                    ]
       map solverLabel [CodexSolver, ClaudeSolver]
-        `shouldBe` ["codex · GPT-5.6-Terra high", "claude · Sonnet 5 high"]
+        `shouldBe` ["codex · GPT-6-Sol high", "claude · Opus 5.5 high"]
 
     -- The whole point of retaining them as shims: a surface answers from the
     -- roster in force, and these answer from the compiled default, so on any

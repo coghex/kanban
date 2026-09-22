@@ -77,9 +77,9 @@ class CompiledDefaultsTests(unittest.TestCase):
         for cell, expected in (
             (("issue_gate", "codex"), ("gpt-6-astra", "high")),
             (("issue_gate", "claude"), ("claude-fable-5-1", "high")),
-            (("drain_rereview", "codex"), ("gpt-5.6-terra", "medium")),
-            (("pr_review", "codex"), ("gpt-5.6-sol", "xhigh")),
-            (("pr_review", "claude"), ("claude-opus-5", "xhigh")),
+            (("drain_rereview", "codex"), ("gpt-6-sol", "medium")),
+            (("pr_review", "codex"), ("gpt-6-sol", "xhigh")),
+            (("pr_review", "claude"), ("claude-opus-5-5", "xhigh")),
         ):
             with self.subTest(cell=cell):
                 assignment = kanban_models.DEFAULT_ROSTER.assignment_for(*cell)
@@ -105,19 +105,19 @@ class CompiledAssignmentTests(unittest.TestCase):
     """
 
     EXPECTED_CELLS = {
-        ("solve", "codex"): ("gpt-5.6-terra", "high", "GPT-5.6-Terra high"),
-        ("solve", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
-        ("pr_review", "codex"): ("gpt-5.6-sol", "xhigh", "GPT-5.6-Sol xhigh"),
-        ("pr_review", "claude"): ("claude-opus-5", "xhigh", "Opus 5 xhigh"),
-        ("pr_revise", "codex"): ("gpt-5.6-terra", "high", "GPT-5.6-Terra high"),
-        ("pr_revise", "claude"): ("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("solve", "codex"): ("gpt-6-sol", "high", "GPT-6-Sol high"),
+        ("solve", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
+        ("pr_review", "codex"): ("gpt-6-sol", "xhigh", "GPT-6-Sol xhigh"),
+        ("pr_review", "claude"): ("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
+        ("pr_revise", "codex"): ("gpt-6-sol", "high", "GPT-6-Sol high"),
+        ("pr_revise", "claude"): ("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_review", "codex"): ("gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"),
         ("issue_review", "claude"): ("claude-fable-5-1", "xhigh", "Fable 5.1 xhigh"),
         ("issue_revise", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
         ("issue_gate", "codex"): ("gpt-6-astra", "high", "GPT-6-Astra high"),
         ("issue_gate", "claude"): ("claude-fable-5-1", "high", "Fable 5.1 high"),
-        ("drain_rereview", "codex"): ("gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"),
-        ("drain_rereview", "claude"): ("claude-opus-5", "medium", "Opus 5 medium"),
+        ("drain_rereview", "codex"): ("gpt-6-sol", "medium", "GPT-6-Sol medium"),
+        ("drain_rereview", "claude"): ("claude-opus-5-5", "medium", "Opus 5.5 medium"),
     }
 
     def test_every_cell_carries_its_compiled_assignment(self):
@@ -160,12 +160,12 @@ class CompiledAssignmentTests(unittest.TestCase):
         codex = kanban_models.DEFAULT_ROSTER.providers["codex"].models
         claude = kanban_models.DEFAULT_ROSTER.providers["claude"].models
         self.assertEqual(
-            codex, ("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
+            codex, ("gpt-6-sol", "gpt-6-astra")
         )
         self.assertNotIn("gpt-5.4", codex)
         self.assertEqual(
             claude,
-            ("claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"),
+            ("claude-opus-5-5", "claude-fable-5", "claude-fable-5-1"),
         )
         # Every assigned model is selectable, which is what the roster's own
         # validation demands of an operator's file too.
@@ -216,12 +216,12 @@ class RosterPathTests(unittest.TestCase):
                 Path(tmp),
                 EXAMPLE.replace(
                     '[roles.issue_gate.codex]\nmodel = "gpt-6-astra"',
-                    '[roles.issue_gate.codex]\nmodel = "gpt-5.5"',
+                    '[roles.issue_gate.codex]\nmodel = "gpt-6-sol"',
                 ),
             )
             with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
                 assignment = kanban_models.resolve_assignment("issue_gate", "codex")
-        self.assertEqual(assignment.model, "gpt-5.5")
+        self.assertEqual(assignment.model, "gpt-6-sol")
 
 
 class AbsentFileTests(unittest.TestCase):
@@ -252,7 +252,7 @@ class AbsentFileTests(unittest.TestCase):
                 kanban_models.resolve_assignment(
                     "pr_review", "codex", fallback=stand_in, explicit_path=present
                 ).model,
-                "gpt-5.6-sol",
+                "gpt-6-sol",
             )
 
     def test_a_fallback_does_not_rescue_a_present_unusable_file(self):
@@ -458,7 +458,7 @@ class DefectVocabularyTests(unittest.TestCase):
         self.assertIn(
             '"providers.codex.modles" is not a key this schema knows',
             self.defects(
-                self.edited(('models = ["gpt-5.5"', 'modles = ["gpt-5.5"'))
+                self.edited(('models = ["gpt-6-sol"', 'modles = ["gpt-6-sol"'))
             ),
         )
 
@@ -468,8 +468,8 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\nmodle = "x"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"\nmodle = "x"',
                     )
                 )
             ),
@@ -481,9 +481,9 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"\n'
-                        'display = "GPT-5.6-Terra high"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"\neffort = "high"\n'
+                        'display = "GPT-6-Sol high"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"\neffort = "high"',
                     )
                 )
             ),
@@ -494,7 +494,7 @@ class DefectVocabularyTests(unittest.TestCase):
             '"roles.solve.codex.model" must be a string',
             self.defects(
                 self.edited(
-                    ('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
+                    ('[roles.solve.codex]\nmodel = "gpt-6-sol"',
                      "[roles.solve.codex]\nmodel = 4")
                 )
             ),
@@ -515,12 +515,12 @@ class DefectVocabularyTests(unittest.TestCase):
 
     def test_a_repeated_catalog_entry(self):
         self.assertIn(
-            '"providers.codex.models" lists "gpt-5.5" more than once',
+            '"providers.codex.models" lists "gpt-6-sol" more than once',
             self.defects(
                 self.edited(
                     (
-                        'models = ["gpt-5.5", "gpt-5.6-terra"',
-                        'models = ["gpt-5.5", "gpt-5.5", "gpt-5.6-terra"',
+                        'models = ["gpt-6-sol", "gpt-6-astra"',
+                        'models = ["gpt-6-sol", "gpt-6-sol", "gpt-6-astra"',
                     )
                 )
             ),
@@ -566,7 +566,7 @@ class DefectVocabularyTests(unittest.TestCase):
         # The provider table goes; the assignments stay, so the cells that name
         # it have no catalog to validate against.
         text = EXAMPLE.replace(
-            '[providers.claude]\nmodels = ["claude-sonnet-5", "claude-opus-5", '
+            '[providers.claude]\nmodels = ["claude-opus-5-5", '
             '"claude-fable-5", "claude-fable-5-1"]\n'
             'efforts = ["low", "medium", "high", "xhigh"]\n',
             "",
@@ -598,7 +598,7 @@ class DefectVocabularyTests(unittest.TestCase):
             'roles.solve.codex names model "gpt-9", which is not in that '
             "provider's models list",
             self.defects(
-                self.edited(('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
+                self.edited(('[roles.solve.codex]\nmodel = "gpt-6-sol"',
                              '[roles.solve.codex]\nmodel = "gpt-9"'))
             ),
         )
@@ -610,8 +610,8 @@ class DefectVocabularyTests(unittest.TestCase):
             self.defects(
                 self.edited(
                     (
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "high"',
-                        '[roles.solve.codex]\nmodel = "gpt-5.6-terra"\neffort = "extreme"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"\neffort = "high"',
+                        '[roles.solve.codex]\nmodel = "gpt-6-sol"\neffort = "extreme"',
                     )
                 )
             ),
@@ -644,7 +644,7 @@ class DefectVocabularyTests(unittest.TestCase):
                 'models = ["gpt-5.4"]\n'
                 'efforts = ["high"]\n'
                 "[providers.claude]\n"
-                'models = ["claude-opus-5"]\n'
+                'models = ["claude-opus-5-5"]\n'
                 'efforts = ["xhigh"]\n'
                 "[roles.issue_gate.codex]\n"
                 'model = "gpt-5.4"\n'
@@ -665,9 +665,9 @@ class DefectVocabularyTests(unittest.TestCase):
     def test_every_defect_is_reported_rather_than_only_the_first(self):
         message = self.defects(
             self.edited(
-                ('[roles.solve.codex]\nmodel = "gpt-5.6-terra"',
+                ('[roles.solve.codex]\nmodel = "gpt-6-sol"',
                  '[roles.solve.codex]\nmodel = "gpt-9"'),
-                ('[roles.solve.claude]\nmodel = "claude-sonnet-5"',
+                ('[roles.solve.claude]\nmodel = "claude-opus-5-5"',
                  '[roles.solve.claude]\nmodel = "claude-9"'),
             )
         )

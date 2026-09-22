@@ -177,14 +177,14 @@ spec = do
 
     it "decodes and presents the final structured result as readable review metadata" $ do
       let payload =
-            "{\"issue\":844,\"stage\":\"review\",\"approved\":false,\"reviewerRoute\":\"codex-origin → Opus 5\",\"models\":[\"Opus 5 xhigh\"],\"commentUrl\":\"https://example.test/issues/844#issuecomment-1\",\"blockingReasons\":[\"Clarify the save-version migration.\",\"Name the regression probe.\"]}"
+            "{\"issue\":844,\"stage\":\"review\",\"approved\":false,\"reviewerRoute\":\"codex-origin → Opus 5.5\",\"models\":[\"Opus 5.5 xhigh\"],\"commentUrl\":\"https://example.test/issues/844#issuecomment-1\",\"blockingReasons\":[\"Clarify the save-version migration.\",\"Name the regression probe.\"]}"
           expected =
             ReviewResult
               { reviewResultIssue = 844,
                 reviewResultStage = InitialReview,
                 reviewResultApproved = False,
-                reviewResultReviewerRoute = "codex-origin → Opus 5",
-                reviewResultModels = ["Opus 5 xhigh"],
+                reviewResultReviewerRoute = "codex-origin → Opus 5.5",
+                reviewResultModels = ["Opus 5.5 xhigh"],
                 reviewResultCommentUrl = Just "https://example.test/issues/844#issuecomment-1",
                 reviewResultBlockingReasons = ["Clarify the save-version migration.", "Name the regression probe."]
               }
@@ -193,8 +193,8 @@ spec = do
         `shouldBe` Data.Text.unlines
           [ "Review result",
             "  Outcome: CHANGES REQUESTED",
-            "  Reviewer route: codex-origin → Opus 5",
-            "  Models: Opus 5 xhigh",
+            "  Reviewer route: codex-origin → Opus 5.5",
+            "  Models: Opus 5.5 xhigh",
             "  Comment: https://example.test/issues/844#issuecomment-1",
             "  Blocking reasons:",
             "    • Clarify the save-version migration.",
@@ -211,14 +211,14 @@ spec = do
 
     it "formats the canonical v2 gate without exposing raw JSON" $ do
       let payload =
-            "{\"approved\":false,\"issue\":844,\"origin\":\"codex\",\"required_reviewers\":\"claude\",\"required_models\":\"claude-opus-5@xhigh\",\"reasons\":[\"latest current review verdict is CHANGES_REQUESTED\"]}"
+            "{\"approved\":false,\"issue\":844,\"origin\":\"codex\",\"required_reviewers\":\"claude\",\"required_models\":\"claude-opus-5-5@xhigh\",\"reasons\":[\"latest current review verdict is CHANGES_REQUESTED\"]}"
           expected =
             CanonicalIssueReviewResult
               { canonicalReviewApproved = False,
                 canonicalReviewIssue = 844,
                 canonicalReviewOrigin = "codex",
                 canonicalReviewRequiredReviewers = Just "claude",
-                canonicalReviewRequiredModels = Just "claude-opus-5@xhigh",
+                canonicalReviewRequiredModels = Just "claude-opus-5-5@xhigh",
                 canonicalReviewReasons = ["latest current review verdict is CHANGES_REQUESTED"]
               }
       decodeCanonicalIssueReviewResult payload `shouldBe` Right expected
@@ -228,7 +228,7 @@ spec = do
             "  Outcome: CHANGES REQUESTED",
             "  Origin: codex",
             "  Reviewer route: claude",
-            "  Models: claude-opus-5@xhigh",
+            "  Models: claude-opus-5-5@xhigh",
             "  Blocking reasons:",
             "    • latest current review verdict is CHANGES_REQUESTED"
           ]

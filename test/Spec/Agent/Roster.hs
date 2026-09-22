@@ -905,25 +905,25 @@ spec = do
     -- pinned against the compiled defaults so an unintended one is a failure.
     it "keeps every default label byte-identical except the two this slice corrects" $ do
       let defaults = Right defaultRoster
-      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-5.6-Terra high"
-      solveChooserDisplay defaults ClaudeSolver `shouldBe` "Sonnet 5 high"
-      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-5.6-Terra high"
-      solveReviewerDisplay defaults CodexSolver `shouldBe` "Opus 5 xhigh"
-      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-5.6-Sol xhigh"
+      solveChooserDisplay defaults CodexSolver `shouldBe` "GPT-6-Sol high"
+      solveChooserDisplay defaults ClaudeSolver `shouldBe` "Opus 5.5 high"
+      solveSessionLabel defaults (solveSessionOn CodexSolver Nothing) `shouldBe` "codex · GPT-6-Sol high"
+      solveReviewerDisplay defaults CodexSolver `shouldBe` "Opus 5.5 xhigh"
+      solveReviewerDisplay defaults ClaudeSolver `shouldBe` "GPT-6-Sol xhigh"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestReview CodexSolver defaults
-        `shouldBe` "codex · GPT-5.6-Sol xhigh"
+        `shouldBe` "codex · GPT-6-Sol xhigh"
       withRecordingReviewClientUsing defaultRoster $ \client _ _ ->
         claudeTranscriptStart (claudeStartDisplay client)
           `shouldBe` "\n[sonnet] Starting authenticated Fable 5.1 high…\n"
       -- The PR-revision label reads pr_revise.claude, which the flow has
-      -- always spawned. PR #629 moved that cell to "Sonnet 5 high", which is
-      -- also what solve.claude says -- so this pair no longer distinguishes
+      -- always spawned. Its current "Opus 5.5 high" label also belongs to
+      -- solve.claude, so this pair no longer distinguishes
       -- the two cells on the default roster; 'distinctDisplays' is what
       -- still does.
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRevision ClaudeSolver defaults
-        `shouldBe` "claude · Sonnet 5 high"
+        `shouldBe` "claude · Opus 5.5 high"
       pullRequestSessionLabel Nothing PullRequestClaude PullRequestRepair ClaudeSolver defaults
-        `shouldBe` "claude · Sonnet 5 high"
+        `shouldBe` "claude · Opus 5.5 high"
       -- And the prose correction: one spelling of the codex cell, the
       -- roster's own, where the literal said "GPT-5.4 high", without reviving
       -- the Kimi or Google amendment path the board and registry refuse.

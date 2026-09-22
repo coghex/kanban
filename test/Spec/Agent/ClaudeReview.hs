@@ -174,11 +174,11 @@ spec = do
         recorded `shouldBe` expected
 
     it "carries a rerostered issue_review.claude cell rather than a compiled pair" $
-      withClaudeReviewClientUsing (rerostered "haiku-9" "low") (reviewTurn <> [approvedResult 844]) $ \fixture -> do
+      withClaudeReviewClientUsing (rerostered "custom-9" "low") (reviewTurn <> [approvedResult 844]) $ \fixture -> do
         fmap (() <$) (beginIssueReview fixture.claudeReviewClient 844) `shouldReturn` Right ()
         _ <- awaitOneCompletedTurn fixture
         launches <- recordedClaudeLaunches fixture.claudeReviewRecordings
-        map (dropWhile (/= "--model")) launches `shouldBe` [["--model", "haiku-9", "--effort", "low"]]
+        map (dropWhile (/= "--model")) launches `shouldBe` [["--model", "custom-9", "--effort", "low"]]
 
     -- Issue #589: the routing itself, rather than a backend this fixture
     -- picked. Every other arm here hands 'startResolvedReviewClient' the
@@ -1271,7 +1271,7 @@ verdictValue issueNumber =
       "stage" .= ("revision" :: Text),
       "approved" .= False,
       "reviewerRoute" .= ("codex" :: Text),
-      "models" .= (["Opus 5 xhigh"] :: [Text]),
+      "models" .= (["Opus 5.5 xhigh"] :: [Text]),
       "commentUrl" .= ("https://example.invalid/c/1" :: Text),
       "blockingReasons" .= ([] :: [Text])
     ]
@@ -1283,7 +1283,7 @@ verdictResult issueNumber =
       reviewResultStage = IssueRevision,
       reviewResultApproved = False,
       reviewResultReviewerRoute = "codex",
-      reviewResultModels = ["Opus 5 xhigh"],
+      reviewResultModels = ["Opus 5.5 xhigh"],
       reviewResultCommentUrl = Just "https://example.invalid/c/1",
       reviewResultBlockingReasons = []
     }

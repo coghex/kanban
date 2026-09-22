@@ -251,13 +251,12 @@ DEFAULT_ROSTER = ModelRoster(
     agents=("codex", "claude"),
     providers={
         "codex": ProviderCatalog(
-            models=("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
+            models=("gpt-6-sol", "gpt-6-astra"),
             efforts=("minimal", "low", "medium", "high", "xhigh"),
         ),
         "claude": ProviderCatalog(
             models=(
-                "claude-sonnet-5",
-                "claude-opus-5",
+                "claude-opus-5-5",
                 "claude-fable-5",
                 "claude-fable-5-1",
             ),
@@ -266,17 +265,17 @@ DEFAULT_ROSTER = ModelRoster(
     },
     assignments={
         ("solve", "codex"): Assignment(
-            "gpt-5.6-terra", "high", "GPT-5.6-Terra high"
+            "gpt-6-sol", "high", "GPT-6-Sol high"
         ),
-        ("solve", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("solve", "claude"): Assignment("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("pr_review", "codex"): Assignment(
-            "gpt-5.6-sol", "xhigh", "GPT-5.6-Sol xhigh"
+            "gpt-6-sol", "xhigh", "GPT-6-Sol xhigh"
         ),
-        ("pr_review", "claude"): Assignment("claude-opus-5", "xhigh", "Opus 5 xhigh"),
+        ("pr_review", "claude"): Assignment("claude-opus-5-5", "xhigh", "Opus 5.5 xhigh"),
         ("pr_revise", "codex"): Assignment(
-            "gpt-5.6-terra", "high", "GPT-5.6-Terra high"
+            "gpt-6-sol", "high", "GPT-6-Sol high"
         ),
-        ("pr_revise", "claude"): Assignment("claude-sonnet-5", "high", "Sonnet 5 high"),
+        ("pr_revise", "claude"): Assignment("claude-opus-5-5", "high", "Opus 5.5 high"),
         ("issue_review", "codex"): Assignment(
             "gpt-6-astra", "xhigh", "GPT-6-Astra xhigh"
         ),
@@ -293,10 +292,10 @@ DEFAULT_ROSTER = ModelRoster(
             "claude-fable-5-1", "high", "Fable 5.1 high"
         ),
         ("drain_rereview", "codex"): Assignment(
-            "gpt-5.6-terra", "medium", "GPT-5.6-Terra medium"
+            "gpt-6-sol", "medium", "GPT-6-Sol medium"
         ),
         ("drain_rereview", "claude"): Assignment(
-            "claude-opus-5", "medium", "Opus 5 medium"
+            "claude-opus-5-5", "medium", "Opus 5.5 medium"
         ),
     },
 )

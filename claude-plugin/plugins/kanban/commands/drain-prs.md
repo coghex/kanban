@@ -113,7 +113,7 @@ Its one agent spawn is the stale-approved-head rereview. When an approved pull
 request's head changes unexpectedly, the drainer rereviews that exact head in a
 throwaway detached worktree, at the provider, model and effort the roster's
 `drain_rereview` cell names for this installation's operating mode: the codex
-cell — GPT-5.6-Terra at medium by default — when both providers are loaded, and
+cell — GPT-6-Sol at medium by default — when both providers are loaded, and
 the sole loaded provider's own cell when one is. That cell is re-read on each
 drain cycle, so a roster edit takes effect on the next pass without restarting
 the managed service. Do not substitute interactive defaults during recovery. If

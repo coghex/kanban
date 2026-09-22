@@ -304,7 +304,7 @@ EXPECTED_COMMAND_NAMES = (
 # (docs/agent-workflow-contract.md §2.1-§2.2). Claude Code's own command
 # frontmatter genuinely supports `model:` (see the personal
 # ~/.claude/commands/pr-revise.md this issue replaces, which set
-# `model: "claude-sonnet-5"` and `effort: "xhigh"`), so this is a real risk
+# an explicit model and `effort: "xhigh"`), so this is a real risk
 # to guard, not just defense in depth.
 FORBIDDEN_FRONTMATTER_KEYS = {
     "model",
@@ -1096,9 +1096,9 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         roster_source = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8")
         codex_cell = roster_cell(roster_source, "roles.pr_review.codex")
         claude_cell = roster_cell(roster_source, "roles.pr_review.claude")
-        self.assertEqual(codex_cell["model"], "gpt-5.6-sol")
+        self.assertEqual(codex_cell["model"], "gpt-6-sol")
         self.assertEqual(codex_cell["effort"], "xhigh")
-        self.assertEqual(claude_cell["model"], "claude-opus-5")
+        self.assertEqual(claude_cell["model"], "claude-opus-5-5")
         self.assertEqual(claude_cell["effort"], "xhigh")
 
         # The literals must be gone from the Haskell source, or this gate
@@ -1165,17 +1165,17 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         # edit is what the nested reviewer runs on, not the constants above.
         coordinator = load_review_pr_module()
         edited = MODELS_TOML_EXAMPLE.read_text(encoding="utf-8").replace(
-            '[roles.pr_review.codex]\nmodel = "gpt-5.6-sol"\neffort = "xhigh"',
-            '[roles.pr_review.codex]\nmodel = "gpt-5.5"\neffort = "medium"',
+            '[roles.pr_review.codex]\nmodel = "gpt-6-sol"\neffort = "xhigh"',
+            '[roles.pr_review.codex]\nmodel = "gpt-6-astra"\neffort = "medium"',
         )
-        self.assertIn('model = "gpt-5.5"', edited)
+        self.assertIn('model = "gpt-6-astra"', edited)
         with tempfile.TemporaryDirectory() as tmp:
             roster = Path(tmp) / "kanban" / "models.toml"
             roster.parent.mkdir(parents=True)
             roster.write_text(edited, encoding="utf-8")
             with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
                 assignment = coordinator.nested_review_assignment("codex")
-        self.assertEqual((assignment.model, assignment.effort), ("gpt-5.5", "medium"))
+        self.assertEqual((assignment.model, assignment.effort), ("gpt-6-astra", "medium"))
 
     def test_the_coordinator_loads_the_reader_from_beside_itself(self):
         # An installed bundle has no tools/ sibling, so a plain import would
@@ -1208,7 +1208,7 @@ class NestedReviewerModelPinningTests(unittest.TestCase):
         # branch, not just the pre-existing unspecified-model assertions.
         coordinator_source = REVIEW_COORDINATOR.read_text(encoding="utf-8")
         self.assertIn("CODEX_NESTED_REVIEW_MODEL}@{CODEX_NESTED_REVIEW_EFFORT", coordinator_source)
-        self.assertIn('"gpt-5.6-sol@xhigh"', coordinator_source)
+        self.assertIn('"gpt-6-sol@xhigh"', coordinator_source)
 
 
 class ClaudePluginRootReferenceTests(unittest.TestCase):

@@ -462,7 +462,7 @@ class LayoutAndFrontmatterTests(unittest.TestCase):
         # The override keys tools/test_claude_plugin.py forbids in a shipped
         # command cannot reach one through the renderer either.
         source = SYNTHETIC.replace(
-            'argument-hint: "[issue number]"', "model: claude-sonnet-5"
+            'argument-hint: "[issue number]"', "model: claude-opus-5-5"
         )
         with self.assertRaises(renderer.CommandSourceError) as raised:
             render_text(source, "claude")

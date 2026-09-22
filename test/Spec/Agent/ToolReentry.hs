@@ -509,7 +509,7 @@ verdictLine :: Int -> ByteString.ByteString
 verdictLine issueNumber =
   "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"issue\":"
     <> ByteString.pack (show issueNumber)
-    <> ",\"stage\":\"revision\",\"approved\":false,\"reviewerRoute\":\"codex\",\"models\":[\"Opus 5 xhigh\"],\"commentUrl\":null,\"blockingReasons\":[]}}'"
+    <> ",\"stage\":\"revision\",\"approved\":false,\"reviewerRoute\":\"codex\",\"models\":[\"Opus 5.5 xhigh\"],\"commentUrl\":null,\"blockingReasons\":[]}}'"
 
 -- | The three replies every MCP session here records: the bootstrap's
 -- @initialize@ and @tools\/list@, then the one tool call the turn made.
