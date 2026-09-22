@@ -48,7 +48,7 @@ spec = do
       defaultRoster.rosterAgents `shouldBe` [CodexProvider, ClaudeProvider]
       Map.lookup CodexProvider defaultRoster.rosterProviders
         `shouldBe` Just
-          (ProviderCatalog ["gpt-6-sol", "gpt-6-astra"] ["low", "medium", "high", "xhigh", "max"])
+          (ProviderCatalog ["gpt-6-sol", "gpt-6-astra"] ["minimal", "low", "medium", "high", "xhigh"])
       Map.lookup ClaudeProvider defaultRoster.rosterProviders
         `shouldBe` Just
           (ProviderCatalog ["claude-opus-5-5", "claude-fable-5", "claude-fable-5-1"] ["low", "medium", "high", "xhigh"])
@@ -168,7 +168,7 @@ spec = do
               { rosterAssignments =
                   Map.insert
                     (SolveRole, CodexProvider)
-                    (Assignment "gpt-6-sol" "max" "GPT-6-Sol max")
+                    (Assignment "gpt-6-sol" "minimal" "GPT-6-Sol minimal")
                     defaultRoster.rosterAssignments
               }
       decodeRoster (encodeRoster edited) `shouldBe` Right edited

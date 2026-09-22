@@ -252,7 +252,7 @@ DEFAULT_ROSTER = ModelRoster(
     providers={
         "codex": ProviderCatalog(
             models=("gpt-6-sol", "gpt-6-astra"),
-            efforts=("low", "medium", "high", "xhigh", "max"),
+            efforts=("minimal", "low", "medium", "high", "xhigh"),
         ),
         "claude": ProviderCatalog(
             models=(

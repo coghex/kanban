@@ -1086,7 +1086,7 @@ applyReviewEvent issueNumber reviewEvent = case reviewEvent of
       ( \session ->
           session
             { sessionTranscript = appendTranscript session.sessionTranscript started,
-              sessionActivity = "running Claude reviewer"
+              sessionActivity = "running Claude revision agent"
             }
       )
     tailReviewSession issueNumber
@@ -1192,8 +1192,8 @@ applyReviewEvent issueNumber reviewEvent = case reviewEvent of
     reviewOutcomeActivity _ TurnSucceeded Nothing = "invalid result"
     reviewOutcomeActivity _ TurnFailed _ = "failed"
     reviewOutcomeActivity _ TurnInterrupted _ = "interrupted"
-    completionMessage (Right ()) = "Claude response returned to the coordinator."
-    completionMessage (Left message) = "Claude review failed: " <> sanitizeText message
+    completionMessage (Right ()) = "Claude revision response returned to the coordinator."
+    completionMessage (Left message) = "Claude revision failed: " <> sanitizeText message
     githubCompletionMessage (Right _) = "GitHub operation completed and returned to the coordinator."
     githubCompletionMessage (Left message) = "GitHub operation failed: " <> sanitizeText message
     formatReviewTranscript transcript Nothing = transcript

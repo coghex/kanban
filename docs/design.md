@@ -1037,10 +1037,10 @@ Review and rereview read `pr_review`, revision and repair read `pr_revise`,
 solve reads `solve`, the embedded issue-review thread reads that thread's own
 provider's `issue_review`, and `kanban_run_claude` reads `issue_revise.claude`;
 which brand's column applies is the routing described here. The defaults
-reproduce today's assignments exactly: Codex-origin PRs on Opus 5 xhigh for
-review and GPT-5.6-Terra high for revision and repair, Claude-origin PRs on
-GPT-5.6-Sol xhigh for review and Sonnet 5 high for revision and repair, and
-both solvers on GPT-5.6-Terra high and Sonnet 5 high.
+reproduce today's assignments exactly: Codex-origin PRs on Opus 5.5 xhigh
+for review and GPT-6-Sol high for revision and repair, Claude-origin PRs on
+GPT-6-Sol xhigh for review and Opus 5.5 high for revision and repair, and
+both solvers on GPT-6-Sol high and Opus 5.5 high.
 
 Single-agent mode moves that column rather than the roles. Every supported
 pull-request action runs on the one loaded provider whatever the pull request's
@@ -4763,9 +4763,9 @@ The first solve/autosolve-compatible slice is implemented.
   stopping after PR creation. Capital `A` opens the same chooser and invokes
   that ordinary solve workflow while Kanban owns the subsequent bounded
   review/fix loop. Escape cancels either chooser.
-- Canonical solvers are GPT-5.6-Terra high and Sonnet 5 high.
-- Canonical opposite-brand PR reviewers are Opus 5 xhigh for Codex-origin
-  work and GPT-5.6-Sol xhigh for Claude-origin work.
+- Canonical solvers are GPT-6-Sol high and Opus 5.5 high.
+- Canonical opposite-brand PR reviewers are Opus 5.5 xhigh for Codex-origin
+  work and GPT-6-Sol xhigh for Claude-origin work.
 - Those pairings, the embedded issue-review thread's own model and effort, and
   `kanban_run_claude`'s are roster cells rather than literals: the values above
   are the compiled defaults, and a roster that cannot supply a cell refuses the

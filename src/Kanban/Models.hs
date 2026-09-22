@@ -372,7 +372,7 @@ defaultRoster =
           [ ( CodexProvider,
               ProviderCatalog
                 { catalogModels = ["gpt-6-sol", "gpt-6-astra"],
-                  catalogEfforts = ["low", "medium", "high", "xhigh", "max"]
+                  catalogEfforts = ["minimal", "low", "medium", "high", "xhigh"]
                 }
             ),
             ( ClaudeProvider,

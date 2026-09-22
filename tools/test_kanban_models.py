@@ -179,7 +179,7 @@ class CompiledAssignmentTests(unittest.TestCase):
         # edit and the two live in the same table.
         self.assertEqual(
             kanban_models.DEFAULT_ROSTER.providers["codex"].efforts,
-            ("low", "medium", "high", "xhigh", "max"),
+            ("minimal", "low", "medium", "high", "xhigh"),
         )
         self.assertEqual(
             kanban_models.DEFAULT_ROSTER.providers["claude"].efforts,
