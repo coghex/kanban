@@ -42,7 +42,7 @@ module Kanban.Cache
   )
 where
 
-import Control.Exception (IOException, allowInterrupt, bracket, bracketOnError, catch, finally, onException, try)
+import Control.Exception (IOException, allowInterrupt, bracket, bracketOnError, catch, finally, onException, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
 import Data.Bits ((.|.))
 import Data.Aeson
@@ -513,8 +513,15 @@ claimGhGroup repository groupPid = do
 -- Idempotent, since more than one path ends a spawn's management and each of
 -- them releases. It raises nothing: a claim that cannot be unlinked is still
 -- released by the close, and an unlocked claim file reads as not held.
+--
+-- Uninterruptible from taking the descriptor to closing it. The descriptor
+-- leaves its slot first, so that a second release finds nothing to close; an
+-- exception delivered after that and before the close would strand a locked
+-- descriptor no later release can reach, and the entry would read as live
+-- work for as long as this process runs. Every step is a short system call on
+-- a local file, so refusing interruption here costs nothing.
 releaseGhGroupClaim :: GhSpawnClaim -> IO ()
-releaseGhGroupClaim claim = do
+releaseGhGroupClaim claim = uninterruptibleMask_ $ do
   held <- atomicModifyIORef' claim.ghSpawnClaimDescriptor (\descriptor -> (Nothing, descriptor))
   case held of
     Nothing -> pure ()

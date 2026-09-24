@@ -1474,6 +1474,27 @@ spec = do
             ghGroupClaimHeld repository groupPid `shouldReturn` Right False
             killThread holder
 
+    -- A release can itself be interrupted -- by the cleanup budget, or by a
+    -- quit -- and 'abandonSpawn' then releases again. Whatever instant the
+    -- interruption lands, that second release must leave the claim free: a
+    -- descriptor taken out of its slot and never closed would keep the entry
+    -- reading as live work. The kill races the release on every pass.
+    it "leaves no claim held when a release is interrupted and released again" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+          mapM_
+            ( \groupPid -> do
+                claim <- claimGhGroup repository groupPid >>= either (fail . Data.Text.unpack) pure
+                started <- newEmptyMVar
+                releaser <- forkIO (putMVar started () >> releaseGhGroupClaim claim)
+                takeMVar started
+                killThread releaser
+                releaseGhGroupClaim claim
+                ghGroupClaimHeld repository groupPid `shouldReturn` Right False
+            )
+            [5000 .. 5199]
+
     it "holds a spawn's claim while it is managed and gives it up, file and all, when released" $
       withLiveRegistration $ \repository _ registration _ -> do
         let groupPid = spawnRegistrationGroup registration
