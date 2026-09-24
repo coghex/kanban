@@ -434,13 +434,28 @@ def declared_brands(entry: CommandSource) -> tuple[str, ...]:
 
 
 def output_paths(entry: CommandSource) -> dict[str, str]:
-    """The repository-relative file each of the entry's brands renders to."""
-    return {
+    """The repository-relative file each of the entry's brands renders to.
+
+    Two brands sharing a layout and an output directory would resolve to one
+    file, and whichever rendered second would silently replace the other, so
+    the entry would ship one output fewer than it declares. That is refused
+    here, where both rendering and `--check` read the paths.
+    """
+    paths = {
         brand: LAYOUTS[BRAND_TABLE[brand].layout].format(
             directory=entry.outputs[brand], name=entry.name
         )
         for brand in declared_brands(entry)
     }
+    owners: dict[str, str] = {}
+    for brand, path in paths.items():
+        if path in owners:
+            raise CommandSourceError(
+                f"{entry.source}: brands {owners[path]!r} and {brand!r} both "
+                f"render to {path}; give each brand its own output directory"
+            )
+        owners[path] = brand
+    return paths
 
 
 def workflow_vocabulary(repo_root: Path = REPO_ROOT) -> set[str]:

@@ -968,6 +968,42 @@ class EntryBrandSetTests(unittest.TestCase):
             renderer.output_paths(entry)
         self.assertIn("gemini", str(raised.exception))
 
+    def test_two_brands_rendering_to_one_path_are_refused(self):
+        # Round 1 blocker: codex and grok share the skill-directory layout, so
+        # one directory for both would collapse two declared outputs into one
+        # file. The collision is an authoring error, not a lost output.
+        entry = renderer.CommandSource(
+            name="synthetic",
+            source="tools/command_sources/synthetic.md",
+            outputs={
+                "claude": "tools/out/claude/commands",
+                "codex": "tools/out/skills",
+                "grok": "tools/out/skills",
+            },
+            note="synthetic test entry",
+        )
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            renderer.output_paths(entry)
+        message = str(raised.exception)
+        self.assertIn("'codex' and 'grok'", message)
+        self.assertIn("tools/out/skills/synthetic/SKILL.md", message)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plant_bundles(root)
+            source = root / entry.source
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(SYNTHETIC, encoding="utf-8")
+            with self.assertRaises(renderer.CommandSourceError):
+                renderer.render_entry(entry, root)
+            with mock.patch.object(renderer, "COMMAND_SOURCES", (entry,)):
+                with self.assertRaises(renderer.CommandSourceError):
+                    renderer.check_all(root)
+
+    def test_brands_sharing_a_layout_in_distinct_directories_render_both(self):
+        # The control: sharing a layout is fine, sharing a path is not.
+        paths = renderer.output_paths(synthetic_entry(brands=("codex", "grok")))
+        self.assertEqual(len(set(paths.values())), 2, paths)
+
     def test_an_entry_declaring_no_brand_is_refused(self):
         entry = synthetic_entry(brands=())
         with self.assertRaises(renderer.CommandSourceError):
