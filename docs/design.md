@@ -2842,9 +2842,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   can lose an entry. That file carries no payload, is never unlinked or
   renamed, is neither the record nor the lease, and is taken by every process
   that rewrites the record, lease or none. An update that cannot establish it
-  fails the way a failed record write does rather than running unsynchronised;
-  only a record that does not exist is answered without it, since there is
-  nothing to rewrite.
+  fails the way a failed record write does rather than running unsynchronised,
+  whatever the record would read as without it: a reclaim refuses and a drop
+  fails.
   Scope is one coordinator per repository within one dashboard process, and one
   such process is all there can be: dashboard mode takes a repository-scoped
   POSIX write lease on

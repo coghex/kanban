@@ -181,22 +181,22 @@ spec = describe "the gh record's cross-process transaction lock" $ do
           ByteString.readFile recordPath `shouldReturn` canonicalBefore
           ByteString.readFile legacyPath `shouldReturn` legacyBefore
 
-    -- The one case reclaim and a drop still answer without the lock: no record
-    -- at all. Nothing is reclaimed, cleared or dropped, so nothing is
-    -- rewritten, and failing would report a recorded gh nobody wrote -- the
-    -- registration is what fails, and it stops the gh it started.
-    it "lets reclaim and a drop answer from a record that does not exist, writing nothing" $
-      withTemporaryCacheRoot $ \root ->
-        withEnvironmentValue "XDG_CACHE_HOME" root $ do
-          lockPath <- ghGroupRecordLockPath repository
-          createDirectoryIfMissing True lockPath
+    -- No exception for a record that would read as absent. A cache root that
+    -- is a regular file can hold neither the record nor its lock, and a read
+    -- taken anyway would call the record absent; reclaim still refuses before
+    -- any gh is spawned, and a drop still fails.
+    it "refuses reclaim and fails a drop even where the record would read as absent" $
+      withTemporaryCacheRoot $ \root -> do
+        let cacheRoot = root </> "cache-is-a-file"
+        ByteString.writeFile cacheRoot "not a directory"
+        withEnvironmentValue "XDG_CACHE_HOME" cacheRoot $ do
+          loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
           guard <- freshGuard
-          reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
-          ghFetchCleanupFailure guard `shouldReturn` Nothing
-          loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
+          reclaimed <- reclaimRecordedGhGroups guard repository
+          reclaimed `shouldSatisfy` either (Text.isInfixOf "gh group record lock could not be established") (const False)
+          fmap ghCleanupGuard <$> ghFetchCleanupFailure guard `shouldReturn` Just GuardRecorded
+          dropGhGroup guard repository 75 >>= (`shouldSatisfy` isRecordWriteFailure)
           recordGhGroup guard repository (unownedGroup 75) >>= (`shouldSatisfy` isRecordWriteFailure)
-          dropGhGroup guard repository 75 `shouldReturn` Right ()
-          loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
 
   -- Blocking contention has to stay compatible with the fetch and cleanup
   -- budgets, which end work by interrupting it. An interruption at either end

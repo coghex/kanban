@@ -46,7 +46,8 @@ import Spec.Support.Board
     forcedCleanupRun,
     heldOffMessage,
     readMarkerPid,
-    withFakeGh
+    withFakeGh,
+    withUnrecordableStore
   )
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (countOccurrences, requireJust, shouldMention, shouldNotMention)
@@ -749,15 +750,13 @@ spec = do
           doesFileExist ranMarker `shouldReturn` False
 
     it "stops the gh it just spawned when no durable guard can be written for it, leaving nothing for a restart to overlap" $
-      withTemporaryCacheRoot $ \temporaryRoot -> do
-        let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
-        -- An unwritable cache is the case where the guard cannot be
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        -- An unwritable record is the case where the guard cannot be
         -- persisted at all. Since it is written before gh is used for
         -- anything, the failure is caught while gh is still this process's
         -- to terminate -- rather than after a timeout, when only an
         -- in-memory gate would be left and a restart would drop it.
-        ByteString.writeFile unwritableCacheRoot "not a directory"
-        withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
+        withUnrecordableStore temporaryRoot $
           withFakeGh
             temporaryRoot
             ["trap '' TERM", "while :; do sleep 1; done"]

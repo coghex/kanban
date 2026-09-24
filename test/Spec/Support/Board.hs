@@ -5,6 +5,7 @@ module Spec.Support.Board
     termIgnoringGh,
     withForcedCleanup,
     withFakeGh,
+    withUnrecordableStore,
     captureBoardRefresh,
     heldOffMessage,
     openOnlyRefreshRunner,
@@ -17,6 +18,7 @@ import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Text (Text)
 import qualified Data.Text
+import Kanban.Cache (ghGroupRecordPath)
 import Kanban.Config
 import Kanban.Domain
 import Kanban.GitHub
@@ -43,7 +45,7 @@ import System.Posix.Files (setFileMode)
 import Test.Hspec
 
 -- | Drives a board refresh in which both facilities the ordinary guards rest
--- on are broken at once: the cache is unwritable, so no durable record can be
+-- on are broken at once: the record is unwritable, so no durable record can be
 -- made, and @ps@ fails, so no kill can be verified. That combination is what
 -- forces the last-resort path.
 --
@@ -77,12 +79,10 @@ termIgnoringGh =
 -- way.
 withForcedCleanup :: FilePath -> Maybe Int -> [ByteString.ByteString] -> IO result -> IO (result, [ProcessIdentity])
 withForcedCleanup temporaryRoot psFailures ghBody action = do
-  let unwritableCacheRoot = temporaryRoot </> "cache-is-a-file"
-      binaryRoot = temporaryRoot </> "bin"
+  let binaryRoot = temporaryRoot </> "bin"
       psCounter = temporaryRoot </> "ps.count"
-  ByteString.writeFile unwritableCacheRoot "not a directory"
   outcome <-
-    withEnvironmentValue "XDG_CACHE_HOME" unwritableCacheRoot $
+    withUnrecordableStore temporaryRoot $
       withFakeGh temporaryRoot ghBody $ do
           createDirectoryIfMissing True binaryRoot
           ByteString.writeFile
@@ -104,6 +104,24 @@ withForcedCleanup temporaryRoot psFailures ghBody action = do
     Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
     Right identities ->
       pure (outcome, filter (Data.Text.isInfixOf (Data.Text.pack binaryRoot) . processIdentityCommand) identities)
+
+-- | Runs @action@ under a cache in which the durable @gh@ record can be read,
+-- locked and cleared, but never written: a directory occupies the record's own
+-- path, so every rewrite's rename over it fails.
+--
+-- That is the store an unrecordable spawn needs, and it is narrower than an
+-- unusable cache on purpose. A cache root that cannot hold the record at all
+-- cannot hold the record's transaction lock either, and a reclaim that cannot
+-- take that lock refuses before any @gh@ is spawned (issue #720) -- so the
+-- registration failure and the last-resort cleanup these fixtures exist to
+-- reach would never run. Here the lock is taken, the record reads as absent,
+-- reclaim lets the fetch go ahead, and it is the registration that fails.
+withUnrecordableStore :: FilePath -> IO result -> IO result
+withUnrecordableStore temporaryRoot action =
+  withEnvironmentValue "XDG_CACHE_HOME" (temporaryRoot </> "unrecordable-cache") $ do
+    recordPath <- ghGroupRecordPath (Repository temporaryRoot "coghex" "kanban")
+    createDirectoryIfMissing True recordPath
+    action
 
 -- | A coordinator for states that only have to hold one.
 --

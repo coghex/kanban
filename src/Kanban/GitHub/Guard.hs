@@ -447,26 +447,12 @@ recordGhGroup guard repository group = fmap (either Left id) . withRecordLock gu
 -- afterwards is deliberate. 'recordedGhGroups' reads an unusable record as an
 -- empty one, so a re-read would answer \"not recorded\" for a record nobody
 -- could parse — fail-open in exactly the case that most needs the opposite.
---
--- A lock that cannot be established fails the drop, with one exception: a
--- record that does not exist already does not name the group, so there is
--- nothing to rewrite and the drop has happened. That is what an unwritable
--- cache looks like, and failing there would report an entry left on disk
--- that no one could ever have written.
 dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO (Either Text ())
-dropGhGroup guard repository groupPid = do
-  locked <- withRecordLock guard repository $ do
-    existing <- recordedGhGroups repository
-    case withoutGroup groupPid existing of
-      [] -> removeGhGroupRecord repository
-      remaining -> writeGhGroupRecord repository remaining
-  case locked of
-    Right dropped -> pure dropped
-    Left message -> do
-      recordLoad <- loadGhGroupRecord repository
-      pure $ case recordLoad of
-        GhGroupRecordAbsent -> Right ()
-        _ -> Left message
+dropGhGroup guard repository groupPid = fmap (either Left id) . withRecordLock guard repository $ do
+  existing <- recordedGhGroups repository
+  case withoutGroup groupPid existing of
+    [] -> removeGhGroupRecord repository
+    remaining -> writeGhGroupRecord repository remaining
 
 withoutGroup :: Int -> [OwnedProcessGroup] -> [OwnedProcessGroup]
 withoutGroup groupPid = filter ((/= groupPid) . ownedProcessGroupPid)
@@ -499,23 +485,17 @@ reclaimRecordedGhGroups guard repository = do
       -- clear discards every entry it did not read, so a rewrite landing
       -- between the two -- another process registering its gh -- would be
       -- wiped out with the entries this did account for.
+      --
+      -- A lock that cannot be established refuses the fetch the way an
+      -- unreadable record does, whatever the record would read as without it:
+      -- a record that cannot be read under the lock has not been shown to hold
+      -- nothing, and a cache path that cannot even be reached is the case
+      -- where a read taken anyway is least to be trusted.
       locked <- withRecordLock guard repository reclaimRecorded
       case locked of
         Right outcome -> pure outcome
-        Left message -> reclaimUnlocked message
+        Left message -> refuse message
   where
-    -- A lock that cannot be established refuses the fetch the way an
-    -- unreadable record does -- unless there is no record at all. An absent
-    -- record is a read with nothing to reclaim and nothing to clear, so no
-    -- rewrite runs unsynchronised by answering it; and it is what an unwritable
-    -- cache always looks like, where refusing over a record that cannot exist
-    -- would report a recorded gh nobody wrote, instead of letting the spawn's
-    -- own registration fail and stop the gh it started.
-    reclaimUnlocked message = do
-      recordLoad <- loadGhGroupRecord repository
-      case recordLoad of
-        GhGroupRecordAbsent -> reclaimAbsent
-        _ -> refuse message
 
     refuseUnrecorded message = do
       -- 'GuardInMemoryOnly' rather than 'GuardRecorded': this job is refusing
@@ -535,7 +515,9 @@ reclaimRecordedGhGroups guard repository = do
         -- that this board inherited nothing. Deferring the answer to the first
         -- non-empty read would settle it after this board's own first entry
         -- was already in the file, and classify that entry as a predecessor's.
-        GhGroupRecordAbsent -> reclaimAbsent
+        GhGroupRecordAbsent -> do
+          _ <- rememberInherited guard []
+          pure (Right ())
         -- Deliberately not remembered. Nothing can be said about a record that
         -- will not decode, and nothing needs to be: this refuses the fetch, so
         -- no gh is spawned and no entry is written, and the first read that
@@ -544,10 +526,6 @@ reclaimRecordedGhGroups guard repository = do
         GhGroupRecordLoaded groups -> do
           inherited <- rememberInherited guard groups
           reclaimGroups inherited groups
-
-    reclaimAbsent = do
-      _ <- rememberInherited guard []
-      pure (Right ())
 
     reclaimGroups inherited groups = do
       -- A record exists from here on, so every exit other than clearing it
