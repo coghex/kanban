@@ -180,7 +180,8 @@ A brand is declared once, in that module's `BRAND_TABLE`, as three independent
 choices: its file layout (`commands/<name>.md` or `skills/<name>/SKILL.md`), the
 frontmatter keys its loader reads, and its invocation sigil. Claude uses the
 command-file layout with `/`, Codex the skill-directory layout with `$`, and a
-brand may pair either layout with either sigil and its own key set. Each
+brand may pair either layout with either sigil and its own key set — Grok,
+Kimi, and Google each use the skill-directory layout with `/`. Each
 registry entry names the brands it renders, with an output directory for each,
 and gets a rendered file for exactly those brands and no others.
 
@@ -189,7 +190,12 @@ of its brands' frontmatter. It names a workflow with a `cmd` directive rather
 than a literal `/name` or `$name`, so each brand's file gets its own sigil, and
 it keeps deliberate per-brand body text inside a block of
 `<!-- brand:<name> -->` variants closed by `<!-- /brand -->`. A brand the block
-does not name gets nothing from it. Rendering refuses a literal sigil written
+does not name gets nothing from it. A variant may name several brands
+(`<!-- brand:kimi,google -->`), and a block may sit in the frontmatter as well
+as the body. A per-brand value is a `brand` directive instead:
+`{{brand:name}}`, `{{brand:title}}`, and `{{brand:upper}}` spell the brand, and
+`{{brand:predecessors}}` lists the brands declared before it in `BRAND_TABLE`,
+whose order is the order brands joined. Rendering refuses a literal sigil written
 where a directive belongs, and a block naming a brand the entry does not render,
 since that text could never reach a file.
 
@@ -198,12 +204,14 @@ After editing a source, re-render and commit every generated file.
 byte-compares it against the tracked output, so a source changed without a
 re-render fails the required `build-test` job.
 
-Two kinds of entry are registered. The fixture renders under `tools/`, outside
+Three kinds of entry are registered. The fixture renders under `tools/`, outside
 every bundle, so nothing becomes invokable; it covers the Claude and Codex
 layouts plus a third brand, grok, which pairs the skill-directory layout with
 the `/` sigil and its own frontmatter keys. The vendored workflows render into
 `claude-plugin/.../commands/` and `codex-plugin/.../skills/`, so they ship and
-the bundle rules above apply to them.
+the bundle rules above apply to them. The external `solve`, authored under
+`tools/command_sources/external/`, renders into the Grok, Kimi, and Google
+bundles and neither of those two, whose own `solve` stays hand-edited.
 
 ## Source layout
 
