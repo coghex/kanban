@@ -1,7 +1,7 @@
 -- | Cleaning up the gh process group a board refresh launches.
 module Spec.GitHub.BoardRefresh (spec) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (void)
@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Either (isRight)
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Kanban.Cache (GhGroupRecordLoad (..), claimGhGroup, ghGroupClaimHeld, ghGroupClaimPath, ghGroupRecordLockPath, ghGroupRecordPath, loadGhGroupRecord, releaseGhGroupClaim, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), claimGhGroup, withGhGroupRecordLock, ghGroupClaimHeld, ghGroupClaimPath, ghGroupRecordLockPath, ghGroupRecordPath, loadGhGroupRecord, releaseGhGroupClaim, writeGhGroupRecord)
 import Kanban.Config (ResolvedConfig (..))
 import Kanban.Domain
 import Kanban.GitHub
@@ -37,6 +37,8 @@ import Kanban.GitHub
     graphqlArguments,
     newGhFetchGuard,
     newGhRecordLock,
+    newGhSpawnState,
+    abandonSpawn,
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
@@ -122,7 +124,7 @@ withRegisteredGroup process action =
       -- The census the run takes for its own spawn, so the entry carries
       -- this process as its writer exactly as a real registration does.
       census <- readProcessSnapshot
-      registered <- registerSpawnedGh guard repository census spawned
+      registered <- registerFresh guard repository census spawned
       case registered of
         Left message -> expectationFailure ("the group could not be registered: " <> Data.Text.unpack message)
         Right registration ->
@@ -1446,6 +1448,32 @@ spec = do
         reclaimRecordedGhGroups otherReader repository `shouldReturn` Right ()
         ghGroupIsRecorded otherReader repository groupPid `shouldReturn` False
 
+    -- A deadline can land after registration has taken the claim and before
+    -- it returns. Staged by holding the record lock, so the registration
+    -- takes its claim and then blocks writing the entry until the deadline
+    -- interrupts it: nothing it was going to return ever arrives, and the
+    -- cleanup must still find and release the claim.
+    it "releases a spawn's claim when registration is interrupted after taking it" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+          guard <- newGhRecordLock >>= newGhFetchGuard
+          withParkedChild $ \child -> do
+            groupPid <- childGroup child
+            census <- readProcessSnapshot
+            state <- newGhSpawnState
+            holding <- newEmptyMVar
+            letGo <- newEmptyMVar
+            holder <- forkIO (void (withGhGroupRecordLock repository (putMVar holding () >> takeMVar letGo)))
+            takeMVar holding
+            interrupted <- timeout 500000 (registerSpawnedGh guard repository state census child)
+            interrupted `shouldBe` Nothing
+            ghGroupClaimHeld repository groupPid `shouldReturn` Right True
+            putMVar letGo ()
+            abandonSpawn guard repository state child
+            ghGroupClaimHeld repository groupPid `shouldReturn` Right False
+            killThread holder
+
     it "holds a spawn's claim while it is managed and gives it up, file and all, when released" $
       withLiveRegistration $ \repository _ registration _ -> do
         let groupPid = spawnRegistrationGroup registration
@@ -1522,13 +1550,13 @@ spec = do
           let repository = Repository temporaryRoot "coghex" "kanban"
           guard <- newGhRecordLock >>= newGhFetchGuard
           withParkedChild $ \first -> do
-            held <- registerSpawnedGh guard repository (Left "ps exited 1") first
+            held <- registerFresh guard repository (Left "ps exited 1") first
             firstPid <- childGroup first
             held `shouldBe` Right (GhSpawnInMemory firstPid)
             loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
           withParkedChild $ \second -> do
             census <- readProcessSnapshot
-            recorded <- registerSpawnedGh guard repository census second
+            recorded <- registerFresh guard repository census second
             self <- fromIntegral <$> getProcessID
             case recorded of
               Right admitted@(GhSpawnRecorded groupPid writer _) -> do
@@ -1545,7 +1573,7 @@ spec = do
           writeGhGroupRecord repository [existing] `shouldReturn` Right ()
           guard <- newGhRecordLock >>= newGhFetchGuard
           withParkedChild $ \child -> do
-            refused <- registerSpawnedGh guard repository (Left "ps exited 1") child
+            refused <- registerFresh guard repository (Left "ps exited 1") child
             either id (const "") refused `shouldMention` "could not identify the process starting gh"
             loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [existing]
 
@@ -1559,7 +1587,7 @@ spec = do
           mapM_
             ( \told -> withParkedChild $ \child -> do
                 guard <- newGhRecordLock >>= newGhFetchGuard
-                admitted <- registerSpawnedGh guard repository (Left "ps exited 1") child
+                admitted <- registerFresh guard repository (Left "ps exited 1") child
                 registration <- either (fail . Data.Text.unpack) pure admitted
                 withFakeOnPath temporaryRoot ("ps", ["exit 1"]) $
                   abandonGh guard repository (if told then Just registration else Nothing) child
@@ -1714,3 +1742,10 @@ withHeldClaim repository groupPid action = do
   claimed <- claimGhGroup repository groupPid
   claim <- either (fail . Data.Text.unpack) pure claimed
   action `finally` releaseGhGroupClaim claim
+
+-- | Registers a spawn with a spawn state of its own, for an example that
+-- reads what registration returns rather than what it published.
+registerFresh :: GhFetchGuard -> Repository -> Either Data.Text.Text [ProcessIdentity] -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Data.Text.Text GhSpawnRegistration)
+registerFresh guard repository census spawned = do
+  state <- newGhSpawnState
+  registerSpawnedGh guard repository state census spawned

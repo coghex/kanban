@@ -18,8 +18,7 @@ where
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Data.IORef (newIORef, readIORef, writeIORef)
-import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try)
+import Control.Exception (Exception, IOException, bracketOnError, throwIO, try)
 import Control.Monad (void)
 import Data.Bifunctor (first)
 import qualified Data.ByteString as ByteString
@@ -27,7 +26,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
 import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupMembers, ignoreIOException, leadsOwnGroupIn)
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhSpawnRegistration (..), abandonGh, dropGhGroup, ghGroupIsPending, markGhGroupPending, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup, uninterruptibleCleanup)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhSpawnRegistration (..), abandonSpawn, dropGhGroup, ghGroupIsPending, markGhGroupPending, newGhSpawnState, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup)
 import Kanban.Process (OwnedProcessGroup (..), defaultProcessSnapshot, identityForPid)
 import Kanban.Provider (ProviderErrorKind (..))
 import System.Directory (findExecutable)
@@ -63,15 +62,15 @@ runGh guard repository arguments = afterLaunch $ do
   case resolved of
     Nothing -> duringLaunch (ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh")))
     Just ghPath -> do
-      -- How the spawn is accounted for -- the pgid its durable entry is keyed
-      -- by and the writer stamped on it, or the in-memory protection that
-      -- wrote nothing -- remembered the instant the registration reports it,
-      -- because the cleanup cannot always ask for the pgid again. 'collect'
-      -- reaps the handle before it drops the entry, and an interruption
-      -- arriving in or after that reap finds 'getPid' empty; a
-      -- cleanup that could not name the entry would leave it on disk and still
-      -- report an ordinary timeout over it.
-      registered <- newIORef Nothing
+      -- How the spawn is accounted for -- its claim as soon as it is taken,
+      -- then the pgid its durable entry is keyed by and the writer stamped on
+      -- it, or the in-memory protection that wrote nothing -- published by the
+      -- registration as each exists, because the cleanup cannot always ask
+      -- for the pgid again. 'collect' reaps the handle before it drops the
+      -- entry, and an interruption arriving in or after that reap finds
+      -- 'getPid' empty; a cleanup that could not name the entry would leave it
+      -- on disk and still report an ordinary timeout over it.
+      registered <- newGhSpawnState
       bracketOnError
         (duringLaunch (createProcess (ghProcess ghPath)))
         (cleanUp registered)
@@ -87,13 +86,7 @@ runGh guard repository arguments = afterLaunch $ do
 
     taggedAs phase action = try @IOException action >>= either (throwIO . GhProcessFailed phase) pure
 
-    -- The claim is released again outside the bounded cleanup, which
-    -- releases it itself when it finishes: a cleanup cut short by its budget
-    -- must not leave the entry reading as live work to every other reader.
-    cleanUp registered spawned = do
-      registration <- readIORef registered
-      uninterruptibleCleanup (abandonGh guard repository registration spawned)
-        `finally` releaseSpawnClaim registration
+    cleanUp registered spawned = abandonSpawn guard repository registered spawned
 
     ghProcess ghPath =
       (uncurry proc (ghBehindBarrier ghPath arguments))
@@ -120,14 +113,10 @@ runGh guard repository arguments = afterLaunch $ do
       -- the writer the entry is stamped with, and it answers leadership too,
       -- since nothing the parked child can do changes its group.
       census <- defaultProcessSnapshot
-      registration <- registerSpawnedGh guard repository census spawned
+      registration <- registerSpawnedGh guard repository registered census spawned
       case registration of
         Left message -> throwIO (GhGuardUnwritable message)
         Right admitted -> do
-          -- Written before anything else can go wrong, so every path out of
-          -- here from this point on can name the entry that was just created
-          -- -- or knows there is none to name.
-          writeIORef registered (Just admitted)
           -- Everything downstream reasons about the pgid as if it named this
           -- fetch's group; that is only true if the child actually leads it,
           -- and this is where that becomes a fact rather than an assumption.

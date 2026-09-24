@@ -16,7 +16,9 @@ module Kanban.GitHub.Guard
     GhFetchGuard,
     GhRecordLock,
     GhSpawnRegistration (..),
+    GhSpawnState,
     abandonGh,
+    abandonSpawn,
     classifyGhEntry,
     clearCleanupFailure,
     describeGhEntry,
@@ -28,6 +30,7 @@ module Kanban.GitHub.Guard
     markGhGroupPending,
     newGhFetchGuard,
     newGhRecordLock,
+    newGhSpawnState,
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
@@ -42,7 +45,7 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent (forkIOWithUnmask)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar, withMVar)
-import Control.Exception (IOException, finally, try, uninterruptibleMask_)
+import Control.Exception (IOException, finally, mask_, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
@@ -470,6 +473,34 @@ releaseSpawnClaim :: Maybe GhSpawnRegistration -> IO ()
 releaseSpawnClaim (Just (GhSpawnRecorded _ _ claim)) = releaseGhGroupClaim claim
 releaseSpawnClaim _ = pure ()
 
+-- | Everything a spawn's cleanup has to find, published the moment each piece
+-- exists rather than when registration returns.
+--
+-- The claim is the piece that cannot wait. Registration takes it, then writes
+-- the entry, then returns, and a deadline can land anywhere after the claim is
+-- taken; a claim only the returned value knew about would then be held by
+-- nobody's cleanup, and an entry whose claim stays held reads as live work to
+-- every other reader for as long as this process runs. So it is published in
+-- the same masked step that takes it, and 'abandonSpawn' releases whatever is
+-- published here whether or not the registration itself ever came back.
+data GhSpawnState = GhSpawnState
+  { ghSpawnRegistration :: IORef (Maybe GhSpawnRegistration),
+    ghSpawnClaim :: IORef (Maybe GhSpawnClaim)
+  }
+
+newGhSpawnState :: IO GhSpawnState
+newGhSpawnState = GhSpawnState <$> newIORef Nothing <*> newIORef Nothing
+
+-- | The cleanup of a spawn that is being abandoned: 'abandonGh' against what
+-- registration published, shielded from the refresh timer, and then — outside
+-- that bounded shield, so a cleanup cut short by its budget still does it —
+-- the release of whatever claim was taken.
+abandonSpawn :: GhFetchGuard -> Repository -> GhSpawnState -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()
+abandonSpawn guard repository state spawned = do
+  registration <- readIORef state.ghSpawnRegistration
+  uninterruptibleCleanup (abandonGh guard repository registration spawned)
+    `finally` (readIORef state.ghSpawnClaim >>= mapM_ releaseGhGroupClaim)
+
 -- | Accounts for a @gh@ that has just been spawned, before it is used for
 -- anything, from @census@: a process snapshot taken for this one spawn while
 -- the child is still parked behind its launch barrier.
@@ -489,8 +520,12 @@ releaseSpawnClaim _ = pure ()
 -- holds anything, the spawn is refused: an entry beside it could be anyone's
 -- live work or anyone's leftover, and the next reader to see this one could
 -- not tell which it was either.
-registerSpawnedGh :: GhFetchGuard -> Repository -> Either Text [ProcessIdentity] -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text GhSpawnRegistration)
-registerSpawnedGh guard repository census (_, _, _, processHandle) = do
+--
+-- Each piece is published to @state@ as it comes into being, for
+-- 'abandonSpawn' to find: the claim as it is taken, the registration once the
+-- entry is written.
+registerSpawnedGh :: GhFetchGuard -> Repository -> GhSpawnState -> Either Text [ProcessIdentity] -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO (Either Text GhSpawnRegistration)
+registerSpawnedGh guard repository state census (_, _, _, processHandle) = do
   spawnedPid <- getPid processHandle
   case spawnedPid of
     Nothing -> pure (Left "gh reported no process id, so no guard could be written for it")
@@ -499,22 +534,29 @@ registerSpawnedGh guard repository census (_, _, _, processHandle) = do
       self <- fromIntegral <$> getProcessID
       case census >>= maybe (Left "this process was not in the snapshot") Right . identityForPid self of
         Right writer -> do
-          claimed <- claimGhGroup repository groupPid
+          -- Masked, so nothing is delivered between the lock being taken and
+          -- the claim being published; the blocking lock itself still admits
+          -- an interruption, and one taken there has taken no claim.
+          claimed <- mask_ $ do
+            taken <- claimGhGroup repository groupPid
+            taken <$ either (const (pure ())) (writeIORef state.ghSpawnClaim . Just) taken
           case claimed of
             Left message -> pure (Left message)
             Right claim -> do
               written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False (Just writer) False)
               case written of
                 Left message -> Left message <$ releaseGhGroupClaim claim
-                Right () -> pure (Right (GhSpawnRecorded groupPid writer claim))
+                Right () -> publish (GhSpawnRecorded groupPid writer claim)
         Left reason -> do
           let unidentified = "could not identify the process starting gh (" <> reason <> ")"
           empty <- withRecordLock guard repository (recordHoldsNothing <$> loadGhGroupRecord repository)
-          pure $ case empty of
-            Left message -> Left (unidentified <> ", and the record could not be read: " <> message)
-            Right True -> Right (GhSpawnInMemory groupPid)
-            Right False -> Left (unidentified <> ", and the record holds entries that cannot be classified beside an unidentified one")
+          case empty of
+            Left message -> pure (Left (unidentified <> ", and the record could not be read: " <> message))
+            Right True -> publish (GhSpawnInMemory groupPid)
+            Right False -> pure (Left (unidentified <> ", and the record holds entries that cannot be classified beside an unidentified one"))
   where
+    publish registration = Right registration <$ writeIORef state.ghSpawnRegistration (Just registration)
+
     recordHoldsNothing GhGroupRecordAbsent = True
     recordHoldsNothing (GhGroupRecordLoaded []) = True
     recordHoldsNothing _ = False
