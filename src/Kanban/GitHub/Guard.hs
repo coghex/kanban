@@ -31,6 +31,7 @@ module Kanban.GitHub.Guard
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
+    releaseSpawnClaim,
     setCleanupFailure,
     spawnRegistrationGroup,
     uninterruptibleCleanup,
@@ -47,7 +48,7 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, withGhGroupRecordLock, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), GhSpawnClaim, claimGhGroup, ghGroupClaimHeld, loadGhGroupRecord, releaseGhGroupClaim, removeGhGroupRecord, withGhGroupRecordLock, writeGhGroupRecord)
 import Kanban.Domain
 import Kanban.GitHub.Group (forceKillGhGroup, freezeThenKillOwnedGroup, groupCleanupPasses, groupConfirmedEmpty, groupMembers, ignoreIOException, killGhGroup)
 import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, identityForPid, matchingIdentities, membersStillInGroup)
@@ -309,6 +310,10 @@ abandonGh guard repository registration (input, _, _, processHandle) = do
         -- never refresh again.
         Nothing -> when (proven || not alreadyReported) (writeIORef cleanupFailure Nothing)
   mapM_ (ignoreIOException . hClose) input
+  -- The cleanup is over, however it ended, so this process no longer manages
+  -- the spawn. Released last: while the claim is held the entry reads as live
+  -- work to every other reader, and from here on it must not.
+  releaseSpawnClaim registration
   where
     recordedGroup = spawnRegistrationGroup <$> registration
 
@@ -320,7 +325,7 @@ abandonGh guard repository registration (input, _, _, processHandle) = do
     -- rewrite of its entry rather than resolved again: the entry is still
     -- the same spawn's.
     spawnWriter = case registration of
-      Just (GhSpawnRecorded _ writer) -> Just writer
+      Just (GhSpawnRecorded _ writer _) -> Just writer
       _ -> Nothing
 
     -- Confirmed by reading the pending mark back, not by the write's own
@@ -436,9 +441,11 @@ markGhGroupPending guard repository groupPid = fmap (either Left id) . withRecor
 -- | How a freshly spawned @gh@ is accounted for while it runs.
 data GhSpawnRegistration
   = -- | An entry naming the group is on the durable record, stamped with the
-    -- identity of the process that spawned it. Every later rewrite of that
-    -- entry carries the same identity.
-    GhSpawnRecorded Int ProcessIdentity
+    -- identity of the process that spawned it, and this process holds the
+    -- spawn's claim on it. Every later rewrite of that entry carries the same
+    -- identity; the claim is released when this process stops managing the
+    -- spawn ('releaseSpawnClaim').
+    GhSpawnRecorded Int ProcessIdentity GhSpawnClaim
   | -- | Nothing is on the record. The writer could not be identified for this
     -- spawn, the record held nothing a reader would have to classify, and a
     -- separate fresh snapshot confirmed the child leads its own group. This
@@ -451,8 +458,17 @@ data GhSpawnRegistration
   deriving stock (Eq, Show)
 
 spawnRegistrationGroup :: GhSpawnRegistration -> Int
-spawnRegistrationGroup (GhSpawnRecorded groupPid _) = groupPid
+spawnRegistrationGroup (GhSpawnRecorded groupPid _ _) = groupPid
 spawnRegistrationGroup (GhSpawnInMemory groupPid) = groupPid
+
+-- | Gives up a spawn's claim on its entry, because this process has stopped
+-- managing that @gh@: it finished and its entry was dropped, or its cleanup
+-- ended, however it ended. From here on a reader re-verifies the entry rather
+-- than skipping it as live work, whether or not a cleanup-pending mark could be
+-- written. Idempotent, and a no-op for a spawn that holds no claim.
+releaseSpawnClaim :: Maybe GhSpawnRegistration -> IO ()
+releaseSpawnClaim (Just (GhSpawnRecorded _ _ claim)) = releaseGhGroupClaim claim
+releaseSpawnClaim _ = pure ()
 
 -- | Accounts for a @gh@ that has just been spawned, before it is used for
 -- anything, from @census@: a process snapshot taken for this one spawn while
@@ -460,7 +476,8 @@ spawnRegistrationGroup (GhSpawnInMemory groupPid) = groupPid
 --
 -- The writer is this process as that census shows it, pid and start time, so
 -- every reader can later tell whether the process that wrote the entry is
--- still running. The entry names only the process group besides, because
+-- still running. The spawn's claim is taken before the entry is written, so
+-- there is no instant at which a reader finds the entry without it. The entry names only the process group besides, because
 -- that is all that is known this early and all a later run needs: an
 -- uncensused entry is watched until its pgid is unoccupied, which is exactly
 -- the question "did that gh outlive its writer?".
@@ -482,8 +499,14 @@ registerSpawnedGh guard repository census (_, _, _, processHandle) = do
       self <- fromIntegral <$> getProcessID
       case census >>= maybe (Left "this process was not in the snapshot") Right . identityForPid self of
         Right writer -> do
-          written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False (Just writer) False)
-          pure (GhSpawnRecorded groupPid writer <$ written)
+          claimed <- claimGhGroup repository groupPid
+          case claimed of
+            Left message -> pure (Left message)
+            Right claim -> do
+              written <- recordGhGroup guard repository (OwnedProcessGroup groupPid [] False (Just writer) False)
+              case written of
+                Left message -> Left message <$ releaseGhGroupClaim claim
+                Right () -> pure (Right (GhSpawnRecorded groupPid writer claim))
         Left reason -> do
           let unidentified = "could not identify the process starting gh (" <> reason <> ")"
           empty <- withRecordLock guard repository (recordHoldsNothing <$> loadGhGroupRecord repository)
@@ -559,11 +582,12 @@ data GhEntryWriter
 -- it, matched by pid and start time; nothing here decides what may be
 -- signalled.
 data GhEntryClass
-  = -- | The writer is running and has not given up on the group: its live
-    -- work. Skipped, and kept on the record.
+  = -- | The writer is running and still holds the spawn's claim, and has not
+    -- given up on the group: its live work. Skipped, and kept on the record.
     GhEntryActive GhEntryWriter
   | -- | The writer is running, but its own cleanup could not confirm the
-    -- group gone or could not remove the entry. Re-verified on every fetch.
+    -- group gone or could not remove the entry: marked so, or with the
+    -- spawn's claim released. Re-verified on every fetch.
     GhEntryCleanupPending GhEntryWriter
   | -- | The writer is confirmed exited, so nothing is left to finish this
     -- entry but a reader. Reclaimed.
@@ -576,20 +600,27 @@ data GhEntryClass
   deriving stock (Eq, Show)
 
 -- | Classifies one entry for a reader whose pid is @self@, against @census@,
--- a snapshot taken for this reclaim.
+-- a snapshot taken for this reclaim, and @claimed@, whether the spawn's claim
+-- on the entry is still held.
 --
 -- "This process" is the writer's pid being the reader's own /and/ its start
 -- time still matching, so an entry left by an earlier process that held the
 -- same pid reads as abandoned, as it should.
-classifyGhEntry :: Int -> Either Text [ProcessIdentity] -> OwnedProcessGroup -> GhEntryClass
-classifyGhEntry self census group =
+--
+-- A live writer's entry is active only while its claim is held and it is not
+-- marked pending. A released claim is a writer that has stopped managing the
+-- spawn — its cleanup ended without taking the entry off the record — and that
+-- needs no write to say, so it holds even when the pending mark could not be
+-- written.
+classifyGhEntry :: Int -> Either Text [ProcessIdentity] -> Bool -> OwnedProcessGroup -> GhEntryClass
+classifyGhEntry self census claimed group =
   case group.ownedProcessGroupOwner of
     Nothing -> GhEntryOwnerless
     Just writer -> case census of
       Left reason -> GhEntryWriterUnknown writer reason
       Right processes
         | null (matchingIdentities processes [writer]) -> GhEntryAbandoned writer
-        | group.ownedProcessGroupCleanupPending -> GhEntryCleanupPending (relation writer)
+        | group.ownedProcessGroupCleanupPending || not claimed -> GhEntryCleanupPending (relation writer)
         | otherwise -> GhEntryActive (relation writer)
   where
     relation writer
@@ -686,7 +717,13 @@ reclaimRecordedGhGroups guard repository = do
         if any (isJust . ownedProcessGroupOwner) groups
           then defaultProcessSnapshot
           else pure (Right [])
-      settlements <- traverse (\group -> settleEntry (classifyGhEntry self census group) group) groups
+      settlements <-
+        traverse
+          ( \group -> do
+              claimed <- claimHeldFor group
+              settleEntry (classifyGhEntry self census claimed group) group
+          )
+          groups
       let kept = [group | (group, settlement) <- zip groups settlements, settlement /= EntryCleared]
           unresolved = [message | EntryUnresolved message <- settlements]
       -- Still under the record lock the read above was taken under, so the
@@ -705,6 +742,13 @@ reclaimRecordedGhGroups guard repository = do
         (Right (), []) -> do
           clearCleanupFailure guard
           pure (Right ())
+
+    -- Asked only of an entry with a writer, the only kind the claim can
+    -- decide. A probe that fails reads as released, which re-verifies the
+    -- entry rather than skipping it.
+    claimHeldFor group
+      | isJust group.ownedProcessGroupOwner = either (const False) id <$> ghGroupClaimHeld repository group.ownedProcessGroupPid
+      | otherwise = pure False
 
     settleEntry entryClass group = case entryClass of
       GhEntryActive _ -> pure EntryKept

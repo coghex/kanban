@@ -19,7 +19,7 @@ where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Control.Exception (Exception, IOException, bracketOnError, throwIO, try)
+import Control.Exception (Exception, IOException, bracketOnError, finally, throwIO, try)
 import Control.Monad (void)
 import Data.Bifunctor (first)
 import qualified Data.ByteString as ByteString
@@ -27,7 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
 import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupMembers, ignoreIOException, leadsOwnGroupIn)
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhSpawnRegistration (..), abandonGh, dropGhGroup, ghGroupIsPending, markGhGroupPending, recordGhGroup, registerSpawnedGh, setCleanupFailure, spawnRegistrationGroup, uninterruptibleCleanup)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhSpawnRegistration (..), abandonGh, dropGhGroup, ghGroupIsPending, markGhGroupPending, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup, uninterruptibleCleanup)
 import Kanban.Process (OwnedProcessGroup (..), defaultProcessSnapshot, identityForPid)
 import Kanban.Provider (ProviderErrorKind (..))
 import System.Directory (findExecutable)
@@ -87,9 +87,13 @@ runGh guard repository arguments = afterLaunch $ do
 
     taggedAs phase action = try @IOException action >>= either (throwIO . GhProcessFailed phase) pure
 
+    -- The claim is released again outside the bounded cleanup, which
+    -- releases it itself when it finishes: a cleanup cut short by its budget
+    -- must not leave the entry reading as live work to every other reader.
     cleanUp registered spawned = do
       registration <- readIORef registered
       uninterruptibleCleanup (abandonGh guard repository registration spawned)
+        `finally` releaseSpawnClaim registration
 
     ghProcess ghPath =
       (uncurry proc (ghBehindBarrier ghPath arguments))
@@ -138,7 +142,7 @@ runGh guard repository arguments = afterLaunch $ do
           -- meaningful when the group is not ours.
           let groupPid = spawnRegistrationGroup admitted
           leads <- case admitted of
-            GhSpawnRecorded _ _ -> pure (leadsOwnGroupIn groupPid census)
+            GhSpawnRecorded {} -> pure (leadsOwnGroupIn groupPid census)
             GhSpawnInMemory _ -> confirmsOwnGroupLeadership groupPid
           case leads of
             Left message -> do
@@ -192,9 +196,12 @@ runGh guard repository arguments = afterLaunch $ do
           -- proven empty -- nothing for anyone to overlap.
           case admitted of
             GhSpawnInMemory _ -> pure ()
-            GhSpawnRecorded _ _ -> do
+            GhSpawnRecorded {} -> do
               dropped <- dropGhGroup guard repository groupPid
               either (const (void (markGhGroupPending guard repository groupPid))) pure dropped
+          -- Managed no longer: a stale entry left behind is re-verified by
+          -- every reader from here on.
+          releaseSpawnClaim (Just admitted)
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
         -- not exiting, and a descendant can do the first without the second.
@@ -217,7 +224,7 @@ runGh guard repository arguments = afterLaunch $ do
           setCleanupFailure guard (GhCleanupFailure message GuardInMemoryOnly)
           case admitted of
             GhSpawnInMemory _ -> pure ()
-            GhSpawnRecorded _ writer -> do
+            GhSpawnRecorded _ writer _ -> do
               void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True (Just writer) True))
               recorded <- ghGroupIsPending guard repository groupPid
               setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))

@@ -2893,18 +2893,23 @@ above are unchanged, and persistence the user switched off is not a failure.
   dashboard, a mission runner, or a worker's precondition read — identified by
   pid and start time from a process snapshot taken for that one spawn while the
   child is still parked behind its launch barrier. Every later rewrite of the
-  entry, including one a failed cleanup makes, keeps that writer. A reader
-  classifies each entry by whether its writer is still running, matched by pid
-  and start time together, so a reused pid is a different process:
-  - **Active** — the writer is running and the entry is not cleanup-pending.
-    It is that writer's live `gh`, whichever process wrote it, the reader's own
-    included. The reader skips it without blocking or refusing, and leaves it on
-    the record.
+  entry, including one a failed cleanup makes, keeps that writer. For as long
+  as the writer is managing that `gh` it also holds the spawn's claim — an
+  exclusive, close-on-exec `flock` on
+  `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.claim-<pgid>`, taken before
+  the entry is written and released, with the file unlinked, once the entry is
+  dropped or the spawn's cleanup ends however it ends. A reader classifies each
+  entry by whether its writer is still running, matched by pid and start time
+  together, so a reused pid is a different process:
+  - **Active** — the writer is running, the spawn's claim is held, and the
+    entry is not cleanup-pending. It is that writer's live `gh`, whichever
+    process wrote it, the reader's own included. The reader skips it without
+    blocking or refusing, and leaves it on the record.
   - **Cleanup-pending** — the writer is running, but its own cleanup could not
-    confirm the group gone or could not take the entry off the record, and
-    marked it so. Every fetch re-verifies it, whoever wrote it and however
-    alive that writer is; it is refused over, and stays pending, until it can
-    be safely cleared.
+    confirm the group gone or could not take the entry off the record: it marked
+    the entry so, or released the claim with the entry still recorded. Every
+    fetch re-verifies it, whoever wrote it and however alive that writer is; it
+    is refused over, and stays on the record, until it can be safely cleared.
   - **Abandoned** — the writer is confirmed exited. The entry is reclaimed.
   - **Unknown** — no snapshot could say whether the writer runs. That proves
     neither exit nor liveness, so the entry is neither skipped nor reclaimed,
@@ -2920,12 +2925,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   the writer itself is never a signalling target. A reclaim takes off the
   record only the entries it accounted for, and rewrites the list with every
   active or still-unresolved entry beside them kept.
-- The cleanup-pending mark is what keeps an unresolved leftover from passing as
-  live work while its writer runs on. A cleanup that marks it reports the group
-  as recorded, and every later fetch re-checks it. When the mark itself cannot
-  be written — the store that refused the drop usually refuses this too —
-  nothing durable would ever re-check the entry, so the writer holds the
-  refusal in memory instead, exactly as for a group it could not record at all.
+- The cleanup-pending mark and the released claim are what keep an unresolved
+  leftover from passing as live work while its writer runs on. A cleanup that
+  marks the entry reports the group as recorded, and every later fetch re-checks
+  it. The mark is a write, and the store that refused the drop usually refuses
+  it too; releasing the claim needs no write, so another reader re-verifies the
+  entry either way, and a writer that dies releases it through the kernel. When
+  the mark cannot be written the writer also holds the refusal in memory, as
+  for a group it could not record at all, since its own next fetch must not
+  spawn beside the group either.
   The mark is an optional field that decodes as not pending when it is absent,
   so records written before it existed stay readable and the schema version
   stays 1.

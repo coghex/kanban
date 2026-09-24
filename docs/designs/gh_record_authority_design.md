@@ -534,8 +534,10 @@ form.
 >   process that spawned that one `gh` — dashboard, mission runner, or worker —
 >   resolved afresh for each spawn while the child is parked behind its launch
 >   barrier, and kept through every later rewrite of the entry. A reader matches
->   it by pid and start time: a running writer's entry is active work, skipped
->   and kept on the record; a confirmed-exited writer's entry is abandoned and
+>   it by pid and start time: a running writer's entry is active work — while
+>   the writer still holds the spawn's claim, a `flock` it releases without any
+>   write when it stops managing that `gh` — skipped and kept on the record; a
+>   confirmed-exited writer's entry is abandoned and
 >   reclaimed; a failed snapshot is unknown, not exited. An entry without an
 >   owner is a legacy entry, observation-only: retained while its pgid is
 >   occupied or any saved member survives, and never signalled.
@@ -543,8 +545,9 @@ form.
 >   A cleanup that cannot confirm its group gone, or cannot remove the entry,
 >   marks it cleanup-pending in a second optional field (absent decodes as not
 >   pending; the schema stays 1), and every fetch re-verifies a pending entry
->   whoever wrote it. A mark that cannot be written is held in memory by the
->   writer. A spawn whose writer cannot be identified is never recorded
+>   whoever wrote it. A mark that cannot be written still leaves the entry
+>   re-verified by every other reader, through the released claim, and is held
+>   in memory by the writer. A spawn whose writer cannot be identified is never recorded
 >   ownerless: it runs under in-memory protection only while the record is
 >   empty and a separate snapshot confirms group leadership, and is refused
 >   otherwise.

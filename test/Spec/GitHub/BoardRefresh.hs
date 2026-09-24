@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as LazyByteString
 import Data.Either (isRight)
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordLockPath, ghGroupRecordPath, loadGhGroupRecord, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), claimGhGroup, ghGroupClaimHeld, ghGroupClaimPath, ghGroupRecordLockPath, ghGroupRecordPath, loadGhGroupRecord, releaseGhGroupClaim, writeGhGroupRecord)
 import Kanban.Config (ResolvedConfig (..))
 import Kanban.Domain
 import Kanban.GitHub
@@ -40,6 +40,7 @@ import Kanban.GitHub
     reclaimRecordedGhGroups,
     recordGhGroup,
     registerSpawnedGh,
+    releaseSpawnClaim,
     spawnRegistrationGroup
   )
 import Kanban.Process
@@ -80,7 +81,7 @@ import Spec.Support.Locale
     withLocaleProbe
   )
 import Spec.Support.Process (withNonLeaderProcess, withSurvivingGroupLeader, withVacatedGroupLeader)
-import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, removeFile)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, removeDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, hClose)
@@ -127,6 +128,7 @@ withRegisteredGroup process action =
         Right registration ->
           action repository guard registration spawned
             `finally` ( do
+                          releaseSpawnClaim (Just registration)
                           void (try @IOException (terminateProcess processHandle))
                           void (try @IOException (waitForProcess processHandle))
                       )
@@ -1316,12 +1318,14 @@ spec = do
               let repository = Repository temporaryRoot "coghex" "kanban"
               writer <- liveIdentity writerPid
               -- The live entry's pgid is occupied, which reclaiming it would
-              -- refuse over; skipping it is what lets this reader proceed.
+              -- refuse over; skipping it is what lets this reader proceed. Its
+              -- claim is held, as a writer still managing its gh holds it.
               let live = OwnedProcessGroup writerPid [] False (Just writer) False
                   abandoned = OwnedProcessGroup vacatedPgid [departedIn vacatedPgid] True (Just exitedWriter) False
               writeGhGroupRecord repository [live, abandoned] `shouldReturn` Right ()
-              guard <- newGhRecordLock >>= newGhFetchGuard
-              reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
+              withHeldClaim repository writerPid $ do
+                guard <- newGhRecordLock >>= newGhFetchGuard
+                reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
               loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [live]
               -- The live writer's identity survives the rewrite, and the writer
               -- itself was never signalled.
@@ -1339,8 +1343,9 @@ spec = do
                     abandoned = OwnedProcessGroup vacatedPgid [departedIn vacatedPgid] True (Just exitedWriter) False
                     unresolved = OwnedProcessGroup squatterPid [] False Nothing False
                 writeGhGroupRecord repository [live, abandoned, unresolved] `shouldReturn` Right ()
-                guard <- newGhRecordLock >>= newGhFetchGuard
-                refused <- reclaimRecordedGhGroups guard repository
+                refused <- withHeldClaim repository writerPid $ do
+                  guard <- newGhRecordLock >>= newGhFetchGuard
+                  reclaimRecordedGhGroups guard repository
                 refusal refused `shouldMention` "a gh recorded without a writer identity"
                 loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [live, unresolved]
 
@@ -1388,14 +1393,69 @@ spec = do
         let entry writer markedPending = OwnedProcessGroup 4200 [] False writer markedPending
             reused = other {processIdentityStartedAt = "Thu Jan 1 00:00:00 1970"}
             earlierHolderOfMyPid = me {processIdentityStartedAt = "Thu Jan 1 00:00:00 1970"}
-        classifyGhEntry self census (entry (Just other) False) `shouldBe` GhEntryActive (WrittenByOtherProcess other)
-        classifyGhEntry self census (entry (Just me) False) `shouldBe` GhEntryActive WrittenByThisProcess
-        classifyGhEntry self census (entry (Just other) True) `shouldBe` GhEntryCleanupPending (WrittenByOtherProcess other)
-        classifyGhEntry self census (entry (Just me) True) `shouldBe` GhEntryCleanupPending WrittenByThisProcess
-        classifyGhEntry self census (entry (Just reused) False) `shouldBe` GhEntryAbandoned reused
-        classifyGhEntry self census (entry (Just earlierHolderOfMyPid) False) `shouldBe` GhEntryAbandoned earlierHolderOfMyPid
-        classifyGhEntry self (Left "ps exited 1") (entry (Just other) False) `shouldBe` GhEntryWriterUnknown other "ps exited 1"
-        classifyGhEntry self census (entry Nothing True) `shouldBe` GhEntryOwnerless
+            classifyClaimed = classifyGhEntry self census True
+        classifyClaimed (entry (Just other) False) `shouldBe` GhEntryActive (WrittenByOtherProcess other)
+        classifyClaimed (entry (Just me) False) `shouldBe` GhEntryActive WrittenByThisProcess
+        classifyClaimed (entry (Just other) True) `shouldBe` GhEntryCleanupPending (WrittenByOtherProcess other)
+        classifyClaimed (entry (Just me) True) `shouldBe` GhEntryCleanupPending WrittenByThisProcess
+        classifyClaimed (entry (Just reused) False) `shouldBe` GhEntryAbandoned reused
+        classifyClaimed (entry (Just earlierHolderOfMyPid) False) `shouldBe` GhEntryAbandoned earlierHolderOfMyPid
+        classifyGhEntry self (Left "ps exited 1") True (entry (Just other) False) `shouldBe` GhEntryWriterUnknown other "ps exited 1"
+        classifyClaimed (entry Nothing True) `shouldBe` GhEntryOwnerless
+
+    -- A released claim is a writer that stopped managing the spawn, so its
+    -- unmarked entry is re-verified exactly as a marked one is -- the case a
+    -- pending mark that could not be written leaves behind.
+    it "re-verifies a live writer's unmarked entry once the spawn's claim is released" $
+      withSurvivingGroupLeader $ \otherPid -> do
+        self <- fromIntegral <$> getProcessID
+        census <- readProcessSnapshot
+        other <- liveIdentity otherPid
+        me <- liveIdentity self
+        let entry writer = OwnedProcessGroup 4200 [] False (Just writer) False
+        classifyGhEntry self census False (entry other) `shouldBe` GhEntryCleanupPending (WrittenByOtherProcess other)
+        classifyGhEntry self census False (entry me) `shouldBe` GhEntryCleanupPending WrittenByThisProcess
+
+    -- The reviewer's scenario end to end. The writer's cleanup can neither
+    -- confirm its group gone nor write the pending mark, so only its own
+    -- memory holds the refusal. Once the store recovers, an independent reader
+    -- still must not take the unmarked entry for live work: the claim was
+    -- released without a write, and the reader re-verifies the entry.
+    it "keeps a cleanup whose pending mark could not be written from passing as live work to another reader" $
+      withLiveRegistration $ \repository guard registration spawned -> do
+        let groupPid = spawnRegistrationGroup registration
+        lockPath <- ghGroupRecordLockPath repository
+        withTemporaryCacheRoot $ \scratch ->
+          withFakeOnPath scratch ("ps", ["exit 1"]) $ do
+            removeFile lockPath
+            createDirectory lockPath
+            abandonGh guard repository (Just registration) spawned
+            removeDirectory lockPath
+        fmap ghCleanupGuard <$> ghFetchCleanupFailure guard `shouldReturn` Just GuardInMemoryOnly
+        -- Unmarked, and its writer -- this process -- still running.
+        loaded <- loadGhGroupRecord repository
+        case loaded of
+          GhGroupRecordLoaded [entry] -> do
+            entry.ownedProcessGroupPid `shouldBe` groupPid
+            entry.ownedProcessGroupCleanupPending `shouldBe` False
+          other -> expectationFailure ("expected the unmarked entry to remain, got " <> show other)
+        ghGroupClaimHeld repository groupPid `shouldReturn` Right False
+        -- An independent reader re-verifies it: the forced kill emptied the
+        -- group, so the entry is cleared rather than skipped and kept.
+        otherReader <- newGhRecordLock >>= newGhFetchGuard
+        reclaimRecordedGhGroups otherReader repository `shouldReturn` Right ()
+        ghGroupIsRecorded otherReader repository groupPid `shouldReturn` False
+
+    it "holds a spawn's claim while it is managed and gives it up, file and all, when released" $
+      withLiveRegistration $ \repository _ registration _ -> do
+        let groupPid = spawnRegistrationGroup registration
+        claimPath <- ghGroupClaimPath repository groupPid
+        ghGroupClaimHeld repository groupPid `shouldReturn` Right True
+        releaseSpawnClaim (Just registration)
+        ghGroupClaimHeld repository groupPid `shouldReturn` Right False
+        doesFileExist claimPath `shouldReturn` False
+        -- Releasing twice is harmless: more than one path ends a spawn.
+        releaseSpawnClaim (Just registration)
 
     -- The live case never has to refuse to be described, so its spellings are
     -- asked of directly.
@@ -1438,7 +1498,7 @@ spec = do
       withLiveRegistration $ \repository _ registration _ -> do
         self <- fromIntegral <$> getProcessID
         case registration of
-          GhSpawnRecorded groupPid writer -> do
+          GhSpawnRecorded groupPid writer _ -> do
             writer.processIdentityPid `shouldBe` self
             loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup groupPid [] False (Just writer) False]
           GhSpawnInMemory _ -> expectationFailure "a spawn whose census named this process was held in memory"
@@ -1471,9 +1531,10 @@ spec = do
             recorded <- registerSpawnedGh guard repository census second
             self <- fromIntegral <$> getProcessID
             case recorded of
-              Right (GhSpawnRecorded groupPid writer) -> do
+              Right admitted@(GhSpawnRecorded groupPid writer _) -> do
                 writer.processIdentityPid `shouldBe` self
                 loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup groupPid [] False (Just writer) False]
+                releaseSpawnClaim (Just admitted)
               other -> expectationFailure ("expected the next spawn to be recorded, got " <> show other)
 
     it "refuses a spawn whose writer cannot be identified while the record holds anything" $
@@ -1644,3 +1705,12 @@ withParkedChild action = do
 
 childGroup :: (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO Int
 childGroup (_, _, _, processHandle) = maybe (fail "the parked child reported no PID") (pure . fromIntegral) =<< getPid processHandle
+
+-- | Runs @action@ holding the claim a writer holds while it manages the gh
+-- recorded at @groupPid@, as a live writer's hand-written entry needs to read
+-- as live work.
+withHeldClaim :: Repository -> Int -> IO result -> IO result
+withHeldClaim repository groupPid action = do
+  claimed <- claimGhGroup repository groupPid
+  claim <- either (fail . Data.Text.unpack) pure claimed
+  action `finally` releaseGhGroupClaim claim

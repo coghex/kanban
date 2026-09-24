@@ -93,7 +93,9 @@ data OwnedProcessGroup = OwnedProcessGroup
     -- whose writer is still running (the same PID with the same start time;
     -- a reused PID is not the same process) is that writer's live work and
     -- is skipped, unless 'ownedProcessGroupCleanupPending' says its own
-    -- cleanup has already given up on it. An entry whose writer is confirmed
+    -- cleanup has already given up on it, or the writer has released the
+    -- spawn's claim ('Kanban.Cache.GhSpawnClaim') because it no longer
+    -- manages that @gh@. An entry whose writer is confirmed
     -- exited is abandoned and reclaimed. A snapshot that could not be taken
     -- proves neither.
     --
