@@ -13,11 +13,12 @@ over to.
 
 What is pinned, per that issue's requirements and its review's amendments:
 
-* exposure is granted by the exact case-insensitive login `claude`, `codex`, or
-  `coghex` and by nothing else — not `author_association` (every documented
-  value is exercised), not repository role, not issue authorship, not display
-  name, not bot status, not a lookalike suffix, and not a malformed or absent
-  login;
+* exposure is granted by the exact case-insensitive login `coghex` and by
+  nothing else — not the logins `claude` or `codex` (unaffiliated third-party
+  accounts, not the agents' own, per issue #726), not `author_association`
+  (every documented value is exercised), not repository role, not issue
+  authorship, not display name, not bot status, not a lookalike suffix, and not
+  a malformed or absent login;
 * no untrusted comment's body or body-derived content survives serialization,
   asserted with a unique sentinel against the helper's whole rendered output —
   including one end-to-end run of the real CLI over a scriptable fake `gh` —
@@ -320,10 +321,12 @@ BRAND_LOGIN_SPELLINGS = (
     "CoDeX",
 )
 
-# Names that resemble a trusted login and are not one. Suffixes and prefixes are
-# the realistic attack (`codex-bot` is a plausible-looking account), and the
+# Names that resemble a login and are not one: the brand-named lookalikes stay
+# as a second line of defence should either brand ever be trusted again, and
+# the `coghex` ones probe the login that is. Suffixes and prefixes are the
+# realistic attack (`coghex-helper` is a plausible-looking account), and the
 # whitespace pair matters because a login is compared exactly: trimming would
-# make " codex" trusted.
+# make " coghex" trusted.
 LOOKALIKE_LOGINS = (
     "codex-bot",
     "coghex-helper",
