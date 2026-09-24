@@ -772,12 +772,12 @@ of it. Act on the one structured result it returns:
   status and any other status keep the reports described beside them for their
   own reasons — a publication is verified success with a changed-line summary
   the run has to check, and an unmodelled status is a failure whose three states
-  are the only account of where the document went. - **Any other status.** The
-  document was not published. Report the three states the helper returns —
-  whether the edit exists locally and in which worktree and path, whether a
-  local publication commit exists and its ID, and whether the remote publication
-  branch contains it — and say plainly which one applies. Leave the document as
-  the helper left it.
+  are the only account of where the document went.
+- **Any other status.** The document was not published. Report the three states
+  the helper returns — whether the edit exists locally and in which worktree and
+  path, whether a local publication commit exists and its ID, and whether the
+  remote publication branch contains it — and say plainly which one applies.
+  Leave the document as the helper left it.
 
 ### Resolve the tracker transaction
 

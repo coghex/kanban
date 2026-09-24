@@ -710,6 +710,27 @@ PUBLICATION_CLAUSES = {
     ),
 }
 
+# The three result branches every publishing asset hands the helper's status
+# to, each its own list item. The clause checks above run over whitespace-
+# collapsed text, so they cannot see a reflow that folds one branch into the
+# prose of the one before it — which is how the fallback for an unexpected
+# status once disappeared as a branch while every clause still matched.
+PUBLICATION_RESULT_BULLETS = (
+    '- **`"status": "published"`.**',
+    '- **`"status": "not-published"`.**',
+    "- **Any other status.**",
+)
+
+
+def missing_result_bullets(text):
+    """The result branches `text` no longer opens as their own list item."""
+    lines = text.splitlines()
+    return [
+        bullet for bullet in PUBLICATION_RESULT_BULLETS
+        if not any(line.startswith(bullet) for line in lines)
+    ]
+
+
 # Issue #727: the pre-widening wording of the two clauses above, which confined
 # the preflight copy to a document absent from the tip. A publishing asset that
 # kept either would direct a run to refuse the tracked case the helper now
@@ -2509,6 +2530,21 @@ class PublicationTests(unittest.TestCase):
                     self.assertEqual(
                         missing_publication_clauses(asset.replace(clause, "")), [key]
                     )
+
+    def test_every_publishing_asset_keeps_each_result_branch_a_list_item(self):
+        for path in PUBLISHING_ASSETS:
+            with self.subTest(path=path):
+                self.assertEqual(missing_result_bullets(self.asset_text(path)), [])
+
+    def test_folding_a_result_branch_into_prose_is_reported(self):
+        # The negative control: the same words, reflowed onto the end of the
+        # previous paragraph, no longer open a branch.
+        for path in PUBLISHING_ASSETS:
+            text = self.asset_text(path)
+            for bullet in PUBLICATION_RESULT_BULLETS:
+                with self.subTest(path=path, bullet=bullet):
+                    folded = text.replace("\n" + bullet, " " + bullet)
+                    self.assertEqual(missing_result_bullets(folded), [bullet])
 
     def test_no_publishing_asset_confines_the_preflight_copy_to_a_novel_document(self):
         # Issue #727's negative control. The widened clauses must not be

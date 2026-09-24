@@ -2397,6 +2397,32 @@ class PublishTests(PublishFixture):
                 run(["git", "cat-file", "-p", result["approved_blob"]], other.docs),
             )
 
+    def test_a_tracked_working_copy_deleted_since_the_preflight_is_refused(self):
+        # The moved copy's limiting case: nothing is there at all. Still
+        # refused, never recreated, and the reason names the binding the
+        # missing file no longer matches.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            document.write_text("# UI\n\n- one\n- the owner's unlanded line\n")
+            observed = self.preflight_blob(other, "coghex/synarchy")
+            document.unlink()
+
+            result = other.publish(
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n",
+                repo="coghex/synarchy", expected_working_copy=observed,
+            )
+            self.assertEqual(result["status"], "not-published")
+            self.assertEqual(result["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(result["document_written"])
+            self.assertIsNone(result["applied_record"])
+            self.assertIsNone(result["found_blob"])
+            self.assertIn("does not exist", result["write_reason"])
+            self.assertIn("--expected-working-copy", result["write_reason"])
+            self.assertIn(observed, result["write_reason"])
+            self.assertFalse(document.exists())
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
     def test_a_divergent_copy_of_a_document_with_a_lane_publishes_as_before(self):
         # The tip stays authoritative for a document that publishes to its
         # branch, whichever lane grants it: a working copy the preflight

@@ -1704,7 +1704,14 @@ def _apply_locally(
     elif current is None:
         why = (
             f"{document} does not exist under {root}, so there was nothing "
-            "this module could recognize and nothing was written"
+            "this module could recognize"
+            + (
+                f", nor the content the preflight observed "
+                f"({expected_working_copy}) that --expected-working-copy bound"
+                if expected_working_copy
+                else ""
+            )
+            + ", and nothing was written"
         )
     else:
         why = (
