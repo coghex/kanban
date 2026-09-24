@@ -44,6 +44,7 @@ module Kanban.GitHub
     classifyFailure,
     compactError,
     decodeGitHubItems,
+    dropGhGroup,
     fetchGitHubSnapshot,
     fetchHistoryPage,
     ghFailureKind,
@@ -166,7 +167,7 @@ import Kanban.GitHub.History
     newHistoryTraversal,
     runCompletedHistoryPage,
   )
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, abandonGh, ghFetchCleanupFailure, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, setCleanupFailure)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhRecordLock, abandonGh, dropGhGroup, ghFetchCleanupFailure, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, newGhRecordLockOwnedBy, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, setCleanupFailure)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)

@@ -41,7 +41,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord, removeGhGroupRecord, withGhGroupRecordLock, writeGhGroupRecord)
 import Kanban.Domain
 import Kanban.GitHub.Group (forceKillGhGroup, freezeThenKillOwnedGroup, groupCleanupPasses, groupConfirmedEmpty, groupMembers, ignoreIOException, killGhGroup)
 import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..), defaultProcessSnapshot, matchingIdentities, membersStillInGroup)
@@ -74,6 +74,11 @@ data GhFetchGuard = GhFetchGuard
 -- run of the dashboard -- knows to reclaim. The lock is what the coordinator
 -- owns on behalf of the repository, so every job it schedules writes the
 -- record through the same one (§15).
+--
+-- The mutex below orders this process's rewrites and nothing else's. Another
+-- process -- a mission runner or a worker's precondition reread beside the
+-- dashboard -- mints a lock of its own, so every rewrite also takes
+-- 'Kanban.Cache.withGhGroupRecordLock', which is what orders processes.
 data GhRecordLock = GhRecordLock
   { ghRecordMutex :: MVar (),
     -- | Set once a job ended holding back a group nothing durable accounts
@@ -139,9 +144,22 @@ newGhRecordLock = newGhRecordLockOwnedBy Nothing
 newGhRecordLockOwnedBy :: Maybe ProcessIdentity -> IO GhRecordLock
 newGhRecordLockOwnedBy owner = GhRecordLock <$> newMVar () <*> newIORef Nothing <*> pure owner <*> newIORef Nothing
 
--- | Serializes one read-modify-write of the durable record.
-withRecordLock :: GhFetchGuard -> IO result -> IO result
-withRecordLock guard action = withMVar guard.ghGuardRecordLock.ghRecordMutex (const action)
+-- | Serializes one read-modify-write of the durable record, within this
+-- process and across processes.
+--
+-- The in-process mutex is taken first and the cross-process file lock inside
+-- it, so two threads of one process queue on the mutex and never contend over
+-- the lock's descriptor; the file lock is then what orders this process
+-- against every other one rewriting the same record. Both are released however
+-- the action ends, an interruption included: 'withMVar' restores the mutex and
+-- 'withGhGroupRecordLock' closes its own descriptor.
+--
+-- 'Left' is a file lock that could not be established. The action has not run,
+-- and each caller reports that the way it already reports a record write that
+-- failed, rather than running it unsynchronised.
+withRecordLock :: GhFetchGuard -> Repository -> IO result -> IO (Either Text result)
+withRecordLock guard repository action =
+  withMVar guard.ghGuardRecordLock.ghRecordMutex (const (withGhGroupRecordLock repository action))
 
 -- | Records a finished job's verdict against the repository, when that verdict
 -- is one only this process is holding back.
@@ -373,9 +391,14 @@ cleanupBudgetMicros = 30 * 1000 * 1000
 -- | Whether the durable record still names this group, asked under the record
 -- lock so the answer cannot be taken from a list another writer is midway
 -- through replacing.
+--
+-- A lock that could not be established answers 'False'. This is asked to
+-- confirm durable coverage, and a record that could not be read under the lock
+-- confirms nothing.
 ghGroupIsRecorded :: GhFetchGuard -> Repository -> Int -> IO Bool
 ghGroupIsRecorded guard repository groupPid =
-  withRecordLock guard (any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository)
+  either (const False) id
+    <$> withRecordLock guard repository (any ((== groupPid) . ownedProcessGroupPid) <$> recordedGhGroups repository)
 
 -- | Writes the guard for a @gh@ that has just been spawned, before it is
 -- used for anything. The entry names only the process group, because that is
@@ -399,7 +422,7 @@ registerSpawnedGh guard repository (_, _, _, processHandle) = do
 -- loses an entry: the list this rewrites is the list it just read, so a write
 -- that landed in between is discarded wholesale.
 recordGhGroup :: GhFetchGuard -> Repository -> OwnedProcessGroup -> IO (Either Text ())
-recordGhGroup guard repository group = withRecordLock guard $ do
+recordGhGroup guard repository group = fmap (either Left id) . withRecordLock guard repository $ do
   existing <- recordedGhGroups repository
   -- Stamped here rather than by each caller, because this is the one way a
   -- new entry reaches the record and the callers that build one are describing
@@ -424,12 +447,26 @@ recordGhGroup guard repository group = withRecordLock guard $ do
 -- afterwards is deliberate. 'recordedGhGroups' reads an unusable record as an
 -- empty one, so a re-read would answer \"not recorded\" for a record nobody
 -- could parse — fail-open in exactly the case that most needs the opposite.
+--
+-- A lock that cannot be established fails the drop, with one exception: a
+-- record that does not exist already does not name the group, so there is
+-- nothing to rewrite and the drop has happened. That is what an unwritable
+-- cache looks like, and failing there would report an entry left on disk
+-- that no one could ever have written.
 dropGhGroup :: GhFetchGuard -> Repository -> Int -> IO (Either Text ())
-dropGhGroup guard repository groupPid = withRecordLock guard $ do
-  existing <- recordedGhGroups repository
-  case withoutGroup groupPid existing of
-    [] -> removeGhGroupRecord repository
-    remaining -> writeGhGroupRecord repository remaining
+dropGhGroup guard repository groupPid = do
+  locked <- withRecordLock guard repository $ do
+    existing <- recordedGhGroups repository
+    case withoutGroup groupPid existing of
+      [] -> removeGhGroupRecord repository
+      remaining -> writeGhGroupRecord repository remaining
+  case locked of
+    Right dropped -> pure dropped
+    Left message -> do
+      recordLoad <- loadGhGroupRecord repository
+      pure $ case recordLoad of
+        GhGroupRecordAbsent -> Right ()
+        _ -> Left message
 
 withoutGroup :: Int -> [OwnedProcessGroup] -> [OwnedProcessGroup]
 withoutGroup groupPid = filter ((/= groupPid) . ownedProcessGroupPid)
@@ -457,8 +494,29 @@ reclaimRecordedGhGroups guard repository = do
   heldBack <- readIORef guard.ghGuardRecordLock.ghRecordHeldBack
   case heldBack of
     Just message -> refuseUnrecorded message
-    Nothing -> reclaimRecorded
+    Nothing -> do
+      -- One critical section from the read to the clear it pairs with. The
+      -- clear discards every entry it did not read, so a rewrite landing
+      -- between the two -- another process registering its gh -- would be
+      -- wiped out with the entries this did account for.
+      locked <- withRecordLock guard repository reclaimRecorded
+      case locked of
+        Right outcome -> pure outcome
+        Left message -> reclaimUnlocked message
   where
+    -- A lock that cannot be established refuses the fetch the way an
+    -- unreadable record does -- unless there is no record at all. An absent
+    -- record is a read with nothing to reclaim and nothing to clear, so no
+    -- rewrite runs unsynchronised by answering it; and it is what an unwritable
+    -- cache always looks like, where refusing over a record that cannot exist
+    -- would report a recorded gh nobody wrote, instead of letting the spawn's
+    -- own registration fail and stop the gh it started.
+    reclaimUnlocked message = do
+      recordLoad <- loadGhGroupRecord repository
+      case recordLoad of
+        GhGroupRecordAbsent -> reclaimAbsent
+        _ -> refuse message
+
     refuseUnrecorded message = do
       -- 'GuardInMemoryOnly' rather than 'GuardRecorded': this job is refusing
       -- over a group that is still on nothing but this process's word, and the
@@ -477,9 +535,7 @@ reclaimRecordedGhGroups guard repository = do
         -- that this board inherited nothing. Deferring the answer to the first
         -- non-empty read would settle it after this board's own first entry
         -- was already in the file, and classify that entry as a predecessor's.
-        GhGroupRecordAbsent -> do
-          _ <- rememberInherited guard []
-          pure (Right ())
+        GhGroupRecordAbsent -> reclaimAbsent
         -- Deliberately not remembered. Nothing can be said about a record that
         -- will not decode, and nothing needs to be: this refuses the fetch, so
         -- no gh is spawned and no entry is written, and the first read that
@@ -488,6 +544,10 @@ reclaimRecordedGhGroups guard repository = do
         GhGroupRecordLoaded groups -> do
           inherited <- rememberInherited guard groups
           reclaimGroups inherited groups
+
+    reclaimAbsent = do
+      _ <- rememberInherited guard []
+      pure (Right ())
 
     reclaimGroups inherited groups = do
       -- A record exists from here on, so every exit other than clearing it
@@ -498,10 +558,10 @@ reclaimRecordedGhGroups guard repository = do
       outcomes <- traverse (reclaimGhGroup inherited) groups
       case [message | Left message <- outcomes] of
         [] -> do
-          -- Under the record lock like every other rewrite, even though the
-          -- coordinator only ever reclaims with the owner held: clearing the
-          -- record is the one update that discards entries it never read.
-          cleared <- withRecordLock guard (removeGhGroupRecord repository)
+          -- Still under the record lock the read above was taken under:
+          -- clearing the record is the one update that discards entries it
+          -- never read, so nothing may have been added since that read.
+          cleared <- removeGhGroupRecord repository
           case cleared of
             Left message -> refuse message
             Right () -> do

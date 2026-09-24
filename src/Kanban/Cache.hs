@@ -1,5 +1,7 @@
+{-# LANGUAGE CApiFFI #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE InterruptibleFFI #-}
 
 module Kanban.Cache
   ( CacheLoad (..),
@@ -10,6 +12,7 @@ module Kanban.Cache
     canonicalRepositoryKey,
     commitUsageSnapshots,
     completedCacheSchemaVersion,
+    ghGroupRecordLockPath,
     ghGroupRecordPath,
     ghGroupRecordSchemaVersion,
     legacyGhGroupRecordCandidates,
@@ -28,13 +31,14 @@ module Kanban.Cache
     usageCacheLockPath,
     usageCachePath,
     usageCommitNotes,
+    withGhGroupRecordLock,
     writeCompletedCache,
     writeGhGroupRecord,
   )
 where
 
-import Control.Exception (IOException, bracketOnError, catch, finally, onException, try)
-import Control.Monad (when)
+import Control.Exception (IOException, allowInterrupt, bracket, bracketOnError, catch, finally, onException, try)
+import Control.Monad (unless, void, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Result (..),
@@ -56,6 +60,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Foreign.C.Error (eINTR, getErrno, throwErrno)
+import Foreign.C.Types (CInt (..))
 import GHC.Generics (Generic)
 import GHC.IO.Handle.Lock (FileLockingNotSupported, LockMode (ExclusiveLock), hLock, hUnlock)
 import Kanban.Domain (CompletedHistory, RepoSnapshot, Repository (..), UsageProvider, UsageSnapshot (..))
@@ -75,6 +81,7 @@ import System.IO (Handle, hClose, openBinaryTempFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode, setFileMode)
 import System.Posix.IO (OpenFileFlags (..), OpenMode (ReadWrite), closeFd, defaultFileFlags, fdToHandle, openFd)
+import System.Posix.Types (Fd (..))
 
 data CacheLoad
   = CacheAbsent
@@ -288,18 +295,20 @@ asciiLowercase = Text.map fold
       | character >= 'A' && character <= 'Z' = toEnum (fromEnum character + 32)
       | otherwise = character
 
--- | The directory the @gh@ record and the lease that guards it share.
+-- | The directory the @gh@ record, the lease that guards it, and the lock its
+-- rewrites are serialised on share.
 ghGroupDirectory :: IO FilePath
 ghGroupDirectory = do
   cacheRoot <- getXdgDirectory XdgCache "kanban"
   pure (cacheRoot </> "gh-groups")
 
--- | The one derivation both of the repository's authority paths come from.
+-- | The one derivation all three of the repository's authority paths come
+-- from: the record, the lease, and the record's transaction lock.
 --
--- Written once rather than twice because the record and the lease are only
--- coherent while they name the same repository by the same rule: a lease keyed
--- differently from the record it protects would guard a file nobody else was
--- writing.
+-- Written once rather than three times because the three are only coherent
+-- while they name the same repository by the same rule: a lease or a lock
+-- keyed differently from the record it protects would guard a file nobody else
+-- was writing.
 ghGroupPath :: Repository -> String -> IO FilePath
 ghGroupPath repository extension = do
   directory <- ghGroupDirectory
@@ -328,6 +337,109 @@ ghGroupRecordPath repository = ghGroupPath repository ".json"
 -- one key, one derivation and one directory cover the pair.
 repositoryLeasePath :: Repository -> IO FilePath
 repositoryLeasePath repository = ghGroupPath repository ".lock"
+
+-- | The file every read-modify-write of one repository's @gh@ record is
+-- serialised on, across processes.
+--
+-- The lease cannot do this job. It is held by one dashboard, and the mission
+-- runner and a worker's precondition reread both rewrite the record from
+-- processes that hold no lease and are meant to run beside it (§15). This lock
+-- is taken by every one of those rewrites instead, whoever holds the lease.
+--
+-- A third file rather than either of the other two, for the reasons
+-- 'repositoryLeasePath' gives twice over. It cannot be the record, which
+-- 'writeCacheFile' replaces by rename, so two processes would lock different
+-- inodes under one name. And it cannot be the lease, because a POSIX record
+-- lock is dropped the moment its process closes /any/ descriptor on the file:
+-- a board taking this lock on the lease file would silently give up its lease
+-- when it let go.
+--
+-- Like the lease it carries no payload and is never unlinked or renamed, so
+-- every process that opens it opens the same inode. Its extension is neither
+-- @.json@ nor @.lock@: 'legacyGhGroupRecordCandidates' matches whole @.json@
+-- basenames, and no repository key can end in this extension and be mistaken
+-- for another repository's record or lease.
+ghGroupRecordLockPath :: Repository -> IO FilePath
+ghGroupRecordLockPath repository = ghGroupPath repository ".record-lock"
+
+-- | Runs one read-modify-write of the repository's @gh@ record while holding
+-- 'ghGroupRecordLockPath' exclusively, and releases it with that rewrite.
+--
+-- Blocking, unlike the lease. A second board needs an answer, so the lease is
+-- a non-blocking @F_SETLK@; a second /rewrite/ needs a queue position, since
+-- all it wants is to go after the first.
+--
+-- A @flock@ on a bare descriptor rather than 'hLock' on a 'Handle', for two
+-- reasons. GHC keeps its own table of files opened through a 'Handle' and
+-- refuses a second writable one in the same process as @resource busy@, so two
+-- rewrites in one process that do not share an in-process lock would have the
+-- second refused rather than queued. And a @flock@ belongs to the open file
+-- description, so separate opens contend with each other whether they are in
+-- one process or two, which is the property the record needs; a POSIX record
+-- lock would not, and would be dropped by the other opener's close besides.
+-- The call is @interruptible@, so a timeout waiting on a holder is delivered
+-- rather than parked behind the kernel.
+--
+-- The descriptor is opened here and closed here, by nothing else, and never
+-- anywhere near 'repositoryLeasePath'. It is close-on-exec because a @flock@
+-- is shared with a child that inherits the description, and this process
+-- spawns long-lived ones. Its mode is forced through the descriptor on every
+-- acquisition, as 'openUsageCacheLock' does and for the same reasons.
+--
+-- The directory is created only when missing: 'createPrivateDirectory' also
+-- re-modes a directory it finds, and a rewrite that only needed to take a lock
+-- has no business changing a directory someone else set.
+--
+-- 'Left' is a lock that could not be established, in the @cache write
+-- failed: ...@ shape a failed record write already uses, and the action has
+-- not run. Nothing here falls back to running it unsynchronised: that is the
+-- defect this lock exists to close.
+withGhGroupRecordLock :: Repository -> IO result -> IO (Either Text result)
+withGhGroupRecordLock repository action = do
+  lockPath <- ghGroupRecordLockPath repository
+  bracket (try @IOException (openRecordLock lockPath)) (either (const (pure ())) closeFd) $ \opened ->
+    case opened of
+      Left exception -> pure (Left (lockFailed (Text.pack (show exception))))
+      Right descriptor ->
+        bracket (try @IOException (flockExclusive descriptor)) (either (const (pure ())) (const (flockRelease descriptor))) $ \taken ->
+          case taken of
+            Left exception -> pure (Left (lockFailed (Text.pack (show exception))))
+            Right () -> Right <$> action
+  where
+    lockFailed detail = "cache write failed: gh group record lock could not be established: " <> detail
+
+    openRecordLock lockPath = do
+      let directory = takeDirectory lockPath
+      present <- doesDirectoryExist directory
+      unless present (createPrivateDirectory XdgCache directory)
+      descriptor <- openFd lockPath ReadWrite defaultFileFlags {creat = Just 0o600, cloexec = True}
+      descriptor <$ (setFdMode descriptor 0o600 `onException` closeFd descriptor)
+
+    -- Taken inside 'bracket''s acquisition, which is masked, so an
+    -- interruption is not delivered by the foreign call's return: the call
+    -- comes back with @EINTR@ and the exception stays pending. Retrying
+    -- straight away would block again with nothing left to wake it, so every
+    -- @EINTR@ first lets a pending exception through.
+    flockExclusive (Fd descriptor) = do
+      result <- c_flock descriptor lockExclusive
+      when (result == -1) $ do
+        errno <- getErrno
+        if errno == eINTR
+          then allowInterrupt >> flockExclusive (Fd descriptor)
+          else throwErrno "flock"
+
+    -- Closing the descriptor releases the lock as well, so a release that
+    -- fails costs nothing the close right after it will not recover.
+    flockRelease (Fd descriptor) = void (c_flock descriptor lockUnlock)
+
+foreign import capi interruptible "sys/file.h flock"
+  c_flock :: CInt -> CInt -> IO CInt
+
+foreign import capi "sys/file.h value LOCK_EX"
+  lockExclusive :: CInt
+
+foreign import capi "sys/file.h value LOCK_UN"
+  lockUnlock :: CInt
 
 -- | The basename a release before the canonical key wrote this repository's
 -- record at, spelled from the normalized identity.
@@ -383,8 +495,15 @@ legacyGhGroupRecordCandidates repository = do
 -- them from.
 --
 -- Run once, by the dashboard that holds the repository's lease, before the
--- first refresh. Under the lease no other board can be writing either file,
--- which is what makes a read-merge-write across two paths safe at all.
+-- first refresh. The lease does not make that read-merge-write safe: it keeps
+-- out a second board, not the mission runner or a worker's precondition
+-- reread, which rewrite the canonical record without it. What does is
+-- 'withGhGroupRecordLock', held across the whole of it -- the canonical read,
+-- the legacy reads, the canonical write and the legacy unlinks -- as it is
+-- across every other rewrite of the record, so no rewrite can land between
+-- this read and this write and be discarded by it. Legacy files are written by
+-- nothing current, so the canonical record is the only file another process
+-- could be changing.
 --
 -- The order is the whole safety argument. Canonical state is written -- and
 -- the write reported success through 'writeCacheFile', whose rename is atomic
@@ -400,9 +519,15 @@ legacyGhGroupRecordCandidates repository = do
 -- state cannot be merged into without discarding whatever it holds. 'Right'
 -- carries notices for what went wrong without threatening an entry -- a legacy
 -- file that would not unlink is one, since its contents are by then also
--- canonical and the next run will simply merge and try again.
+-- canonical and the next run will simply merge and try again. A lock that
+-- cannot be established is the first case: nothing has been read or written,
+-- and a migration that went ahead without it could discard another process's
+-- entry.
 migrateGhGroupRecord :: Repository -> IO (Either Text [Text])
-migrateGhGroupRecord repository = do
+migrateGhGroupRecord repository = either Left id <$> withGhGroupRecordLock repository (migrateUnderRecordLock repository)
+
+migrateUnderRecordLock :: Repository -> IO (Either Text [Text])
+migrateUnderRecordLock repository = do
   discovered <- legacyGhGroupRecordCandidates repository
   case discovered of
     Left message -> pure (Left message)
