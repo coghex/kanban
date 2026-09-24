@@ -14,10 +14,11 @@ some of them ships a broken asset. Each is declared per brand in `BRAND_TABLE`,
 independently of the other two, because the bundles combine them freely — Grok
 takes Codex's layout with Claude's sigil (issue #716):
 
-* **File layout.** Claude reads `commands/<name>.md`; Codex and Grok read
+* **File layout.** Claude reads `commands/<name>.md`; every other brand reads
   `skills/<name>/SKILL.md`.
 * **Frontmatter keys.** Claude declares `description` and `argument-hint`;
-  Codex declares `name` and `description`; Grok declares all three. The
+  Codex, Kimi, and Google declare `name` and `description`; Grok declares all
+  three. The
   projection here is an allowlist per brand, and the source's own key set is
   an allowlist too, so a
   `model:` or `permission-mode:` key that would override the model, effort, or
@@ -57,7 +58,17 @@ survive reconciliation — stays authored in the one source, inside a
 The shipped `solve` pair needs exactly that: `$ARGUMENTS` against a prompt
 argument, `${CLAUDE_PLUGIN_ROOT}` against a `$CODEX_HOME` search. A brand the
 block does not name receives nothing from it, and a block naming a brand its
-entry does not render is refused, since that text could reach no output.
+entry does not render is refused, since that text could reach no output. A
+variant may name several brands, `<!-- brand:kimi,google -->`, and a block may
+sit in the frontmatter, since a description is one line and a clause only some
+brands carry has nowhere else to go.
+
+A per-brand *value* is a `{{brand:<form>}}` token rather than a block (issue
+#717): `name`, `title`, and `upper` spell the brand itself, and `predecessors`
+lists the brands `BRAND_TABLE` declares before it. The external bundles differ
+mostly by such values — a plugin-root variable, a marketplace name, an origin
+marker — and a block per value would put three near-copies of every such line
+back into the one source.
 
 `COMMAND_SOURCES` is the registry, and `--check` re-renders every entry and
 byte-compares it against the tracked output, so a source edited without
@@ -66,8 +77,8 @@ re-rendering fails `tools/test_render_command_sources.py` in the required
 would not: it proves the mechanism ran once, never that it keeps being run.
 
 Each entry declares the brands it renders, as the keys of its `outputs`
-mapping, and receives an output for exactly those. The registry holds two kinds
-of entry, and the difference is the output directories alone. VEND-0's fixture
+mapping, and receives an output for exactly those. The registry holds three
+kinds of entry, and the difference is the output directories alone. VEND-0's fixture
 renders under `tools/`, deliberately outside every bundle directory, because
 `tools/plugin_bundle_gate.py` takes shippedness from location: anything
 rendered into a bundle directory becomes invokable and gate-relevant, and the
@@ -75,7 +86,9 @@ fixture vendors no command. It is also the one entry rendering a third brand,
 grok, which proves the generalized mechanism without an external bundle
 changing. `triage` — VEND-1, the first real rendering — renders into the Claude
 and Codex bundle directories and is therefore shipped, named by both bundles'
-manifests and discovered by both providers.
+manifests and discovered by both providers. The external `solve` — EXT-2 —
+renders into the Grok, Kimi, and Google bundles and neither of those two,
+whose own `solve` stays hand-edited.
 """
 
 from __future__ import annotations
@@ -107,6 +120,8 @@ class Brand:
     declares a frontmatter key set that is neither of theirs.
     """
 
+    # What prose calls the brand, which `{{brand:title}}` renders.
+    title: str
     # How the provider spells a workflow invocation.
     sigil: str
     # A key of `LAYOUTS`.
@@ -117,17 +132,39 @@ class Brand:
     frontmatter_keys: tuple[str, ...]
 
 
+# In the order the brands joined, which is what `{{brand:predecessors}}`
+# enumerates: each external bundle names the brands that existed when it was
+# added, so a new brand is appended here and no earlier brand's text moves.
 BRAND_TABLE = {
     "claude": Brand(
-        sigil="/", layout="command-file", frontmatter_keys=("description", "argument-hint")
+        title="Claude",
+        sigil="/",
+        layout="command-file",
+        frontmatter_keys=("description", "argument-hint"),
     ),
     "codex": Brand(
-        sigil="$", layout="skill-directory", frontmatter_keys=("name", "description")
+        title="Codex",
+        sigil="$",
+        layout="skill-directory",
+        frontmatter_keys=("name", "description"),
     ),
     "grok": Brand(
+        title="Grok",
         sigil="/",
         layout="skill-directory",
         frontmatter_keys=("name", "description", "argument-hint"),
+    ),
+    "kimi": Brand(
+        title="Kimi",
+        sigil="/",
+        layout="skill-directory",
+        frontmatter_keys=("name", "description"),
+    ),
+    "google": Brand(
+        title="Google",
+        sigil="/",
+        layout="skill-directory",
+        frontmatter_keys=("name", "description"),
     ),
 }
 
@@ -148,6 +185,17 @@ CODEX_SKILLS_DIR = "codex-plugin/plugins/kanban/skills"
 # Read-only, because every shipping entry shares this one mapping.
 BUNDLE_OUTPUTS = MappingProxyType(
     {"claude": CLAUDE_COMMANDS_DIR, "codex": CODEX_SKILLS_DIR}
+)
+# Where the three external bundles discover theirs. None is a spawned provider
+# and each ships only the workflows its session opens a pull request with, so
+# an entry rendering here ships in those bundles and in neither of the two
+# above.
+EXTERNAL_OUTPUTS = MappingProxyType(
+    {
+        "grok": "grok-plugin/plugins/kanban/skills",
+        "kimi": "kimi-plugin/plugins/kanban/skills",
+        "google": "google-plugin/plugins/kanban/skills",
+    }
 )
 
 # What an authored source may declare — an allowlist, so an override key fails
@@ -186,11 +234,21 @@ FRONTMATTER_RE = re.compile(
 )
 FIELD_RE = re.compile(r"\A(?P<key>[A-Za-z][A-Za-z0-9_-]*): (?P<value>\S.*)\Z")
 
-BRAND_OPEN_RE = re.compile(r"\A<!--\s*brand:(?P<brand>[a-z][a-z0-9-]*)\s*-->[ \t]*\Z")
+BRAND_OPEN_RE = re.compile(
+    r"\A<!--\s*brand:(?P<brands>[a-z][a-z0-9-]*(?:,[a-z][a-z0-9-]*)*)\s*-->[ \t]*\Z"
+)
 BRAND_CLOSE_RE = re.compile(r"\A<!--\s*/brand\s*-->[ \t]*\Z")
 
 COMMAND_REF_RE = re.compile(r"\{\{cmd:(?P<name>[a-z][a-z0-9]*(?:-[a-z0-9]+)*)\}\}")
-DIRECTIVE_RE = re.compile(r"\{\{.*?\}\}", re.DOTALL)
+# A directive opens at the last `{` of a run, so `${{{brand:upper}}_ROOT}` --
+# a shell expansion whose variable name is a brand token -- reads as `$`, `{`,
+# and one directive rather than as one malformed one.
+DIRECTIVE_RE = re.compile(r"\{\{(?!\{).*?\}\}", re.DOTALL)
+
+# The per-brand values a source may reference by name, each a function of the
+# brand and of `BRAND_TABLE` alone.
+BRAND_TOKEN_RE = re.compile(r"\{\{brand:(?P<form>[a-z]+)\}\}")
+BRAND_TOKEN_FORMS = ("name", "title", "upper", "predecessors")
 
 # The repair every stale-artifact failure names, kept as one constant so the
 # test asserts the words the failure actually prints.
@@ -416,6 +474,27 @@ COMMAND_SOURCES = (
             "identical outside that block."
         ),
     ),
+    CommandSource(
+        name="solve",
+        source="tools/command_sources/external/solve.md",
+        outputs=EXTERNAL_OUTPUTS,
+        note=(
+            "EXT-2 of docs/coordination/external_workflow_authoring_design.md "
+            "(issue #717), and the first entry rendering into the external "
+            "bundles rather than the Claude and Codex pair: grok, kimi and "
+            "google each ship a solve that opens a pull request Codex reviews. "
+            "The Claude and Codex solve stay hand-edited, so this source lives "
+            "under external/ and renders into neither of their bundles. Its "
+            "per-brand text is of three kinds: {{brand:...}} tokens for the "
+            "brand's name, plugin-root variable, marketplace and origin marker; "
+            "{{brand:predecessors}} for the sibling brands each bundle refuses "
+            "to imitate, which is the brands that existed when it was added "
+            "rather than every other brand; and two brand blocks -- argument "
+            "binding and helper discovery -- where Grok says one thing and the "
+            "two Copilot-hosted bundles another, plus the description clause "
+            "only those two carry. Its migration moved no rendered byte."
+        ),
+    ),
 )
 
 
@@ -485,12 +564,19 @@ def workflow_vocabulary(repo_root: Path = REPO_ROOT) -> set[str]:
     return names
 
 
-def parse_source(text: str, *, origin: str) -> tuple[dict[str, str], str, int]:
-    """`(frontmatter fields, body, body's first line number)`.
+def parse_source(
+    text: str, brand: str, *, origin: str, declared: tuple[str, ...] = BRANDS
+) -> tuple[dict[str, str], str, int]:
+    """`(brand's frontmatter fields, body, body's first line number)`.
 
     Deliberately not a YAML parse: what every loader reads is a flat block of
     `key: value` lines, and accepting more than that here would let a source
     declare something only one brand's loader could interpret.
+
+    The frontmatter may carry brand blocks exactly as the body does, because a
+    frontmatter value is one line: a clause only some brands' descriptions
+    carry can be expressed no other way. The fields are those `brand` keeps,
+    each checked against the line it is on in the source.
     """
     match = FRONTMATTER_RE.match(text)
     if match is None:
@@ -499,8 +585,15 @@ def parse_source(text: str, *, origin: str) -> tuple[dict[str, str], str, int]:
             "frontmatter block closed by a `---` line of its own"
         )
     fields: dict[str, str] = {}
-    for offset, line in enumerate(match.group("frontmatter").splitlines()):
-        lineno = offset + 2
+    selected = brand_lines(
+        match.group("frontmatter") + "\n",
+        brand,
+        origin=origin,
+        first_line=2,
+        declared=declared,
+    )
+    for lineno, line in selected:
+        line = line.rstrip("\n")
         field = FIELD_RE.match(line)
         if field is None:
             raise CommandSourceError(
@@ -538,13 +631,32 @@ def select_brand(
     body_line: int,
     declared: tuple[str, ...] = BRANDS,
 ) -> str:
-    """`body` with every brand block resolved for `brand`.
+    """`body` with every brand block resolved for `brand`."""
+    return "".join(
+        line
+        for _, line in brand_lines(
+            body, brand, origin=origin, first_line=body_line, declared=declared
+        )
+    )
+
+
+def brand_lines(
+    text: str,
+    brand: str,
+    *,
+    origin: str,
+    first_line: int,
+    declared: tuple[str, ...] = BRANDS,
+) -> list[tuple[int, str]]:
+    """The `(source line number, line)` pairs `brand` keeps from `text`.
 
     A block opens with `<!-- brand:<name> -->`, may switch variant with another
-    such marker, and closes with `<!-- /brand -->`. Marker lines never reach the
-    output, and a brand the block does not name contributes nothing — which is
-    how a single-branch block expresses text one provider has and the other
-    does not.
+    such marker, and closes with `<!-- /brand -->`. A marker may name several
+    brands, comma-separated, when they share one variant: the Kimi and Google
+    bundles run on one host and say the same thing where Grok says another.
+    Marker lines never reach the output, and a brand the block does not name
+    contributes nothing — which is how a single-branch block expresses text one
+    provider has and the other does not.
 
     A block that contributes nothing would otherwise leave the blank line above
     it and the blank line below it adjacent, so one brand's file carries a gap
@@ -557,14 +669,14 @@ def select_brand(
     never renders could reach no output, so it is an authoring error rather
     than text that silently vanishes.
     """
-    kept: list[str] = []
+    kept: list[tuple[int, str]] = []
     open_line: int | None = None
-    active: str | None = None
+    active: frozenset[str] = frozenset()
     seen: set[str] = set()
     emitted = False
     squeeze = False
-    for offset, line in enumerate(body.splitlines(keepends=True)):
-        lineno = body_line + offset
+    for offset, line in enumerate(text.splitlines(keepends=True)):
+        lineno = first_line + offset
         stripped = line.rstrip("\n")
         opened = BRAND_OPEN_RE.match(stripped)
         closed = BRAND_CLOSE_RE.match(stripped)
@@ -573,29 +685,30 @@ def select_brand(
             if not stripped.strip():
                 continue
         if opened is not None:
-            named = opened.group("brand")
-            if named not in BRANDS:
-                raise CommandSourceError(
-                    f"{origin}:{lineno}: unknown brand {named!r}; the brands are "
-                    f"{', '.join(BRANDS)}"
-                )
-            if named not in declared:
-                raise CommandSourceError(
-                    f"{origin}:{lineno}: brand {named!r} is not one this source "
-                    f"renders, so its block can reach no output; the source "
-                    f"renders {', '.join(declared)}"
-                )
             if open_line is None:
                 open_line = lineno
                 seen = set()
                 emitted = False
-            elif named in seen:
-                raise CommandSourceError(
-                    f"{origin}:{lineno}: brand {named!r} appears twice in the block "
-                    f"opened at line {open_line}"
-                )
-            seen.add(named)
-            active = named
+            names = opened.group("brands").split(",")
+            for named in names:
+                if named not in BRANDS:
+                    raise CommandSourceError(
+                        f"{origin}:{lineno}: unknown brand {named!r}; the brands are "
+                        f"{', '.join(BRANDS)}"
+                    )
+                if named not in declared:
+                    raise CommandSourceError(
+                        f"{origin}:{lineno}: brand {named!r} is not one this source "
+                        f"renders, so its block can reach no output; the source "
+                        f"renders {', '.join(declared)}"
+                    )
+                if named in seen:
+                    raise CommandSourceError(
+                        f"{origin}:{lineno}: brand {named!r} appears twice in the block "
+                        f"opened at line {open_line}"
+                    )
+                seen.add(named)
+            active = frozenset(names)
             continue
         if closed is not None:
             if open_line is None:
@@ -603,19 +716,19 @@ def select_brand(
                     f"{origin}:{lineno}: `<!-- /brand -->` closes no open brand block"
                 )
             open_line = None
-            active = None
-            squeeze = not emitted and (not kept or not kept[-1].strip())
+            active = frozenset()
+            squeeze = not emitted and (not kept or not kept[-1][1].strip())
             continue
-        if open_line is not None and active != brand:
+        if open_line is not None and brand not in active:
             continue
-        kept.append(line)
+        kept.append((lineno, line))
         if open_line is not None:
             emitted = True
     if open_line is not None:
         raise CommandSourceError(
             f"{origin}:{open_line}: brand block is never closed by `<!-- /brand -->`"
         )
-    return "".join(kept)
+    return kept
 
 
 def referenced_names(text: str) -> set[str]:
@@ -624,7 +737,7 @@ def referenced_names(text: str) -> set[str]:
 
 
 def validate_directives(text: str, *, origin: str) -> None:
-    """Refuse any `{{...}}` that is not a command reference.
+    """Refuse any `{{...}}` that is not a command reference or a brand token.
 
     Checked over the whole source rather than over the text one brand keeps,
     so a mistyped directive inside a block the rendered brand elides is still
@@ -632,17 +745,70 @@ def validate_directives(text: str, *, origin: str) -> None:
     brand rendered.
     """
     for match in DIRECTIVE_RE.finditer(text):
-        if COMMAND_REF_RE.fullmatch(match.group(0)) is None:
-            raise CommandSourceError(
-                f"{origin}: unsupported directive {match.group(0)!r}; the only "
-                "directive is {{cmd:<workflow-name>}}"
-            )
+        directive = match.group(0)
+        if COMMAND_REF_RE.fullmatch(directive) is not None:
+            continue
+        token = BRAND_TOKEN_RE.fullmatch(directive)
+        if token is not None and token.group("form") in BRAND_TOKEN_FORMS:
+            continue
+        raise CommandSourceError(
+            f"{origin}: unsupported directive {directive!r}; the directives are "
+            "{{cmd:<workflow-name>}} and "
+            + ", ".join(f"{{{{brand:{form}}}}}" for form in BRAND_TOKEN_FORMS)
+        )
 
 
 def substitute_references(text: str, brand: str) -> str:
     """`text` with every `{{cmd:<name>}}` replaced by `brand`'s spelling."""
     sigil = SIGILS[brand]
     return COMMAND_REF_RE.sub(lambda match: sigil + match.group("name"), text)
+
+
+def enumerate_titles(titles: list[str]) -> str:
+    """`A or B`, or `A, B, or C` — how a sentence lists alternatives."""
+    if len(titles) <= 2:
+        return " or ".join(titles)
+    return ", ".join(titles[:-1]) + ", or " + titles[-1]
+
+
+def brand_token_value(form: str, brand: str, *, origin: str) -> str:
+    """What `{{brand:<form>}}` renders for `brand`.
+
+    `name` is the brand as origin markers and bundle directories spell it,
+    `title` as prose does, and `upper` as an environment-variable prefix does.
+    `predecessors` lists, by title, every brand `BRAND_TABLE` declares before
+    this one. That is an explicit ordering, not "every other brand": each
+    external bundle names the brands that existed when it was added, so a
+    derivation from the whole brand set would rewrite all of them.
+    """
+    if form == "name":
+        return brand
+    if form == "title":
+        return BRAND_TABLE[brand].title
+    if form == "upper":
+        return brand.upper()
+    earlier = [BRAND_TABLE[other].title for other in BRANDS[: BRANDS.index(brand)]]
+    if not earlier:
+        raise CommandSourceError(
+            f"{origin}: {{{{brand:predecessors}}}} has nothing to enumerate for "
+            f"{brand!r}, the first brand in BRAND_TABLE"
+        )
+    return enumerate_titles(earlier)
+
+
+def substitute_brand_tokens(text: str, brand: str, *, origin: str) -> str:
+    """`text` with every `{{brand:<form>}}` replaced by `brand`'s value."""
+    return BRAND_TOKEN_RE.sub(
+        lambda match: brand_token_value(match.group("form"), brand, origin=origin),
+        text,
+    )
+
+
+def substitute(text: str, brand: str, *, origin: str) -> str:
+    """`text` with every directive resolved for `brand`."""
+    return substitute_brand_tokens(
+        substitute_references(text, brand), brand, origin=origin
+    )
 
 
 def literal_invocation_failures(text: str, names: set[str], *, origin: str) -> list[str]:
@@ -697,7 +863,9 @@ def render(
             "from the file, so the two must agree"
         )
     validate_directives(source_text, origin=origin)
-    fields, body, body_line = parse_source(source_text, origin=origin)
+    fields, body, body_line = parse_source(
+        source_text, brand, origin=origin, declared=declared
+    )
     if fields["name"] != entry.name:
         raise CommandSourceError(
             f"{origin}: frontmatter declares name {fields['name']!r} but the "
@@ -711,7 +879,7 @@ def render(
         body, brand, origin=origin, body_line=body_line, declared=declared
     )
     lines = [
-        f"{key}: {substitute_references(fields[key], brand)}"
+        f"{key}: {substitute(fields[key], brand, origin=origin)}"
         for key in BRAND_FRONTMATTER_KEYS[brand]
         if key in fields
     ]
@@ -719,7 +887,7 @@ def render(
         "---\n"
         + "".join(f"{line}\n" for line in lines)
         + "---\n"
-        + substitute_references(selected, brand)
+        + substitute(selected, brand, origin=origin)
     )
     return rendered if rendered.endswith("\n") else rendered + "\n"
 

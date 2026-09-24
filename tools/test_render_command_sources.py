@@ -34,7 +34,10 @@ directly against this mechanism rather than vendored from a personal copy --
 `fix` and, since LEDGER-7 (issue #685), `auto-project-review`, all eleven of
 which do render into both bundles, so the same class pins
 the shipped sets at twenty-six and twenty-five and pins which registered
-source belongs to which kind.
+source belongs to which kind. Since EXT-2 (issue #717) it holds a third kind
+too, the external `solve`, which renders into the Grok, Kimi, and Google
+bundles and neither of the other two; `tools/test_external_solve_workflow.py`
+holds its reach.
 """
 
 from __future__ import annotations
@@ -90,6 +93,13 @@ SHIPPING_SOURCE_NAMES = {
     "autosolve",
     "auto-project-review",
 }
+
+# The registered sources that render into the three external bundles and
+# neither of the two above. Keyed by source path rather than by name, because
+# the external `solve` shares its name with the hand-edited Claude and Codex
+# `solve` pair it deliberately does not render.
+EXTERNAL_SOURCES = {"tools/command_sources/external/solve.md"}
+EXTERNAL_PREFIXES = ("grok-plugin/", "kimi-plugin/", "google-plugin/")
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
 FIXTURE_CLAUDE_OUTPUT = "tools/command_render_fixture/claude/commands/fixture-command.md"
@@ -157,6 +167,8 @@ SYNTHETIC_OUTPUTS = {
     "claude": "tools/out/claude/commands",
     "codex": "tools/out/codex/skills",
     "grok": "tools/out/grok/skills",
+    "kimi": "tools/out/kimi/skills",
+    "google": "tools/out/google/skills",
 }
 
 
@@ -502,9 +514,35 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         # cannot agree by coincidence while the membership drifted.
         self.assertEqual(codex, claude - {CLAUDE_ONLY_WORKFLOW})
         for entry in renderer.COMMAND_SOURCES:
+            if entry.source in EXTERNAL_SOURCES:
+                # Its name may be one the two bundles ship by hand; what it
+                # renders is pinned by the test below.
+                continue
             shipped = entry.name in SHIPPING_SOURCE_NAMES
             self.assertEqual(entry.name in claude, shipped, entry.name)
             self.assertEqual(entry.name in codex, shipped, entry.name)
+
+
+    def test_an_external_source_renders_into_the_external_bundles_alone(self):
+        # The third kind: it ships in the grok, kimi and google bundles, and
+        # in neither the Claude nor the Codex one.
+        external = [
+            entry
+            for entry in renderer.COMMAND_SOURCES
+            if entry.source in EXTERNAL_SOURCES
+        ]
+        self.assertEqual({entry.source for entry in external}, EXTERNAL_SOURCES)
+        for entry in external:
+            paths = renderer.output_paths(entry)
+            self.assertEqual(sorted(paths), ["google", "grok", "kimi"], entry.source)
+            for brand, path in paths.items():
+                self.assertTrue(path.startswith(f"{brand}-plugin/"), path)
+                self.assertTrue((REPO_ROOT / path).is_file(), f"missing {path}")
+        for entry in renderer.COMMAND_SOURCES:
+            if entry.source in EXTERNAL_SOURCES:
+                continue
+            for path in renderer.output_paths(entry).values():
+                self.assertFalse(path.startswith(EXTERNAL_PREFIXES), path)
 
 
 class LayoutAndFrontmatterTests(unittest.TestCase):
@@ -1008,6 +1046,181 @@ class EntryBrandSetTests(unittest.TestCase):
         entry = synthetic_entry(brands=())
         with self.assertRaises(renderer.CommandSourceError):
             renderer.output_paths(entry)
+
+
+EXTERNAL_BRANDS = ("grok", "kimi", "google")
+
+
+class SharedVariantTests(unittest.TestCase):
+    """Issue #717: one variant a block gives several brands at once."""
+
+    SOURCE = textwrap.dedent(
+        """\
+        ---
+        name: synthetic
+        description: d
+        ---
+
+        <!-- brand:grok -->
+        Grok's own text.
+        <!-- brand:kimi,google -->
+        The Copilot pair's text.
+        <!-- /brand -->
+        """
+    )
+
+    def test_every_named_brand_keeps_the_shared_variant(self):
+        for brand in ("kimi", "google"):
+            rendered = render_text(self.SOURCE, brand, brands=EXTERNAL_BRANDS)
+            self.assertIn("The Copilot pair's text.", rendered, brand)
+            self.assertNotIn("Grok's own text.", rendered, brand)
+        grok = render_text(self.SOURCE, "grok", brands=EXTERNAL_BRANDS)
+        self.assertIn("Grok's own text.", grok)
+        self.assertNotIn("Copilot", grok)
+
+    def test_a_brand_repeated_across_variants_is_refused(self):
+        source = self.SOURCE.replace("<!-- brand:grok -->", "<!-- brand:grok,kimi -->")
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(source, "grok", brands=EXTERNAL_BRANDS)
+        self.assertIn("'kimi' appears twice", str(raised.exception))
+
+    def test_every_name_in_a_shared_marker_is_checked(self):
+        # The second name is the one at fault, so a check reading only the
+        # first would pass.
+        for name, expected in (
+            ("gemini", "unknown brand 'gemini'"),
+            ("claude", "'claude' is not one this source renders"),
+        ):
+            source = self.SOURCE.replace("brand:kimi,google", f"brand:kimi,{name}")
+            with self.assertRaises(renderer.CommandSourceError, msg=name) as raised:
+                render_text(source, "grok", brands=EXTERNAL_BRANDS)
+            self.assertIn(expected, str(raised.exception))
+
+
+class BrandTokenTests(unittest.TestCase):
+    """Issue #717: per-brand values a source references by name."""
+
+    SOURCE = textwrap.dedent(
+        """\
+        ---
+        name: synthetic
+        description: Opens a {{brand:name}}-origin PR, never imitating a {{brand:predecessors}} one.
+        ---
+
+        This session is {{brand:title}}. Prefer `${{brand:upper}}_PLUGIN_ROOT`,
+        spelled `"${{{brand:upper}}_PLUGIN_ROOT:-}"` in shell, and stamp
+        `<!-- pr-origin:{{brand:name}} -->`.
+        """
+    )
+
+    def test_each_form_renders_its_brands_value(self):
+        kimi = render_text(self.SOURCE, "kimi", brands=EXTERNAL_BRANDS)
+        self.assertIn("This session is Kimi.", kimi)
+        self.assertIn("`$KIMI_PLUGIN_ROOT`", kimi)
+        self.assertIn('`"${KIMI_PLUGIN_ROOT:-}"`', kimi)
+        self.assertIn("`<!-- pr-origin:kimi -->`", kimi)
+        self.assertNotIn("{{", kimi)
+
+    def test_tokens_render_in_frontmatter_too(self):
+        google = render_text(self.SOURCE, "google", brands=EXTERNAL_BRANDS)
+        self.assertIn(
+            "description: Opens a google-origin PR, never imitating a Claude, "
+            "Codex, Grok, or Kimi one.\n",
+            google,
+        )
+
+    def test_predecessors_are_the_brands_declared_earlier_in_the_table(self):
+        # The brands that existed when each was added, in that order -- not
+        # every other brand, which would rewrite every external bundle.
+        self.assertEqual(
+            renderer.BRANDS, ("claude", "codex", "grok", "kimi", "google")
+        )
+        expected = {
+            "codex": "Claude",
+            "grok": "Claude or Codex",
+            "kimi": "Claude, Codex, or Grok",
+            "google": "Claude, Codex, Grok, or Kimi",
+        }
+        for brand, listed in expected.items():
+            self.assertEqual(
+                renderer.brand_token_value("predecessors", brand, origin="o"),
+                listed,
+                brand,
+            )
+
+    def test_the_first_brand_has_no_predecessors_to_enumerate(self):
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(self.SOURCE, "claude")
+        self.assertIn("nothing to enumerate for 'claude'", str(raised.exception))
+
+    def test_an_unknown_form_is_refused(self):
+        source = self.SOURCE.replace("{{brand:title}}", "{{brand:display}}")
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(source, "kimi", brands=EXTERNAL_BRANDS)
+        self.assertIn("{{brand:display}}", str(raised.exception))
+
+    def test_a_malformed_token_after_a_brace_is_still_refused(self):
+        # The control for the shell-expansion spelling above: a directive
+        # opening at the last brace of a run is still validated.
+        source = self.SOURCE.replace("${{{brand:upper}}", "${{{brand:UPPER}}")
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(source, "kimi", brands=EXTERNAL_BRANDS)
+        self.assertIn("{{brand:UPPER}}", str(raised.exception))
+
+
+class FrontmatterBrandBlockTests(unittest.TestCase):
+    """Issue #717: a frontmatter value only some brands carry."""
+
+    SOURCE = textwrap.dedent(
+        """\
+        ---
+        name: synthetic
+        <!-- brand:grok -->
+        description: Grok's description.
+        <!-- brand:kimi,google -->
+        description: The Copilot pair's description.
+        <!-- /brand -->
+        argument-hint: "[issue number]"
+        ---
+
+        Body.
+        """
+    )
+
+    def test_each_brand_declares_its_own_variant_once(self):
+        grok = render_text(self.SOURCE, "grok", brands=EXTERNAL_BRANDS)
+        self.assertEqual(
+            frontmatter_lines(grok),
+            [
+                "name: synthetic",
+                "description: Grok's description.",
+                'argument-hint: "[issue number]"',
+            ],
+        )
+        kimi = render_text(self.SOURCE, "kimi", brands=EXTERNAL_BRANDS)
+        self.assertEqual(
+            frontmatter_lines(kimi),
+            ["name: synthetic", "description: The Copilot pair's description."],
+        )
+
+    def test_a_brand_left_without_a_required_key_is_refused(self):
+        source = self.SOURCE.replace(
+            "<!-- brand:kimi,google -->", "<!-- brand:kimi -->"
+        )
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(source, "google", brands=EXTERNAL_BRANDS)
+        self.assertIn("must declare description", str(raised.exception))
+
+    def test_a_frontmatter_error_names_its_source_line(self):
+        source = self.SOURCE.replace(
+            "description: The Copilot pair's description.", "model: opus"
+        )
+        expected = source.splitlines().index("model: opus") + 1
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(source, "kimi", brands=EXTERNAL_BRANDS)
+        message = str(raised.exception)
+        self.assertIn("unsupported frontmatter key 'model'", message)
+        self.assertIn(f":{expected}:", message)
 
 
 class IdempotenceTests(unittest.TestCase):

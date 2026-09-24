@@ -15,6 +15,16 @@ created above it.
 
 ### Unreleased
 
+- The Grok, Kimi, and Google `solve` workflows are now rendered from one
+  authored source, `tools/command_sources/external/solve.md`, instead of being
+  three hand-maintained copies, so a shared policy change is written once and
+  `python3 tools/render_command_sources.py --check` fails on a hand-edited
+  output. The renderer gains `kimi` and `google` brands, variants shared by
+  several brands (`<!-- brand:kimi,google -->`), brand blocks in frontmatter,
+  and `{{brand:name}}`, `{{brand:title}}`, `{{brand:upper}}`, and
+  `{{brand:predecessors}}` tokens for per-brand values. The rendered bytes are
+  the bytes those bundles already shipped, so no bundle version changes. The
+  Claude and Codex `solve` stay hand-edited.
 - Processing a tracked document whose owner declares no publication lane no
   longer stalls when its working copy carries the owner's unlanded edits.
   `publish_coordination_doc.py` now applies the approved mutation over a
