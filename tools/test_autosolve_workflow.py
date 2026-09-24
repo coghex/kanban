@@ -326,9 +326,9 @@ class RegistrationTests(unittest.TestCase):
 
     def entry(self) -> renderer.CommandSource:
         matching = [
-            entry for entry in renderer.COMMAND_SOURCES if entry.name == "autosolve"
+            entry for entry in renderer.COMMAND_SOURCES if entry.source == SOURCE
         ]
-        self.assertEqual(len(matching), 1, "autosolve is registered exactly once")
+        self.assertEqual(len(matching), 1, f"{SOURCE} is registered exactly once")
         return matching[0]
 
     def test_the_source_renders_into_both_bundle_directories(self):

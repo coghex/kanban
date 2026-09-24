@@ -15,6 +15,13 @@ created above it.
 
 ### Unreleased
 
+- The Grok, Kimi, and Google `autosolve` workflows are now rendered from one
+  authored source, `tools/command_sources/external/autosolve.md`, instead of
+  being three hand-maintained copies, so a shared policy change is written once
+  and `python3 tools/render_command_sources.py --check` fails on a hand-edited
+  output. The rendered bytes are the bytes those bundles already shipped, so no
+  bundle version changes. The Claude and Codex `autosolve` keep rendering from
+  `tools/command_sources/autosolve.md`.
 - The Grok, Kimi, and Google `solve` workflows are now rendered from one
   authored source, `tools/command_sources/external/solve.md`, instead of being
   three hand-maintained copies, so a shared policy change is written once and

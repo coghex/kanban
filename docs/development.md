@@ -209,9 +209,10 @@ every bundle, so nothing becomes invokable; it covers the Claude and Codex
 layouts plus a third brand, grok, which pairs the skill-directory layout with
 the `/` sigil and its own frontmatter keys. The vendored workflows render into
 `claude-plugin/.../commands/` and `codex-plugin/.../skills/`, so they ship and
-the bundle rules above apply to them. The external `solve`, authored under
-`tools/command_sources/external/`, renders into the Grok, Kimi, and Google
-bundles and neither of those two, whose own `solve` stays hand-edited.
+the bundle rules above apply to them. The external `solve` and `autosolve`,
+authored under `tools/command_sources/external/`, render into the Grok, Kimi,
+and Google bundles and neither of those two, whose own `solve` stays
+hand-edited and whose own `autosolve` renders from its separate source.
 
 ## Source layout
 
