@@ -2830,8 +2830,21 @@ above are unchanged, and persistence the user switched off is not a failure.
   repository's refresh jobs run in. Every production board-refresh entry point
   goes through it — startup, `u`, and the refreshes a finished review, solve, or
   pull-request action requires — so two requests arriving together resolve to
-  one owner, neither can spawn `gh` while the other holds it, and no
-  interleaving of the record's read-modify-write updates can lose an entry.
+  one owner and neither can spawn `gh` while the other holds it. The
+  coordinator and the lease below do not, on their own, keep the record's
+  updates from losing an entry, because processes the lease does not govern
+  rewrite the record too. What does is a cross-process lock: every
+  read-modify-write of the record — registering a group, dropping one, the
+  coverage check, reclaim's read together with the clear it pairs with, and the
+  legacy migration — holds an exclusive, blocking `flock` on
+  `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.record-lock` for the whole
+  of it, inside the in-process ordering, so no interleaving of those updates
+  can lose an entry. That file carries no payload, is never unlinked or
+  renamed, is neither the record nor the lease, and is taken by every process
+  that rewrites the record, lease or none. An update that cannot establish it
+  fails the way a failed record write does rather than running unsynchronised,
+  whatever the record would read as without it: a reclaim refuses and a drop
+  fails.
   Scope is one coordinator per repository within one dashboard process, and one
   such process is all there can be: dashboard mode takes a repository-scoped
   POSIX write lease on
@@ -3805,6 +3818,7 @@ Suggested paths:
 ~/.cache/kanban/repos/<owner>-<repo>.json
 ~/.cache/kanban/usage.json
 ~/.cache/kanban/usage.lock
+~/.cache/kanban/gh-groups/<canonical-key>.record-lock
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl

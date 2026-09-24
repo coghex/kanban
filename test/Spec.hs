@@ -50,6 +50,7 @@ import qualified Spec.GitHub.Decoding as GitHubDecoding
 import qualified Spec.GitHub.History as GitHubHistory
 import qualified Spec.GitHub.Precondition as GitHubPrecondition
 import qualified Spec.GitHub.PullRequestStatus as PullRequestStatus
+import qualified Spec.GitHub.RecordLock as RecordLock
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
@@ -71,6 +72,7 @@ import Spec.Support.Lanes
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
 import Spec.Support.NotifyProbe (notifyProbeVariable, runNotifyProbe)
+import Spec.Support.RecordWriters (recordWriterVariable, runRecordWriter)
 import Spec.Support.SchedulerProbe (runSchedulerProbe, schedulerProbeVariable)
 import Spec.Support.Locale (localeProbeVariable, runLocaleProbe)
 import Spec.Support.UsageWriters (runUsageWriter, usageWriterVariable)
@@ -102,7 +104,7 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stdin, stdout)
 
--- | Ordinarily the suite. Six markers divert it instead, and each names a
+-- | Ordinarily the suite. Seven markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
@@ -111,7 +113,10 @@ import System.IO (stdin, stdout)
 -- for why a thread would not do), 'leaseProbeVariable' makes it one of the
 -- independent processes contending for a repository's lease (see
 -- "Spec.Support.LeaseProbes" for why a thread would not merely be weaker but
--- would prove the opposite), and 'missionProbeVariable' makes it one of the
+-- would prove the opposite), 'recordWriterVariable' makes it one of the
+-- independent processes rewriting a repository's durable @gh@ record (see
+-- "Spec.Support.RecordWriters" for why threads would exercise the wrong lock),
+-- and 'missionProbeVariable' makes it one of the
 -- independent processes acting on a mission store (see
 -- "Spec.Support.MissionProbes" for the two things a thread cannot stage there:
 -- a reader sharing nothing with the writer, and a lease holder there is
@@ -127,7 +132,7 @@ import System.IO (stdin, stdout)
 -- reaches stderr, and what the process exits with (see
 -- "Spec.Support.SchedulerProbe").
 --
--- All six are asked about before the suite and deliberately so: a lane
+-- All seven are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -149,17 +154,19 @@ main = do
       localeProbe <- lookupEnv localeProbeVariable
       usageWriter <- lookupEnv usageWriterVariable
       leaseProbe <- lookupEnv leaseProbeVariable
+      recordWriter <- lookupEnv recordWriterVariable
       missionProbe <- lookupEnv missionProbeVariable
       notifyProbe <- lookupEnv notifyProbeVariable
       schedulerProbe <- lookupEnv schedulerProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, missionProbe, notifyProbe, schedulerProbe) of
-        (Just probeRoot, _, _, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _, _, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath, _, _) -> runMissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Just directory, _) -> runNotifyProbe directory
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Just argv) -> runSchedulerProbe argv
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+      case (localeProbe, usageWriter, leaseProbe, recordWriter, missionProbe, notifyProbe, schedulerProbe) of
+        (Just probeRoot, _, _, _, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _, _, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _, _, _, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath, _, _, _) -> runRecordWriter planPath
+        (Nothing, Nothing, Nothing, Nothing, Just planPath, _, _) -> runMissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Just directory, _) -> runNotifyProbe directory
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just argv) -> runSchedulerProbe argv
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -220,6 +227,11 @@ suiteGroups =
     SuiteGroup "Spec.UI.SolveChooser" PingLane SolveChooser.spec,
     SuiteGroup "Spec.Agent.Usage" UsageLane Usage.spec, -- 45.7s
     SuiteGroup "Spec.Repository.Lease" UsageLane RepositoryLease.spec, -- 1.7s
+    -- Beside "Spec.Repository.Lease" for the reason 'suiteColocations' records
+    -- for that group: it starts suite processes of its own -- two record
+    -- writers and a lease probe -- and the swept-process assertions in this
+    -- lane are measured against that churn. Its own cost rides along anywhere.
+    SuiteGroup "Spec.GitHub.RecordLock" UsageLane RecordLock.spec,
     -- Beside the other group that starts suite processes of its own, and for
     -- the same reason 'suiteColocations' records for the pair it names: the
     -- assertions in @UsageLane@ about a swept process being gone are measured

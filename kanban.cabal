@@ -318,6 +318,7 @@ test-suite kanban-test
     Spec.GitHub.History
     Spec.GitHub.Precondition
     Spec.GitHub.PullRequestStatus
+    Spec.GitHub.RecordLock
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
     Spec.Mission
@@ -347,6 +348,7 @@ test-suite kanban-test
     Spec.Support.SchedulerProbe
     Spec.Support.Preflight
     Spec.Support.Process
+    Spec.Support.RecordWriters
     Spec.Support.Render
     Spec.Support.Roster
     Spec.Support.UsageWriters
