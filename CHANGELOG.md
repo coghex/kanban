@@ -15,6 +15,20 @@ created above it.
 
 ### Unreleased
 
+- Processing a tracked document whose owner declares no publication lane no
+  longer stalls when its working copy carries the owner's unlanded edits.
+  `publish_coordination_doc.py` now applies the approved mutation over a
+  tracked working copy that is neither the publication tip's content nor its
+  own last write when that copy is still byte-identical to the preflight's
+  `--expected-working-copy` blob, reporting `applied-over-preflight-copy` and
+  recording it so `tracker_transaction.py --resolve --source local` resolves
+  it. Before, the only way past the `unrecognized-working-copy` refusal was to
+  land the owner's unrelated pending documents first. A copy that moved after
+  the preflight is still refused and left untouched, and a document with a
+  direct-publication lane publishes exactly as before. The publishing assets
+  and `docs/document-workflow-contract.md` §9 describe the preflight copy as
+  applying to any document without a lane. The Claude bundle is 1.63.0 and the
+  Codex bundle 1.62.0.
 - `autosolve` no longer tells the user that the merge after approval is a
   manual step they take, and no longer closes by inviting `finalize`
   unconditionally. `docs/agent-workflow-contract.md` §2.10 gives ordinary merge

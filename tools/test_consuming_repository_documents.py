@@ -553,6 +553,108 @@ class ConsumingRepositoryTests(unittest.TestCase):
                     self.fixture.primary,
                 ))
 
+    # -- issue #727: a tracked report whose working copy is ahead of the tip --
+
+    OWNER_EDITED = REPORT.replace(
+        "### CR-1 — The first finding\n\nBody.\n",
+        "### CR-1 — The first finding\n\nBody.\n\nAn owner's unlanded paragraph.\n",
+    )
+
+    def test_a_tracked_document_takes_its_dispositions_over_an_unlanded_edit(self):
+        # The sequence observed on coghex/hetoimasia: no lane is declared, the
+        # report is tracked on the tip, and the working copy carries an owner
+        # edit that has not been batch-landed yet. Both processing assets,
+        # through the bundled helpers: the preflight reports that copy, the
+        # first disposition is applied over it with the owner's edit preserved,
+        # the transaction resolves from the working tree, and a second
+        # disposition continues over the first and resolves the same way.
+        self.assertIn("An owner's unlanded paragraph.", self.OWNER_EDITED)
+        for relative_path, brand, uses_tracker in ASSETS:
+            if not uses_tracker:
+                continue
+            with self.subTest(asset=relative_path):
+                self.build_repository()
+                publish, tracker_script = self.resolve_helpers(relative_path, brand)
+                self.assertIn(DOCUMENT, run(
+                    ["git", "ls-tree", "-r", "--name-only", f"origin/{BRANCH}"],
+                    self.fixture.primary,
+                ))
+                (self.fixture.docs / DOCUMENT).write_text(
+                    self.OWNER_EDITED, encoding="utf-8"
+                )
+
+                def dispose(plan, identity, content, expected_outcome):
+                    preflight = self.helper(publish, "--branch", BRANCH, "--check-pending")
+                    self.assertEqual(preflight["status"], "clear", preflight)
+                    tip = preflight["publication_tip"]
+                    self.transaction(
+                        tracker_script, "--acquire", "--approved",
+                        "--publication-tip", tip, "--plan", "-", stdin=plan,
+                    )
+                    begun = self.transaction(
+                        tracker_script, "--begin-step", "0", "--approved"
+                    )
+                    self.transaction(
+                        tracker_script, "--confirm-step", "0",
+                        "--begin-token", begun["begin_token"], "--identity", "-",
+                        stdin=identity,
+                    )
+                    self.transaction(tracker_script, "--publication-pending")
+                    outcome = self.publish(
+                        publish, content, tip,
+                        working_copy=preflight["working_copy_blob"],
+                    )
+                    self.assertEqual(outcome["status"], "not-published", outcome)
+                    self.assertEqual(outcome["write_outcome"], expected_outcome, outcome)
+                    self.assertEqual(outcome["applied_record"], "recorded", outcome)
+                    self.assertEqual(
+                        (self.fixture.docs / DOCUMENT).read_text(encoding="utf-8"),
+                        content,
+                    )
+                    resolved = self.transaction(
+                        tracker_script, "--resolve", "--source", "local",
+                        "--branch", BRANCH,
+                    )
+                    self.assertEqual(resolved["status"], "resolved", resolved)
+                    return preflight, outcome
+
+                first_content = self.OWNER_EDITED.replace(
+                    "- [ ] CR-1. The first finding",
+                    "- [x] CR-1. The first finding — [#7]",
+                )
+                preflight, first = dispose(
+                    self.PLAN, self.IDENTITY, first_content,
+                    "applied-over-preflight-copy",
+                )
+                self.assertNotEqual(
+                    preflight["working_copy_blob"],
+                    run(
+                        ["git", "rev-parse", f"origin/{BRANCH}:{DOCUMENT}"],
+                        self.fixture.primary,
+                    ),
+                )
+                self.assertIn(
+                    "An owner's unlanded paragraph.",
+                    (self.fixture.docs / DOCUMENT).read_text(encoding="utf-8"),
+                )
+
+                both = first_content.replace(
+                    "- [ ] CR-2. The second finding",
+                    "- [x] CR-2. The second finding — [#8]",
+                )
+                again, _second = dispose(
+                    self.SECOND_PLAN, self.SECOND_IDENTITY, both,
+                    "applied-over-local-predecessor",
+                )
+                self.assertEqual(again["working_copy_blob"], first["approved_blob"])
+                self.assertEqual(
+                    self.helper(publish, "--branch", BRANCH, "--check-pending")["status"],
+                    "clear",
+                )
+                # The tip is untouched: landing stays the owner's choice.
+                self.assertNotIn("[#7]", self.fixture.remote_content())
+                self.assertNotIn("unlanded paragraph", self.fixture.remote_content())
+
     def test_a_declared_lane_for_another_document_publishes_nothing_here(self):
         # The declaration is exact and per path, so a repository with a lane is
         # not a repository whose every document publishes.

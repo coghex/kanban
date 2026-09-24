@@ -685,14 +685,15 @@ of it. Act on the one structured result it returns:
   A working copy byte-identical to what the helper last applied locally is its
   own unlanded write, and the approved mutation is applied on top of it — so
   successive approved mutations to a document its owner lands out of band
-  accumulate rather than wedging on the first one. A document absent from the
-  publication tip is applied over the working copy the preflight observed,
-  provided it is still byte-identical to it — that is what `$PREFLIGHT_COPY`
-  binds, and it is how a report processed before its owner's first batch landing
-  takes its disposition like any other. A working copy that is none of those —
-  neither the publication tip's content, the helper's own last write, nor, for a
-  document absent from the tip, the copy the preflight observed — is never
-  overwritten, and nothing is applied over it.
+  accumulate rather than wedging on the first one. A document without a lane is
+  applied over the working copy the preflight observed, provided it is still
+  byte-identical to it, whether that document is absent from the publication tip
+  or tracked there with owner edits that have not landed yet — that is what
+  `$PREFLIGHT_COPY` binds, and it is how a report processed before its owner's
+  first batch landing, or edited since the last one, takes its disposition like
+  any other. A working copy that is none of those — neither the publication
+  tip's content, the helper's own last write, nor the copy the preflight
+  observed — is never overwritten, and nothing is applied over it.
 
   `applied_record` is the other half of that. The helper records what it wrote
   in its own reference, and only `"recorded"` — with `applied_ref` naming that
@@ -733,21 +734,21 @@ of it. Act on the one structured result it returns:
   `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
   approved mutation survives only as `approved_blob`; an `applied_record` of
   `"unrecorded"` means the write cannot be proven and no later run may build on
-  it. `no-baseline` on a document that exists means the working copy moved after
-  the preflight observed it, or the binding was not passed: re-read the
-  document, render the disposition again, and hand it over with a fresh
-  preflight's binding. Each of those needs the write root, the document path,
-  and the preserved `approved_blob` named plainly, because the mutation is not
-  where the next run will look for it. A `"published"` status and any other
-  status keep the reports described beside them for their own reasons — a
-  publication is verified success with a changed-line summary the run has to
-  check, and an unmodelled status is a failure whose three states are the only
-  account of where the document went.
-- **Any other status.** The document was not published. Report the three states
-  the helper returns — whether the edit exists locally and in which worktree and
-  path, whether a local publication commit exists and its ID, and whether the
-  remote publication branch contains it — and say plainly which one applies.
-  Leave the document as the helper left it.
+  it. `no-baseline` on a document that exists, or `unrecognized-working-copy`,
+  means the working copy moved after the preflight observed it, or the binding
+  was not passed: re-read the document, render the disposition again, and hand
+  it over with a fresh preflight's binding. Each of those needs the write root,
+  the document path, and the preserved `approved_blob` named plainly, because
+  the mutation is not where the next run will look for it. A `"published"`
+  status and any other status keep the reports described beside them for their
+  own reasons — a publication is verified success with a changed-line summary
+  the run has to check, and an unmodelled status is a failure whose three states
+  are the only account of where the document went. - **Any other status.** The
+  document was not published. Report the three states the helper returns —
+  whether the edit exists locally and in which worktree and path, whether a
+  local publication commit exists and its ID, and whether the remote publication
+  branch contains it — and say plainly which one applies. Leave the document as
+  the helper left it.
 
 ### Resolve the tracker transaction
 

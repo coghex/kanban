@@ -677,15 +677,21 @@ PUBLICATION_CLAUSES = {
     # applies the mutation over that copy only while it still holds those
     # bytes. Pinned because it is the case that stranded every first
     # disposition of a report processed before its owner's batch landing.
-    "applies-a-novel-document-over-the-preflight-copy": (
-        "a document absent from the publication tip is applied over the working "
-        "copy the preflight observed, provided it is still byte-identical to it"
+    # Issue #727 widened it to every document without a lane: a tracked
+    # document whose working copy carries unlanded owner edits stranded its
+    # transaction the same way, so the clause names both shapes, and the
+    # foreign-copy clause no longer confines the preflight copy to a document
+    # absent from the tip. RETIRED_PUBLICATION_FRAGMENTS holds the old wording.
+    "applies-a-document-without-a-lane-over-the-preflight-copy": (
+        "a document without a lane is applied over the working copy the "
+        "preflight observed, provided it is still byte-identical to it, whether "
+        "that document is absent from the publication tip or tracked there with "
+        "owner edits that have not landed yet"
     ),
     "never-overwrites-a-foreign-working-copy": (
         "a working copy that is none of those — neither the publication tip's "
-        "content, the helper's own last write, nor, for a document absent from "
-        "the tip, the copy the preflight observed — is never overwritten, and "
-        "nothing is applied over it"
+        "content, the helper's own last write, nor the copy the preflight "
+        "observed — is never overwritten, and nothing is applied over it"
     ),
     "only-a-recorded-write-licenses-continuation": (
         'only "recorded" — with applied_ref naming that reference — lets a later '
@@ -701,6 +707,24 @@ PUBLICATION_CLAUSES = {
     "names-the-write-root-and-the-blob": (
         "needs the write root, the document path, and the preserved "
         "approved_blob named plainly"
+    ),
+}
+
+# Issue #727: the pre-widening wording of the two clauses above, which confined
+# the preflight copy to a document absent from the tip. A publishing asset that
+# kept either would direct a run to refuse the tracked case the helper now
+# applies, so each is asserted absent, and each is shown to fail the clause
+# that replaced it.
+RETIRED_PUBLICATION_FRAGMENTS = {
+    "applies-a-document-without-a-lane-over-the-preflight-copy": (
+        "a document absent from the publication tip is applied over the working "
+        "copy the preflight observed, provided it is still byte-identical to it"
+    ),
+    "never-overwrites-a-foreign-working-copy": (
+        "a working copy that is none of those — neither the publication tip's "
+        "content, the helper's own last write, nor, for a document absent from "
+        "the tip, the copy the preflight observed — is never overwritten, and "
+        "nothing is applied over it"
     ),
 }
 
@@ -2485,6 +2509,22 @@ class PublicationTests(unittest.TestCase):
                     self.assertEqual(
                         missing_publication_clauses(asset.replace(clause, "")), [key]
                     )
+
+    def test_no_publishing_asset_confines_the_preflight_copy_to_a_novel_document(self):
+        # Issue #727's negative control. The widened clauses must not be
+        # satisfiable by the wording they replaced: restoring the old wording
+        # in place of the new reports exactly that clause missing, and no
+        # publishing asset still carries the old wording anywhere.
+        self.assertEqual(
+            set(RETIRED_PUBLICATION_FRAGMENTS) - set(PUBLICATION_CLAUSES), set()
+        )
+        for path in PUBLISHING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, fragment in RETIRED_PUBLICATION_FRAGMENTS.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertNotIn(fragment, asset)
+                    reverted = asset.replace(PUBLICATION_CLAUSES[key], fragment)
+                    self.assertEqual(missing_publication_clauses(reverted), [key])
 
     def test_every_publishing_asset_reports_the_ordinary_outcome_by_silence(self):
         # Issue #577. The rule these assets gained: on the one settled outcome
