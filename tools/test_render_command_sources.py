@@ -35,9 +35,10 @@ directly against this mechanism rather than vendored from a personal copy --
 which do render into both bundles, so the same class pins
 the shipped sets at twenty-six and twenty-five and pins which registered
 source belongs to which kind. Since EXT-2 (issue #717) it holds a third kind
-too, the external `solve`, which renders into the Grok, Kimi, and Google
-bundles and neither of the other two; `tools/test_external_solve_workflow.py`
-holds its reach.
+too, the external `solve` and, since EXT-3 (issue #718), the external
+`autosolve`, which render into the Grok, Kimi, and Google bundles and neither
+of the other two; `tools/test_external_solve_workflow.py` and
+`tools/test_external_autosolve_workflow.py` hold their reach.
 """
 
 from __future__ import annotations
@@ -96,9 +97,12 @@ SHIPPING_SOURCE_NAMES = {
 
 # The registered sources that render into the three external bundles and
 # neither of the two above. Keyed by source path rather than by name, because
-# the external `solve` shares its name with the hand-edited Claude and Codex
-# `solve` pair it deliberately does not render.
-EXTERNAL_SOURCES = {"tools/command_sources/external/solve.md"}
+# each shares its name with a Claude and Codex pair it deliberately does not
+# render: the hand-edited `solve`, and the `autosolve` another source renders.
+EXTERNAL_SOURCES = {
+    "tools/command_sources/external/solve.md",
+    "tools/command_sources/external/autosolve.md",
+}
 EXTERNAL_PREFIXES = ("grok-plugin/", "kimi-plugin/", "google-plugin/")
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
@@ -239,8 +243,16 @@ class RegistryShapeTests(unittest.TestCase):
         # Guards every gate below: an empty registry would make the staleness
         # check pass by having nothing to check.
         self.assertTrue(renderer.COMMAND_SOURCES)
-        names = [entry.name for entry in renderer.COMMAND_SOURCES]
-        self.assertEqual(sorted(names), sorted(set(names)))
+        sources = [entry.source for entry in renderer.COMMAND_SOURCES]
+        self.assertEqual(sorted(sources), sorted(set(sources)))
+        # A name may repeat only across the canonical/external split -- the
+        # external autosolve beside the Claude and Codex one -- and then only
+        # between entries rendering disjoint brand sets, so no bundle ships two.
+        brands_by_name = {}
+        for entry in renderer.COMMAND_SOURCES:
+            claimed = brands_by_name.setdefault(entry.name, set())
+            self.assertFalse(claimed & set(entry.outputs), entry.name)
+            claimed |= set(entry.outputs)
         outputs = [
             path
             for entry in renderer.COMMAND_SOURCES
@@ -487,8 +499,13 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         # shipping kind is pinned as well as the fixture: an entry that
         # rendered a vendored workflow outside both bundles would ship
         # nothing while every other assertion here still passed.
+        shipping = {
+            source.name: source
+            for source in renderer.COMMAND_SOURCES
+            if source.source not in EXTERNAL_SOURCES
+        }
         for name in SHIPPING_SOURCE_NAMES:
-            entry = {source.name: source for source in renderer.COMMAND_SOURCES}[name]
+            entry = shipping[name]
             paths = renderer.output_paths(entry)
             self.assertEqual(sorted(paths), ["claude", "codex"], name)
             self.assertTrue(paths["claude"].startswith(CLAUDE_COMMANDS_PREFIX), paths)

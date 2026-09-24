@@ -87,8 +87,10 @@ grok, which proves the generalized mechanism without an external bundle
 changing. `triage` — VEND-1, the first real rendering — renders into the Claude
 and Codex bundle directories and is therefore shipped, named by both bundles'
 manifests and discovered by both providers. The external `solve` — EXT-2 —
-renders into the Grok, Kimi, and Google bundles and neither of those two,
-whose own `solve` stays hand-edited.
+and the external `autosolve` — EXT-3 — render into the Grok, Kimi, and Google
+bundles and neither of those two, whose own `solve` stays hand-edited and whose
+own `autosolve` is the separate entry above it. Two entries may therefore share
+a name, and are told apart by their source path, never by that name.
 """
 
 from __future__ import annotations
@@ -493,6 +495,29 @@ COMMAND_SOURCES = (
             "binding and helper discovery -- where Grok says one thing and the "
             "two Copilot-hosted bundles another, plus the description clause "
             "only those two carry. Its migration moved no rendered byte."
+        ),
+    ),
+    CommandSource(
+        name="autosolve",
+        source="tools/command_sources/external/autosolve.md",
+        outputs=EXTERNAL_OUTPUTS,
+        note=(
+            "EXT-3 of docs/coordination/external_workflow_authoring_design.md "
+            "(issue #718): the grok, kimi and google autosolve, each driving a "
+            "Codex review of the pull request its own solve opened. It shares "
+            "a name with the Claude and Codex autosolve rendered from "
+            "tools/command_sources/autosolve.md above, and the two sources are "
+            "deliberately not merged, so this one lives under external/ and "
+            "renders into neither of their bundles. The reviewer route is "
+            "shared text -- all three brands route to Codex -- and only the "
+            "origin beside it is a {{brand:name}} token, so no brand block "
+            "sits around the route. {{brand:predecessors}} spells the sibling "
+            "plugin paths the coordinator fallback refuses. Four brand blocks "
+            "carry where Grok says one thing and the two Copilot-hosted "
+            "bundles another: the argument binding, the step 2 sentence that "
+            "follows from it, the coordinator discovery, and that refusal "
+            "line, which the two sides wrap differently. Its migration moved "
+            "no rendered byte."
         ),
     ),
 )
