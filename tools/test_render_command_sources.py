@@ -9,7 +9,10 @@ things are under test and they fail for different reasons:
 * **The mechanism.** One authored source renders into a Claude
   `commands/<name>.md` and a Codex `skills/<name>/SKILL.md`, reconciling file
   layout, per-brand frontmatter keys, and the invocation sigil throughout the
-  body — and rendering twice changes nothing.
+  body — and rendering twice changes nothing. Since issue #716 an entry
+  declares which brands it renders, and each brand declares its layout,
+  frontmatter keys, and sigil independently; the fixture proves a third brand,
+  grok, that takes Codex's layout with Claude's sigil and a key set of its own.
 * **The gate.** Every registered source is re-rendered here and byte-compared
   against its tracked output, so a source edited without re-rendering fails
   `build-test`. Running the renderer once by hand proves it ran once; this is
@@ -93,6 +96,18 @@ FIXTURE_CLAUDE_OUTPUT = "tools/command_render_fixture/claude/commands/fixture-co
 FIXTURE_CODEX_OUTPUT = (
     "tools/command_render_fixture/codex/skills/fixture-command/SKILL.md"
 )
+FIXTURE_GROK_OUTPUT = "tools/command_render_fixture/grok/skills/fixture-command/SKILL.md"
+FIXTURE_OUTPUTS = {
+    "claude": FIXTURE_CLAUDE_OUTPUT,
+    "codex": FIXTURE_CODEX_OUTPUT,
+    "grok": FIXTURE_GROK_OUTPUT,
+}
+
+# Every bundle directory prefix in the tree, so the fixture's unshippedness is
+# asserted against all of them rather than the two it started with.
+PLUGIN_PREFIXES = tuple(
+    f"{path.name}/" for path in sorted(REPO_ROOT.glob("*-plugin")) if path.is_dir()
+)
 
 # Text that looks sigil-adjacent but is not a workflow invocation. Every one
 # must reach both rendered files unchanged, which is the half of the
@@ -138,12 +153,22 @@ SYNTHETIC = textwrap.dedent(
 )
 
 
-def synthetic_entry(name="synthetic", source=None):
+SYNTHETIC_OUTPUTS = {
+    "claude": "tools/out/claude/commands",
+    "codex": "tools/out/codex/skills",
+    "grok": "tools/out/grok/skills",
+}
+
+
+def synthetic_entry(name="synthetic", source=None, brands=None):
+    """A synthetic entry rendering every registered brand, or `brands`."""
     return renderer.CommandSource(
         name=name,
         source=source or f"tools/command_sources/{name}.md",
-        claude_commands_dir="tools/out/claude/commands",
-        codex_skills_dir="tools/out/codex/skills",
+        outputs={
+            brand: SYNTHETIC_OUTPUTS[brand]
+            for brand in (renderer.BRANDS if brands is None else brands)
+        },
         note="synthetic test entry",
     )
 
@@ -154,9 +179,9 @@ def synthetic_entry(name="synthetic", source=None):
 SYNTHETIC_VOCABULARY = {"synthetic", "solve", "pr-review"}
 
 
-def render_text(text, brand, name="synthetic", vocabulary=None):
+def render_text(text, brand, name="synthetic", vocabulary=None, brands=None):
     return renderer.render(
-        synthetic_entry(name),
+        synthetic_entry(name, brands=brands),
         text,
         brand,
         SYNTHETIC_VOCABULARY if vocabulary is None else vocabulary,
@@ -228,12 +253,42 @@ class RegistryShapeTests(unittest.TestCase):
         self.assertEqual(sorted(renderer.BRAND_FRONTMATTER_KEYS), sorted(renderer.BRANDS))
 
     def test_a_required_source_key_reaches_the_brands_that_need_it(self):
-        # Both loaders read `description`; only Codex reads `name`, which is
-        # why `name` is required in the source even though Claude drops it.
+        # Every loader reads `description`; the skill-directory loaders read
+        # `name` as well, which is why `name` is required in the source even
+        # though Claude drops it.
         for brand in renderer.BRANDS:
             self.assertIn("description", renderer.BRAND_FRONTMATTER_KEYS[brand], brand)
         self.assertIn("name", renderer.BRAND_FRONTMATTER_KEYS["codex"])
+        self.assertIn("name", renderer.BRAND_FRONTMATTER_KEYS["grok"])
         self.assertNotIn("name", renderer.BRAND_FRONTMATTER_KEYS["claude"])
+
+    def test_every_brand_declares_a_known_layout_and_a_patterned_sigil(self):
+        for brand, spec in renderer.BRAND_TABLE.items():
+            self.assertIn(spec.layout, renderer.LAYOUTS, brand)
+            self.assertIn(spec.sigil, renderer.IDENTIFIER_PATTERNS, brand)
+        self.assertEqual(renderer.BRANDS, tuple(renderer.BRAND_TABLE))
+        self.assertEqual(
+            renderer.SIGILS,
+            {brand: spec.sigil for brand, spec in renderer.BRAND_TABLE.items()},
+        )
+
+    def test_the_three_axes_are_independent(self):
+        # Requirement 2: the table can express a brand that is neither
+        # existing brand but shares an axis with each -- grok takes codex's
+        # layout, claude's sigil, and a key set that is neither's.
+        claude, codex, grok = (
+            renderer.BRAND_TABLE[brand] for brand in ("claude", "codex", "grok")
+        )
+        self.assertEqual(grok.layout, codex.layout)
+        self.assertEqual(grok.sigil, claude.sigil)
+        self.assertNotEqual(grok.frontmatter_keys, claude.frontmatter_keys)
+        self.assertNotEqual(grok.frontmatter_keys, codex.frontmatter_keys)
+        self.assertEqual(grok.frontmatter_keys, ("name", "description", "argument-hint"))
+
+    def test_every_entry_declares_a_non_empty_set_of_registered_brands(self):
+        for entry in renderer.COMMAND_SOURCES:
+            self.assertTrue(entry.outputs, entry.name)
+            self.assertLessEqual(set(entry.outputs), set(renderer.BRANDS), entry.name)
 
     def test_the_workflow_token_pattern_matches_the_bundle_gates(self):
         # One notion of where a sigil-prefixed workflow token may start, across
@@ -246,8 +301,10 @@ class RegistryShapeTests(unittest.TestCase):
                 for sigil, pattern in plugin_bundle_gate.IDENTIFIER_PATTERNS.items()
             },
         )
+        # Two brands may share a sigil -- claude and grok both use `/` -- so
+        # the comparison is over the distinct sigils, not one per brand.
         self.assertEqual(
-            sorted(renderer.SIGILS.values()), sorted(renderer.IDENTIFIER_PATTERNS)
+            set(renderer.SIGILS.values()), set(renderer.IDENTIFIER_PATTERNS)
         )
 
     def test_the_refusal_pattern_is_the_shared_one_plus_a_trailing_boundary(self):
@@ -280,8 +337,8 @@ class RenderedArtifactsAreCurrentTests(unittest.TestCase):
     def test_the_gate_has_something_to_compare(self):
         rendered = renderer.render_all(REPO_ROOT)
         self.assertGreaterEqual(len(rendered), 2)
-        self.assertIn(FIXTURE_CLAUDE_OUTPUT, rendered)
-        self.assertIn(FIXTURE_CODEX_OUTPUT, rendered)
+        for path in FIXTURE_OUTPUTS.values():
+            self.assertIn(path, rendered)
 
     def test_the_command_line_check_agrees_with_the_tracked_tree(self):
         self.assertEqual(renderer.main(["--check"]), 0)
@@ -322,8 +379,8 @@ class StaleArtifactDetectionTests(unittest.TestCase):
         self.assertIn(self.rendered_paths()["codex"], failures[0])
         self.assertIn(renderer.RENDER_INSTRUCTION, failures[0])
 
-    def test_an_edited_source_makes_both_rendered_files_stale(self):
-        # The drift this gate exists for: the single source moves and the two
+    def test_an_edited_source_makes_every_rendered_file_stale(self):
+        # The drift this gate exists for: the single source moves and the
         # generated files do not.
         renderer.write_all(self.root)
         source = self.root / self.entry.source
@@ -334,7 +391,7 @@ class StaleArtifactDetectionTests(unittest.TestCase):
             encoding="utf-8",
         )
         failures = renderer.check_all(self.root)
-        self.assertEqual(len(failures), 2, failures)
+        self.assertEqual(len(failures), len(renderer.BRANDS), failures)
         self.assertEqual(
             sorted(path for path in self.rendered_paths().values()),
             sorted(failure.split(" ", 1)[0] for failure in failures),
@@ -347,6 +404,31 @@ class StaleArtifactDetectionTests(unittest.TestCase):
         self.assertEqual(len(failures), 1, failures)
         self.assertIn(self.rendered_paths()["claude"], failures[0])
         self.assertIn("missing", failures[0])
+
+    def test_the_third_brands_missing_output_is_reported_with_the_repair(self):
+        # Requirement 5: the new brand's output is gated exactly as the
+        # existing two are.
+        renderer.write_all(self.root)
+        grok = self.rendered_paths()["grok"]
+        (self.root / grok).unlink()
+        failures = renderer.check_all(self.root)
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn(grok, failures[0])
+        self.assertIn("missing", failures[0])
+        self.assertIn(renderer.RENDER_INSTRUCTION, failures[0])
+
+    def test_the_third_brands_stale_output_is_reported_with_the_repair(self):
+        renderer.write_all(self.root)
+        grok = self.rendered_paths()["grok"]
+        with (self.root / grok).open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        failures = renderer.check_all(self.root)
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn(grok, failures[0])
+        self.assertIn("stale", failures[0])
+        self.assertIn(renderer.RENDER_INSTRUCTION, failures[0])
+        self.assertEqual(renderer.write_all(self.root), [grok])
+        self.assertEqual(renderer.check_all(self.root), [])
 
     def test_rendering_repairs_what_the_check_reported(self):
         renderer.write_all(self.root)
@@ -378,11 +460,14 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         entry = {source.name: source for source in renderer.COMMAND_SOURCES}[
             "fixture-command"
         ]
+        # Non-vacuous: the prefixes include the two shipping bundles.
+        self.assertIn("claude-plugin/", PLUGIN_PREFIXES)
+        self.assertIn("codex-plugin/", PLUGIN_PREFIXES)
         for brand, path in renderer.output_paths(entry).items():
             self.assertFalse(
-                path.startswith((CLAUDE_COMMANDS_PREFIX, CODEX_SKILLS_PREFIX)),
-                f"fixture-command renders {brand} into a shipped bundle "
-                f"directory ({path}); it must stay invokable by neither provider",
+                path.startswith(PLUGIN_PREFIXES),
+                f"fixture-command renders {brand} into a bundle ({path}); it "
+                "must stay invokable by every provider",
             )
 
     def test_a_production_source_renders_into_both_bundles(self):
@@ -393,19 +478,17 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         for name in SHIPPING_SOURCE_NAMES:
             entry = {source.name: source for source in renderer.COMMAND_SOURCES}[name]
             paths = renderer.output_paths(entry)
+            self.assertEqual(sorted(paths), ["claude", "codex"], name)
             self.assertTrue(paths["claude"].startswith(CLAUDE_COMMANDS_PREFIX), paths)
             self.assertTrue(paths["codex"].startswith(CODEX_SKILLS_PREFIX), paths)
 
-    def test_the_fixture_renders_to_the_two_paths_this_slice_declares(self):
+    def test_the_fixture_renders_to_the_three_paths_it_declares(self):
         entry = {source.name: source for source in renderer.COMMAND_SOURCES}[
             "fixture-command"
         ]
         self.assertEqual(entry.source, FIXTURE_SOURCE)
-        self.assertEqual(
-            renderer.output_paths(entry),
-            {"claude": FIXTURE_CLAUDE_OUTPUT, "codex": FIXTURE_CODEX_OUTPUT},
-        )
-        for path in (FIXTURE_CLAUDE_OUTPUT, FIXTURE_CODEX_OUTPUT):
+        self.assertEqual(renderer.output_paths(entry), FIXTURE_OUTPUTS)
+        for path in FIXTURE_OUTPUTS.values():
             self.assertTrue((REPO_ROOT / path).is_file(), f"missing {path}")
 
     def test_the_shipped_sets_are_the_ones_this_slice_declares(self):
@@ -430,12 +513,33 @@ class LayoutAndFrontmatterTests(unittest.TestCase):
     def setUp(self):
         self.claude = read(FIXTURE_CLAUDE_OUTPUT)
         self.codex = read(FIXTURE_CODEX_OUTPUT)
+        self.grok = read(FIXTURE_GROK_OUTPUT)
 
     def test_each_brand_lands_in_its_own_layout(self):
         self.assertTrue(FIXTURE_CLAUDE_OUTPUT.endswith("/commands/fixture-command.md"))
         self.assertTrue(
             FIXTURE_CODEX_OUTPUT.endswith("/skills/fixture-command/SKILL.md")
         )
+        self.assertTrue(FIXTURE_GROK_OUTPUT.endswith("/skills/fixture-command/SKILL.md"))
+
+    def test_the_grok_file_declares_all_three_keys_matching_its_directory(self):
+        # The third brand's projection: neither claude's pair nor codex's.
+        self.assertEqual(
+            frontmatter_keys(self.grok), ["name", "description", "argument-hint"]
+        )
+        name_line = frontmatter_lines(self.grok)[0]
+        self.assertEqual(name_line, "name: fixture-command")
+        self.assertEqual(Path(FIXTURE_GROK_OUTPUT).parent.name, "fixture-command")
+        self.assertEqual(
+            frontmatter_lines(self.grok)[2], frontmatter_lines(self.claude)[1]
+        )
+
+    def test_the_grok_description_takes_the_slash_sigil(self):
+        # Same sigil as claude, so the description is claude's byte for byte.
+        self.assertEqual(
+            frontmatter_lines(self.grok)[1], frontmatter_lines(self.claude)[0]
+        )
+        self.assertIn("/fixture-command", frontmatter_lines(self.grok)[1])
 
     def test_the_claude_file_declares_claude_frontmatter(self):
         self.assertEqual(frontmatter_keys(self.claude), ["description", "argument-hint"])
@@ -548,16 +652,20 @@ class InvocationSigilTests(unittest.TestCase):
     def setUp(self):
         self.claude = read(FIXTURE_CLAUDE_OUTPUT)
         self.codex = read(FIXTURE_CODEX_OUTPUT)
+        self.grok = read(FIXTURE_GROK_OUTPUT)
         self.claude_body = body_of(self.claude)
         self.codex_body = body_of(self.codex)
+        self.grok_body = body_of(self.grok)
 
     def test_the_sigil_is_rewritten_in_body_prose_not_frontmatter_alone(self):
         # The failure this guards is a renderer that rewrites keys and paths
         # and ships a Codex skill telling its reader to type /solve.
         self.assertIn("/autosolve drives /solve, /pr-review", self.claude_body)
         self.assertIn("$autosolve drives $solve, $pr-review", self.codex_body)
+        self.assertIn("/autosolve drives /solve, /pr-review", self.grok_body)
         self.assertNotIn("/autosolve", self.codex_body)
         self.assertNotIn("$autosolve", self.claude_body)
+        self.assertNotIn("$autosolve", self.grok_body)
 
     def test_cross_command_references_are_rewritten_for_both_brands(self):
         source = read(FIXTURE_SOURCE)
@@ -571,13 +679,14 @@ class InvocationSigilTests(unittest.TestCase):
         for name in sorted(referenced):
             self.assertIn(f"/{name}", self.claude, name)
             self.assertIn(f"${name}", self.codex, name)
+            self.assertIn(f"/{name}", self.grok, name)
 
     def test_neither_file_carries_the_other_brands_sigil_for_a_workflow(self):
         referenced = renderer.referenced_names(read(FIXTURE_SOURCE))
         # Scanned with the boundary-aware pattern, which is what an invocation
         # in body text really looks like: the fixture deliberately carries
         # `$solve_result` and `/solve/cache`, and neither is a leaked sigil.
-        for text, wrong in ((self.claude, "$"), (self.codex, "/")):
+        for text, wrong in ((self.claude, "$"), (self.codex, "/"), (self.grok, "$")):
             found = {
                 match.group(1)
                 for match in renderer.LITERAL_INVOCATION_PATTERNS[wrong].finditer(text)
@@ -588,6 +697,7 @@ class InvocationSigilTests(unittest.TestCase):
         for fragment in NON_INVOCATIONS:
             self.assertIn(fragment, self.claude, fragment)
             self.assertIn(fragment, self.codex, fragment)
+            self.assertIn(fragment, self.grok, fragment)
 
     def test_a_literal_slash_invocation_is_refused(self):
         source = SYNTHETIC.replace("Invoke {{cmd:solve}}", "Invoke /solve")
@@ -693,8 +803,25 @@ class BrandBlockTests(unittest.TestCase):
         self.assertIn("Codex takes its argument from the prompt.", codex)
         self.assertNotIn("Claude takes its argument", codex)
 
-    def test_no_marker_reaches_either_rendered_file(self):
+    def test_a_brand_the_block_does_not_name_receives_nothing_from_it(self):
+        grok = render_text(SYNTHETIC, "grok")
+        self.assertNotIn("takes its argument", grok)
+        self.assertNotIn("\n\n\n", grok)
+
+    def test_the_fixtures_third_brand_keeps_only_its_own_variants(self):
+        grok = read(FIXTURE_GROK_OUTPUT)
+        self.assertIn("which Grok substitutes", grok)
+        self.assertIn("$GROK_PLUGIN_ROOT", grok)
+        # The claude and codex variants of the same block, and the claude-only
+        # block, contribute nothing to it.
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", grok)
+        self.assertNotIn("CODEX_HOME", grok)
+        self.assertNotIn("This one is Claude's.", grok)
         for path in (FIXTURE_CLAUDE_OUTPUT, FIXTURE_CODEX_OUTPUT):
+            self.assertNotIn("GROK", read(path), path)
+
+    def test_no_marker_reaches_either_rendered_file(self):
+        for path in FIXTURE_OUTPUTS.values():
             text = read(path)
             self.assertNotIn("<!-- brand:", text, path)
             self.assertNotIn("<!-- /brand -->", text, path)
@@ -740,8 +867,8 @@ class BrandBlockTests(unittest.TestCase):
         self.assertEqual(body_of(render_text(source, "codex")), "\nAbove.\n\nBelow.\n")
 
     def test_the_fixtures_elided_block_leaves_no_double_blank_line(self):
-        self.assertNotIn("\n\n\n", read(FIXTURE_CODEX_OUTPUT))
-        self.assertNotIn("\n\n\n", read(FIXTURE_CLAUDE_OUTPUT))
+        for path in FIXTURE_OUTPUTS.values():
+            self.assertNotIn("\n\n\n", read(path), path)
 
     def test_an_unclosed_block_is_refused(self):
         source = SYNTHETIC.replace("<!-- /brand -->\n", "")
@@ -777,6 +904,76 @@ class BrandBlockTests(unittest.TestCase):
         self.assertIn(f":{expected}:", str(raised.exception))
 
 
+class EntryBrandSetTests(unittest.TestCase):
+    """Requirements 1 and 6: an entry renders exactly the brands it declares,
+    and authored text for any other brand is an error rather than a no-op."""
+
+    def test_an_entry_declaring_a_subset_renders_exactly_that_subset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plant_bundles(root)
+            entry = synthetic_entry(brands=("claude", "grok"))
+            source = root / entry.source
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                SYNTHETIC.replace("<!-- brand:codex -->", "<!-- brand:grok -->"),
+                encoding="utf-8",
+            )
+            rendered = renderer.render_entry(entry, root)
+            self.assertEqual(
+                sorted(rendered),
+                sorted(
+                    [
+                        "tools/out/claude/commands/synthetic.md",
+                        "tools/out/grok/skills/synthetic/SKILL.md",
+                    ]
+                ),
+            )
+            with mock.patch.object(renderer, "COMMAND_SOURCES", (entry,)):
+                renderer.write_all(root)
+            self.assertFalse((root / "tools/out/codex").exists())
+
+    def test_rendering_an_undeclared_brand_is_refused(self):
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            render_text(SYNTHETIC.replace(
+                "<!-- brand:codex -->\nCodex takes its argument from the prompt.\n", ""
+            ), "codex", brands=("claude",))
+        self.assertIn("'codex' is not a brand this source renders", str(raised.exception))
+
+    def test_a_block_naming_a_registered_but_undeclared_brand_is_refused(self):
+        # codex is in the brand table, so only the entry's own set can refuse
+        # it -- and it must, for every brand the entry does render.
+        for brand in ("claude", "grok"):
+            with self.assertRaises(renderer.CommandSourceError, msg=brand) as raised:
+                render_text(SYNTHETIC, brand, brands=("claude", "grok"))
+            message = str(raised.exception)
+            self.assertIn("'codex' is not one this source renders", message)
+            expected = SYNTHETIC.splitlines().index("<!-- brand:codex -->") + 1
+            self.assertIn(f":{expected}:", message)
+
+    def test_the_same_block_renders_when_the_brand_is_declared(self):
+        # The control for the refusal above: the refusal is the entry's set,
+        # not the brand.
+        rendered = render_text(SYNTHETIC, "claude", brands=("claude", "codex"))
+        self.assertIn("Claude takes its argument", rendered)
+
+    def test_an_entry_naming_an_unregistered_brand_is_refused(self):
+        entry = renderer.CommandSource(
+            name="synthetic",
+            source="tools/command_sources/synthetic.md",
+            outputs={"claude": "tools/out/claude/commands", "gemini": "tools/out/gemini"},
+            note="synthetic test entry",
+        )
+        with self.assertRaises(renderer.CommandSourceError) as raised:
+            renderer.output_paths(entry)
+        self.assertIn("gemini", str(raised.exception))
+
+    def test_an_entry_declaring_no_brand_is_refused(self):
+        entry = synthetic_entry(brands=())
+        with self.assertRaises(renderer.CommandSourceError):
+            renderer.output_paths(entry)
+
+
 class IdempotenceTests(unittest.TestCase):
     """Requirement 3: rendering is a function of the source alone."""
 
@@ -784,7 +981,7 @@ class IdempotenceTests(unittest.TestCase):
         source = read(FIXTURE_SOURCE)
         entry = {item.name: item for item in renderer.COMMAND_SOURCES}["fixture-command"]
         vocabulary = renderer.workflow_vocabulary(REPO_ROOT)
-        for brand in renderer.BRANDS:
+        for brand in renderer.output_paths(entry):
             first = renderer.render(entry, source, brand, vocabulary)
             self.assertEqual(first, renderer.render(entry, source, brand, vocabulary))
 

@@ -167,31 +167,43 @@ fails rather than passing unenforced.
 
 ## Rendering a shared command source
 
-Some workflow commands are authored once and rendered into both bundle
-layouts, instead of being maintained as two hand-edited copies that drift.
+Some workflow commands are authored once and rendered into every bundle that
+ships them, instead of being maintained as hand-edited copies that drift.
 `tools/render_command_sources.py` holds the registry and the transformation:
 
 ```console
-python3 tools/render_command_sources.py            # write both files
-python3 tools/render_command_sources.py --check    # report stale ones
+python3 tools/render_command_sources.py            # write every rendered file
+python3 tools/render_command_sources.py --check    # report stale or missing ones
 ```
 
-An authored source lives under `tools/command_sources/` and carries the union
-of both brands' frontmatter. It names a workflow with a `cmd` directive rather
-than a literal `/name` or `$name`, so each brand's file gets its own sigil, and
-it keeps deliberate per-brand body text inside a
-`<!-- brand:claude -->` / `<!-- brand:codex -->` / `<!-- /brand -->` block.
-Rendering refuses a literal sigil written where a directive belongs.
+A brand is declared once, in that module's `BRAND_TABLE`, as three independent
+choices: its file layout (`commands/<name>.md` or `skills/<name>/SKILL.md`), the
+frontmatter keys its loader reads, and its invocation sigil. Claude uses the
+command-file layout with `/`, Codex the skill-directory layout with `$`, and a
+brand may pair either layout with either sigil and its own key set. Each
+registry entry names the brands it renders, with an output directory for each,
+and gets a rendered file for exactly those brands and no others.
 
-After editing a source, re-render and commit both generated files.
+An authored source lives under `tools/command_sources/` and carries the union
+of its brands' frontmatter. It names a workflow with a `cmd` directive rather
+than a literal `/name` or `$name`, so each brand's file gets its own sigil, and
+it keeps deliberate per-brand body text inside a block of
+`<!-- brand:<name> -->` variants closed by `<!-- /brand -->`. A brand the block
+does not name gets nothing from it. Rendering refuses a literal sigil written
+where a directive belongs, and a block naming a brand the entry does not render,
+since that text could never reach a file.
+
+After editing a source, re-render and commit every generated file.
 `tools/test_render_command_sources.py` re-renders every registered source and
 byte-compares it against the tracked output, so a source changed without a
 re-render fails the required `build-test` job.
 
-Only a fixture is registered today (issue #375): it renders under `tools/`,
-outside both bundles, so nothing new becomes invokable while the mechanism is
-proved. A command rendered into `claude-plugin/.../commands/` or
-`codex-plugin/.../skills/` is shipped, and the bundle rules above apply to it.
+Two kinds of entry are registered. The fixture renders under `tools/`, outside
+every bundle, so nothing becomes invokable; it covers the Claude and Codex
+layouts plus a third brand, grok, which pairs the skill-directory layout with
+the `/` sigil and its own frontmatter keys. The vendored workflows render into
+`claude-plugin/.../commands/` and `codex-plugin/.../skills/`, so they ship and
+the bundle rules above apply to them.
 
 ## Source layout
 

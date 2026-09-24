@@ -1,4 +1,4 @@
-"""Render one authored command source into both plugin bundle layouts.
+"""Render one authored command source into each of its brands' bundle layouts.
 
 Run with: python3 tools/render_command_sources.py [--check]
 
@@ -9,14 +9,17 @@ personal copies of every command have already drifted — `project-review`'s by
 223 lines. This module is that mechanism, built and proved before any command
 is vendored so the reconciliation cost is paid once.
 
-Three differences separate the two layouts, and a renderer that reconciles only
-some of them ships a broken asset:
+Three differences separate the layouts, and a renderer that reconciles only
+some of them ships a broken asset. Each is declared per brand in `BRAND_TABLE`,
+independently of the other two, because the bundles combine them freely — Grok
+takes Codex's layout with Claude's sigil (issue #716):
 
-* **File layout.** Claude reads `commands/<name>.md`; Codex reads
+* **File layout.** Claude reads `commands/<name>.md`; Codex and Grok read
   `skills/<name>/SKILL.md`.
 * **Frontmatter keys.** Claude declares `description` and `argument-hint`;
-  Codex declares `name` and `description`. The projection here is an
-  allowlist per brand, and the source's own key set is an allowlist too, so a
+  Codex declares `name` and `description`; Grok declares all three. The
+  projection here is an allowlist per brand, and the source's own key set is
+  an allowlist too, so a
   `model:` or `permission-mode:` key that would override the model, effort, or
   permission mode Kanban's CLI spawn already pins
   (`docs/agent-workflow-contract.md` §2.1-§2.2) cannot reach a rendered file at
@@ -36,7 +39,7 @@ one under some spelling of that rule. The token has no such ambiguity, so
 requirement "rewrite invocations, and nothing else" holds by construction.
 
 The token's own failure mode is an author who types `/solve` literally instead,
-which would render identically for Claude and wrongly for Codex. So rendering
+which would render correctly for a `/` brand and wrongly for Codex. So rendering
 also refuses a literal sigil-prefixed occurrence of any name in
 `workflow_vocabulary()`: every workflow either bundle already ships, every
 registered source name, plus the source's own name and its `{{cmd:}}` targets.
@@ -50,10 +53,11 @@ shrinking to nothing.
 Deliberate per-brand *body* text — argument conventions and installed-helper
 resolution, which `docs/designs/workflow_command_vendoring_design.md` D-2/D-7 require to
 survive reconciliation — stays authored in the one source, inside a
-`<!-- brand:claude -->` / `<!-- brand:codex -->` / `<!-- /brand -->` block. The
-shipped `solve` pair needs exactly that: `$ARGUMENTS` against a prompt argument,
-`${CLAUDE_PLUGIN_ROOT}` against a `$CODEX_HOME` search. A block naming only one
-brand renders as nothing at all for the other.
+`<!-- brand:<name> -->` / `<!-- /brand -->` block with one variant per brand.
+The shipped `solve` pair needs exactly that: `$ARGUMENTS` against a prompt
+argument, `${CLAUDE_PLUGIN_ROOT}` against a `$CODEX_HOME` search. A brand the
+block does not name receives nothing from it, and a block naming a brand its
+entry does not render is refused, since that text could reach no output.
 
 `COMMAND_SOURCES` is the registry, and `--check` re-renders every entry and
 byte-compares it against the tracked output, so a source edited without
@@ -61,14 +65,17 @@ re-rendering fails `tools/test_render_command_sources.py` in the required
 `build-test` job. A one-time `render && git diff --exit-code` demonstration
 would not: it proves the mechanism ran once, never that it keeps being run.
 
-The registry holds two kinds of entry, and the difference is the output
-directory alone. VEND-0's fixture renders under `tools/`, deliberately outside
-`claude-plugin/.../commands/` and `codex-plugin/.../skills/`, because
+Each entry declares the brands it renders, as the keys of its `outputs`
+mapping, and receives an output for exactly those. The registry holds two kinds
+of entry, and the difference is the output directories alone. VEND-0's fixture
+renders under `tools/`, deliberately outside every bundle directory, because
 `tools/plugin_bundle_gate.py` takes shippedness from location: anything
-rendered into either bundle directory becomes invokable and gate-relevant, and
-the fixture vendors no command. `triage` — VEND-1, the first real rendering —
-renders into those two bundle directories and is therefore shipped, named by
-both bundles' manifests and discovered by both providers.
+rendered into a bundle directory becomes invokable and gate-relevant, and the
+fixture vendors no command. It is also the one entry rendering a third brand,
+grok, which proves the generalized mechanism without an external bundle
+changing. `triage` — VEND-1, the first real rendering — renders into the Claude
+and Codex bundle directories and is therefore shipped, named by both bundles'
+manifests and discovered by both providers.
 """
 
 from __future__ import annotations
@@ -76,29 +83,72 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-BRANDS = ("claude", "codex")
+# The file shapes a brand's loader discovers a workflow in, as a template over
+# the entry's output directory and the workflow name.
+LAYOUTS = {
+    "command-file": "{directory}/{name}.md",
+    "skill-directory": "{directory}/{name}/SKILL.md",
+}
 
-# How each provider spells a workflow invocation.
-SIGILS = {"claude": "/", "codex": "$"}
 
-# Where each provider discovers the workflows it ships. Read to build the
-# vocabulary the literal-sigil refusal is measured against, never written by
-# this module: VEND-0 vendors no command.
+@dataclass(frozen=True)
+class Brand:
+    """How one provider's bundle spells a workflow.
+
+    The three axes are independent, because the bundles combine them freely:
+    Grok takes Codex's skill-directory layout with Claude's `/` sigil, and
+    declares a frontmatter key set that is neither of theirs.
+    """
+
+    # How the provider spells a workflow invocation.
+    sigil: str
+    # A key of `LAYOUTS`.
+    layout: str
+    # The frontmatter the provider's loader reads, in the order it is written.
+    # A key absent from the source is simply omitted; a key absent from this
+    # tuple never reaches the brand's file.
+    frontmatter_keys: tuple[str, ...]
+
+
+BRAND_TABLE = {
+    "claude": Brand(
+        sigil="/", layout="command-file", frontmatter_keys=("description", "argument-hint")
+    ),
+    "codex": Brand(
+        sigil="$", layout="skill-directory", frontmatter_keys=("name", "description")
+    ),
+    "grok": Brand(
+        sigil="/",
+        layout="skill-directory",
+        frontmatter_keys=("name", "description", "argument-hint"),
+    ),
+}
+
+BRANDS = tuple(BRAND_TABLE)
+
+# The two per-brand views the workflow tests read, derived from the table so
+# they cannot disagree with it.
+SIGILS = {brand: spec.sigil for brand, spec in BRAND_TABLE.items()}
+BRAND_FRONTMATTER_KEYS = {
+    brand: spec.frontmatter_keys for brand, spec in BRAND_TABLE.items()
+}
+
+# Where Claude and Codex discover the workflows they ship. Read to build the
+# vocabulary the literal-sigil refusal is measured against, and named as the
+# output directories of every entry that ships in those two bundles.
 CLAUDE_COMMANDS_DIR = "claude-plugin/plugins/kanban/commands"
 CODEX_SKILLS_DIR = "codex-plugin/plugins/kanban/skills"
-
-# The frontmatter each brand's loader reads, in the order it is written. A key
-# absent from the source is simply omitted; a key absent from a brand's tuple
-# never reaches that brand's file.
-BRAND_FRONTMATTER_KEYS = {
-    "claude": ("description", "argument-hint"),
-    "codex": ("name", "description"),
-}
+# Read-only, because every shipping entry shares this one mapping.
+BUNDLE_OUTPUTS = MappingProxyType(
+    {"claude": CLAUDE_COMMANDS_DIR, "codex": CODEX_SKILLS_DIR}
+)
 
 # What an authored source may declare — an allowlist, so an override key fails
 # rendering rather than reaching a bundle.
@@ -154,17 +204,19 @@ class CommandSourceError(RuntimeError):
 
 @dataclass(frozen=True)
 class CommandSource:
-    """One authored source and the two directories it renders into.
+    """One authored source and the brands it renders into.
 
-    The output directories are per entry rather than global constants: a
-    vendored command renders into the two bundles, while VEND-0's fixture
-    renders outside both so nothing new becomes invokable.
+    `outputs` maps each brand the entry renders to the directory that brand's
+    layout is applied under, and its keys are the entry's whole brand set: a
+    brand it does not name receives no output, and a brand block naming such a
+    brand is refused. The directories are per entry rather than global
+    constants: a vendored command renders into the two bundles, while VEND-0's
+    fixture renders outside every bundle so nothing new becomes invokable.
     """
 
     name: str
     source: str
-    claude_commands_dir: str
-    codex_skills_dir: str
+    outputs: Mapping[str, str] = field(hash=False)
     note: str
 
 
@@ -172,19 +224,23 @@ COMMAND_SOURCES = (
     CommandSource(
         name="fixture-command",
         source="tools/command_sources/fixture-command.md",
-        claude_commands_dir="tools/command_render_fixture/claude/commands",
-        codex_skills_dir="tools/command_render_fixture/codex/skills",
+        outputs={
+            "claude": "tools/command_render_fixture/claude/commands",
+            "codex": "tools/command_render_fixture/codex/skills",
+            "grok": "tools/command_render_fixture/grok/skills",
+        },
         note=(
             "VEND-0's proof fixture. Its outputs mirror each bundle's layout "
             "but land under tools/, so the mechanism is exercised end to end "
-            "without adding an invokable command to either bundle."
+            "without adding an invokable command to any bundle. Issue #716 "
+            "gave it a third brand, grok, whose layout, sigil and frontmatter "
+            "keys are not all one existing brand's."
         ),
     ),
     CommandSource(
         name="triage",
         source="tools/command_sources/triage.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-1, the first vendored workflow. Unlike the fixture above it "
             "renders into both bundle directories, so both providers ship it "
@@ -194,8 +250,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="push-docs",
         source="tools/command_sources/push-docs.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "Issue #410's documentation-landing workflow. Both brands invoke "
             "the tracked tools/docs_land.sh identically, so the two rendered "
@@ -205,8 +260,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="retriage",
         source="tools/command_sources/retriage.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-2, the roadmap refresh that reads triage's own sections "
             "back. It names triage through {{cmd:triage}} rather than a "
@@ -217,8 +271,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="backlog-review",
         source="tools/command_sources/backlog-review.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-3, the first vendored workflow that closes issues and "
             "rewrites their bodies. Its brand blocks carry text one provider "
@@ -229,8 +282,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="project-review",
         source="tools/command_sources/project-review.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-4, the heaviest reconciliation in the arc: 223 differing "
             "lines between a 79-line Claude copy that drafted and filed issue "
@@ -246,8 +298,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="fix",
         source="tools/command_sources/fix.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "The approved-pull-request obstacle clearer. Authored here rather "
             "than as a hand-edited pair because it restates the worktree, "
@@ -262,8 +313,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="drain-prs",
         source="tools/command_sources/drain-prs.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-5, the first vendored workflow whose reconciliation is "
             "mostly against this repository rather than against the other "
@@ -278,8 +328,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="finalize",
         source="tools/command_sources/finalize.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-7, and the one slice in the arc with no Codex counterpart "
             "to reconcile against: the personal collection held a single "
@@ -295,8 +344,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="janitor",
         source="tools/command_sources/janitor.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-9, and the seventh of the arc's eight commands: only "
             "autosolve is left. It is the one slice split across two pull "
@@ -319,8 +367,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="autosolve",
         source="tools/command_sources/autosolve.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "VEND-8, and the last of the arc's eight commands: with it every "
             "personal copy is retired. It is the one entry whose body runs "
@@ -350,8 +397,7 @@ COMMAND_SOURCES = (
     CommandSource(
         name="auto-project-review",
         source="tools/command_sources/auto-project-review.md",
-        claude_commands_dir=CLAUDE_COMMANDS_DIR,
-        codex_skills_dir=CODEX_SKILLS_DIR,
+        outputs=BUNDLE_OUTPUTS,
         note=(
             "LEDGER-7 of docs/designs/project_review_ledger_design.md, and the first "
             "entry in this registry with no personal copy behind it at all: "
@@ -373,11 +419,27 @@ COMMAND_SOURCES = (
 )
 
 
+def declared_brands(entry: CommandSource) -> tuple[str, ...]:
+    """The brands `entry` renders into, refusing one no brand table names."""
+    unknown = sorted(set(entry.outputs) - set(BRANDS))
+    if unknown:
+        raise CommandSourceError(
+            f"{entry.source}: registered with unknown brand "
+            f"{', '.join(repr(brand) for brand in unknown)}; the brands are "
+            f"{', '.join(BRANDS)}"
+        )
+    if not entry.outputs:
+        raise CommandSourceError(f"{entry.source}: registered with no brand to render")
+    return tuple(entry.outputs)
+
+
 def output_paths(entry: CommandSource) -> dict[str, str]:
-    """The repository-relative file each brand renders to."""
+    """The repository-relative file each of the entry's brands renders to."""
     return {
-        "claude": f"{entry.claude_commands_dir}/{entry.name}.md",
-        "codex": f"{entry.codex_skills_dir}/{entry.name}/SKILL.md",
+        brand: LAYOUTS[BRAND_TABLE[brand].layout].format(
+            directory=entry.outputs[brand], name=entry.name
+        )
+        for brand in declared_brands(entry)
     }
 
 
@@ -411,7 +473,7 @@ def workflow_vocabulary(repo_root: Path = REPO_ROOT) -> set[str]:
 def parse_source(text: str, *, origin: str) -> tuple[dict[str, str], str, int]:
     """`(frontmatter fields, body, body's first line number)`.
 
-    Deliberately not a YAML parse: what both loaders read is a flat block of
+    Deliberately not a YAML parse: what every loader reads is a flat block of
     `key: value` lines, and accepting more than that here would let a source
     declare something only one brand's loader could interpret.
     """
@@ -453,7 +515,14 @@ def parse_source(text: str, *, origin: str) -> tuple[dict[str, str], str, int]:
     return fields, match.group("body"), body_line
 
 
-def select_brand(body: str, brand: str, *, origin: str, body_line: int) -> str:
+def select_brand(
+    body: str,
+    brand: str,
+    *,
+    origin: str,
+    body_line: int,
+    declared: tuple[str, ...] = BRANDS,
+) -> str:
     """`body` with every brand block resolved for `brand`.
 
     A block opens with `<!-- brand:<name> -->`, may switch variant with another
@@ -467,6 +536,11 @@ def select_brand(body: str, brand: str, *, origin: str, body_line: int) -> str:
     the other's does not. When an elided block is preceded by a blank line, the
     blank line that follows it is consumed with it. Only then: consuming it
     after a non-blank line would run two paragraphs together.
+
+    Every marker must name one of `declared`, the rendering entry's brand set,
+    and not merely a brand the table knows: a variant for a brand the entry
+    never renders could reach no output, so it is an authoring error rather
+    than text that silently vanishes.
     """
     kept: list[str] = []
     open_line: int | None = None
@@ -489,6 +563,12 @@ def select_brand(body: str, brand: str, *, origin: str, body_line: int) -> str:
                 raise CommandSourceError(
                     f"{origin}:{lineno}: unknown brand {named!r}; the brands are "
                     f"{', '.join(BRANDS)}"
+                )
+            if named not in declared:
+                raise CommandSourceError(
+                    f"{origin}:{lineno}: brand {named!r} is not one this source "
+                    f"renders, so its block can reach no output; the source "
+                    f"renders {', '.join(declared)}"
                 )
             if open_line is None:
                 open_line = lineno
@@ -574,7 +654,7 @@ def literal_invocation_failures(text: str, names: set[str], *, origin: str) -> l
                 failures.add(
                     f"{origin}: {sigil}{name} is written with a literal sigil; "
                     f"an authored source names a workflow as {{{{cmd:{name}}}}} so "
-                    "both brands render their own"
+                    "each brand renders its own"
                 )
     return sorted(failures)
 
@@ -588,8 +668,12 @@ def render(
     against — `workflow_vocabulary()` in every non-test caller. It is a
     parameter rather than a lookup so rendering stays a function of its inputs.
     """
-    if brand not in BRANDS:
-        raise CommandSourceError(f"unknown brand {brand!r}")
+    declared = declared_brands(entry)
+    if brand not in declared:
+        raise CommandSourceError(
+            f"{entry.source}: {brand!r} is not a brand this source renders; it "
+            f"renders {', '.join(declared)}"
+        )
     origin = entry.source
     if Path(entry.source).stem != entry.name:
         raise CommandSourceError(
@@ -608,7 +692,9 @@ def render(
     failures = literal_invocation_failures(source_text, known, origin=origin)
     if failures:
         raise CommandSourceError("\n".join(failures))
-    selected = select_brand(body, brand, origin=origin, body_line=body_line)
+    selected = select_brand(
+        body, brand, origin=origin, body_line=body_line, declared=declared
+    )
     lines = [
         f"{key}: {substitute_references(fields[key], brand)}"
         for key in BRAND_FRONTMATTER_KEYS[brand]
@@ -636,10 +722,9 @@ def render_entry(
         ) from error
     if vocabulary is None:
         vocabulary = workflow_vocabulary(repo_root)
-    paths = output_paths(entry)
     return {
-        paths[brand]: render(entry, source_text, brand, vocabulary)
-        for brand in BRANDS
+        path: render(entry, source_text, brand, vocabulary)
+        for brand, path in output_paths(entry).items()
     }
 
 
