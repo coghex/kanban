@@ -54,7 +54,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import GHC.Generics (Generic)
 import Kanban.Domain (Repository)
 import Kanban.GitHub (newGhFetchGuard, newGhRecordLock, recordGhGroup)
-import Kanban.Process (OwnedProcessGroup (..))
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..))
 import Spec.Support.Env (ignoringIOException)
 import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Environment (getEnvironment, getExecutablePath, setEnv)
@@ -255,9 +255,12 @@ runRecordWriter planPath = do
       -- plan's rather than whichever one the parent happened to be pinned at.
       setEnv "XDG_CACHE_HOME" plan.recordPlanCacheRoot
       guard <- newGhRecordLock >>= newGhFetchGuard
+      -- A writer is stamped by hand because an entry without one is never
+      -- written; which process it names is nothing the lock looks at.
+      let writer = ProcessIdentity 4812 1 4812 "Thu Jan 1 00:00:00 1970" "kanban"
       touch plan.recordPlanStartedPath
       awaitGate plan.recordPlanGatePath
-      let transact groupPid = recordGhGroup guard plan.recordPlanRepository (OwnedProcessGroup groupPid [] False Nothing)
+      let transact groupPid = recordGhGroup guard plan.recordPlanRepository (OwnedProcessGroup groupPid [] False (Just writer) False)
           -- @afterPeers@ counts the transactions since every peer was seen
           -- rewriting; 'Nothing' until then.
           go :: Int -> Maybe Int -> [Int] -> [Text] -> IO RecordWriterOutcome

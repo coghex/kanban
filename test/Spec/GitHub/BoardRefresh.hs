@@ -1,36 +1,46 @@
 -- | Cleaning up the gh process group a board refresh launches.
 module Spec.GitHub.BoardRefresh (spec) where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (void)
 import Data.Aeson (eitherDecode)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Either (isRight)
 import Data.Maybe (isJust)
 import qualified Data.Text
-import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordPath, loadGhGroupRecord, writeGhGroupRecord)
+import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordLockPath, ghGroupRecordPath, loadGhGroupRecord, writeGhGroupRecord)
+import Kanban.Config (ResolvedConfig (..))
 import Kanban.Domain
 import Kanban.GitHub
   ( FetchState (..),
     GhCleanupFailure (..),
     GhCleanupGuard (..),
+    GhEntryClass (..),
+    GhEntryWriter (..),
     GhFetchGuard,
+    GhSpawnRegistration (..),
     GitHubResult (..),
     abandonGh,
     advanceState,
+    classifyGhEntry,
     confirmsOwnGroupLeadership,
+    describeGhEntry,
+    fetchGitHubSnapshot,
     ghBehindBarrier,
     ghFetchCleanupFailure,
+    ghGroupIsPending,
     ghGroupIsRecorded,
     groupConfirmedEmpty,
     graphqlArguments,
     newGhFetchGuard,
     newGhRecordLock,
-    newGhRecordLockOwnedBy,
     reclaimRecordedGhGroups,
     recordGhGroup,
-    registerSpawnedGh
+    registerSpawnedGh,
+    spawnRegistrationGroup
   )
 import Kanban.Process
   ( OwnedProcessGroup (..),
@@ -49,7 +59,8 @@ import Spec.Support.Board
     withFakeGh,
     withUnrecordableStore
   )
-import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Env (withEnvironmentValue, withFakeOnPath, withTemporaryCacheRoot)
+import Spec.Support.Fixtures (testResolvedConfig)
 import Spec.Support.Expect (countOccurrences, requireJust, shouldMention, shouldNotMention)
 import Spec.Support.Json
   ( emptyAssigneesJson,
@@ -69,11 +80,12 @@ import Spec.Support.Locale
     withLocaleProbe
   )
 import Spec.Support.Process (withNonLeaderProcess, withSurvivingGroupLeader, withVacatedGroupLeader)
-import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, hClose)
 import System.Posix.Files (setFileMode)
+import System.Posix.Process (getProcessID)
 import System.Process
   ( CreateProcess (..),
     ProcessHandle,
@@ -97,7 +109,7 @@ import Test.Hspec
 -- temporary root it was registered under.
 withRegisteredGroup ::
   CreateProcess ->
-  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  (Repository -> GhFetchGuard -> GhSpawnRegistration -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
   IO ()
 withRegisteredGroup process action =
   withTemporaryCacheRoot $ \temporaryRoot ->
@@ -106,11 +118,14 @@ withRegisteredGroup process action =
       guard <- newGhRecordLock >>= newGhFetchGuard
       spawned@(_, _, _, processHandle) <-
         createProcess process {std_in = CreatePipe, create_group = True}
-      registered <- registerSpawnedGh guard repository spawned
+      -- The census the run takes for its own spawn, so the entry carries
+      -- this process as its writer exactly as a real registration does.
+      census <- readProcessSnapshot
+      registered <- registerSpawnedGh guard repository census spawned
       case registered of
         Left message -> expectationFailure ("the group could not be registered: " <> Data.Text.unpack message)
-        Right groupPid ->
-          action repository guard groupPid spawned
+        Right registration ->
+          action repository guard registration spawned
             `finally` ( do
                           void (try @IOException (terminateProcess processHandle))
                           void (try @IOException (waitForProcess processHandle))
@@ -121,18 +136,18 @@ withRegisteredGroup process action =
 -- child's entry. @true@ stands in for @gh@: what matters is a real child that
 -- leads its own group and then exits, not anything it prints.
 withReapedRegistration ::
-  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  (Repository -> GhFetchGuard -> GhSpawnRegistration -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
   IO ()
 withReapedRegistration action =
-  withRegisteredGroup (proc "true" []) $ \repository guard groupPid spawned@(_, _, _, processHandle) -> do
+  withRegisteredGroup (proc "true" []) $ \repository guard registration spawned@(_, _, _, processHandle) -> do
     _ <- waitForProcess processHandle
-    action repository guard groupPid spawned
+    action repository guard registration spawned
 
 -- | A registered group whose child is still running and still unreaped, which
 -- is the state the run is in from the instant the entry is persisted until it
 -- is finally waited on.
 withLiveRegistration ::
-  (Repository -> GhFetchGuard -> Int -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
+  (Repository -> GhFetchGuard -> GhSpawnRegistration -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) ->
   IO ()
 withLiveRegistration = withRegisteredGroup (proc "sleep" ["30"])
 
@@ -223,29 +238,61 @@ spec = do
     -- the reap and the drop are adjacent instructions, so nothing about a
     -- fetch's timing can be arranged to land between them reliably.
     it "drops the registered entry even when the handle was already reaped" $
-      withReapedRegistration $ \repository guard groupPid spawned -> do
+      withReapedRegistration $ \repository guard registration spawned -> do
+        let groupPid = spawnRegistrationGroup registration
         ghGroupIsRecorded guard repository groupPid `shouldReturn` True
-        abandonGh guard repository (Just groupPid) spawned
+        abandonGh guard repository (Just registration) spawned
         ghGroupIsRecorded guard repository groupPid `shouldReturn` False
         ghFetchCleanupFailure guard `shouldReturn` Nothing
 
     -- And when that drop cannot happen, the same window must not be reported
     -- as a clean anything: the record still names the group, which is what the
-    -- next fetch holds back over.
-    it "reports a reaped handle's entry it could not drop instead of clearing" $
-      withReapedRegistration $ \repository guard groupPid spawned ->
+    -- next fetch holds back over. The entry is marked cleanup-pending, since
+    -- unmarked it would read as this live process's own work and be skipped.
+    -- (The sealed directory refuses the unlink only: the record writer puts
+    -- its directory's mode back before it rewrites, so the mark still lands.)
+    it "reports a reaped handle's entry it could not drop, marked pending, instead of clearing" $
+      withReapedRegistration $ \repository guard registration spawned ->
         withSealedRecordDirectory $ do
-          abandonGh guard repository (Just groupPid) spawned
+          let groupPid = spawnRegistrationGroup registration
+          abandonGh guard repository (Just registration) spawned
           failure <- ghFetchCleanupFailure guard
           case failure of
             Nothing -> expectationFailure "an undropped record entry was reported as a clean cleanup"
             Just cleanup -> do
               cleanup.ghCleanupMessage
                 `shouldSatisfy` Data.Text.isInfixOf "durable record entry could not be dropped"
-              -- The record is what survived, so this is exact rather than
-              -- merely conservative: the next fetch re-checks that entry.
+              -- Exact rather than merely conservative: the next fetch --
+              -- this process's own included -- re-checks the pending entry.
               cleanup.ghCleanupGuard `shouldBe` GuardRecorded
-          ghGroupIsRecorded guard repository groupPid `shouldReturn` True
+          ghGroupIsPending guard repository groupPid `shouldReturn` True
+
+    -- The double failure: the store that refused the drop refuses the pending
+    -- mark too. Unmarked, the entry reads as this live process's own work and
+    -- no fetch would re-check it, so the refusal is held in memory rather than
+    -- promising a re-check that will not happen. An unobtainable record lock
+    -- is what refuses both here.
+    it "holds a reaped handle's entry it could neither drop nor mark pending back in memory" $
+      withReapedRegistration $ \repository guard registration spawned -> do
+        let groupPid = spawnRegistrationGroup registration
+        lockPath <- ghGroupRecordLockPath repository
+        removeFile lockPath
+        createDirectory lockPath
+        abandonGh guard repository (Just registration) spawned
+        failure <- ghFetchCleanupFailure guard
+        case failure of
+          Nothing -> expectationFailure "an undropped record entry was reported as a clean cleanup"
+          Just cleanup -> do
+            cleanup.ghCleanupMessage
+              `shouldSatisfy` Data.Text.isInfixOf "durable record entry could not be dropped"
+            cleanup.ghCleanupMessage `shouldMention` "nor could it be marked for re-verification"
+            cleanup.ghCleanupGuard `shouldBe` GuardInMemoryOnly
+        loaded <- loadGhGroupRecord repository
+        case loaded of
+          GhGroupRecordLoaded [entry] -> do
+            entry.ownedProcessGroupPid `shouldBe` groupPid
+            entry.ownedProcessGroupCleanupPending `shouldBe` False
+          other -> expectationFailure ("expected the unmarked entry to remain, got " <> show other)
 
     -- Persisting the entry and publishing the pgid the cleanup will name it by
     -- are two steps with an interruptible gap between them, so a deadline can
@@ -254,7 +301,8 @@ spec = do
     -- drop has to fall back to the pid it still reports -- otherwise this is
     -- the same defect again, one window earlier.
     it "drops the persisted entry when cleanup was never told the pgid" $
-      withLiveRegistration $ \repository guard groupPid spawned -> do
+      withLiveRegistration $ \repository guard registration spawned -> do
+        let groupPid = spawnRegistrationGroup registration
         ghGroupIsRecorded guard repository groupPid `shouldReturn` True
         abandonGh guard repository Nothing spawned
         ghGroupIsRecorded guard repository groupPid `shouldReturn` False
@@ -542,9 +590,9 @@ spec = do
             repository = Repository temporaryRoot "coghex" "kanban"
         -- Stands in for the gh a previous dashboard could not confirm dead:
         -- still alive, still ignoring TERM, recorded on disk exactly as
-        -- 'abandonGh' would have left it. Nothing in this process has ever
-        -- seen it before -- which is the point, since the concern is a
-        -- restarted dashboard racing a survivor.
+        -- 'abandonGh' would have left it, by a writer that has since exited.
+        -- Nothing in this process has ever seen it before -- which is the
+        -- point, since the concern is a restarted dashboard racing a survivor.
         withSurvivingGroupLeader $ \survivorPid ->
           withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
             snapshot <- readProcessSnapshot
@@ -553,7 +601,7 @@ spec = do
               Right identities -> do
                 let members = filter ((== survivorPid) . processIdentityGroupPid) identities
                 members `shouldNotBe` []
-                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True Nothing] `shouldReturn` Right ()
+                writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True (Just exitedWriter) False] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -603,7 +651,7 @@ spec = do
           case snapshot of
             Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
             Right identities ->
-              writeGhGroupRecord repository [OwnedProcessGroup leaderPid (filter ((== leaderPid) . processIdentityGroupPid) identities) True Nothing]
+              writeGhGroupRecord repository [OwnedProcessGroup leaderPid (filter ((== leaderPid) . processIdentityGroupPid) identities) True (Just exitedWriter) False]
                 `shouldReturn` Right ()
           withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
             (outcome, _) <- captureBoardRefresh temporaryRoot 30
@@ -634,7 +682,7 @@ spec = do
               Left message -> fail (Data.Text.unpack message)
               Right identity -> pure identity
             identity.processIdentityGroupPid `shouldNotBe` nonLeaderPid
-            writeGhGroupRecord repository [OwnedProcessGroup nonLeaderPid [identity] False Nothing] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup nonLeaderPid [identity] False Nothing False] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -671,7 +719,7 @@ spec = do
         -- vacuously, while it is plainly still running.
         withSurvivingGroupLeader $ \survivorPid ->
           withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-            writeGhGroupRecord repository [OwnedProcessGroup survivorPid [] False Nothing] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup survivorPid [] False Nothing False] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -699,7 +747,7 @@ spec = do
               Left message -> fail (Data.Text.unpack message)
               Right identity -> do
                 withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-                  writeGhGroupRecord repository [OwnedProcessGroup survivorPid [identity] False Nothing] `shouldReturn` Right ()
+                  writeGhGroupRecord repository [OwnedProcessGroup survivorPid [identity] False Nothing False] `shouldReturn` Right ()
                   withFakeGh
                     temporaryRoot
                     [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -900,8 +948,8 @@ spec = do
                   membersOf secondPid `shouldNotBe` []
                   writeGhGroupRecord
                     repository
-                    [ OwnedProcessGroup survivorPid (membersOf survivorPid) True Nothing,
-                      OwnedProcessGroup secondPid (membersOf secondPid) True Nothing
+                    [ OwnedProcessGroup survivorPid (membersOf survivorPid) True (Just exitedWriter) False,
+                      OwnedProcessGroup secondPid (membersOf secondPid) True (Just exitedWriter) False
                     ]
                     `shouldReturn` Right ()
               withFakeGh
@@ -958,8 +1006,8 @@ spec = do
                   ours `shouldNotBe` []
                   writeGhGroupRecord
                     repository
-                    [ OwnedProcessGroup ourPid ours True Nothing,
-                      OwnedProcessGroup squatterPid [departed] True Nothing
+                    [ OwnedProcessGroup ourPid ours True (Just exitedWriter) False,
+                      OwnedProcessGroup squatterPid [departed] True (Just exitedWriter) False
                     ]
                     `shouldReturn` Right ()
               withFakeGh temporaryRoot ["printf '%s' '" <> emptyGraphqlPage <> "'"] $ do
@@ -1151,7 +1199,7 @@ spec = do
                       processIdentityStartedAt = "Thu Jan 1 00:00:00 1970",
                       processIdentityCommand = "gh api graphql"
                     }
-            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departed] True Nothing] `shouldReturn` Right ()
+            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departed] True Nothing False] `shouldReturn` Right ()
             withFakeGh
               temporaryRoot
               [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
@@ -1193,130 +1241,345 @@ spec = do
       inMemory `shouldMention` "check for a stray gh process"
       mapM_ (`shouldNotMention` "restarting is safe") [recorded, inMemory]
 
-  -- Whose leftover a refusal is about. A board under the repository lease is
-  -- the only current one, so whatever the record held at its first read was
-  -- written by a board that has since died — and whatever appears afterwards,
-  -- in this process, is its own. The owner an entry carries can name that dead
-  -- board, and is allowed to do nothing else.
-  describe "the board a recorded gh belonged to" $ do
-    it "describes an entry it found in the record as a dead predecessor's" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withSurvivingGroupLeader $ \squatterPid ->
-          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-            let repository = Repository temporaryRoot "coghex" "kanban"
-            writeGhGroupRecord repository [OwnedProcessGroup squatterPid [departedIn squatterPid] True Nothing]
-              `shouldReturn` Right ()
-            guard <- newGhRecordLock >>= newGhFetchGuard
-            refused <- reclaimRecordedGhGroups guard repository
-            refusal refused `shouldMention` "a gh left by a previous Kanban board"
-            -- Without owner metadata there is no board to name, and one is not
-            -- invented: an entry an earlier release wrote carries no identity.
-            refusal refused `shouldNotMention` "(pid "
+  -- Whose gh an entry is, decided by whether the process that wrote it is still
+  -- running. That decides whether a reader skips the entry as live work or
+  -- reclaims it, and nothing about what may be signalled.
+  describe "the writer a recorded gh belongs to" $ do
+    -- The reproduction: two readers that share the record but not a lock, as a
+    -- mission runner's board read and a worker's precondition reread do beside
+    -- a dashboard. The first reader's gh is on the record and running when the
+    -- second reads it, and it is live work, not a ghost.
+    it "lets an independent reader fetch while another reader's gh is still running, and both complete" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let repository = Repository temporaryRoot "coghex" "kanban"
+            counter = temporaryRoot </> "gh.count"
+            firstStarted = temporaryRoot </> "first-started"
+            releaseFirst = temporaryRoot </> "release-first"
+            fetchWith recordLock = do
+              guard <- newGhFetchGuard recordLock
+              fetchGitHubSnapshot guard (const (pure ())) 30 testResolvedConfig.resolvedWorkflow repository
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withFakeGh
+            temporaryRoot
+            [ ByteString.pack ("count=$(( $(cat " <> counter <> " 2>/dev/null || echo 0) + 1 ))"),
+              ByteString.pack ("printf '%s' \"$count\" > " <> counter),
+              "if [ \"$count\" -eq 1 ]; then",
+              ByteString.pack ("  : > " <> firstStarted),
+              ByteString.pack ("  while [ ! -e " <> releaseFirst <> " ]; do sleep 0.05; done"),
+              "fi",
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ do
+              firstLock <- newGhRecordLock
+              secondLock <- newGhRecordLock
+              firstOutcome <- newEmptyMVar
+              _ <- forkIO (fetchWith firstLock >>= putMVar firstOutcome)
+              awaitPath firstStarted
+              -- The first reader's gh is running and on the record.
+              loadGhGroupRecord repository >>= (`shouldSatisfy` recordsExactly 1)
+              second <- fetchWith secondLock
+              second `shouldSatisfy` isRight
+              -- Skipped, not reclaimed: the first reader's entry is still there.
+              loadGhGroupRecord repository >>= (`shouldSatisfy` recordsExactly 1)
+              writeFile releaseFirst ""
+              first <- timeout 20000000 (takeMVar firstOutcome)
+              fmap isRight first `shouldBe` Just True
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
 
-    it "names the predecessor when the entry it left says which board it was" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        withSurvivingGroupLeader $ \squatterPid ->
-          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-            let repository = Repository temporaryRoot "coghex" "kanban"
-                predecessor = departedIn 4812
-            writeGhGroupRecord
-              repository
-              [OwnedProcessGroup squatterPid [departedIn squatterPid] True (Just predecessor)]
-              `shouldReturn` Right ()
-            guard <- newGhRecordLock >>= newGhFetchGuard
-            refused <- reclaimRecordedGhGroups guard repository
-            refusal refused `shouldMention` "a gh left by a previous Kanban board (pid 4812)"
+    -- The case writer liveness alone would get wrong: a failed cleanup whose
+    -- writer is still running. Its entry is marked pending, so the writer's own
+    -- next fetch re-verifies it -- refusing while the group is still occupied
+    -- and clearing it once it is not -- instead of skipping it as live work.
+    it "re-verifies an entry its own failed cleanup left while its writer is still running" $
+      withLiveRegistration $ \repository guard registration spawned@(_, _, _, processHandle) -> do
+        let groupPid = spawnRegistrationGroup registration
+        -- No census, so the cleanup can neither signal nor confirm anything:
+        -- it records the group pending and reports it on disk.
+        withTemporaryCacheRoot $ \scratch ->
+          withFakeOnPath scratch ("ps", ["exit 1"]) (abandonGh guard repository (Just registration) spawned)
+        fmap ghCleanupGuard <$> ghFetchCleanupFailure guard `shouldReturn` Just GuardRecorded
+        ghGroupIsPending guard repository groupPid `shouldReturn` True
+        nextGuard <- newGhRecordLock >>= newGhFetchGuard
+        refused <- reclaimRecordedGhGroups nextGuard repository
+        refusal refused `shouldMention` "a gh this process started, whose cleanup is still pending"
+        ghGroupIsPending guard repository groupPid `shouldReturn` True
+        terminateProcess processHandle
+        void (waitForProcess processHandle)
+        reclaimRecordedGhGroups nextGuard repository `shouldReturn` Right ()
+        ghGroupIsRecorded guard repository groupPid `shouldReturn` False
 
-    -- The other side of the same signal, and the one owner presence cannot
-    -- decide: this board's own new entry carries an owner too.
-    it "describes an entry it wrote itself as this board's" $
+    it "skips and keeps a live writer's entry while it reclaims an abandoned one beside it" $
       withTemporaryCacheRoot $ \temporaryRoot ->
-        withSurvivingGroupLeader $ \squatterPid ->
-          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
-            let repository = Repository temporaryRoot "coghex" "kanban"
-            recordLock <- newGhRecordLockOwnedBy (Just (departedIn 4812))
-            guard <- newGhFetchGuard recordLock
-            -- The first reclaim is what settles the question, and it happens
-            -- before this board has written anything — exactly as it does in
-            -- a real refresh, where nothing is spawned until reclaim returns.
-            reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
-            recordGhGroup guard repository (OwnedProcessGroup squatterPid [departedIn squatterPid] True Nothing)
-              `shouldReturn` Right ()
-            refused <- reclaimRecordedGhGroups guard repository
-            refusal refused `shouldMention` "a gh this board started"
-            refusal refused `shouldNotMention` "previous Kanban board"
-
-    -- The transition between those two answers, and the reason it cannot rest
-    -- on a remembered pgid. Once the inherited entry is confirmed gone and its
-    -- record cleared, the operating system is free to reissue that pgid to a
-    -- gh this board starts, and describing that one as a predecessor's would
-    -- name a board that never wrote it.
-    it "describes an entry it wrote at a reissued pgid as this board's" $
-      withTemporaryCacheRoot $ \temporaryRoot ->
-        -- Started before the pgid is vacated, and still running when it is, so
-        -- the reissued number is provably not this member's own.
-        withSurvivingGroupLeader $ \memberPid ->
-          withVacatedGroupLeader $ \reissuedPgid ->
+        withSurvivingGroupLeader $ \writerPid ->
+          withVacatedGroupLeader $ \vacatedPgid ->
             withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
               let repository = Repository temporaryRoot "coghex" "kanban"
-              -- The predecessor left the entry 'registerSpawnedGh' writes: no
-              -- members, no census, and — like this board's own, whose lock
-              -- carries no identity to stamp — no owner. Nothing in it tells
-              -- it apart from the entry recorded below, so only when each
-              -- appeared can.
-              writeGhGroupRecord repository [OwnedProcessGroup reissuedPgid [] False Nothing]
-                `shouldReturn` Right ()
+              writer <- liveIdentity writerPid
+              -- The live entry's pgid is occupied, which reclaiming it would
+              -- refuse over; skipping it is what lets this reader proceed.
+              let live = OwnedProcessGroup writerPid [] False (Just writer) False
+                  abandoned = OwnedProcessGroup vacatedPgid [departedIn vacatedPgid] True (Just exitedWriter) False
+              writeGhGroupRecord repository [live, abandoned] `shouldReturn` Right ()
               guard <- newGhRecordLock >>= newGhFetchGuard
-              -- The first read settles what was inherited; the group is empty,
-              -- so that entry is accounted for and the record goes with it.
               reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
-              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
-              member <- liveIdentity memberPid
-              -- This board now records a gh of its own at the pgid the cleared
-              -- entry used to name. Its member is alive and outside that
-              -- group, so the reclaim can only watch it and says whose it is.
-              recordGhGroup guard repository (OwnedProcessGroup reissuedPgid [member] True Nothing)
-                `shouldReturn` Right ()
-              refused <- reclaimRecordedGhGroups guard repository
-              refusal refused `shouldMention` "a gh this board started"
-              refusal refused `shouldNotMention` "previous Kanban board"
+              loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [live]
+              -- The live writer's identity survives the rewrite, and the writer
+              -- itself was never signalled.
+              liveIdentity writerPid `shouldReturn` writer
 
-    -- Owner data is informational, and this is what that has to mean: a live
-    -- process named as an entry's owner is not signalled, not censused, and
-    -- not what keeps the entry alive. The record clears because the group is
-    -- empty, and the owner is still running afterwards.
-    it "never signals or consults the process an entry names as its owner" $
+    it "keeps a live entry and an unresolved one when it reclaims the entry between them" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \writerPid ->
+          withSurvivingGroupLeader $ \squatterPid ->
+            withVacatedGroupLeader $ \vacatedPgid ->
+              withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+                let repository = Repository temporaryRoot "coghex" "kanban"
+                writer <- liveIdentity writerPid
+                let live = OwnedProcessGroup writerPid [] False (Just writer) False
+                    abandoned = OwnedProcessGroup vacatedPgid [departedIn vacatedPgid] True (Just exitedWriter) False
+                    unresolved = OwnedProcessGroup squatterPid [] False Nothing False
+                writeGhGroupRecord repository [live, abandoned, unresolved] `shouldReturn` Right ()
+                guard <- newGhRecordLock >>= newGhFetchGuard
+                refused <- reclaimRecordedGhGroups guard repository
+                refusal refused `shouldMention` "a gh recorded without a writer identity"
+                loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [live, unresolved]
+
+    -- The behaviour change for entries an earlier release wrote: a census is
+    -- no longer licence to signal one. It is watched until nothing matches it.
+    it "never signals an ownerless entry, even a censused one whose members still hold its group" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \survivorPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            let repository = Repository temporaryRoot "coghex" "kanban"
+            snapshot <- readProcessSnapshot
+            members <- case snapshot of
+              Left message -> fail ("could not snapshot processes: " <> Data.Text.unpack message)
+              Right identities -> pure (filter ((== survivorPid) . processIdentityGroupPid) identities)
+            members `shouldNotBe` []
+            writeGhGroupRecord repository [OwnedProcessGroup survivorPid members True Nothing False] `shouldReturn` Right ()
+            guard <- newGhRecordLock >>= newGhFetchGuard
+            refused <- reclaimRecordedGhGroups guard repository
+            refusal refused `shouldMention` "a gh recorded without a writer identity"
+            refusal refused `shouldNotMention` "(pid "
+            void (liveIdentity survivorPid)
+            (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` True
+
+    it "names an exited writer's pid when it refuses over what that writer left" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withSurvivingGroupLeader $ \squatterPid ->
+          withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+            let repository = Repository temporaryRoot "coghex" "kanban"
+            writeGhGroupRecord
+              repository
+              [OwnedProcessGroup squatterPid [departedIn squatterPid] True (Just exitedWriter) False]
+              `shouldReturn` Right ()
+            guard <- newGhRecordLock >>= newGhFetchGuard
+            refused <- reclaimRecordedGhGroups guard repository
+            refusal refused `shouldMention` "a gh left by a Kanban process that has exited (pid 4812)"
+
+    -- Liveness is a pid and a start time together, and a snapshot that could
+    -- not be taken proves nothing either way.
+    it "matches a writer by pid and start time, and reads a failed census as unknown" $
+      withSurvivingGroupLeader $ \otherPid -> do
+        self <- fromIntegral <$> getProcessID
+        census <- readProcessSnapshot
+        other <- liveIdentity otherPid
+        me <- liveIdentity self
+        let entry writer markedPending = OwnedProcessGroup 4200 [] False writer markedPending
+            reused = other {processIdentityStartedAt = "Thu Jan 1 00:00:00 1970"}
+            earlierHolderOfMyPid = me {processIdentityStartedAt = "Thu Jan 1 00:00:00 1970"}
+        classifyGhEntry self census (entry (Just other) False) `shouldBe` GhEntryActive (WrittenByOtherProcess other)
+        classifyGhEntry self census (entry (Just me) False) `shouldBe` GhEntryActive WrittenByThisProcess
+        classifyGhEntry self census (entry (Just other) True) `shouldBe` GhEntryCleanupPending (WrittenByOtherProcess other)
+        classifyGhEntry self census (entry (Just me) True) `shouldBe` GhEntryCleanupPending WrittenByThisProcess
+        classifyGhEntry self census (entry (Just reused) False) `shouldBe` GhEntryAbandoned reused
+        classifyGhEntry self census (entry (Just earlierHolderOfMyPid) False) `shouldBe` GhEntryAbandoned earlierHolderOfMyPid
+        classifyGhEntry self (Left "ps exited 1") (entry (Just other) False) `shouldBe` GhEntryWriterUnknown other "ps exited 1"
+        classifyGhEntry self census (entry Nothing True) `shouldBe` GhEntryOwnerless
+
+    -- The live case never has to refuse to be described, so its spellings are
+    -- asked of directly.
+    it "spells every class truthfully, naming a writer's pid and never inventing one" $ do
+      let writer = departedIn 4812
+      describeGhEntry (GhEntryActive WrittenByThisProcess) `shouldMention` "this process is still running"
+      describeGhEntry (GhEntryActive (WrittenByOtherProcess writer)) `shouldMention` "another running Kanban process (pid 4812) is still running"
+      describeGhEntry (GhEntryCleanupPending WrittenByThisProcess) `shouldMention` "this process started, whose cleanup is still pending"
+      describeGhEntry (GhEntryCleanupPending (WrittenByOtherProcess writer)) `shouldMention` "(pid 4812) started, whose cleanup is still pending"
+      describeGhEntry (GhEntryAbandoned writer) `shouldMention` "has exited (pid 4812)"
+      describeGhEntry (GhEntryWriterUnknown writer "ps exited 1") `shouldMention` "could not be confirmed running or exited"
+      describeGhEntry GhEntryOwnerless `shouldMention` "without a writer identity"
+      describeGhEntry GhEntryOwnerless `shouldNotMention` "(pid "
+
+    -- Writer identity classifies and does nothing else. Neither an exited
+    -- writer's reused pid nor a live writer is signalled, censused, or what
+    -- keeps an entry alive: each record clears because its group is empty, and
+    -- the process it names is still running afterwards.
+    it "never signals or consults the process an entry names as its writer" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withSurvivingGroupLeader $ \ownerPid ->
           withVacatedGroupLeader $ \departedPgid ->
             withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
               let repository = Repository temporaryRoot "coghex" "kanban"
-                  owner = departedIn ownerPid
-              -- A group whose own pgid is established as empty, owned by a
-              -- process that is very much alive. If the owner were a liveness
-              -- predicate the record would be kept; if it were a signalling
-              -- target the process would die.
-              writeGhGroupRecord repository [OwnedProcessGroup departedPgid [departedIn departedPgid] True (Just owner)]
-                `shouldReturn` Right ()
-              guard <- newGhRecordLock >>= newGhFetchGuard
-              reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
-              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
-              alive <- readProcessSnapshot
-              case alive of
-                Left message -> expectationFailure ("could not snapshot processes: " <> Data.Text.unpack message)
-                Right identities -> identityForPid ownerPid identities `shouldSatisfy` isJust
+              liveOwner <- liveIdentity ownerPid
+              let exitedOwner = departedIn ownerPid
+                  emptyGroup owner = OwnedProcessGroup departedPgid [departedIn departedPgid] True (Just owner) True
+              mapM_
+                ( \owner -> do
+                    writeGhGroupRecord repository [emptyGroup owner] `shouldReturn` Right ()
+                    guard <- newGhRecordLock >>= newGhFetchGuard
+                    reclaimRecordedGhGroups guard repository `shouldReturn` Right ()
+                    (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+                    liveIdentity ownerPid `shouldReturn` liveOwner
+                )
+                [exitedOwner, liveOwner]
 
-    it "stamps every entry it writes with the board's own identity" $
+  describe "resolving a spawn's writer" $ do
+    it "stamps a spawn's entry with this process as the spawn's own census shows it" $
+      withLiveRegistration $ \repository _ registration _ -> do
+        self <- fromIntegral <$> getProcessID
+        case registration of
+          GhSpawnRecorded groupPid writer -> do
+            writer.processIdentityPid `shouldBe` self
+            loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup groupPid [] False (Just writer) False]
+          GhSpawnInMemory _ -> expectationFailure "a spawn whose census named this process was held in memory"
+
+    it "keeps an entry's writer through a rewrite that does not name one, and never writes an entry without one" $
       withTemporaryCacheRoot $ \temporaryRoot ->
         withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
           let repository = Repository temporaryRoot "coghex" "kanban"
-              board = departedIn 4812
-          recordLock <- newGhRecordLockOwnedBy (Just board)
-          guard <- newGhFetchGuard recordLock
-          -- Written without an owner by the caller, so what ends up in the
-          -- record is the record's doing rather than the call site's.
-          recordGhGroup guard repository (OwnedProcessGroup 4200 [] False Nothing) `shouldReturn` Right ()
-          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4200 [] False (Just board)]
+              writer = departedIn 4812
+          guard <- newGhRecordLock >>= newGhFetchGuard
+          recordGhGroup guard repository (OwnedProcessGroup 4200 [] False (Just writer) False) `shouldReturn` Right ()
+          recordGhGroup guard repository (OwnedProcessGroup 4200 [departedIn 4201] True Nothing True) `shouldReturn` Right ()
+          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4200 [departedIn 4201] True (Just writer) True]
+          refused <- recordGhGroup guard repository (OwnedProcessGroup 4300 [] False Nothing False)
+          refusal refused `shouldMention` "an entry without one is never written"
+          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4200 [departedIn 4201] True (Just writer) True]
+
+    it "holds a spawn in memory when its writer cannot be identified and the record is empty, then records the next spawn normally" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+          guard <- newGhRecordLock >>= newGhFetchGuard
+          withParkedChild $ \first -> do
+            held <- registerSpawnedGh guard repository (Left "ps exited 1") first
+            firstPid <- childGroup first
+            held `shouldBe` Right (GhSpawnInMemory firstPid)
+            loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
+          withParkedChild $ \second -> do
+            census <- readProcessSnapshot
+            recorded <- registerSpawnedGh guard repository census second
+            self <- fromIntegral <$> getProcessID
+            case recorded of
+              Right (GhSpawnRecorded groupPid writer) -> do
+                writer.processIdentityPid `shouldBe` self
+                loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup groupPid [] False (Just writer) False]
+              other -> expectationFailure ("expected the next spawn to be recorded, got " <> show other)
+
+    it "refuses a spawn whose writer cannot be identified while the record holds anything" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+              existing = OwnedProcessGroup 4200 [] False (Just (departedIn 4812)) False
+          writeGhGroupRecord repository [existing] `shouldReturn` Right ()
+          guard <- newGhRecordLock >>= newGhFetchGuard
+          withParkedChild $ \child -> do
+            refused <- registerSpawnedGh guard repository (Left "ps exited 1") child
+            either id (const "") refused `shouldMention` "could not identify the process starting gh"
+            loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [existing]
+
+    -- Whether the cleanup knew the spawn was held in memory, or was
+    -- interrupted before it was told anything, a group it cannot account for
+    -- stays in memory and nothing ownerless reaches the record.
+    it "writes no entry when a spawn held in memory cannot be cleaned up" $
+      withTemporaryCacheRoot $ \temporaryRoot ->
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          let repository = Repository temporaryRoot "coghex" "kanban"
+          mapM_
+            ( \told -> withParkedChild $ \child -> do
+                guard <- newGhRecordLock >>= newGhFetchGuard
+                admitted <- registerSpawnedGh guard repository (Left "ps exited 1") child
+                registration <- either (fail . Data.Text.unpack) pure admitted
+                withFakeOnPath temporaryRoot ("ps", ["exit 1"]) $
+                  abandonGh guard repository (if told then Just registration else Nothing) child
+                fmap ghCleanupGuard <$> ghFetchCleanupFailure guard `shouldReturn` Just GuardInMemoryOnly
+                loadGhGroupRecord repository `shouldReturn` GhGroupRecordAbsent
+            )
+            [True, False]
+
+    it "never lets gh run while no process snapshot can be taken" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let ranMarker = temporaryRoot </> "gh-ran"
+            repository = Repository temporaryRoot "coghex" "kanban"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $
+          withFakeGh
+            temporaryRoot
+            [ "printf '%s' 'ran' > " <> ByteString.pack ranMarker,
+              "printf '%s' '" <> emptyGraphqlPage <> "'"
+            ]
+            $ withFakeOnPath temporaryRoot ("ps", ["exit 1"])
+            $ do
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Left providerError) ->
+                  providerError.providerErrorMessage `shouldMention` "could not confirm gh leads its own process group"
+                other -> expectationFailure ("expected the spawn to be refused, got " <> show other)
+              doesFileExist ranMarker `shouldReturn` False
+              (ghGroupRecordPath repository >>= doesFileExist) `shouldReturn` False
+
+    -- End to end: the first page's writer census fails (every retry of it),
+    -- its gh runs held in memory after its own leadership check, and the
+    -- second page's census succeeds and is recorded as usual.
+    it "recovers durable recording on the next spawn after one transient census failure" $
+      withTemporaryCacheRoot $ \temporaryRoot -> do
+        let binaryRoot = temporaryRoot </> "bin"
+            repository = Repository temporaryRoot "coghex" "kanban"
+            psCounter = temporaryRoot </> "ps.count"
+            pageCounter = temporaryRoot </> "page.count"
+            recordCopy = temporaryRoot </> "record-seen"
+        withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+          recordPath <- ghGroupRecordPath repository
+          withFakeGh
+            temporaryRoot
+            [ ByteString.pack ("page=$(cat " <> pageCounter <> " 2>/dev/null || echo 0)"),
+              "page=$((page + 1))",
+              ByteString.pack ("printf '%s' \"$page\" > " <> pageCounter),
+              ByteString.pack ("cp " <> recordPath <> " " <> recordCopy <> ".$page 2>/dev/null || true"),
+              "if [ \"$page\" -eq 1 ]; then",
+              "  printf '%s' '{\"data\":{\"repository\":{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"c1\"}},\"pullRequests\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}'",
+              "else",
+              "  printf '%s' '{\"data\":{\"repository\":{\"issues\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}'",
+              "fi"
+            ]
+            $ do
+              createDirectoryIfMissing True binaryRoot
+              -- Three failures: exactly the retry budget of the first page's
+              -- writer census, and nothing after it.
+              ByteString.writeFile
+                (binaryRoot </> "ps")
+                ( ByteString.unlines
+                    [ "#!/bin/sh",
+                      ByteString.pack ("attempt=$(cat " <> psCounter <> " 2>/dev/null || echo 0)"),
+                      "attempt=$((attempt + 1))",
+                      ByteString.pack ("printf '%s' \"$attempt\" > " <> psCounter),
+                      "[ \"$attempt\" -le 3 ] && exit 1",
+                      "exec /bin/ps \"$@\""
+                    ]
+                )
+              setFileMode (binaryRoot </> "ps") 0o700
+              (outcome, _) <- captureBoardRefresh temporaryRoot 30
+              case outcome of
+                BoardRefreshCompleted (Right _) -> pure ()
+                other -> expectationFailure ("expected the fetch to complete, got " <> show other)
+          readMarkerPid pageCounter `shouldReturn` 2
+          -- Page 1 ran with nothing on the record, ownerless or otherwise.
+          doesFileExist (recordCopy <> ".1") `shouldReturn` False
+          -- Page 2 ran recorded, under this process as its writer.
+          secondPageRecord <- ByteString.readFile (recordCopy <> ".2")
+          countOccurrences "ownedProcessGroupPid" secondPageRecord `shouldBe` 1
+          self <- getProcessID
+          secondPageRecord `shouldSatisfy` ByteString.isInfixOf (ByteString.pack ("\"processIdentityPid\":" <> show self))
+          doesFileExist recordPath `shouldReturn` False
 
 -- | A recorded member identity for a PID, with a start time far enough in the
 -- past that nothing running now can match it.
@@ -1343,3 +1606,41 @@ liveIdentity processId = do
 
 refusal :: Either Data.Text.Text () -> Data.Text.Text
 refusal = either id (const "")
+
+-- | The writer of an entry left behind by a process that has since exited: a
+-- pid whose recorded start time nothing running now can match.
+exitedWriter :: ProcessIdentity
+exitedWriter = departedIn 4812
+
+recordsExactly :: Int -> GhGroupRecordLoad -> Bool
+recordsExactly count (GhGroupRecordLoaded groups) = length groups == count
+recordsExactly _ _ = False
+
+-- | Waits for a fixture's marker file, failing rather than hanging.
+awaitPath :: FilePath -> IO ()
+awaitPath path = go (200 :: Int)
+  where
+    go remaining = do
+      present <- doesFileExist path
+      if present
+        then pure ()
+        else
+          if remaining <= 0
+            then expectationFailure (path <> " never appeared")
+            else threadDelay 50000 >> go (remaining - 1)
+
+-- | A child parked the way the run parks gh: leading its own group, with a
+-- standard input to release it through. It never is released, and is killed
+-- and reaped afterwards whatever the example did.
+withParkedChild :: ((Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO ()) -> IO ()
+withParkedChild action = do
+  spawned@(_, _, _, processHandle) <-
+    createProcess (proc "sleep" ["30"]) {std_in = CreatePipe, create_group = True}
+  action spawned
+    `finally` ( do
+                  void (try @IOException (terminateProcess processHandle))
+                  void (try @IOException (waitForProcess processHandle))
+              )
+
+childGroup :: (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO Int
+childGroup (_, _, _, processHandle) = maybe (fail "the parked child reported no PID") (pure . fromIntegral) =<< getPid processHandle

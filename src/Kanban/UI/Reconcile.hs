@@ -107,9 +107,10 @@ applyCurrentBoardRefresh outcome = do
 -- the event runs.
 boardRefreshOutcomeApplied :: BoardRefreshOutcome -> AppState -> AppState
 boardRefreshOutcomeApplied outcome state = case outcome of
-    -- Once the unconfirmed group is on disk, 'fetchGitHubSnapshot'
-    -- re-verifies it before spawning anything, so a later refresh -- in this
-    -- process or in one started after a restart -- cannot overlap it, and the
+    -- Once the unconfirmed group is on disk and marked cleanup-pending,
+    -- 'fetchGitHubSnapshot' re-verifies it before spawning anything -- even
+    -- while this process, its writer, still runs -- so a later refresh, in this
+    -- process or in one started after a restart, cannot overlap it, and the
     -- board is free to sit in an ordinary failure state that self-heals as
     -- soon as the group is confirmed gone. Without that record the in-memory
     -- refusal is all that is left, so 'appBoardFreshness' stays 'Loading' and

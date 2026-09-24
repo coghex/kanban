@@ -40,7 +40,7 @@ import Kanban.GitHub
     reclaimRecordedGhGroups,
     recordGhGroup,
   )
-import Kanban.Process (OwnedProcessGroup (..))
+import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..))
 import Kanban.Repository.Lease (BoardLeaseOutcome (..), acquireBoardLease, releaseRepositoryLease)
 import Spec.Support.Env (permissionsOf, withEnvironmentValue, withFileCreationMask, withTemporaryCacheRoot)
 import Spec.Support.LeaseProbes
@@ -95,7 +95,7 @@ spec = describe "the gh record's cross-process transaction lock" $ do
         case taken of
           BoardLeaseAcquired lease -> do
             guard <- freshGuard
-            recordGhGroup guard repository (unownedGroup 4242) `shouldReturn` Right ()
+            recordGhGroup guard repository (writtenGroup 4242) `shouldReturn` Right ()
             ghGroupIsRecorded guard repository 4242 `shouldReturn` True
             dropGhGroup guard repository 4242 `shouldReturn` Right ()
             migrateGhGroupRecord repository `shouldReturn` Right []
@@ -125,11 +125,11 @@ spec = describe "the gh record's cross-process transaction lock" $ do
     withTemporaryCacheRoot $ \root ->
       withEnvironmentValue "XDG_CACHE_HOME" root $ do
         guard <- freshGuard
-        recordGhGroup guard repository (unownedGroup 51) `shouldReturn` Right ()
+        recordGhGroup guard repository (writtenGroup 51) `shouldReturn` Right ()
         lockPath <- ghGroupRecordLockPath repository
         doesFileExist lockPath `shouldReturn` True
         migrateGhGroupRecord repository `shouldReturn` Right []
-        loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [unownedGroup 51]
+        loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [writtenGroup 51]
         doesFileExist lockPath `shouldReturn` True
 
   describe "its mode" $ do
@@ -138,7 +138,7 @@ spec = describe "the gh record's cross-process transaction lock" $ do
         withEnvironmentValue "XDG_CACHE_HOME" root $
           withFileCreationMask 0o000 $ do
             guard <- freshGuard
-            recordGhGroup guard repository (unownedGroup 61) `shouldReturn` Right ()
+            recordGhGroup guard repository (writtenGroup 61) `shouldReturn` Right ()
             lockPath <- ghGroupRecordLockPath repository
             permissionsOf lockPath `shouldReturn` 0o600
 
@@ -160,16 +160,16 @@ spec = describe "the gh record's cross-process transaction lock" $ do
     it "fails every rewrite, confirms nothing, and leaves the canonical and legacy records as they were" $
       withTemporaryCacheRoot $ \root ->
         withEnvironmentValue "XDG_CACHE_HOME" root $ do
-          writeGhGroupRecord repository [unownedGroup 71] `shouldReturn` Right ()
+          writeGhGroupRecord repository [writtenGroup 71] `shouldReturn` Right ()
           recordPath <- ghGroupRecordPath repository
           let legacyPath = takeDirectory recordPath </> "coghex-kanban.json"
-          writeLegacyRecord legacyPath [unownedGroup 72]
+          writeLegacyRecord legacyPath [writtenGroup 72]
           canonicalBefore <- ByteString.readFile recordPath
           legacyBefore <- ByteString.readFile legacyPath
           lockPath <- ghGroupRecordLockPath repository
           createDirectory lockPath
           guard <- freshGuard
-          recordGhGroup guard repository (unownedGroup 73) >>= (`shouldSatisfy` isRecordWriteFailure)
+          recordGhGroup guard repository (writtenGroup 73) >>= (`shouldSatisfy` isRecordWriteFailure)
           dropGhGroup guard repository 71 >>= (`shouldSatisfy` isRecordWriteFailure)
           -- The group is on disk, and still not confirmed: an answer that could
           -- not be read under the lock is no confirmation of coverage.
@@ -196,7 +196,7 @@ spec = describe "the gh record's cross-process transaction lock" $ do
           reclaimed `shouldSatisfy` either (Text.isInfixOf "gh group record lock could not be established") (const False)
           fmap ghCleanupGuard <$> ghFetchCleanupFailure guard `shouldReturn` Just GuardRecorded
           dropGhGroup guard repository 75 >>= (`shouldSatisfy` isRecordWriteFailure)
-          recordGhGroup guard repository (unownedGroup 75) >>= (`shouldSatisfy` isRecordWriteFailure)
+          recordGhGroup guard repository (writtenGroup 75) >>= (`shouldSatisfy` isRecordWriteFailure)
 
   -- Blocking contention has to stay compatible with the fetch and cleanup
   -- budgets, which end work by interrupting it. An interruption at either end
@@ -215,12 +215,12 @@ spec = describe "the gh record's cross-process transaction lock" $ do
           guard <- freshGuard
           ( do
               -- Queued, not refused: a refusal would come back at once.
-              timeout 300000 (recordGhGroup guard repository (unownedGroup 81)) `shouldReturn` Nothing
+              timeout 300000 (recordGhGroup guard repository (writtenGroup 81)) `shouldReturn` Nothing
               putMVar letGo ()
               -- The same guard, so the mutex the interrupted wait held is the
               -- one this has to take.
-              timeout boundMicros (recordGhGroup guard repository (unownedGroup 82)) `shouldReturn` Just (Right ())
-              loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [unownedGroup 82]
+              timeout boundMicros (recordGhGroup guard repository (writtenGroup 82)) `shouldReturn` Just (Right ())
+              loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [writtenGroup 82]
             )
             `finally` killThread holder
 
@@ -233,8 +233,8 @@ spec = describe "the gh record's cross-process transaction lock" $ do
           takeMVar holding
           killThread holder
           guard <- freshGuard
-          timeout boundMicros (recordGhGroup guard repository (unownedGroup 91)) `shouldReturn` Just (Right ())
-          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [unownedGroup 91]
+          timeout boundMicros (recordGhGroup guard repository (writtenGroup 91)) `shouldReturn` Just (Right ())
+          loadGhGroupRecord repository `shouldReturn` GhGroupRecordLoaded [writtenGroup 91]
 
 -- | How many transactions each writer goes on for once it has seen the other
 -- rewriting: the span the lost-update probe guarantees they share.
@@ -252,8 +252,14 @@ repository = Repository "/nonexistent/checkout" "coghex" "kanban"
 freshGuard :: IO GhFetchGuard
 freshGuard = newGhRecordLock >>= newGhFetchGuard
 
-unownedGroup :: Int -> OwnedProcessGroup
-unownedGroup groupPid = OwnedProcessGroup groupPid [] False Nothing
+-- | An entry as a spawn records one: no members yet, and a writer, since an
+-- entry without one is never written. Which process the writer names does not
+-- matter to the lock, so it is a fixed identity rather than a live one.
+writtenGroup :: Int -> OwnedProcessGroup
+writtenGroup groupPid = OwnedProcessGroup groupPid [] False (Just recordWriter) False
+
+recordWriter :: ProcessIdentity
+recordWriter = ProcessIdentity 4812 1 4812 "Thu Jan 1 00:00:00 1970" "kanban"
 
 loadedGroups :: GhGroupRecordLoad -> Maybe [OwnedProcessGroup]
 loadedGroups (GhGroupRecordLoaded groups) = Just groups

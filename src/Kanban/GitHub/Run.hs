@@ -26,8 +26,8 @@ import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain
-import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupMembers, ignoreIOException)
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, abandonGh, dropGhGroup, ghGroupIsRecorded, recordGhGroup, registerSpawnedGh, setCleanupFailure, uninterruptibleCleanup)
+import Kanban.GitHub.Group (confirmsOwnGroupLeadership, groupMembers, ignoreIOException, leadsOwnGroupIn)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhFetchGuard, GhSpawnRegistration (..), abandonGh, dropGhGroup, ghGroupIsPending, markGhGroupPending, recordGhGroup, registerSpawnedGh, setCleanupFailure, spawnRegistrationGroup, uninterruptibleCleanup)
 import Kanban.Process (OwnedProcessGroup (..), defaultProcessSnapshot, identityForPid)
 import Kanban.Provider (ProviderErrorKind (..))
 import System.Directory (findExecutable)
@@ -63,10 +63,12 @@ runGh guard repository arguments = afterLaunch $ do
   case resolved of
     Nothing -> duringLaunch (ioError (mkIOError doesNotExistErrorType "gh" Nothing (Just "gh")))
     Just ghPath -> do
-      -- The pgid the durable entry is keyed by, remembered the instant the
-      -- registration reports it, because the cleanup cannot always ask for it
-      -- again. 'collect' reaps the handle before it drops the entry, and an
-      -- interruption arriving in or after that reap finds 'getPid' empty; a
+      -- How the spawn is accounted for -- the pgid its durable entry is keyed
+      -- by and the writer stamped on it, or the in-memory protection that
+      -- wrote nothing -- remembered the instant the registration reports it,
+      -- because the cleanup cannot always ask for the pgid again. 'collect'
+      -- reaps the handle before it drops the entry, and an interruption
+      -- arriving in or after that reap finds 'getPid' empty; a
       -- cleanup that could not name the entry would leave it on disk and still
       -- report an ordinary timeout over it.
       registered <- newIORef Nothing
@@ -86,8 +88,8 @@ runGh guard repository arguments = afterLaunch $ do
     taggedAs phase action = try @IOException action >>= either (throwIO . GhProcessFailed phase) pure
 
     cleanUp registered spawned = do
-      recordedGroup <- readIORef registered
-      uninterruptibleCleanup (abandonGh guard repository recordedGroup spawned)
+      registration <- readIORef registered
+      uninterruptibleCleanup (abandonGh guard repository registration spawned)
 
     ghProcess ghPath =
       (uncurry proc (ghBehindBarrier ghPath arguments))
@@ -98,34 +100,46 @@ runGh guard repository arguments = afterLaunch $ do
         }
 
     -- The child exists but has not run @gh@ yet, and cannot until this
-    -- releases it. So the durable guard is not merely written early -- there
-    -- is no instant at which a @gh@ is running that the record does not
-    -- already cover. Losing the dashboard anywhere in here closes the pipe,
+    -- releases it. So a recorded guard is not merely written early -- there
+    -- is no instant at which a recorded @gh@ is running that the record does
+    -- not already cover. Losing the process anywhere in here closes the pipe,
     -- the barrier reads EOF, and the child exits without ever having
     -- executed anything.
+    --
+    -- The one spawn the record does not cover is one admitted under in-memory
+    -- protection ('GhSpawnInMemory'): its writer could not be identified, so
+    -- nothing is written for it, and only this process's serialised jobs keep
+    -- another @gh@ from overlapping it. A process lost while that @gh@ runs
+    -- leaves it unguarded for a restart.
     run registered spawned@(input, _, _, _) = do
-      registration <- registerSpawnedGh guard repository spawned
+      -- One census for this spawn, taken while the child is parked: it names
+      -- the writer the entry is stamped with, and it answers leadership too,
+      -- since nothing the parked child can do changes its group.
+      census <- defaultProcessSnapshot
+      registration <- registerSpawnedGh guard repository census spawned
       case registration of
         Left message -> throwIO (GhGuardUnwritable message)
-        -- The PID comes from the registration, captured while the child was
-        -- still unreaped: 'collect' waits on the handle, and 'getPid' goes
-        -- 'Nothing' the moment it does, which would leave the entry behind.
-        Right groupPid -> do
+        Right admitted -> do
           -- Written before anything else can go wrong, so every path out of
-          -- here from this point on can name the entry that was just created.
-          writeIORef registered (Just groupPid)
-          -- Asked while the child is alive and still parked on the barrier,
-          -- which is the one moment it is guaranteed observable and has done
-          -- nothing yet. Everything downstream reasons about the pgid as if
-          -- it named this fetch's group; that is only true if the child
-          -- actually leads it, and this is where that becomes a fact rather
-          -- than an assumption.
+          -- here from this point on can name the entry that was just created
+          -- -- or knows there is none to name.
+          writeIORef registered (Just admitted)
+          -- Everything downstream reasons about the pgid as if it named this
+          -- fetch's group; that is only true if the child actually leads it,
+          -- and this is where that becomes a fact rather than an assumption.
+          --
+          -- A spawn held only in memory gets a snapshot of its own for this:
+          -- the census that could not identify the writer is not evidence of
+          -- anything, and a persistent snapshot failure stops gh here.
           --
           -- Refusing here costs nothing, because gh has not run: there are no
           -- descendants to account for and nothing to clean up but the parked
           -- shell itself, which is killed by PID -- the one identity that is
           -- meaningful when the group is not ours.
-          leads <- confirmsOwnGroupLeadership groupPid
+          let groupPid = spawnRegistrationGroup admitted
+          leads <- case admitted of
+            GhSpawnRecorded _ _ -> pure (leadsOwnGroupIn groupPid census)
+            GhSpawnInMemory _ -> confirmsOwnGroupLeadership groupPid
           case leads of
             Left message -> do
               ignoreIOException (signalProcess sigKILL (fromIntegral groupPid))
@@ -135,7 +149,7 @@ runGh guard repository arguments = afterLaunch $ do
               released <- releaseBarrier input
               case released of
                 Left message -> throwIO (GhGuardUnwritable message)
-                Right () -> collect groupPid spawned
+                Right () -> collect admitted spawned
       where
         (_, _, _, processHandleOf) = spawned
 
@@ -147,7 +161,8 @@ runGh guard repository arguments = afterLaunch $ do
       written <- try @IOException (hPutStrLn input "" >> hFlush input)
       pure (first (Text.pack . show) written)
 
-    collect groupPid (input, output, errors, processHandle) = do
+    collect admitted (input, output, errors, processHandle) = do
+      let groupPid = spawnRegistrationGroup admitted
       mapM_ (ignoreIOException . hClose) input
       standardOutput <- drain output
       standardError <- drain errors
@@ -167,16 +182,29 @@ runGh guard repository arguments = afterLaunch $ do
           -- abandoned group's undropped entry is. 'settleGroup' has just
           -- proven this group empty and this run is returning gh's real
           -- answer, so an entry that outlives it names nothing that is
-          -- running and the next fetch's reclaim re-verifies the pgid and
-          -- clears it. Failing here would discard a page gh actually
-          -- answered, over a record that is stale rather than live.
-          void (dropGhGroup guard repository groupPid)
+          -- running. Failing here would discard a page gh actually answered,
+          -- over a record that is stale rather than live.
+          --
+          -- It is marked pending, though, when it can be: unmarked, it reads
+          -- as this process's live work to every reader for as long as this
+          -- process runs, and is re-verified only once it exits. A mark that
+          -- fails too leaves exactly that stale entry, naming a group already
+          -- proven empty -- nothing for anyone to overlap.
+          case admitted of
+            GhSpawnInMemory _ -> pure ()
+            GhSpawnRecorded _ _ -> do
+              dropped <- dropGhGroup guard repository groupPid
+              either (const (void (markGhGroupPending guard repository groupPid))) pure dropped
           pure (exitCode, capturedOutput, capturedError)
         -- A member outlived the process that led it -- closing the pipes is
         -- not exiting, and a descendant can do the first without the second.
-        -- The record stays, naming what is left, so the next fetch reclaims
-        -- it with the full ownership machinery instead of starting a gh
-        -- beside it.
+        -- The record stays, naming what is left and marked cleanup-pending, so
+        -- the next fetch -- this process's own included -- reclaims it with
+        -- the full ownership machinery instead of starting a gh beside it. The
+        -- entry keeps the writer this spawn was registered under.
+        --
+        -- A spawn held only in memory records nothing here either: its
+        -- finding stays in memory, which is what 'GuardInMemoryOnly' says.
         --
         -- The finding is published to the guard before the handle is reaped,
         -- and that order is deliberate: reaping is exactly what makes this
@@ -187,9 +215,12 @@ runGh guard repository arguments = afterLaunch $ do
         -- about.
         Left (message, survivors) -> do
           setCleanupFailure guard (GhCleanupFailure message GuardInMemoryOnly)
-          void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True Nothing))
-          recorded <- ghGroupIsRecorded guard repository groupPid
-          setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
+          case admitted of
+            GhSpawnInMemory _ -> pure ()
+            GhSpawnRecorded _ writer -> do
+              void (recordGhGroup guard repository (OwnedProcessGroup groupPid survivors True (Just writer) True))
+              recorded <- ghGroupIsPending guard repository groupPid
+              setCleanupFailure guard (GhCleanupFailure message (if recorded then GuardRecorded else GuardInMemoryOnly))
           -- Deliberately not reaped. Reaping is what frees the PID and with
           -- it the pgid, and the cleanup this throw is about to trigger needs
           -- both: with them it can escalate against the survivors and prove
@@ -273,7 +304,9 @@ leaderDeparturePollMicros = 50 * 1000
 -- | The argv that starts @gh@ behind a barrier: a shell that waits for a
 -- line on standard input and only then replaces itself with @gh@.
 --
--- This is what makes the durable guard genuinely a /pre/-spawn guard. Writing
+-- This is what makes the durable guard genuinely a /pre/-spawn guard for every
+-- spawn it records (one held in memory, its writer unidentified, has no durable
+-- guard to make pre-spawn). Writing
 -- the record straight after 'createProcess' would still leave a window —
 -- short, but real — in which @gh@ is running and nothing on disk names it, so
 -- losing the dashboard there would strand it unguarded. Here the child cannot

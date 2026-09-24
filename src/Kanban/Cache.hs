@@ -145,10 +145,13 @@ data UsageCacheEnvelope = UsageCacheEnvelope
   }
   deriving stock (Eq, Show)
 
--- | The @gh@ process groups a board refresh spawned and then failed to
--- confirm dead. Unlike the snapshot caches this is not an optimisation: it
--- is the only thing that carries "a gh of ours may still be running" across
--- a dashboard restart, so a later fetch re-verifies before spawning another.
+-- | The @gh@ process groups this repository's readers have spawned — each
+-- entry naming the process that spawned it — and those whose cleanup failed.
+-- Unlike the snapshot caches this is not an optimisation: it is the only thing
+-- that carries "a gh of ours may still be running" across a restart, so a
+-- later fetch re-verifies before spawning another. A spawn admitted under
+-- in-memory protection, its writer unidentified, is the one @gh@ it does not
+-- cover (see 'Kanban.GitHub.Guard.GhSpawnInMemory').
 data GhGroupEnvelope = GhGroupEnvelope
   { ghGroupSchemaVersion :: Int,
     ghGroupRepositoryKey :: Text,

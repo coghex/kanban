@@ -132,7 +132,7 @@ runHeldDashboard authority options config repository roster = do
   -- pull-request action requires -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
-  refreshCoordinator <- newBoardRefreshCoordinator authority.authorityOwner config repository historyTraversal eventChannel
+  refreshCoordinator <- newBoardRefreshCoordinator config repository historyTraversal eventChannel
   let (initialUsage, initialUsageFreshness, usageNotice) = initialUsageState usageCacheLoad
       (initialHistory, historyNotice) = initialCompletedHistory completedCacheLoad
   -- The startup line's diagnostic fragments, gathered once so the line that

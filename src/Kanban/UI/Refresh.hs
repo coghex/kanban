@@ -49,12 +49,10 @@ import Kanban.GitHub
     ghFetchCleanupFailure,
     newGhFetchGuard,
     newGhRecordLock,
-    newGhRecordLockOwnedBy,
     newRefreshCoordinator,
     requestRefreshJob,
     runCompletedHistoryPage
     )
-import Kanban.Process (ProcessIdentity)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Usage (claudeRefreshTimeoutMicros, codexRefreshTimeoutMicros, runUsageProvider, usageProviders)
 import System.Timeout (timeout)
@@ -256,13 +254,11 @@ markBoardRefreshRunning generation =
 -- event channel exactly as a lone refresh thread's did, and what the
 -- scheduler has to say for itself reaches the same notice line.
 --
--- The owner is this board's own identity, taken when it acquired the
--- repository, and it goes only into the entries the record gains from here.
--- 'Nothing' is ordinary: a board whose process snapshot failed still holds the
--- repository and still records every @gh@ it starts.
-newBoardRefreshCoordinator :: Maybe ProcessIdentity -> ResolvedConfig -> Repository -> HistoryTraversal -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
-newBoardRefreshCoordinator owner config repository traversal eventChannel = do
-  recordLock <- newGhRecordLockOwnedBy owner
+-- The entries its jobs record are stamped with the writer each spawn resolves
+-- for itself, not with an identity settled here.
+newBoardRefreshCoordinator :: ResolvedConfig -> Repository -> HistoryTraversal -> BChan AppEvent -> IO (RefreshCoordinator BoardRefreshOutcome)
+newBoardRefreshCoordinator config repository traversal eventChannel = do
+  recordLock <- newGhRecordLock
   newRefreshCoordinator
     recordLock
     (boardRefreshRunner config repository traversal eventChannel)
