@@ -37,7 +37,7 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, catchJust, try)
 import Control.Monad (void, when)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON (..), ToJSON, withObject, (.!=), (.:), (.:?))
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -85,26 +85,55 @@ data OwnedProcessGroup = OwnedProcessGroup
     -- handed to a group check that would find its empty membership
     -- vacuously absent and call the survivor reclaimed.
     ownedProcessGroupCensused :: Bool,
-    -- | The dashboard process that wrote this entry, when it could be
-    -- captured.
+    -- | The process that spawned this entry's @gh@ — a dashboard, a mission
+    -- runner, or a worker's precondition read — resolved afresh for that one
+    -- spawn while the child was still parked behind its launch barrier.
     --
-    -- Informational and nothing more. It is not consulted by
-    -- 'matchingIdentities', by 'membersStillInGroup', by any signalling
-    -- decision, or by any judgement about whether the group may be reclaimed:
-    -- the census and the recorded member identities remain the whole of that,
-    -- and an owner that is present adds no authority to them. What it is for
-    -- is saying /whose/ leftover a message is talking about.
+    -- It decides one thing: how a reader /classifies/ the entry. An entry
+    -- whose writer is still running (the same PID with the same start time;
+    -- a reused PID is not the same process) is that writer's live work and
+    -- is skipped, unless 'ownedProcessGroupCleanupPending' says its own
+    -- cleanup has already given up on it, or the writer has released the
+    -- spawn's claim ('Kanban.Cache.GhSpawnClaim') because it no longer
+    -- manages that @gh@. An entry whose writer is confirmed
+    -- exited is abandoned and reclaimed. A snapshot that could not be taken
+    -- proves neither.
     --
-    -- 'Nothing' has two entirely ordinary causes and neither weakens anything:
-    -- an entry written before this field existed decodes without it, and a
-    -- process snapshot that could not be taken at startup leaves the running
-    -- dashboard with no identity to record. A board with no captured identity
-    -- still holds the repository lease, so a missing owner never admits a
-    -- second board.
-    ownedProcessGroupOwner :: Maybe ProcessIdentity
+    -- It never grants authority to signal anything. It is not consulted by
+    -- 'matchingIdentities', by 'membersStillInGroup', or by any signalling
+    -- decision: the census and the recorded member identities remain the
+    -- whole of that, and the owner itself is never a signalling target.
+    --
+    -- 'Nothing' is an entry written before this field existed. Nothing
+    -- current writes one — a spawn whose writer could not be identified is
+    -- held in memory instead of being recorded ownerless — so such an entry
+    -- can only be watched until neither its pgid nor any saved member
+    -- survives, and is never signalled.
+    ownedProcessGroupOwner :: Maybe ProcessIdentity,
+    -- | Set once the writer's own cleanup could not confirm the group gone,
+    -- or could not take its entry off the record.
+    --
+    -- What separates an unresolved leftover from active work while its writer
+    -- is still running: every reader re-verifies a pending entry on every
+    -- fetch, whoever wrote it, instead of skipping it as that writer's live
+    -- @gh@. Absent from every entry written before it existed, and decoded
+    -- as 'False' there, so the record's schema version does not move.
+    ownedProcessGroupCleanupPending :: Bool
   }
   deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (ToJSON)
+
+-- | Written by hand only so an entry from before
+-- 'ownedProcessGroupCleanupPending' existed still decodes, as not pending:
+-- a record that did not decode would refuse every fetch and never clear.
+instance FromJSON OwnedProcessGroup where
+  parseJSON = withObject "OwnedProcessGroup" $ \entry ->
+    OwnedProcessGroup
+      <$> entry .: "ownedProcessGroupPid"
+      <*> entry .: "ownedProcessGroupMembers"
+      <*> entry .: "ownedProcessGroupCensused"
+      <*> entry .:? "ownedProcessGroupOwner"
+      <*> entry .:? "ownedProcessGroupCleanupPending" .!= False
 
 data ManagedProcess
   = LocalManagedProcess ProcessHandle (Maybe CPid)

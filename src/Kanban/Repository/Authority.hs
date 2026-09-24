@@ -37,7 +37,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Cache (migrateGhGroupRecord, normalizedRepositoryIdentity)
 import Kanban.Domain (Repository)
-import Kanban.Process (ProcessIdentity, currentProcessIdentity)
 import Kanban.Repository.Lease
   ( BoardLeaseOutcome (..),
     RepositoryLease,
@@ -49,9 +48,6 @@ import Kanban.Repository.Lease
 data BoardAuthority = BoardAuthority
   { -- | Held for the process's lifetime. Nothing but the kernel takes it back.
     authorityLease :: RepositoryLease,
-    -- | This board, for the entries it goes on to write. 'Nothing' when no
-    -- process snapshot could name it, which is informational only.
-    authorityOwner :: Maybe ProcessIdentity,
     -- | What went wrong on the way in without threatening a recorded group —
     -- a migrated file that would not unlink is the case there is one of. The
     -- board opens and says so; it does not refuse.
@@ -75,9 +71,7 @@ acquireBoardAuthority repository = do
         Left message -> do
           releaseRepositoryLease lease
           pure (Left message)
-        Right notices -> do
-          owner <- currentProcessIdentity
-          pure (Right (BoardAuthority lease owner notices))
+        Right notices -> pure (Right (BoardAuthority lease notices))
 
 -- | Gives the repository back. Only for a board that is finished with it: the
 -- kernel does this for a board that dies.

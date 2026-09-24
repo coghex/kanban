@@ -7,11 +7,15 @@ module Kanban.Cache
   ( CacheLoad (..),
     CompletedCacheLoad (..),
     GhGroupRecordLoad (..),
+    GhSpawnClaim,
     UsageCacheLoad (..),
     UsageCommit (..),
     canonicalRepositoryKey,
+    claimGhGroup,
     commitUsageSnapshots,
     completedCacheSchemaVersion,
+    ghGroupClaimHeld,
+    ghGroupClaimPath,
     ghGroupRecordLockPath,
     ghGroupRecordPath,
     ghGroupRecordSchemaVersion,
@@ -24,6 +28,7 @@ module Kanban.Cache
     mergeUsageSnapshots,
     migrateGhGroupRecord,
     normalizedRepositoryIdentity,
+    releaseGhGroupClaim,
     removeGhGroupRecord,
     repositoryCachePath,
     repositoryCacheSchemaVersion,
@@ -37,8 +42,9 @@ module Kanban.Cache
   )
 where
 
-import Control.Exception (IOException, allowInterrupt, bracket, bracketOnError, catch, finally, onException, try)
+import Control.Exception (IOException, allowInterrupt, bracket, bracketOnError, catch, finally, onException, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
+import Data.Bits ((.|.))
 import Data.Aeson
   ( FromJSON (parseJSON),
     Result (..),
@@ -56,11 +62,12 @@ import Data.Aeson
 import Data.Aeson.Types (parse)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Foreign.C.Error (eINTR, getErrno, throwErrno)
+import Foreign.C.Error (eAGAIN, eINTR, eWOULDBLOCK, getErrno, throwErrno)
 import Foreign.C.Types (CInt (..))
 import GHC.Generics (Generic)
 import GHC.IO.Handle.Lock (FileLockingNotSupported, LockMode (ExclusiveLock), hLock, hUnlock)
@@ -80,7 +87,8 @@ import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, hClose, openBinaryTempFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode, setFileMode)
-import System.Posix.IO (OpenFileFlags (..), OpenMode (ReadWrite), closeFd, defaultFileFlags, fdToHandle, openFd)
+import System.Posix.Files (removeLink)
+import System.Posix.IO (OpenFileFlags (..), OpenMode (ReadOnly, ReadWrite), closeFd, defaultFileFlags, fdToHandle, openFd)
 import System.Posix.Types (Fd (..))
 
 data CacheLoad
@@ -145,10 +153,13 @@ data UsageCacheEnvelope = UsageCacheEnvelope
   }
   deriving stock (Eq, Show)
 
--- | The @gh@ process groups a board refresh spawned and then failed to
--- confirm dead. Unlike the snapshot caches this is not an optimisation: it
--- is the only thing that carries "a gh of ours may still be running" across
--- a dashboard restart, so a later fetch re-verifies before spawning another.
+-- | The @gh@ process groups this repository's readers have spawned — each
+-- entry naming the process that spawned it — and those whose cleanup failed.
+-- Unlike the snapshot caches this is not an optimisation: it is the only thing
+-- that carries "a gh of ours may still be running" across a restart, so a
+-- later fetch re-verifies before spawning another. A spawn admitted under
+-- in-memory protection, its writer unidentified, is the one @gh@ it does not
+-- cover (see 'Kanban.GitHub.Guard.GhSpawnInMemory').
 data GhGroupEnvelope = GhGroupEnvelope
   { ghGroupSchemaVersion :: Int,
     ghGroupRepositoryKey :: Text,
@@ -434,6 +445,122 @@ withGhGroupRecordLock repository action = do
 
 foreign import capi interruptible "sys/file.h flock"
   c_flock :: CInt -> CInt -> IO CInt
+
+-- | Where one spawn's claim on its record entry lives: beside the record,
+-- keyed by the repository and by the pgid the entry is recorded under. Its
+-- extension, like the record lock's, is neither @.json@ nor @.lock@, so the
+-- legacy migration never takes it for a record.
+ghGroupClaimPath :: Repository -> Int -> IO FilePath
+ghGroupClaimPath repository groupPid = ghGroupPath repository (".claim-" <> show groupPid)
+
+-- | The claim a spawn holds on its record entry for as long as the process
+-- that spawned it is still managing that @gh@.
+--
+-- An entry whose writer is alive is live work only while this is held. What
+-- makes it a claim rather than a mark is that giving it up needs no write: a
+-- cleanup that could neither confirm its group gone nor durably mark the entry
+-- cleanup-pending can still release this, and the kernel releases it for a
+-- writer that dies. Every other reader then re-verifies the entry instead of
+-- skipping it as live work.
+--
+-- A @flock@ on its own close-on-exec descriptor, for the reasons
+-- 'withGhGroupRecordLock' gives: separate opens contend in one process as in
+-- two, and @gh@ and its descendants must not inherit it and keep it held.
+data GhSpawnClaim = GhSpawnClaim
+  { ghSpawnClaimPath :: FilePath,
+    ghSpawnClaimDescriptor :: IORef (Maybe Fd)
+  }
+
+-- | Compared and shown by path: the descriptor is this process's handle on
+-- it, not part of what it claims.
+instance Eq GhSpawnClaim where
+  left == right = left.ghSpawnClaimPath == right.ghSpawnClaimPath
+
+instance Show GhSpawnClaim where
+  show claim = "GhSpawnClaim " <> show claim.ghSpawnClaimPath
+
+-- | Takes the claim for a freshly spawned group, before its entry is written.
+--
+-- Blocking, because the only holder it can meet is a reader's momentary probe,
+-- or the tail of an earlier spawn at a pgid that has since been reissued, and
+-- either lets go at once; it is interruptible, so the fetch's own deadline
+-- still bounds it. 'Left' is a claim that could not be taken, and the caller
+-- refuses the spawn rather than recording an entry nobody could tell was live.
+claimGhGroup :: Repository -> Int -> IO (Either Text GhSpawnClaim)
+claimGhGroup repository groupPid = do
+  claimPath <- ghGroupClaimPath repository groupPid
+  opened <- try @IOException $ do
+    let directory = takeDirectory claimPath
+    present <- doesDirectoryExist directory
+    unless present (createPrivateDirectory XdgCache directory)
+    descriptor <- openFd claimPath ReadWrite defaultFileFlags {creat = Just 0o600, cloexec = True}
+    (descriptor <$ flockWith lockExclusive descriptor) `onException` closeFd descriptor
+  case opened of
+    Left exception -> pure (Left ("the gh process group's claim could not be taken: " <> Text.pack (show exception)))
+    Right descriptor -> Right . GhSpawnClaim claimPath <$> newIORef (Just descriptor)
+  where
+    flockWith operation (Fd descriptor) = do
+      result <- c_flock descriptor operation
+      when (result == -1) $ do
+        errno <- getErrno
+        if errno == eINTR
+          then allowInterrupt >> flockWith operation (Fd descriptor)
+          else throwErrno "flock"
+
+-- | Gives the claim up: the file is unlinked while it is still held, so no
+-- other spawn can be holding it, and then the descriptor is closed.
+--
+-- Idempotent, since more than one path ends a spawn's management and each of
+-- them releases. It raises nothing: a claim that cannot be unlinked is still
+-- released by the close, and an unlocked claim file reads as not held.
+--
+-- Uninterruptible from taking the descriptor to closing it. The descriptor
+-- leaves its slot first, so that a second release finds nothing to close; an
+-- exception delivered after that and before the close would strand a locked
+-- descriptor no later release can reach, and the entry would read as live
+-- work for as long as this process runs. Every step is a short system call on
+-- a local file, so refusing interruption here costs nothing.
+releaseGhGroupClaim :: GhSpawnClaim -> IO ()
+releaseGhGroupClaim claim = uninterruptibleMask_ $ do
+  held <- atomicModifyIORef' claim.ghSpawnClaimDescriptor (\descriptor -> (Nothing, descriptor))
+  case held of
+    Nothing -> pure ()
+    Just descriptor -> do
+      void (try @IOException (removeLink claim.ghSpawnClaimPath))
+      void (try @IOException (closeFd descriptor))
+
+-- | Whether some process still holds the claim on the entry recorded for a
+-- group, asked without waiting.
+--
+-- An absent claim file is 'False': a released claim is unlinked. 'Left' is a
+-- probe that could not be made, and says nothing either way.
+ghGroupClaimHeld :: Repository -> Int -> IO (Either Text Bool)
+ghGroupClaimHeld repository groupPid = do
+  claimPath <- ghGroupClaimPath repository groupPid
+  opened <- try @IOException (openFd claimPath ReadOnly defaultFileFlags {cloexec = True})
+  case opened of
+    Left exception
+      | isDoesNotExistError exception -> pure (Right False)
+      | otherwise -> pure (Left (Text.pack (show exception)))
+    Right descriptor@(Fd raw) ->
+      ( do
+          result <- c_flock raw (lockShared .|. lockNonBlocking)
+          if result == 0
+            then Right False <$ c_flock raw lockUnlock
+            else do
+              errno <- getErrno
+              pure $
+                if errno == eWOULDBLOCK || errno == eAGAIN
+                  then Right True
+                  else Left "the gh process group's claim could not be probed"
+      )
+        `finally` closeFd descriptor
+
+foreign import capi "sys/file.h value LOCK_SH"
+  lockShared :: CInt
+
+foreign import capi "sys/file.h value LOCK_NB"
+  lockNonBlocking :: CInt
 
 foreign import capi "sys/file.h value LOCK_EX"
   lockExclusive :: CInt

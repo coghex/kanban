@@ -56,7 +56,6 @@ import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Process (processIdentity)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.Posix.Process (getProcessID)
 import Test.Hspec
 
 spec :: Spec
@@ -168,8 +167,8 @@ spec = do
     -- members are the only thing that makes the group killable at all.
     it "keeps two entries that share a pgid but disagree about the census" $
       withCacheRoot $ \_ -> do
-        let censused = OwnedProcessGroup 90 [processIdentity 91 1 90 "gh"] True Nothing
-            uncensused = OwnedProcessGroup 90 [] False Nothing
+        let censused = OwnedProcessGroup 90 [processIdentity 91 1 90 "gh"] True Nothing False
+            uncensused = OwnedProcessGroup 90 [] False Nothing False
         writeGhGroupRecord lowerSpelling [censused] `shouldReturn` Right ()
         writeLegacyRecord "coghex-kanban.json" "coghex/kanban" [uncensused]
         migrateGhGroupRecord lowerSpelling `shouldReturn` Right []
@@ -263,8 +262,8 @@ spec = do
 
   describe "merging records" $ do
     it "treats only an entry equal in every field as a duplicate" $ do
-      let censused = OwnedProcessGroup 140 [processIdentity 141 1 140 "gh"] True Nothing
-          uncensused = OwnedProcessGroup 140 [] False Nothing
+      let censused = OwnedProcessGroup 140 [processIdentity 141 1 140 "gh"] True Nothing False
+          uncensused = OwnedProcessGroup 140 [] False Nothing False
           owned = censused {ownedProcessGroupOwner = Just (processIdentity 9 1 9 "kanban")}
       mergeGhGroups [censused] [censused] `shouldBe` [censused]
       mergeGhGroups [censused] [uncensused] `shouldBe` [censused, uncensused]
@@ -277,10 +276,26 @@ spec = do
       let legacy = object ["ownedProcessGroupPid" .= (150 :: Int), "ownedProcessGroupMembers" .= ([] :: [ProcessIdentity]), "ownedProcessGroupCensused" .= False]
       decode (encode legacy) `shouldBe` Just (unownedGroup 150)
 
+    -- The cleanup-pending mark arrived without a schema bump, so an entry
+    -- written before it -- owner and all -- must still decode, as not pending:
+    -- a record that did not decode would refuse every fetch and never clear.
+    it "decodes an entry written before the cleanup-pending mark as not pending" $ do
+      let board = processIdentity 170 1 170 "kanban"
+          earlier = object ["ownedProcessGroupPid" .= (171 :: Int), "ownedProcessGroupMembers" .= ([] :: [ProcessIdentity]), "ownedProcessGroupCensused" .= False, "ownedProcessGroupOwner" .= board]
+      decode (encode earlier) `shouldBe` Just (OwnedProcessGroup 171 [] False (Just board) False)
+
+    it "round-trips a cleanup-pending entry at schema version 1" $
+      withCacheRoot $ \_ -> do
+        let pendingEntry = OwnedProcessGroup 181 [] False (Just (processIdentity 180 1 180 "kanban")) True
+        writeGhGroupRecord lowerSpelling [pendingEntry] `shouldReturn` Right ()
+        loadGhGroupRecord lowerSpelling `shouldReturn` GhGroupRecordLoaded [pendingEntry]
+        path <- ghGroupRecordPath lowerSpelling
+        envelopeField path "ghGroupSchemaVersion" `shouldReturn` Just (toJSON ghGroupRecordSchemaVersion)
+
     it "round-trips an entry with an owner and one without" $
       withCacheRoot $ \_ -> do
         let board = processIdentity 160 1 160 "kanban"
-            withOwner = OwnedProcessGroup 161 [] False (Just board)
+            withOwner = OwnedProcessGroup 161 [] False (Just board) False
             without = unownedGroup 162
         writeGhGroupRecord lowerSpelling [withOwner, without] `shouldReturn` Right ()
         loadGhGroupRecord lowerSpelling `shouldReturn` GhGroupRecordLoaded [withOwner, without]
@@ -344,9 +359,10 @@ spec = do
 
   describe "taking the repository for a board" $ do
     -- The whole composition, in the order 'runDashboard' calls it: the lease,
-    -- then the record, then this board's own identity. Nothing below it in the
-    -- dashboard may run without all three settled.
-    it "holds the lease, migrates the record, and knows which process it is" $
+    -- then the record. Nothing below it in the dashboard may run without both
+    -- settled. (Which process writes an entry is resolved per spawn, not
+    -- here.)
+    it "holds the lease and migrates the record" $
       withCacheRoot $ \_ -> do
         writeLegacyRecord "Coghex-Kanban.json" "Coghex/Kanban" [unownedGroup 171]
         taken <- acquireBoardAuthority lowerSpelling
@@ -356,8 +372,6 @@ spec = do
             loadGhGroupRecord lowerSpelling `shouldReturn` GhGroupRecordLoaded [unownedGroup 171]
             legacyStillPresent "Coghex-Kanban.json" `shouldReturn` False
             authority.authorityNotices `shouldBe` []
-            self <- getProcessID
-            fmap processIdentityPid authority.authorityOwner `shouldBe` Just (fromIntegral self)
             releaseBoardAuthority authority
 
     -- A board that never opened holds nothing. The lease is given back on the
@@ -400,7 +414,7 @@ hyphenOwner = Repository "/nonexistent/checkout" "coghex-kan" "ban"
 hyphenName = Repository "/nonexistent/checkout" "coghex" "kan-ban"
 
 unownedGroup :: Int -> OwnedProcessGroup
-unownedGroup groupPid = OwnedProcessGroup groupPid [] False Nothing
+unownedGroup groupPid = OwnedProcessGroup groupPid [] False Nothing False
 
 -- | Every mode an invocation can select, one option set each, in §5's order.
 everyMode :: [Options]

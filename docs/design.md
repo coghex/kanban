@@ -2281,10 +2281,11 @@ unverified. Neither is ever reported as the target having moved or gone, which
 is a different reading and a different repair. A timeout is published as one
 only when the interrupted read's own cleanup both proved its `gh` process group
 gone and took that group off the durable record. Either half failing is
-reported in its place, and leaves the record naming whatever it names, so the
-next fetch re-verifies that entry rather than starting a `gh` beside it — a
-group killed but still recorded is no more a clean timeout than one that was
-never confirmed dead.
+reported in its place, and leaves the record naming that group, marked
+cleanup-pending — or, when even the mark cannot be written, holds the refusal
+in memory (section 15) — so the next fetch re-verifies that entry rather than
+starting a `gh` beside it — a group killed but still recorded is no more a
+clean timeout than one that was never confirmed dead.
 
 Completed history is acquired the same way, in the background. A second
 traversal follows the closed issues and the closed-or-merged pull requests, each
@@ -2860,13 +2861,18 @@ above are unchanged, and persistence the user switched off is not a failure.
   no timeout, no reaper — because the kernel releases a dead holder's locks,
   which is the whole recovery story. Only dashboard mode takes it: `--worker`,
   `--glyph-test`, `--doctor`, `--usage`, `--ping` and `--mission` do not,
-  having no board and no durable record to serialise against. `--mission` is
-  the one worth stating: it does take a lease, but that lease is the selected
-  mission's own advancement lease under the state root (section 16), which
-  serialises advancement of one mission rather than access to this
+  having no board to serialise. That does not keep them off the durable
+  record. `--mission` reads the board and observes targets through the same
+  fetch a dashboard does, and a worker rereads its precondition the same way,
+  so each reclaims from and writes to this repository's shared `gh` record and
+  takes its cross-process lock for every rewrite — without holding the
+  dashboard's lease. `--mission` does take a lease of its own, but that is the
+  selected mission's advancement lease under the state root (section 16),
+  which serialises advancement of one mission rather than access to this
   repository's `gh` record. A mission runner and a dashboard on the same
   repository therefore run side by side, which is exactly the attachment the
-  mission contract expects. Any acquisition failure other than confirmed
+  mission contract expects, and it is what the record's writer classification
+  below exists for. Any acquisition failure other than confirmed
   contention fails startup rather than proceeding unheld, since
   a board that could not establish the lease has not established that it is
   alone. The durable record and the restart-time reclaim refusal remain what
@@ -2883,18 +2889,67 @@ above are unchanged, and persistence the user switched off is not a failure.
   interruption can leave a duplicate that the next start merges away but can
   never leave a possibly-live `gh` unrecorded. Entries keep schema version 1
   throughout.
-- Every entry a board writes carries that board's own process identity when a
-  process snapshot can supply one. It is informational: it says whose leftover
-  a later reclaim message is describing and nothing more, taking no part in
-  censusing a group, proving one owned, signalling it, or deciding to refuse
-  over it, and an entry without one — written before the field existed, or by a
-  board whose snapshot failed — is treated exactly as an entry with one. What
-  separates a leftover from a board's own work is not the owner but the record
-  the board found at its first reclaim, since under the lease nothing else
-  could have written it. That claim is given up as the record carrying it is
-  cleared, and only once the removal succeeds: a process group id is reissued
-  freely once its group is gone, so a board still holding the number would
-  describe its own later `gh` as a predecessor's leftover.
+- Every entry names its writer: the process that spawned that `gh` — a
+  dashboard, a mission runner, or a worker's precondition read — identified by
+  pid and start time from a process snapshot taken for that one spawn while the
+  child is still parked behind its launch barrier. Every later rewrite of the
+  entry, including one a failed cleanup makes, keeps that writer. For as long
+  as the writer is managing that `gh` it also holds the spawn's claim — an
+  exclusive, close-on-exec `flock` on
+  `$XDG_CACHE_HOME/kanban/gh-groups/<canonical-key>.claim-<pgid>`, taken before
+  the entry is written and released, with the file unlinked, once the entry is
+  dropped or the spawn's cleanup ends however it ends. A reader classifies each
+  entry by whether its writer is still running, matched by pid and start time
+  together, so a reused pid is a different process:
+  - **Active** — the writer is running, the spawn's claim is held, and the
+    entry is not cleanup-pending. It is that writer's live `gh`, whichever
+    process wrote it, the reader's own included. The reader skips it without
+    blocking or refusing, and leaves it on the record.
+  - **Cleanup-pending** — the writer is running, but its own cleanup could not
+    confirm the group gone or could not take the entry off the record: it marked
+    the entry so, or released the claim with the entry still recorded. Every
+    fetch re-verifies it, whoever wrote it and however alive that writer is; it
+    is refused over, and stays on the record, until it can be safely cleared.
+  - **Abandoned** — the writer is confirmed exited. The entry is reclaimed.
+  - **Unknown** — no snapshot could say whether the writer runs. That proves
+    neither exit nor liveness, so the entry is neither skipped nor reclaimed,
+    and the fetch refuses.
+  - **Ownerless** — an entry written before entries carried a writer. It is
+    observation-only: retained while its pgid is occupied or any saved member
+    identity survives, in that group or any other, cleared once neither
+    remains, and never signalled, whatever census it carries.
+- Writer identity decides classification and nothing else. It never grants
+  authority to signal: a reclaimed entry's group is signalled only when a fresh
+  census and the entry's saved member identities prove the group is this
+  repository's, with the same verified TERM-then-KILL escalation as before, and
+  the writer itself is never a signalling target. A reclaim takes off the
+  record only the entries it accounted for, and rewrites the list with every
+  active or still-unresolved entry beside them kept.
+- The cleanup-pending mark and the released claim are what keep an unresolved
+  leftover from passing as live work while its writer runs on. A cleanup that
+  marks the entry reports the group as recorded, and every later fetch re-checks
+  it. The mark is a write, and the store that refused the drop usually refuses
+  it too; releasing the claim needs no write, so another reader re-verifies the
+  entry either way, and a writer that dies releases it through the kernel. When
+  the mark cannot be written the writer also holds the refusal in memory, as
+  for a group it could not record at all, since its own next fetch must not
+  spawn beside the group either.
+  The mark is an optional field that decodes as not pending when it is absent,
+  so records written before it existed stay readable and the schema version
+  stays 1.
+- A spawn whose writer census fails is not recorded without a writer. When the
+  shared record is absent or empty, and a separate fresh snapshot still confirms
+  the child leads its own process group, the spawn goes ahead under in-memory
+  protection alone: nothing is written for it, and a cleanup that cannot
+  account for it holds the refusal in memory rather than recording anything.
+  Such a `gh` is not covered by the durable record, so a process lost while it
+  runs leaves it unguarded for a restart — the trade this makes rather than
+  refusing every fetch over one transient snapshot. When the record holds
+  anything, the spawn is refused, since the next reader could not classify an
+  entry beside one it cannot identify. When no snapshot can be taken at all,
+  the leadership check fails too and `gh` never runs. Each spawn resolves its
+  writer afresh, so one failed census costs that spawn only, and the next one
+  records normally.
 - The coordinator schedules typed jobs rather than one anonymous refresh: a
   foreground open job and a background history job. When both are runnable the
   open job runs first; a history job never starts or resumes while an open job
@@ -3044,7 +3099,8 @@ above are unchanged, and persistence the user switched off is not a failure.
   than age into a failure that lets the next fetch through. Only a job the quit
   cancelled is left unanswered, because nothing is waiting for it. The dashboard halts once the cleanup reaches a verdict
   that leaves nothing ambiguous — the group confirmed gone, or durably recorded
-  for a later run to re-check before it spawns anything. A group that is
+  as cleanup-pending, which every later fetch re-checks before it spawns
+  anything, and which a restart reclaims once its writer has exited. A group that is
   neither, possibly live with only this process's in-memory refusal covering it,
   refuses the quit and reports that instead: halting there would drop the one
   thing holding the next `gh` back, so the dashboard says to stop the stray `gh`
@@ -4592,7 +4648,11 @@ writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
 and incidents, starts and stops it, and replays a mission's durable events from
 a cursor; rendering any of that, capacity
 arbitration, fair rotation, and descendant-tree termination are not
-implemented. Board frames are
+implemented. The durable `gh` group record is shared safely by every process
+that reads the board: each rewrite takes a cross-process lock, and each entry
+names the process that spawned its `gh`, so a reader skips another process's
+live work, re-verifies a cleanup-pending leftover even while its writer runs,
+and reclaims only what an exited writer left (section 15). Board frames are
 bounded as section 7 describes: each column is laid out once per change to what
 it shows, and a frame builds the cards its viewport can reach rather than every
 card the column holds. The

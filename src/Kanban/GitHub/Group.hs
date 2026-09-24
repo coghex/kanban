@@ -15,6 +15,7 @@ module Kanban.GitHub.Group
     groupMembers,
     ignoreIOException,
     killGhGroup,
+    leadsOwnGroupIn,
   )
 where
 
@@ -44,9 +45,16 @@ groupMembers groupPid = filter ((== groupPid) . processIdentityGroupPid)
 -- behind runs on somewhere this module cannot see. Establishing leadership
 -- once, before anything runs, is what makes all of those questions sound.
 confirmsOwnGroupLeadership :: Int -> IO (Either Text ())
-confirmsOwnGroupLeadership groupPid = do
-  snapshot <- defaultProcessSnapshot
-  pure $ case snapshot of
+confirmsOwnGroupLeadership groupPid = leadsOwnGroupIn groupPid <$> defaultProcessSnapshot
+
+-- | The same answer, read off a snapshot the caller already took.
+--
+-- A spawn's writer census is taken while its child is parked on the barrier,
+-- so leadership read from that census is as fresh as a snapshot of its own
+-- would be; nothing the child can do before it is released changes its group.
+leadsOwnGroupIn :: Int -> Either Text [ProcessIdentity] -> Either Text ()
+leadsOwnGroupIn groupPid snapshot =
+  case snapshot of
     Left message -> Left ("could not confirm gh leads its own process group: " <> message)
     Right processes -> case identityForPid groupPid processes of
       Nothing -> Left "gh was gone before it could be confirmed to lead its own process group"
@@ -108,7 +116,7 @@ killGhGroup processHandle = do
         -- recorded uncensused: a later run may watch that pgid until it is
         -- empty, but must never signal it, because by then the PIDs could
         -- belong to anything.
-        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False Nothing))
+        Left message -> pure (Left (message, OwnedProcessGroup groupPid [] False Nothing False))
         Right processes -> case identityForPid groupPid processes of
           -- A live gh that is not its own group leader means @create_group@
           -- did not take effect, and its pgid now names processes this fetch
@@ -120,7 +128,7 @@ killGhGroup processHandle = do
                 pure
                   ( Left
                       ( "gh is not the leader of its own process group, so its group cannot be terminated safely",
-                        OwnedProcessGroup groupPid [leader] False Nothing
+                        OwnedProcessGroup groupPid [leader] False Nothing False
                       )
                   )
           _ -> case groupMembers groupPid processes of
@@ -129,11 +137,11 @@ killGhGroup processHandle = do
             [] -> pure (Right True)
             members
               | passesLeft <= 0 ->
-                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True Nothing))
+                  pure (Left ("gh's process group kept gaining members faster than they could be terminated", OwnedProcessGroup groupPid members True Nothing False))
               | otherwise -> do
                   result <- killVerifiedGroup groupPid members
                   case result of
-                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True Nothing))
+                    Left message -> pure (Left (message, OwnedProcessGroup groupPid members True Nothing False))
                     Right () -> escalate groupPid (passesLeft - 1)
 
 -- | How many census-then-escalate rounds a group gets before its survivors

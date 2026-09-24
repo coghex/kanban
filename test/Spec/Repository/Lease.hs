@@ -395,7 +395,7 @@ spec = do
               record <- ghGroupRecordPath boardRepository
               writeLegacyRecord (takeDirectory record) "coghex-kanban.json"
               migrateGhGroupRecord boardRepository `shouldReturn` Right []
-              loadGhGroupRecord boardRepository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4242 [] False Nothing]
+              loadGhGroupRecord boardRepository `shouldReturn` GhGroupRecordLoaded [OwnedProcessGroup 4242 [] False Nothing False]
               withLeaseProbes
                 (root </> "probes")
                 [LeaseProbe "intruder" boardRepository (root </> "cache") "intruder"]
@@ -529,7 +529,7 @@ writeLegacyRecord directory name = do
         ( object
             [ "ghGroupSchemaVersion" .= ghGroupRecordSchemaVersion,
               "ghGroupRepositoryKey" .= ("coghex/kanban" :: Text),
-              "ghGroupGroups" .= [OwnedProcessGroup 4242 [] False Nothing]
+              "ghGroupGroups" .= [OwnedProcessGroup 4242 [] False Nothing False]
             ]
         )
     )

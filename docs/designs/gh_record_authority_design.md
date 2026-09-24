@@ -521,6 +521,44 @@ form.
 
 *Amended after the unusable-record finding; see the history note below.*
 
+> **Superseded in part by issue `#721` (GHR-2, epic `#642`).** The optional,
+> schema-1 owner field stands; the policy that the owner is informational only
+> does not. It rested on D-1's premise that, under the repository lease, nothing
+> but a dead predecessor could have written what a board finds in the record.
+> Mission reads and worker precondition rereads share the record without
+> holding the lease, so that premise does not hold, and a live concurrent
+> reader's `gh` was being refused as a predecessor's ghost. The superseding
+> decision:
+>
+> - **Writer identity determines liveness classification.** The owner is the
+>   process that spawned that one `gh` — dashboard, mission runner, or worker —
+>   resolved afresh for each spawn while the child is parked behind its launch
+>   barrier, and kept through every later rewrite of the entry. A reader matches
+>   it by pid and start time: a running writer's entry is active work — while
+>   the writer still holds the spawn's claim, a `flock` it releases without any
+>   write when it stops managing that `gh` — skipped and kept on the record; a
+>   confirmed-exited writer's entry is abandoned and
+>   reclaimed; a failed snapshot is unknown, not exited. An entry without an
+>   owner is a legacy entry, observation-only: retained while its pgid is
+>   occupied or any saved member survives, and never signalled.
+> - **Cleanup-pending entries are re-verified even while their writer lives.**
+>   A cleanup that cannot confirm its group gone, or cannot remove the entry,
+>   marks it cleanup-pending in a second optional field (absent decodes as not
+>   pending; the schema stays 1), and every fetch re-verifies a pending entry
+>   whoever wrote it. A mark that cannot be written still leaves the entry
+>   re-verified by every other reader, through the released claim, and is held
+>   in memory by the writer. A spawn whose writer cannot be identified is never recorded
+>   ownerless: it runs under in-memory protection only while the record is
+>   empty and a separate snapshot confirms group leadership, and is refused
+>   otherwise.
+> - **Identity never authorizes signalling.** A group is signalled only when a
+>   fresh census and the saved member identities prove it this repository's,
+>   with the unchanged TERM-then-KILL escalation. The writer is never a
+>   signalling target and proves nothing about a group.
+>
+> The rationale and consequences below are kept as they were decided;
+> `docs/design.md` §15 is the current contract.
+
 `OwnedProcessGroup` gains an owner `ProcessIdentity` as an **optional** field,
 decoded with `.:?`. `ghGroupRecordSchemaVersion` stays 1. Records written before
 the change load unchanged, with the owner absent.

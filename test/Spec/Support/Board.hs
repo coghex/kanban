@@ -50,7 +50,10 @@ import Test.Hspec
 -- forces the last-resort path.
 --
 -- @psFailures@ is how many @ps@ invocations fail before the real one takes
--- over ('Nothing' fails every one). The fake gh spawns a TERM-ignoring
+-- over ('Nothing' fails every one). The first invocation is let through
+-- regardless: it is the spawn's own writer census, and failing it would hold
+-- the spawn in memory -- or, with nothing to confirm leadership, refuse it --
+-- before gh ever ran, rather than breaking the cleanup this fixture drives. The fake gh spawns a TERM-ignoring
 -- descendant into its own group, so what comes back — the published outcome,
 -- and anything of this fixture's still alive once the real @ps@ is back —
 -- answers both halves of the question: what the guard claimed, and whether
@@ -92,7 +95,7 @@ withForcedCleanup temporaryRoot psFailures ghBody action = do
                   ByteString.pack ("attempt=$(cat " <> psCounter <> " 2>/dev/null || echo 0)"),
                   "attempt=$((attempt + 1))",
                   ByteString.pack ("printf '%s' \"$attempt\" > " <> psCounter),
-                  ByteString.pack ("[ " <> maybe "1 -eq 1" (\n -> "\"$attempt\" -le " <> show n) psFailures <> " ] && exit 1"),
+                  ByteString.pack ("[ \"$attempt\" -gt 1 ] && [ " <> maybe "1 -eq 1" (\n -> "\"$attempt\" -le " <> show (n + 1)) psFailures <> " ] && exit 1"),
                   "exec /bin/ps \"$@\""
                 ]
             )
