@@ -2075,6 +2075,66 @@ class TrackerTransactionTests(TrackerFixture):
         self.assertEqual(caught.exception.status, "local-resolution-refused")
         self.assertIn("changed since", caught.exception.message)
 
+    def tracked_preflight_copy_disposition(self):
+        """Issue #727's shape: a pr-atomic document on the tip whose working
+        copy carries an unlanded owner edit, applied over the copy the
+        preflight observed. Returns the helper's result."""
+        document = "docs/design.md"
+        (self.fx.docs / document).write_text(DOCUMENT, encoding="utf-8")
+        run(["git", "add", "-A"], self.fx.docs)
+        run(["git", "commit", "-qm", "baseline"], self.fx.docs)
+        run(["git", "push", "-q", "origin", "HEAD:master"], self.fx.docs)
+        run(["git", "fetch", "-q", "origin", "master"], self.fx.primary)
+        owner_edited = DOCUMENT + "\nAn owner's unlanded paragraph.\n"
+        (self.fx.docs / document).write_text(owner_edited, encoding="utf-8")
+        preflight = publisher.check_pending(
+            self.fx.docs, "coghex/kanban", "master", document
+        )
+        self.assertEqual(preflight["status"], "clear")
+        self.assertNotEqual(
+            preflight["working_copy_blob"],
+            publisher.blob_at(self.fx.docs, "origin/master", document),
+        )
+        applied = self.fx.publish_document(
+            owner_edited.replace(
+                "- [ ] DW-3. Checkpoint tracker mutations",
+                "- [x] DW-3. Checkpoint tracker mutations — [#311]",
+            ),
+            path=document,
+            expected_working_copy=preflight["working_copy_blob"],
+        )
+        self.assertEqual(applied["status"], "not-published")
+        self.assertEqual(applied["write_outcome"], "applied-over-preflight-copy")
+        self.assertEqual(applied["applied_record"], "recorded")
+        self.confirmed_pr_atomic_transaction()
+        return applied
+
+    def test_a_tracked_document_applied_over_the_preflight_copy_resolves_locally(self):
+        # Issue #727: the write outcome's name decides nothing here. The lane
+        # check and the applied record are the same ones every other local
+        # resolution passes, and the owner's unlanded edit survives it.
+        self.tracked_preflight_copy_disposition()
+        outcome = self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(outcome["status"], "resolved")
+        self.assertEqual(outcome["source"], "local")
+        self.assertIsNone(self.fx.read(document="docs/design.md")[0])
+        self.assertIn(
+            "An owner's unlanded paragraph.",
+            (self.fx.docs / "docs" / "design.md").read_text(),
+        )
+
+    def test_a_tracked_preflight_copy_changed_since_it_was_applied_does_not_resolve(self):
+        self.tracked_preflight_copy_disposition()
+        target = self.fx.docs / "docs" / "design.md"
+        target.write_text(target.read_text() + "\nedited since\n", encoding="utf-8")
+        with self.assertRaises(tracker.TransactionError) as caught:
+            self.fx.resolve(source="local", document="docs/design.md")
+        self.assertEqual(caught.exception.status, "local-resolution-refused")
+        self.assertIn("changed since", caught.exception.message)
+        self.assertEqual(
+            self.fx.check(document="docs/design.md")["status"], "outstanding"
+        )
+
     def test_a_coordination_document_absent_from_the_tip_does_not_resolve_either(self):
         # Classified for the direct lane but not yet on the branch: the helper
         # reports not-published with document_written false, so a locally edited
