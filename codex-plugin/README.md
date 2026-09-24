@@ -192,10 +192,11 @@ invocations) override them.
 `$solve` bundles a second script, `skills/solve/scripts/trusted_issue_spec.py`,
 and reads the issue's effective spec through nothing else. It fetches the
 complete paginated comment timeline and exposes a comment body only for the
-exact, case-insensitive logins `claude`, `codex`, and `coghex`; every other
-comment comes back as metadata alone, so an untrusted body never enters the
-solving session's context. Repository role, `author_association`, issue
-authorship, display name, and bot status grant nothing, and the set is
+exact, case-insensitive login `coghex`; every other comment comes back as
+metadata alone, so an untrusted body never enters the solving session's
+context. The logins `claude` and `codex` are unaffiliated accounts, not this
+pipeline's agents, and like repository role, `author_association`, issue
+authorship, display name, and bot status they grant nothing, and the set is
 hardcoded, so widening it costs a reviewed pull request. `$solve` locates this
 helper under `$CODEX_HOME` exactly the way the PR-flow skills locate the
 coordinator, and for the same reason. The trust rule and its deliberate
