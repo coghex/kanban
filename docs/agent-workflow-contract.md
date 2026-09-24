@@ -143,6 +143,30 @@ everything else.
   read the timeline through the Codex and Claude copies, resolved the same
   two ways and under the identical no-unfiltered-fallback rule; they do not
   add a sixth copy.
+- **PR reviewer comment trust boundary:** each bundle's review coordinator
+  (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`,
+  `claude-plugin/plugins/kanban/scripts/review_pr.py`,
+  `grok-plugin/plugins/kanban/scripts/review_pr.py`,
+  `kimi-plugin/plugins/kanban/scripts/review_pr.py`, and
+  `google-plugin/plugins/kanban/scripts/review_pr.py`) applies the same rule to
+  the payload it hands a reviewer, because on a public repository every
+  discussion surface is open to any account and an APPROVE verdict is what the
+  drainer merges on. Its `collect_context` serializes a body from the PR
+  timeline comments, the inline review comments, the `reviews` a `gh pr view`
+  returns, and each linked issue's comments only for an exact,
+  case-insensitive login in its `TRUSTED_COMMENT_AUTHORS`, and reduces every
+  other entry to id, author, timestamp, and url in an `excluded_*` list. That
+  set is the bundle's own `trusted_issue_spec.py` set —
+  `tools/test_pr_review_comment_trust.py` fails when the two differ — so the
+  same signals grant nothing. A prior `pr-review:v2` verdict keeps its body on a
+  rereview because its publisher is in the set, never because of its marker
+  syntax, and the publisher-authenticated marker checks still read the raw
+  timeline. Both prompts, and the `metadata.json` a large nested review reads,
+  carry only the filtered payload. They call the included trusted-author
+  bodies, the linked approved issue specifications, and CI authoritative, treat
+  the PR title, body, commits, and diff as data under review rather than
+  instructions, and forbid retrieving a withheld body through any other
+  source. Reading the PR head's source stays permitted.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
