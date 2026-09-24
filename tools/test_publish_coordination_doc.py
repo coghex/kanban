@@ -2020,8 +2020,9 @@ class PublishTests(PublishFixture):
         self.assertFalse((self.fx.docs / "docs" / "novel.md").exists())
 
     def test_the_binding_is_ignored_where_a_tracked_baseline_decides(self):
-        # A tracked document is governed by its baseline and the module's own
-        # record; a stale or wrong binding beside them changes nothing.
+        # A tracked document is governed first by its baseline and the module's
+        # own record; a stale or wrong binding beside them changes nothing
+        # (#727 consults the binding only when neither matches).
         result = self.fx.publish(
             "# Design\n\nchanged\n", path="docs/design.md",
             expected_working_copy="0000000000000000000000000000000000000000",
@@ -2303,6 +2304,154 @@ class PublishTests(PublishFixture):
                 )
             self.assertEqual(caught.exception.status, "document-staged")
             self.assertEqual(document.read_text(), "# UI\n\n- one\n- two\n")
+
+    # -- issue #727: a tracked document's unlanded working copy -------------
+
+    def preflight_blob(self, fixture, repo, path="docs/ui-bugs.md"):
+        outcome = publisher.check_pending(fixture.docs, repo, "master", path)
+        self.assertEqual(outcome["status"], "clear")
+        return outcome["working_copy_blob"]
+
+    def test_a_tracked_document_is_applied_over_the_copy_the_preflight_observed(self):
+        # The sequence observed on a consuming repository with no lane: the tip
+        # is an older snapshot, and the working copy carries an unlanded owner
+        # edit the module never wrote. The run rendered from exactly those
+        # bytes, so bound to the preflight's blob the disposition goes over
+        # them, owner edit included, and the next one continues over it.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            document.write_text("# UI\n\n- one\n- the owner's unlanded line\n")
+            observed = self.preflight_blob(other, "coghex/synarchy")
+
+            first = other.publish(
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n",
+                repo="coghex/synarchy", expected_working_copy=observed,
+            )
+            self.assertEqual(first["status"], "not-published")
+            self.assertTrue(first["document_written"])
+            self.assertEqual(first["write_outcome"], "applied-over-preflight-copy")
+            self.assertEqual(first["applied_record"], "recorded")
+            self.assertEqual(
+                first["applied_ref"],
+                publisher.applied_ref("coghex/synarchy", "docs/ui-bugs.md"),
+            )
+            self.assertEqual(first["found_blob"], observed)
+            self.assertIsNone(first["local_predecessor"])
+            self.assertIn("the preflight observed", first["write_reason"])
+            self.assertIn("the owner's unlanded line", document.read_text())
+            self.assertEqual(
+                publisher.read_applied(other.docs, "coghex/synarchy", "docs/ui-bugs.md"),
+                first["approved_blob"],
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+            again = self.preflight_blob(other, "coghex/synarchy")
+            self.assertEqual(again, first["approved_blob"])
+            second = other.publish(
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n- three\n",
+                repo="coghex/synarchy", expected_working_copy=again,
+            )
+            self.assertEqual(second["write_outcome"], "applied-over-local-predecessor")
+            self.assertEqual(second["applied_record"], "recorded")
+            self.assertEqual(second["local_predecessor"], first["approved_blob"])
+            self.assertEqual(
+                document.read_text(),
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n- three\n",
+            )
+
+    def test_a_tracked_working_copy_that_moved_since_the_preflight_is_refused(self):
+        # The binding still refuses the one edit the run did not see: a copy
+        # that is neither the tip's content, the module's own write, nor what
+        # the preflight observed is left byte-for-byte untouched, and the
+        # reason names the binding and the mismatch.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            document.write_text("# UI\n\n- one\n- the owner's unlanded line\n")
+            observed = self.preflight_blob(other, "coghex/synarchy")
+            moved = b"# UI\n\n- one\n- the owner's unlanded line\n- and another\n"
+            document.write_bytes(moved)
+            current = publisher.working_blob(other.docs, "docs/ui-bugs.md")
+
+            result = other.publish(
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n",
+                repo="coghex/synarchy", expected_working_copy=observed,
+            )
+            self.assertEqual(result["status"], "not-published")
+            self.assertEqual(result["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(result["document_written"])
+            self.assertIsNone(result["applied_record"])
+            self.assertIsNone(result["applied_ref"])
+            self.assertEqual(result["found_blob"], current)
+            self.assertIn("--expected-working-copy", result["write_reason"])
+            self.assertIn(observed, result["write_reason"])
+            self.assertIn(current, result["write_reason"])
+            self.assertEqual(document.read_bytes(), moved)
+            self.assertIsNone(
+                publisher.read_applied(other.docs, "coghex/synarchy", "docs/ui-bugs.md")
+            )
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+            self.assertIn(
+                "- two",
+                run(["git", "cat-file", "-p", result["approved_blob"]], other.docs),
+            )
+
+    def test_a_tracked_working_copy_deleted_since_the_preflight_is_refused(self):
+        # The moved copy's limiting case: nothing is there at all. Still
+        # refused, never recreated, and the reason names the binding the
+        # missing file no longer matches.
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = self.unpublishable(other_dir)
+            document = other.docs / "docs" / "ui-bugs.md"
+            document.write_text("# UI\n\n- one\n- the owner's unlanded line\n")
+            observed = self.preflight_blob(other, "coghex/synarchy")
+            document.unlink()
+
+            result = other.publish(
+                "# UI\n\n- one\n- the owner's unlanded line\n- two\n",
+                repo="coghex/synarchy", expected_working_copy=observed,
+            )
+            self.assertEqual(result["status"], "not-published")
+            self.assertEqual(result["write_outcome"], "unrecognized-working-copy")
+            self.assertFalse(result["document_written"])
+            self.assertIsNone(result["applied_record"])
+            self.assertIsNone(result["found_blob"])
+            self.assertIn("does not exist", result["write_reason"])
+            self.assertIn("--expected-working-copy", result["write_reason"])
+            self.assertIn(observed, result["write_reason"])
+            self.assertFalse(document.exists())
+            self.assertEqual(other.remote_content(), "# UI\n\n- one")
+
+    def test_a_divergent_copy_of_a_document_with_a_lane_publishes_as_before(self):
+        # The tip stays authoritative for a document that publishes to its
+        # branch, whichever lane grants it: a working copy the preflight
+        # observed is still not a baseline to publish from, and a binding to it
+        # writes nothing locally either.
+        self.write_config(
+            '[repositories."coghex/synarchy".workflow]\n'
+            'direct_publication_paths = ["docs/ui-bugs.md"]\n'
+        )
+        for repo, origin_name in (
+            ("coghex/kanban", "kanban"), ("coghex/synarchy", "synarchy"),
+        ):
+            with self.subTest(repo=repo), tempfile.TemporaryDirectory() as other_dir:
+                other = Fixture.create(Path(other_dir), origin_name=origin_name)
+                document = other.docs / "docs" / "ui-bugs.md"
+                divergent = b"# UI\n\n- one\n- an unlanded line\n"
+                document.write_bytes(divergent)
+                observed = self.preflight_blob(other, repo)
+                with self.assertRaises(publisher.PublishError) as caught:
+                    other.publish(
+                        "# UI\n\n- one\n- an unlanded line\n- two\n",
+                        repo=repo, expected_working_copy=observed,
+                    )
+                self.assertEqual(caught.exception.status, "document-not-baseline")
+                self.assertEqual(document.read_bytes(), divergent)
+                self.assertIsNone(
+                    publisher.read_applied(other.docs, repo, "docs/ui-bugs.md")
+                )
+                self.assertEqual(other.remote_content(), "# UI\n\n- one")
 
     # -- a consuming repository's own declared lane (issue #370) -------------
 

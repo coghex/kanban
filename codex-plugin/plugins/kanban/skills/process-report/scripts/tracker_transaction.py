@@ -1393,6 +1393,10 @@ def local_resolution_permitted(root: Path, record: dict, branch: str):
     the same record below. Being novel neither licenses nor forbids a local
     resolution by itself — a novel document with a lane still resolves on the
     branch only, and a novel document the module never wrote is still refused.
+    Nor is a tracked document applied over the copy the preflight observed
+    (#727): that write is recorded the same way, so it resolves through the
+    same record, and a tracked document the module never wrote, or one changed
+    since it wrote it, is refused exactly as before.
 
     The permission is derived rather than asserted: the caller says which source
     it wants, and this decides whether that source is admissible, from the same

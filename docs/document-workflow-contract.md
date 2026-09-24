@@ -765,13 +765,15 @@ of five things a write outcome was rather than leaving one boolean to stand for
 all of them: the working copy still carried the publication tip's content and
 the mutation was applied to it; the working copy was byte-identical to what this
 module last applied locally, making it this module's own unlanded write, and the
-mutation was applied on top of it; the document is absent from the publication
-tip but the working copy still held exactly the bytes the run's own preflight
-observed, and the mutation was applied over them; the document is absent from
-the tip and the working copy is not that — it moved since the preflight, no
-binding was passed, or there is no file at all, which the module never creates —
-so nothing was written; or the working copy is none of those, in which case it
-is somebody else's and is never overwritten.
+mutation was applied on top of it; the working copy still held exactly the bytes
+the run's own preflight observed, whether the document is absent from the
+publication tip or tracked there with a copy that is neither of the first two,
+and the mutation was applied over them; the document is absent from the tip and
+the working copy is not that — it moved since the preflight, no binding was
+passed, or there is no file at all, which the module never creates — so nothing
+was written; or the working copy is none of those — neither the tip's content,
+this module's own last write, nor the copy the preflight observed — in which
+case it is somebody else's and is never overwritten.
 
 The third is issue #605, and for an owner that lands out of band it is the
 ordinary case rather than the exotic one: every report is processed before its
@@ -791,6 +793,24 @@ let a run prepared over an older copy overwrite a newer disposition another run
 recorded in between. A novel document is still never published from here —
 it lands through the owning repository's documentation-landing lane, as §9.1
 sets out — and only its local write is licensed.
+
+Issue #727 widens the same binding to a document that is on the tip. For an
+owner with no lane the tip is routinely an older snapshot and the working copy
+carries that owner's unlanded edits, so accepting only the tip's content or the
+module's own record there refused the ordinary case, and the only way past it
+was to land the owner's unrelated pending documents first — a decision the
+workflow had no business forcing. The tip is the right baseline only for a
+document that publishes to its branch, and such a document never reaches the
+local write at all: it is published, or refused, against the tip exactly as
+before. For a document without a lane it is the binding, not the tip, that
+guards the write. The run rendered its content from exactly the bytes the
+preflight observed, owner edits included, so writing over them destroys
+nothing, and a tracked copy still byte-identical to the preflight's blob is
+applied over as `applied-over-preflight-copy`. Unlike a document absent from
+the tip, the binding is consulted only after the tip's content and the recorded
+predecessor, whose precedence and meaning are unchanged, so it refuses a copy
+that moved after the preflight to anything other than one of those — the edit
+the run did not see — as `unrecognized-working-copy`, leaving it untouched.
 Which predecessor it is changes nothing else: the replacement is guarded against
 the exact bytes the decision was made from, a staged document is still refused,
 and a write that lands in between still wins.

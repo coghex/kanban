@@ -1277,7 +1277,10 @@ def check_pending(root: Path, repository: str, branch: str, document: str) -> di
             # baseline there can be, and publication applies the approved
             # mutation over it only while the copy still matches — so the
             # assets extract it beside the tip and pass it back as
-            # --expected-working-copy. Null when the path does not exist.
+            # --expected-working-copy. Issue #727: the same binding lets a
+            # tracked document without a lane be applied over an unlanded
+            # working copy that is neither the tip's content nor the module's
+            # own last write. Null when the path does not exist.
             "working_copy_blob": working_blob(resolved, document),
             "pending_kinds": kinds,
             "tracker_transaction": tracker,
@@ -1594,9 +1597,20 @@ def _apply_locally(
     it would let a run prepared over an older copy overwrite a newer
     disposition another run recorded in between. A document that does not
     exist at all is never created here, whatever binding is passed; creating
-    one stays the drafting assets' job. Anything else — a tracked document
-    whose working copy is neither the tip's content nor this module's own last
-    write — is still never overwritten.
+    one stays the drafting assets' job.
+
+    Issue #727: the same binding guards a tracked document whose working copy
+    is neither the tip's content nor this module's own last write. For an
+    owner with no lane the tip is routinely an older snapshot, and the working
+    copy carries the owner's unlanded edits; the run rendered its content from
+    exactly those bytes, so writing over them destroys nothing. A copy that is
+    still byte-identical to the preflight's blob is therefore applied over as
+    `applied-over-preflight-copy`, after the tip's own content and the recorded
+    predecessor, whose precedence and meaning are unchanged. The tip is the
+    right baseline only for a document that publishes to its branch, and such a
+    document never reaches this function. Anything else — a tracked working
+    copy that is neither the tip's content, this module's own last write, nor
+    the copy this run's preflight observed — is still never overwritten.
 
     The distinction is in the result rather than left to `document_written`,
     which reads identically for a novel document nobody bound, for a document
@@ -1619,6 +1633,18 @@ def _apply_locally(
             f"{document} was byte-identical to the disposition this module "
             f"last applied locally ({recorded}), so the approved mutation was "
             "applied on top of it"
+        )
+    elif (
+        baseline is not None
+        and expected_working_copy
+        and current == expected_working_copy
+    ):
+        outcome, over = "applied-over-preflight-copy", current
+        why = (
+            f"{document} is neither the publication tip's content ({baseline}) "
+            "nor the content this module last applied locally, but it still "
+            f"carried exactly the content the preflight observed ({current}), "
+            "so the approved mutation was applied over it"
         )
     elif baseline is None and current is None:
         outcome = "no-baseline"
@@ -1678,7 +1704,14 @@ def _apply_locally(
     elif current is None:
         why = (
             f"{document} does not exist under {root}, so there was nothing "
-            "this module could recognize and nothing was written"
+            "this module could recognize"
+            + (
+                f", nor the content the preflight observed "
+                f"({expected_working_copy}) that --expected-working-copy bound"
+                if expected_working_copy
+                else ""
+            )
+            + ", and nothing was written"
         )
     else:
         why = (
@@ -1686,7 +1719,15 @@ def _apply_locally(
             f"publication tip's content ({baseline}) nor the content this "
             "module last applied locally ("
             + (recorded if recorded else "nothing recorded")
-            + "), so it was left untouched and nothing was written"
+            + ")"
+            + (
+                f", nor the content the preflight observed "
+                f"({expected_working_copy}) that --expected-working-copy bound"
+                if expected_working_copy
+                else ", and no --expected-working-copy bound the content the "
+                "preflight observed"
+            )
+            + ", so it was left untouched and nothing was written"
         )
 
     record = None
@@ -1898,8 +1939,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--expected-working-copy",
         default=None,
-        help="the preflight's working_copy_blob; what a document absent from "
-        "the publication tip is applied over, while it still holds those bytes",
+        help="the preflight's working_copy_blob; what a document without a "
+        "lane is applied over, while it still holds those bytes, when it is "
+        "absent from the publication tip or is neither the tip's content nor "
+        "this module's own last write",
     )
     parser.add_argument("--clear-stale-lock", action="store_true")
     parser.add_argument(
