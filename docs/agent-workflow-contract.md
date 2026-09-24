@@ -92,11 +92,13 @@ everything else.
   `google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`). Each copy
   retrieves the complete paginated timeline in deterministic chronological
   order and serializes a comment body only for the exact, case-insensitive
-  logins `claude`, `codex`, and `coghex`; every other comment is returned as
-  metadata alone — id, author, timestamp, url — with no body and no
-  body-derived content of any kind. Repository role, `author_association`,
-  issue authorship, display name, bot status, and a lookalike login such as
-  `codex-bot` or `coghex-helper` grant nothing, and the trusted set is
+  login `coghex`; every other comment is returned as metadata alone — id,
+  author, timestamp, url — with no body and no body-derived content of any
+  kind. The logins `claude` and `codex` are unaffiliated third-party accounts,
+  not this pipeline's agents — every pipeline-authored comment is posted as
+  `coghex` — and like repository role, `author_association`, issue authorship,
+  display name, bot status, and a lookalike login such as `codex-bot` or
+  `coghex-helper` they grant nothing, and the trusted set is
   hardcoded in the tracked helper so widening it costs a reviewed pull request.
   The workflows forbid `gh issue view`, the raw comments endpoint, GraphQL, and
   every other unfiltered source: only the helper's own internal fetch may read

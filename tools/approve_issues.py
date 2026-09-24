@@ -856,13 +856,13 @@ def is_spec_relevant_comment(issue: dict[str, Any], comment: dict[str, Any]) -> 
     #
     # The tracked solve workflows read the timeline through their bundles'
     # vendored trusted_issue_spec.py instead, which exposes a comment body only
-    # for the exact case-insensitive logins claude/codex/coghex and grants
-    # nothing for association or issue authorship. The two layers answer
-    # different questions and are meant to diverge: a reporter comment can be
-    # inside this fingerprint -- changing the spec hash and forcing a fresh
-    # review -- while its body never reaches the solve agent. See
-    # docs/agent-workflow-contract.md §2.1. Do not re-align this function with
-    # that helper; the gate needs the wider set.
+    # for the exact case-insensitive login coghex and grants nothing for
+    # association, issue authorship, or the unaffiliated claude/codex logins.
+    # The two layers answer different questions and are meant to diverge: a
+    # reporter comment can be inside this fingerprint -- changing the spec hash
+    # and forcing a fresh review -- while its body never reaches the solve
+    # agent. See docs/agent-workflow-contract.md §2.1. Do not re-align this
+    # function with that helper; the gate needs the wider set.
     if comment.get("author_association") in {"OWNER", "MEMBER", "COLLABORATOR"}:
         return True
     commenter = (comment.get("user") or {}).get("login")

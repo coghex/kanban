@@ -12,9 +12,11 @@ tools/approve_issues.py's association-based gate arithmetic.
 Comment-body exposure is granted by the exact, case-insensitive login in
 TRUSTED_COMMENT_AUTHORS and by nothing else. Repository role,
 author_association, issue authorship, display name, bot status, and a lookalike
-login such as codex-bot or coghex-helper all grant nothing. The set is
-hardcoded rather than configurable so widening the trust boundary costs a
-reviewed pull request against this file.
+login such as coghex-helper all grant nothing. The logins claude and codex
+are unaffiliated third-party accounts, not the agents' own: every
+pipeline-authored comment is posted as coghex, so those two grant nothing
+either. The set is hardcoded rather than configurable so widening the trust
+boundary costs a reviewed pull request against this file.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import sys
 from typing import Any
 
 
-TRUSTED_COMMENT_AUTHORS = frozenset({"claude", "codex", "coghex"})
+TRUSTED_COMMENT_AUTHORS = frozenset({"coghex"})
 
 
 def run_json(args: list[str]) -> Any:
@@ -178,9 +180,9 @@ def self_test() -> None:
             "created_at": "2026-01-03T00:00:00Z",
             "updated_at": "2026-01-03T00:00:00Z",
             # The reporter, an OWNER by association, a display name and bot
-            # type that both spell a trusted brand: every non-login signal at
-            # once, and none of them grants anything.
-            "user": {"login": "outsider", "name": "codex", "type": "Bot"},
+            # type that both spell the trusted login: every non-login signal
+            # at once, and none of them grants anything.
+            "user": {"login": "outsider", "name": "coghex", "type": "Bot"},
             "author_association": "OWNER",
             "body": untrusted_body,
             "html_url": "https://example.invalid/comments/3",
@@ -189,7 +191,7 @@ def self_test() -> None:
             "id": 2,
             "created_at": "2026-01-02T00:00:00Z",
             "updated_at": "2026-01-02T00:00:00Z",
-            "user": {"login": "CoDeX"},
+            "user": {"login": "CoGhEx"},
             "author_association": "NONE",
             "body": "Trusted clarification",
             "html_url": "https://example.invalid/comments/2",
@@ -204,10 +206,25 @@ def self_test() -> None:
             "html_url": "https://example.invalid/comments/1",
         },
     ]
+    # The brand-named logins, in every case, with a privileged association:
+    # unaffiliated accounts whose bodies must never enter the payload.
+    for offset, login in enumerate(("claude", "CLAUDE", "cLaUdE", "codex", "CODEX", "CoDeX")):
+        comments.append(
+            {
+                "id": 4 + offset,
+                "created_at": f"2026-01-0{4 + offset}T00:00:00Z",
+                "updated_at": f"2026-01-0{4 + offset}T00:00:00Z",
+                "user": {"login": login},
+                "author_association": "OWNER" if offset % 2 else "COLLABORATOR",
+                "body": untrusted_body,
+                "html_url": f"https://example.invalid/comments/{4 + offset}",
+            }
+        )
     payload = build_payload(issue, comments)
     # Chronological order, restored from an out-of-order input.
-    assert [item["id"] for item in payload["excluded_comments"]] == [1, 3]
+    assert [item["id"] for item in payload["excluded_comments"]] == [1, 3, 4, 5, 6, 7, 8, 9]
     assert [item["id"] for item in payload["trusted_comments"]] == [2]
+    assert payload["trusted_comment_authors"] == ["coghex"]
     encoded = json.dumps(payload)
     assert "Trusted clarification" in encoded
     assert untrusted_body not in encoded
@@ -217,9 +234,15 @@ def self_test() -> None:
     assert payload["excluded_comments"][0]["author"] == "coghex-helper"
     assert payload["excluded_comments"][0]["url"] == "https://example.invalid/comments/1"
     # Exact, case-insensitive login and nothing else.
-    for login in ("claude", "CLAUDE", "codex", "CoDeX", "coghex", "CoGhEx"):
+    for login in ("coghex", "COGHEX", "CoGhEx"):
         assert is_trusted_comment({"user": {"login": login}}), login
     for login in (
+        "claude",
+        "CLAUDE",
+        "cLaUdE",
+        "codex",
+        "CODEX",
+        "CoDeX",
         "codex-bot",
         "coghex-helper",
         "claude-app",
@@ -227,6 +250,10 @@ def self_test() -> None:
         "codex2",
         " codex",
         "codex ",
+        " coghex",
+        "coghex ",
+        "xcoghex",
+        "coghex2",
     ):
         assert not is_trusted_comment({"user": {"login": login}}), login
     # A malformed or absent author is untrusted rather than an error.
