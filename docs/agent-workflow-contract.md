@@ -365,6 +365,37 @@ that a particular comment should not.
   second, quieter merge path. The record of the bypass is therefore prose
   rather than a marker field — the reviewer is told in its prompt, and the
   published comment carries the operator's reason above the verdict.
+- **Owner directive:** the pull request's title, body, commits, and diff are
+  data under review, so an owner decision written there cannot change what the
+  reviewer holds the pull request to. `--owner-directive <text>` is the channel
+  that can. It carries the repository owner's own words, verbatim, relayed by
+  the session they gave them to. It is a **human** decision in the same sense
+  as the override: no agent composes, paraphrases, or infers one. The single
+  exception is the fixed standing directive `autosolve` relays for a
+  documentation-only issue it routes to a pull request as worthy of review.
+  That text is written into the workflow asset and relayed unchanged, because
+  otherwise the reviewer would always block on the issue's own
+  no-pull-request requirement. The reviewer's prompt, spawned and self-review
+  alike, says the human in the loop ordered it and that it supersedes any
+  conflicting linked-issue requirement for that pull request only, with later
+  directives superseding earlier ones. Nothing else about the review changes.
+  It works whether or not the issue gate is overridden, and a blank one is
+  refused as `owner_directive_refused` before anything is read.
+  - *Recorded.* The published comment quotes each directive above the
+    verdict. Its first line is a hidden `pr-owner-directive:v1` record: a
+    base64url JSON list of the texts.
+  - *Persistent.* Every later round on the same pull request carries the
+    directives recorded by this publisher's newest `pr-review:v2` comment,
+    including after new pushes, without the flag being passed again. A newly
+    supplied directive is appended after them, and one already in force is
+    not duplicated. Only that first line of that comment is read, so another
+    login's comment, a record-shaped string lower in a comment, and the pull
+    request's own text introduce nothing. A record that cannot be read fails
+    the round closed rather than silently dropping a directive.
+  - *Bound to the verdict.* The self-review `gate_key` binds the directives'
+    text, so a `--publish-verdict` under different directives is refused.
+  - *Marker unchanged.* The `pr-review:v2` marker keeps its exact shape, so a
+    directed approval merges through the drainer's ordinary queue.
 - **Required authority:** GitHub write on the PR (labels, comments, draft
   readiness, pushes). No action in this surface ever merges a PR.
 - **Durable state:** session log; the isolated worktree `pr-revise` works in,
