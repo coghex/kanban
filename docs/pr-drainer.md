@@ -754,11 +754,31 @@ together — the gate would have to fail *open* against a signal it already
 treats as blocking. A rejection is therefore a veto whoever published it, which
 is what makes the outcome the same in either arrival order.
 
+**One thing other than a commit replaces what a rejection judged: the
+contract.** When the repository owner overrides a requirement through the
+coordinator's `--owner-directive`, the coordinator records the directives a
+review was performed under on the first line of its `pr-review:v2` comment. A
+canonical approval of the current head, published after a rejection of that
+head, whose record names a directive the rejection was not reviewed under, was
+reached against requirements the rejection never saw, and it lifts that
+rejection. Nothing else changes: a second canonical opinion under the same
+directives still lifts nothing, a `pr-review:v1` approval records no
+directives, a rejection published under the new directives is a veto of its
+own, and a record that sits anywhere but a comment's first line lifts nothing.
+"After" means a later comment, not a later position among the markers one
+comment carries, so an approval never lifts a rejection published beside it.
+A record that cannot be read is an unknown contract rather than an empty one:
+a rejection carrying one is never lifted, and an approval carrying one lifts
+nothing.
+
 Two consequences worth knowing before you meet them:
 
 - **Re-running a review on an unchanged head cannot un-block it.** If a review
   requested changes and you believe it was wrong, the pull request needs a
-  commit — an empty one is enough — before any approval of it counts.
+  commit — an empty one is enough — before any approval of it counts. The one
+  exception is a rereview under an owner directive the rejection never saw, as
+  above: that changes the requirements rather than asking for a second
+  opinion on them.
 - **This is the drainer's merge policy.** `$finalize` / `/finalize` is the
   documented manual fallback for merging one named pull request when the
   drainer cannot be used, and it keeps its own separate gate.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import fcntl
 import json
@@ -179,6 +181,15 @@ PR_REVIEW_V2_RE = re.compile(
     r"models=[^\s]+\s+head=([0-9a-fA-F]{40})\s+"
     r"verdict=(APPROVE|CHANGES_REQUESTED)\s*-->",
     re.IGNORECASE,
+)
+# The owner-directive record the canonical coordinator writes as the FIRST line
+# of a `pr-review:v2` comment published under `--owner-directive`: a base64url
+# JSON list of the directives that review was performed under. Mirrored from
+# `<bundle>/scripts/review_pr.py`'s OWNER_DIRECTIVE_RECORD_RE rather than
+# imported, like every marker spelling this module reads.
+OWNER_DIRECTIVE_RECORD_PREFIX = "<!-- pr-owner-directive:"
+OWNER_DIRECTIVE_RECORD_RE = re.compile(
+    r"<!-- pr-owner-directive:v1 (?P<payload>[A-Za-z0-9_-]+={0,2}) -->"
 )
 LEGACY_CODEX_REVIEW_RE = re.compile(
     r"<!--\s*codex-review\s+head=([0-9a-fA-F]{40})\s+"
@@ -1140,6 +1151,13 @@ class ReviewMarker:
     verdict: str
     comment_id: str = ""
     comment_url: str = ""
+    # The owner directives a canonical review was performed under, read from
+    # its comment's first line by `review_markers`; empty for every other
+    # marker, and None when the comment opens a record that cannot be read --
+    # a contract that cannot be established. What `blocking_marker_in` asks of
+    # it is whether an approval was reached under a contract a rejection of
+    # the same head never saw.
+    directives: tuple[str, ...] | None = ()
 
 
 def parse_review_marker_records(body: str) -> list[ReviewMarker]:
@@ -1185,6 +1203,37 @@ def parse_review_marker_records(body: str) -> list[ReviewMarker]:
         for match in LEGACY_CODEX_REVIEW_RE.finditer(body)
     ]
     return records
+
+
+def recorded_owner_directives(body: str) -> tuple[str, ...] | None:
+    """The owner directives one comment records, from its first line only.
+
+    Only the first line, because that is the one line of a published review
+    the coordinator writes before any reviewer- or owner-supplied text; a
+    record-shaped string anywhere else is inert. No record is an empty tuple.
+
+    A first line that opens a record which cannot be read -- a damaged
+    envelope or payload -- is None, not empty: the contract that review was
+    performed under is unknown. Reading it as empty would be the opposite of
+    conservative on a rejection, since every directive a later approval
+    recorded would then look new to it; `blocking_marker_in` lets neither a
+    rejection nor an approval with an unknown contract take part in a lift.
+    """
+    first = body.split("\n", 1)[0].strip()
+    if not first.startswith(OWNER_DIRECTIVE_RECORD_PREFIX):
+        return ()
+    match = OWNER_DIRECTIVE_RECORD_RE.fullmatch(first)
+    if not match:
+        return None
+    try:
+        value = json.loads(base64.urlsafe_b64decode(match.group("payload")).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        return None
+    return tuple(value)
 
 
 def parse_review_marker_record(body: str) -> ReviewMarker | None:
@@ -1305,6 +1354,10 @@ def review_markers(ctx: RepoContext, number: int) -> list[ReviewMarker]:
             str(comment.get("id") or ""),
             str(comment.get("html_url") or ""),
         )
+        body = comment.get("body") or ""
+        # Only the canonical coordinator records owner directives, so only its
+        # markers carry them.
+        directives = recorded_owner_directives(body)
         markers += [
             ReviewMarker(
                 record.version,
@@ -1312,8 +1365,9 @@ def review_markers(ctx: RepoContext, number: int) -> list[ReviewMarker]:
                 record.head,
                 record.verdict,
                 *identity,
+                directives if record.version == MARKER_CANONICAL else (),
             )
-            for record in parse_review_marker_records(comment.get("body") or "")
+            for record in parse_review_marker_records(body)
         ]
     return markers
 
@@ -1367,13 +1421,51 @@ def blocking_marker_in(
     head is a verdict on work that has since been replaced, so it imposes
     nothing here; pushing a new commit is what clears a veto, which is what a
     reviewer asking for changes was asking for.
+
+    One thing other than a new commit replaces what a rejection judged: the
+    contract. A canonical `pr-review:v2` approval of the same head, published
+    after the rejection, whose comment records an owner directive the
+    rejection was not reviewed under, was reached against requirements the
+    rejection never saw -- the owner changed what the pull request must
+    satisfy, and relayed it through the coordinator's `--owner-directive`. That
+    approval lifts the rejection. Nothing else does: a second opinion under the
+    same directives is exactly the second canonical verdict above, a
+    `pr-review:v1` approval records no directives at all, and a later rejection
+    under the new directives is a veto of its own.
+
+    "Published after" is a comment, not a list position. `review_markers`
+    returns comments newest first, but the markers inside one comment in
+    parser-pattern order, so an approval can precede a rejection it was
+    published together with. A lifting approval must therefore come from a
+    different, identified comment than the rejection; markers carrying no
+    comment identity never lift anything. And a contract that cannot be
+    established -- an unreadable record on either side -- lifts nothing.
     """
     if not head:
         return None
     wanted = head.lower()
+    # Comments newest first, so an approval seen before a rejection, from
+    # another comment, was published after it.
+    newer_approvals: list[ReviewMarker] = []
     for marker in markers:
-        if marker.head == wanted and marker.verdict == "CHANGES_REQUESTED":
-            return marker
+        if marker.head != wanted:
+            continue
+        if marker.verdict == "CHANGES_REQUESTED":
+            if marker.directives is None or not marker.comment_id:
+                return marker
+            seen = set(marker.directives)
+            if not any(
+                approval.comment_id != marker.comment_id
+                and set(approval.directives or ()) - seen
+                for approval in newer_approvals
+            ):
+                return marker
+        elif (
+            marker.version == MARKER_CANONICAL
+            and marker.comment_id
+            and marker.directives is not None
+        ):
+            newer_approvals.append(marker)
     return None
 
 
@@ -1425,7 +1517,9 @@ def describe_blocking_marker(number: int, marker: ReviewMarker) -> str:
         f"PR #{number}: a {marker.version} review by {marker.reviewers} "
         f"requested changes on its current head {marker.head[:12]}"
         f"{identity}{where}. That verdict stands until a new commit is pushed, "
-        "whatever later marker or label sits beside it."
+        "or until a later canonical approval of this head is reviewed under an "
+        "owner directive the rejection never saw, whatever other marker or label "
+        "sits beside it."
     )
 
 

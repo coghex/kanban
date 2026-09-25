@@ -1052,8 +1052,13 @@ reimplement the removal, and `--check` remains read-only.
   `CHANGES_REQUESTED` marker naming a candidate's current head refuses the
   merge, and no later marker at that same head lifts it** — not a second
   canonical verdict, not an approval from the other producer, and not the
-  `reviewed:approve` label written beside it. Only a new head clears it; a
-  rejection naming any other head imposes nothing. A `reviewers=` token is a
+  `reviewed:approve` label written beside it. Only a new head clears it — or
+  a changed contract: a canonical `pr-review:v2` approval of that head, in a
+  later comment, whose first-line owner-directive record names a directive the
+  rejection was not reviewed under lifts it, because the owner replaced the
+  requirements it judged (§ "Owner directive"). An unreadable record on either
+  side is an unknown contract and takes no part in a lift. A rejection naming any other head imposes
+  nothing. A `reviewers=` token is a
   set, since the coordinator publishes `reviewers=claude,codex` for a
   dual-routed review; every marker in a comment body counts rather than only
   the first, so a rejection published underneath an approval in one comment is
