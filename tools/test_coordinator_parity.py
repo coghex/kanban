@@ -856,26 +856,33 @@ ALIGNMENT_SENSITIVE_RENDERINGS = {
 # Four lines, one of them the bare `        )` that failed the gate three
 # times in pull request #622. Adding the shared large-review preparation code
 # changed the old diff algorithm's alignment: its previous two-probe fixture
-# no longer moved the rendering. On this snapshot 21 uniquely named copies
-# reproduce that failure. Keep the negative control live without changing the
-# reconciliation gate or its documented divergence allowance.
-CLOSING_PARENTHESIS_PROBES = "".join(
-    f'def probe_{name}():\n    return (\n        "x"\n        )\n\n\n'
-    for name in range(21)
-)
+# no longer moved the rendering. Adding the shared owner-directive code moved
+# it again, from 21 copies to 23, and left the two blank lines that used to
+# re-anchor the grouped rendering before `def kanban_models():` inert there --
+# no blank-line edit anywhere in the pair moves it on this snapshot, and three
+# probes at that same anchor do. Keep the negative control live without
+# changing the reconciliation gate or its documented divergence allowance.
+def closing_parenthesis_probes(count: int) -> str:
+    return "".join(
+        f'def probe_{name}():\n    return (\n        "x"\n        )\n\n\n'
+        for name in range(count)
+    )
+
+
+CLOSING_PARENTHESIS_PROBES = closing_parenthesis_probes(23)
 
 # (description, anchor the edit lands before, edit, renderings it moves)
 SHARED_EDITS = (
     (
-        "21 closing-parenthesis probes",
+        "23 closing-parenthesis probes",
         "def publish_verdict(",
         CLOSING_PARENTHESIS_PROBES,
         ("unified-diff hunks",),
     ),
     (
-        "two blank lines",
+        "3 closing-parenthesis probes",
         "def kanban_models():",
-        "\n\n",
+        closing_parenthesis_probes(3),
         ("autojunk=False grouped opcodes",),
     ),
 )

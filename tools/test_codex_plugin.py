@@ -342,6 +342,17 @@ def load_review_pr_module():
     spec.loader.exec_module(module)
     return module
 
+def load_review_pr_module_without_directives():
+    """The coordinator with no owner directive in force on any pull request.
+
+    Its directive lookup reads GitHub, which these harnesses never reach.
+    """
+    module = load_review_pr_module()
+    module.owner_directive_state = lambda *args, **kwargs: {
+        "directives": [], "carried": [], "carried_from": None, "supplied": None,
+    }
+    return module
+
 
 def iter_tracked_plugin_files():
     # Queries git directly (not a filesystem walk): running the wider test
@@ -1236,7 +1247,7 @@ class PostCommentPublicationRaceTests(unittest.TestCase):
         }
 
     def test_post_comment_gate_or_head_race_clears_stale_verdict_labels(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr()
         gate = {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": "k1"}
         review_result = {
@@ -1300,7 +1311,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
     immutable on disk, not just described as read-only in the prompt."""
 
     def test_make_tree_read_only_strips_write_permission_from_files_and_dirs(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "extracted"
             nested = root / "sub"
@@ -1317,7 +1328,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
                 target_file.write_text("overwritten")
 
     def test_make_tree_writable_reverses_make_tree_read_only_for_cleanup(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "extracted"
             nested = root / "sub"
@@ -1342,7 +1353,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         # disk at once (an unrestricted reviewer can enumerate/glob for a
         # peer's prefix). Assert the actual invariant: run_reviews never
         # has more than one reviewer's source directory on disk at a time.
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         created_dirs = []
         invocation_log = []
 
@@ -1380,7 +1391,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
             self.assertFalse(created.exists(), "run_reviews must tear each source down before returning")
 
     def test_extract_source_result_is_read_only(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
         ).stdout.strip()
@@ -1401,7 +1412,7 @@ class ReviewerSourceIsolationTests(unittest.TestCase):
         # Uses the real extract_source/tempfile.mkdtemp/run_reviews path
         # against this actual repo; only GitHub calls and the reviewer
         # subprocess spawn (invoke_reviewer) are mocked.
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = {
             "number": 89,
             "url": "https://github.com/coghex/kanban/pull/89",
@@ -1493,7 +1504,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         return {"approved": True, "allow_no_issue": False, "issues": [], "invalid_links": [], "checks": [], "key": key}
 
     def test_self_review_known_origin_returns_context_without_spawning(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr()  # claude origin -> single reviewer, codex
         gate = self._gate()
 
@@ -1534,7 +1545,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         # session as both brands; Kanban's own invocation never routes here
         # (it always tags a known origin), so falling back to the existing
         # nested-spawn-both behavior is an acceptable, low-value edge case.
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr(body="no origin marker")
         gate = self._gate()
         fake_source = Path("/fake/source")
@@ -1557,7 +1568,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         self.assertEqual(result["status"], "reviewed")
 
     def test_publish_verdict_publishes_a_precomputed_result(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr()
         gate = self._gate()
 
@@ -1585,7 +1596,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         self.assertEqual(published_results_arg[0]["reviewer"], "codex")
 
     def test_publish_verdict_rejects_a_stale_head(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr()
         with tempfile.TemporaryDirectory() as temp:
             result_path = Path(temp) / "result.json"
@@ -1598,7 +1609,7 @@ class SelfReviewProtocolTests(unittest.TestCase):
         self.assertIn("rerun $pr-review/$pr-rereview", str(excinfo.exception))
 
     def test_publish_verdict_rejects_a_stale_gate_key(self):
-        module = load_review_pr_module()
+        module = load_review_pr_module_without_directives()
         pr = self._base_pr()
         gate = self._gate(key="different-key")
         with tempfile.TemporaryDirectory() as temp:

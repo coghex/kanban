@@ -69,6 +69,14 @@ def load_coordinator(brand: str):
 class SelfReviewCallerBrandTests(unittest.TestCase):
     def setUp(self):
         self.modules = {brand: load_coordinator(brand) for brand in COORDINATORS}
+        # No owner directive is in force on these fixtures' pull requests;
+        # the lookup reads GitHub, which nothing here may reach.
+        for module in self.modules.values():
+            directives = mock.patch.object(
+                module, "owner_directive_state", return_value={"directives": [], "carried": [], "carried_from": None, "supplied": None}
+            )
+            directives.start()
+            self.addCleanup(directives.stop)
 
     @staticmethod
     def pr(body: str = "<!-- pr-origin:claude -->") -> dict:

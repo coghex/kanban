@@ -15,6 +15,26 @@ created above it.
 
 ### Unreleased
 
+- The review coordinator accepts `--owner-directive <text>`. It carries the
+  repository owner's own words, relayed verbatim by the session they gave them
+  to, and the reviewer treats them as superseding any conflicting requirement
+  of the linked issue for that pull request only. Previously an owner decision
+  had nowhere to go: the pull request's text is data under review, so the
+  reviewer kept blocking on the issue text the owner had just overridden, and
+  editing the issue would stale its canonical approval.
+  - The published comment quotes each directive above the verdict and records
+    it on its first line. Every later round on the pull request carries it
+    without the flag. The self-review key binds it, every publication refuses
+    a record that moved under it, a damaged record fails closed, and the
+    `pr-review:v2` marker is unchanged. The flag repeats, one verbatim text
+    each.
+  - `autosolve` now obeys and relays an owner direction given in the
+    conversation. When it routes a documentation-only, direct-publication
+    issue to a pull request as worthy of review, it relays a fixed standing
+    directive, so the reviewer no longer blocks on the issue's own
+    no-pull-request requirement.
+  - All five bundles bump their versions.
+
 - The Grok, Kimi, and Google `autosolve` workflows are now rendered from one
   authored source, `tools/command_sources/external/autosolve.md`, instead of
   being three hand-maintained copies, so a shared policy change is written once

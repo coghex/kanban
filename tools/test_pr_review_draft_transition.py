@@ -117,6 +117,9 @@ class ApprovedDraftTransitionTests(unittest.TestCase):
             mock.patch.object(module, "render_review", return_value=(verdict, f"{verdict}\n"))
         )
         stack.enter_context(mock.patch.object(module, "require_current_review_state", return_value=self.gate()))
+        # No owner directive is recorded on this pull request; the lookup
+        # reads GitHub, which nothing here may reach.
+        stack.enter_context(mock.patch.object(module, "require_current_owner_directives"))
         stack.enter_context(mock.patch.object(module, "post_comment"))
         stack.enter_context(mock.patch.object(module, "set_verdict_label"))
         verify = stack.enter_context(

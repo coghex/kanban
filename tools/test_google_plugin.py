@@ -206,7 +206,7 @@ class PluginLayoutTests(unittest.TestCase):
     def test_the_plugin_manifest_declares_version_1_3_0(self):
         document = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(document["name"], "kanban")
-        self.assertEqual(document["version"], "1.5.0")
+        self.assertEqual(document["version"], "1.6.0")
 
     def test_solve_and_autosolve_skills_exist(self):
         self.assertTrue(SOLVE.is_file())
@@ -1065,6 +1065,13 @@ def load_google_review_pr():
 class ExpectedRouteBindingTests(unittest.TestCase):
     def setUp(self):
         self.module = load_google_review_pr()
+        # No owner directive is in force on these fixtures' pull requests;
+        # the lookup reads GitHub, which nothing here may reach.
+        directives = mock.patch.object(
+            self.module, "owner_directive_state", return_value={"directives": [], "carried": [], "carried_from": None, "supplied": None}
+        )
+        directives.start()
+        self.addCleanup(directives.stop)
         self.calls = []
         dual = self.module.kanban_models().DUAL_MODE
         self.operating = mock.patch.object(
