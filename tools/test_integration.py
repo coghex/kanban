@@ -1763,6 +1763,70 @@ class CanonicalVerdictPrecedenceTests(ProcessPrFixture):
         )
         self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
 
+    # -- an owner directive relayed through the coordinator ---------------
+
+    DIRECTIVE = "just use a pr, that is fine"
+
+    def _directed_feed(self, *comments):
+        """Comments given oldest first, as (marker, directives, record_first)."""
+        import base64
+
+        feed = []
+        for index, (marker, directives, record_first) in enumerate(comments):
+            comment = self._review_marker_comment(
+                marker,
+                comment_id=100 + index,
+                created_at=f"2026-09-06T09:{40 + index:02d}:00Z",
+            )
+            if directives:
+                payload = base64.urlsafe_b64encode(json.dumps(directives).encode()).decode()
+                record = f"<!-- pr-owner-directive:v1 {payload} -->"
+                comment["body"] = (
+                    f"{record}\n{comment['body']}"
+                    if record_first
+                    else f"{comment['body']}\n{record}"
+                )
+            feed.append(comment)
+        self._script_comment_pages([feed])
+
+    def _drive(self, *comments):
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+        self._directed_feed(*comments)
+        report = drain_prs.new_single_pr_report(42)
+        self._run_process_pr(report=report)
+        return report
+
+    def test_an_approval_under_a_new_owner_directive_releases_the_rejections(self):
+        # hetoimasia PR #261: rejected twice on one head for a requirement the
+        # owner then overrode through --owner-directive, and approved on that
+        # same head under the directive.
+        report = self._drive(
+            (self._v2("CHANGES_REQUESTED"), None, True),
+            (self._v2("CHANGES_REQUESTED"), None, True),
+            (self._v2("APPROVE"), [self.DIRECTIVE], True),
+        )
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(report["reason"], "merged")
+
+    def test_an_approval_under_the_same_directives_releases_nothing(self):
+        report = self._drive(
+            (self._v2("CHANGES_REQUESTED"), [self.DIRECTIVE], True),
+            (self._v2("APPROVE"), [self.DIRECTIVE], True),
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_a_record_below_the_first_line_releases_nothing(self):
+        report = self._drive(
+            (self._v2("CHANGES_REQUESTED"), None, True),
+            (self._v2("APPROVE"), [self.DIRECTIVE], False),
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
     def test_a_v1_rejection_blocks_a_canonical_approval_in_both_orders(self):
         for markers in (
             (self._v1("CHANGES_REQUESTED"), self._v2("APPROVE")),

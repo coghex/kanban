@@ -15,6 +15,14 @@ created above it.
 
 ### Unreleased
 
+- The PR drainer lets an owner directive lift a rejection of the same head. A
+  canonical approval published after a `CHANGES_REQUESTED` marker on the
+  current head, whose comment records an owner directive that rejection was
+  not reviewed under, no longer leaves the pull request vetoed until someone
+  pushes a meaningless commit. The owner changed what it had to satisfy, which
+  replaces what the rejection judged. A second opinion under the same
+  directives still lifts nothing, as issue #628 requires.
+
 - The review coordinator accepts `--owner-directive <text>`. It carries the
   repository owner's own words, relayed verbatim by the session they gave them
   to, and the reviewer treats them as superseding any conflicting requirement

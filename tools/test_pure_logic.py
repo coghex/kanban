@@ -897,9 +897,17 @@ class BlockingReviewMarkerTests(unittest.TestCase):
     HEAD = "a" * 40
     OTHER = "b" * 40
 
-    def marker(self, version, verdict, head=None, *, reviewers="codex", comment_id="1"):
+    def marker(
+        self, version, verdict, head=None, *, reviewers="codex", comment_id="1", directives=()
+    ):
         return drain_prs.ReviewMarker(
-            version, reviewers, (head or self.HEAD).lower(), verdict, comment_id, ""
+            version,
+            reviewers,
+            (head or self.HEAD).lower(),
+            verdict,
+            comment_id,
+            "",
+            tuple(directives),
         )
 
     def blocking(self, *markers, head=None):
@@ -934,6 +942,92 @@ class BlockingReviewMarkerTests(unittest.TestCase):
         )
         self.assertIsNotNone(blocking)
         self.assertEqual(blocking.verdict, "CHANGES_REQUESTED")
+
+    # -- an owner directive changes what a rejection judged ---------------
+    #
+    # A canonical approval of the same head reached under an owner directive
+    # the rejection never saw was judged against a different contract, so it
+    # lifts the rejection; nothing about it lets a plain second opinion do so.
+
+    DIRECTIVE = "just use a pr, that is fine"
+    LATER = "and keep the landing script untouched"
+
+    def test_an_approval_under_a_new_directive_lifts_the_rejections_before_it(self):
+        # hetoimasia PR #261's exact shape: two rejections of one head, then
+        # the owner's directive, then an approval of that same head.
+        self.assertIsNone(
+            self.blocking(
+                self.marker(
+                    drain_prs.MARKER_CANONICAL,
+                    "APPROVE",
+                    comment_id="3",
+                    directives=[self.DIRECTIVE],
+                ),
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", comment_id="2"),
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+            )
+        )
+
+    def test_a_directive_the_rejection_already_saw_lifts_nothing(self):
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2", directives=[self.DIRECTIVE]
+            ),
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", directives=[self.DIRECTIVE]
+            ),
+        )
+        self.assertIsNotNone(blocking)
+        # A directive added after it does.
+        self.assertIsNone(
+            self.blocking(
+                self.marker(
+                    drain_prs.MARKER_CANONICAL,
+                    "APPROVE",
+                    comment_id="2",
+                    directives=[self.DIRECTIVE, self.LATER],
+                ),
+                self.marker(
+                    drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", directives=[self.DIRECTIVE]
+                ),
+            )
+        )
+
+    def test_an_older_directed_approval_lifts_nothing(self):
+        self.assertIsNotNone(
+            self.blocking(
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", comment_id="2"),
+                self.marker(
+                    drain_prs.MARKER_CANONICAL, "APPROVE", directives=[self.DIRECTIVE]
+                ),
+            )
+        )
+
+    def test_a_rejection_under_the_new_directive_is_a_veto_of_its_own(self):
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL,
+                "CHANGES_REQUESTED",
+                comment_id="3",
+                directives=[self.DIRECTIVE],
+            ),
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2", directives=[self.DIRECTIVE]
+            ),
+            self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.comment_id, "3")
+
+    def test_only_a_canonical_approval_can_carry_a_directive_that_lifts(self):
+        self.assertIsNotNone(
+            self.blocking(
+                self.marker(
+                    drain_prs.MARKER_DRAINER, "APPROVE", comment_id="2", directives=[self.DIRECTIVE]
+                ),
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+            )
+        )
 
     def test_a_v1_rejection_blocks_a_canonical_approval_in_either_order(self):
         for markers in (
@@ -1615,6 +1709,38 @@ class ConfiguredLabelsTests(unittest.TestCase):
                 self._context(Path("/tmp")), dry_run=True
             )
         self.assertEqual([pr["number"] for pr in approved], [1])
+
+
+class RecordedOwnerDirectiveTests(unittest.TestCase):
+    """The drainer reads the coordinator's owner-directive record the way the
+    coordinator writes it: the first line of the comment, and nowhere else."""
+
+    @staticmethod
+    def record(directives):
+        import base64
+
+        payload = json.dumps(directives).encode("utf-8")
+        return f"<!-- pr-owner-directive:v1 {base64.urlsafe_b64encode(payload).decode()} -->"
+
+    def test_the_first_line_is_read(self):
+        body = self.record(["use a pr"]) + "\n> quoted\n\nAPPROVE\n"
+        self.assertEqual(drain_prs.recorded_owner_directives(body), ("use a pr",))
+
+    def test_a_record_anywhere_else_is_inert(self):
+        body = "APPROVE\n" + self.record(["use a pr"]) + "\n"
+        self.assertEqual(drain_prs.recorded_owner_directives(body), ())
+
+    def test_a_damaged_record_lifts_nothing(self):
+        # Directives can only lift a veto here, so an unreadable record reads
+        # as none and leaves every rejection standing.
+        for first in (
+            "<!-- pr-owner-directive:v1 !!! -->",
+            "<!-- pr-owner-directive:v1 bm90IGpzb24= -->",
+            "<!-- pr-owner-directive:v1 WzFd -->",
+            "<!-- pr-owner-directive:v1 WyJhIl0=",
+        ):
+            with self.subTest(first=first):
+                self.assertEqual(drain_prs.recorded_owner_directives(first + "\nAPPROVE"), ())
 
 
 if __name__ == "__main__":
