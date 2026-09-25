@@ -380,7 +380,9 @@ that a particular comment should not.
   conflicting linked-issue requirement for that pull request only, with later
   directives superseding earlier ones. Nothing else about the review changes.
   It works whether or not the issue gate is overridden, and a blank one is
-  refused as `owner_directive_refused` before anything is read.
+  refused as `owner_directive_refused` before anything is read. The flag
+  repeats, one verbatim text each, so a round can relay several directives
+  without merging them.
   - *Recorded.* The published comment quotes each directive above the
     verdict. Its first line is a hidden `pr-owner-directive:v1` record: a
     base64url JSON list of the texts.
@@ -390,10 +392,16 @@ that a particular comment should not.
     supplied directive is appended after them, and one already in force is
     not duplicated. Only that first line of that comment is read, so another
     login's comment, a record-shaped string lower in a comment, and the pull
-    request's own text introduce nothing. A record that cannot be read fails
-    the round closed rather than silently dropping a directive.
+    request's own text introduce nothing. A first line that opens a record
+    but cannot be read — a bad envelope or payload alike — fails the round
+    closed rather than silently dropping a directive.
   - *Bound to the verdict.* The self-review `gate_key` binds the directives'
     text, so a `--publish-verdict` under different directives is refused.
+    Every publication also checks the record on the pull request itself.
+    Before posting, it must still be the one the round was briefed from, so
+    a directive another round published in the meantime is never buried
+    under a verdict reached without it. After posting, it must be exactly
+    the one this round wrote, or the verdict is not labeled.
   - *Marker unchanged.* The `pr-review:v2` marker keeps its exact shape, so a
     directed approval merges through the drainer's ordinary queue.
 - **Required authority:** GitHub write on the PR (labels, comments, draft

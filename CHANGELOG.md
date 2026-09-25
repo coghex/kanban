@@ -24,8 +24,10 @@ created above it.
   editing the issue would stale its canonical approval.
   - The published comment quotes each directive above the verdict and records
     it on its first line. Every later round on the pull request carries it
-    without the flag, the self-review key binds it, and the `pr-review:v2`
-    marker is unchanged.
+    without the flag. The self-review key binds it, every publication refuses
+    a record that moved under it, a damaged record fails closed, and the
+    `pr-review:v2` marker is unchanged. The flag repeats, one verbatim text
+    each.
   - `autosolve` now obeys and relays an owner direction given in the
     conversation. When it routes a documentation-only, direct-publication
     issue to a pull request as worthy of review, it relays a fixed standing

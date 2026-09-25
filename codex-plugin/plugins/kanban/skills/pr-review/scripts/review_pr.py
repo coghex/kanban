@@ -35,6 +35,7 @@ GATE_TEXT = "Issue has not been approved."
 OWNER_DIRECTIVE_RECORD_RE = re.compile(
     r"<!-- pr-owner-directive:v1 (?P<payload>[A-Za-z0-9_-]+={0,2}) -->"
 )
+OWNER_DIRECTIVE_RECORD_PREFIX = "<!-- pr-owner-directive:"
 OWNER_DIRECTIVE_REFUSED_STATUS = "owner_directive_refused"
 VALID_ORIGIN_RE = re.compile(r"<!-- pr-origin:(claude|codex|grok|kimi|google) -->")
 REVIEW_MARKER_RE = re.compile(
@@ -556,8 +557,18 @@ def override_refusal(
     }
 
 
+def supplied_owner_directives(owner_directive: str | list[str] | None) -> list[str]:
+    """Every directive passed this invocation, in order: `--owner-directive`
+    repeats, one verbatim text per flag, because autosolve's first round can
+    owe the reviewer both the user's words and its own standing directive,
+    and joining two directives into one would relay words nobody gave."""
+    if owner_directive is None:
+        return []
+    return [owner_directive] if isinstance(owner_directive, str) else list(owner_directive)
+
+
 def owner_directive_refusal(
-    number: int, owner_directive: str | None
+    number: int, owner_directive: str | list[str] | None
 ) -> tuple[int, dict[str, Any]] | None:
     """Refuse an empty owner directive before anything at all happens.
 
@@ -569,7 +580,7 @@ def owner_directive_refusal(
 
     `None` when there is nothing to refuse, so the ordinary path is unchanged.
     """
-    if owner_directive is None or owner_directive.strip():
+    if all(text.strip() for text in supplied_owner_directives(owner_directive)):
         return None
     return 1, {
         "pr": number,
@@ -1679,9 +1690,15 @@ def recorded_owner_directives(body: str) -> list[str]:
     stop applying because its record was damaged.
     """
     first = body.split("\n", 1)[0].strip()
+    if not first.startswith(OWNER_DIRECTIVE_RECORD_PREFIX):
+        return []
+    # A first line that opens a record is one, however damaged: an envelope
+    # that does not parse -- a bad payload alphabet, an empty payload, a
+    # truncated delimiter, another version -- fails closed like a payload that
+    # does not decode, rather than reading as a comment that recorded nothing.
     match = OWNER_DIRECTIVE_RECORD_RE.fullmatch(first)
     if not match:
-        return []
+        raise WorkflowError(f"the recorded owner directive is malformed: {first[:80]!r}")
     try:
         value = json.loads(base64.urlsafe_b64decode(match.group("payload")).decode("utf-8"))
     except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
@@ -1694,15 +1711,15 @@ def recorded_owner_directives(body: str) -> list[str]:
 
 
 def owner_directive_state(
-    root: Path, repo: str, number: int, supplied: str | None
+    root: Path, repo: str, number: int, supplied: str | list[str] | None
 ) -> dict[str, Any]:
     """The owner directives in force for this round.
 
     A directive persists: every one recorded by this publisher's newest
     `pr-review:v2` comment on the pull request is carried into the next round
-    without being re-supplied, including after new pushes. A supplied one is
-    added after them, and later directives supersede earlier ones where they
-    conflict. Re-supplying a directive already in force changes nothing, so a
+    without being re-supplied, including after new pushes. Supplied ones are
+    added after them in the order given, and later directives supersede
+    earlier ones where they conflict. Re-supplying a directive already in force changes nothing, so a
     caller that relays the same words every round is harmless.
 
     Read from the raw timeline and held to the authenticated publisher, as the
@@ -1719,15 +1736,43 @@ def owner_directive_state(
             break
     carried = recorded_owner_directives(str(latest.get("body") or "")) if latest else []
     directives = list(carried)
-    text = supplied.strip() if supplied is not None else None
-    if text and text not in directives:
-        directives.append(text)
+    texts = [text.strip() for text in supplied_owner_directives(supplied)]
+    for text in texts:
+        if text and text not in directives:
+            directives.append(text)
     return {
         "directives": directives,
         "carried": carried,
         "carried_from": str(latest.get("html_url") or "") if carried and latest else None,
-        "supplied": text,
+        "supplied": texts,
     }
+
+
+def require_current_owner_directives(
+    root: Path, repo: str, number: int, expected: list[str], *, published: bool
+) -> None:
+    """Hold publication to the directives recorded on the pull request.
+
+    Persistence reads the publisher's newest review comment, so a round that
+    publishes is also rewriting what every later round is held to. Before this
+    round's comment lands, the record must still be the one this round was
+    briefed from: another round publishing a newer directive in the meantime
+    would otherwise be buried under a verdict reached without it. Once the
+    comment has landed, the newest record must be exactly this round's, or
+    something else published in between and the verdict must not be labeled.
+    """
+    current = owner_directive_state(root, repo, number, None)["carried"]
+    if current == expected:
+        return
+    if published:
+        raise WorkflowError(
+            "the owner directives recorded on the pull request are not the ones this "
+            "review published; no current verdict may be labeled"
+        )
+    raise WorkflowError(
+        "the owner directives recorded on the pull request changed during review; "
+        "no verdict was published. Rerun the review to be briefed on them."
+    )
 
 
 def owner_directive_report(state: dict[str, Any]) -> dict[str, Any]:
@@ -1822,6 +1867,7 @@ def publish_results(
     allow_no_issue: bool,
     config_path: str | None = None,
     owner_directives: list[str] | None = None,
+    carried_directives: list[str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Safely publish an already-computed set of review results: re-verify
     nothing went stale since `gate`/`pr` were captured, post the
@@ -1892,6 +1938,9 @@ def publish_results(
         expected_overridden=reviewed_bypass,
         config_path=config_path,
     )
+    require_current_owner_directives(
+        root, repo, number, list(carried_directives or []), published=False
+    )
     post_comment(root, repo, number, body)
     try:
         require_current_review_state(
@@ -1904,6 +1953,9 @@ def publish_results(
             override_issue_gate=override_issue_gate,
             expected_overridden=reviewed_bypass,
             config_path=config_path,
+        )
+        require_current_owner_directives(
+            root, repo, number, list(owner_directives or []), published=True
         )
         set_verdict_label(root, repo, number, verdict, approval_label, changes_requested_label)
         verified = verify_publication(
@@ -1986,7 +2038,7 @@ def workflow(
     allow_no_issue: bool,
     override_issue_gate: bool = False,
     override_reason: str | None = None,
-    owner_directive: str | None = None,
+    owner_directive: str | list[str] | None = None,
     self_review: bool = False,
     self_review_as: str | None = None,
     config_path: str | None = None,
@@ -2152,6 +2204,7 @@ def workflow(
         root, repo, number, pr, gate, reviewers, results, base,
         allow_no_issue=allow_no_issue, config_path=config_path,
         owner_directives=directives["directives"],
+        carried_directives=directives["carried"],
     )
 
 
@@ -2166,7 +2219,7 @@ def publish_verdict(
     override_issue_gate: bool = False,
     override_reason: str | None = None,
     expected_override: list[int] | None = None,
-    owner_directive: str | None = None,
+    owner_directive: str | list[str] | None = None,
     config_path: str | None = None,
     explicit_repo: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -2269,6 +2322,7 @@ def publish_verdict(
         root, repo, number, pr, gate, reviewers, [result], base,
         allow_no_issue=allow_no_issue, config_path=config_path,
         owner_directives=in_force,
+        carried_directives=directives["carried"],
     )
 
 
@@ -2373,6 +2427,8 @@ def self_test() -> None:
     # its record round-trips from the first line of a comment and nowhere else.
     assert owner_directive_refusal(1, None) is None
     assert owner_directive_refusal(1, "use a pr") is None
+    assert owner_directive_refusal(1, ["use a pr", "keep the tests"]) is None
+    assert owner_directive_refusal(1, ["use a pr", " "]) is not None
     blank = owner_directive_refusal(1, "  ")
     assert blank is not None and blank[1]["status"] == OWNER_DIRECTIVE_REFUSED_STATUS
     assert bound_review_key("k1", []) == "k1"
@@ -2381,6 +2437,13 @@ def self_test() -> None:
     recorded = ["use a pr", "multi\nline --> text"]
     assert recorded_owner_directives(owner_directive_record(recorded) + "\nAPPROVE") == recorded
     assert recorded_owner_directives("APPROVE\n" + owner_directive_record(recorded)) == []
+    for damaged in ("<!-- pr-owner-directive:v1 !!! -->", "<!-- pr-owner-directive:v1 WyJhIl0="):
+        try:
+            recorded_owner_directives(damaged + "\nAPPROVE")
+        except WorkflowError:
+            pass
+        else:
+            raise AssertionError(f"a damaged record was read as none: {damaged}")
     assert owner_directive_notice({}) == ""
     assert "use a pr" in owner_directive_notice({"owner_directives": ["use a pr"]})
     assert not gate_approved([], [], [], allow_no_issue=False)
@@ -2474,14 +2537,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--owner-directive",
+        action="append",
         metavar="TEXT",
         help=(
             "The repository owner's own words, verbatim, ordering a change to what this pull "
             "request must satisfy -- relayed by the session the owner gave them to. The "
             "reviewer treats it as superseding any conflicting linked-issue requirement, the "
             "published comment quotes it above the verdict, and every later round on this "
-            "pull request carries it without it being passed again. Never compose, "
-            "paraphrase, or infer one: only the owner may give it."
+            "pull request carries it without it being passed again. Repeat the flag, one "
+            "verbatim text each, to relay several. Never compose, paraphrase, merge, or "
+            "infer one: only the owner may give it."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print structured output")

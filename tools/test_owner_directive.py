@@ -271,6 +271,37 @@ class OwnerDirectiveTests(unittest.TestCase):
                 code, result, _ = self.run_workflow(module)
                 self.assertNotIn("owner_directives", result)
 
+    def test_the_flag_repeats_one_verbatim_text_each(self):
+        for brand, module in self.modules.items():
+            with self.subTest(coordinator=brand), mock.patch.object(
+                sys,
+                "argv",
+                ["review_pr.py", "--review", "89", "--owner-directive", DIRECTIVE,
+                 "--owner-directive", STANDING_DIRECTIVE],
+            ):
+                self.assertEqual(
+                    module.parse_args().owner_directive, [DIRECTIVE, STANDING_DIRECTIVE]
+                )
+
+    def test_a_round_relays_the_users_words_and_the_standing_directive_together(self):
+        both = [DIRECTIVE, STANDING_DIRECTIVE]
+        for brand, module in self.modules.items():
+            with self.subTest(coordinator=brand):
+                _, report, _ = self.run_workflow(module, owner_directive=both)
+                self.assertEqual(report["owner_directives"]["in_force"], both)
+                self.assertEqual(report["owner_directives"]["supplied"], both)
+                _, _, stubs = self.run_workflow(module, dry_run=False, owner_directive=both)
+                self.assertEqual(stubs["run_reviews"].call_args.args[1]["owner_directives"], both)
+                self.assertEqual(stubs["publish_results"].call_args.kwargs["owner_directives"], both)
+                _, briefing, _ = self.run_workflow(
+                    module, dry_run=False, owner_directive=both,
+                    self_review=True, self_review_as="codex",
+                )
+                self.assertEqual(briefing["gate_key"], module.bound_review_key("k1", both))
+                # One blank among several refuses the whole invocation.
+                code, refused, _ = self.run_workflow(module, owner_directive=[DIRECTIVE, " "])
+                self.assertEqual(refused["status"], module.OWNER_DIRECTIVE_REFUSED_STATUS)
+
     # ------------------------------------------ 3. never silent, and persistent
 
     def test_the_published_comment_records_and_quotes_it_above_the_verdict(self):
@@ -331,7 +362,7 @@ class OwnerDirectiveTests(unittest.TestCase):
                 code, report, _ = self.run_workflow(module, comments=[earlier])
                 self.assertEqual(report["owner_directives"]["in_force"], [DIRECTIVE])
                 self.assertEqual(report["owner_directives"]["carried_from"], earlier["html_url"])
-                self.assertIsNone(report["owner_directives"]["supplied"])
+                self.assertEqual(report["owner_directives"]["supplied"], [])
 
     def test_a_later_directive_is_added_after_the_carried_ones_once(self):
         for brand, module in self.modules.items():
@@ -392,6 +423,27 @@ class OwnerDirectiveTests(unittest.TestCase):
                 self.assertNotIn("owner_directives", report)
                 self.assertNotIn("owner_directives", stubs["run_reviews"].call_args.args[1])
 
+    def test_a_damaged_envelope_fails_closed_rather_than_reading_as_none(self):
+        for brand, module in self.modules.items():
+            for first in (
+                "<!-- pr-owner-directive:v1 !!! -->",
+                "<!-- pr-owner-directive:v1  -->",
+                "<!-- pr-owner-directive:v1 WyJhIl0=",
+                "<!-- pr-owner-directive:v2 WyJhIl0= -->",
+            ):
+                with self.subTest(coordinator=brand, first=first):
+                    comment = {
+                        "user": {"login": LOGIN},
+                        "body": f"{first}\nAPPROVE\n\n{MARKER}\n",
+                        "html_url": "u",
+                    }
+                    with self.assertRaises(module.WorkflowError):
+                        self.run_workflow(module, comments=[comment])
+                    # The same damage below the first line stays inert.
+                    inert = {**comment, "body": f"APPROVE\n{first}\n\n{MARKER}\n"}
+                    _, report, _ = self.run_workflow(module, comments=[inert])
+                    self.assertNotIn("owner_directives", report)
+
     def test_a_damaged_record_fails_closed(self):
         for brand, module in self.modules.items():
             with self.subTest(coordinator=brand):
@@ -409,6 +461,91 @@ class OwnerDirectiveTests(unittest.TestCase):
                         continue
                     with self.subTest(payload=payload), self.assertRaises(module.WorkflowError):
                         self.run_workflow(module, comments=[comment])
+
+    def run_publication(self, module, *, records, briefed_carried, directives):
+        """publish_results() for real, with GitHub stubbed and the newest
+        recorded directives read from `records` one lookup at a time."""
+        states = iter(records)
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(module, "pr_view", return_value=self.pr()))
+            stack.enter_context(mock.patch.object(module, "gate_status", return_value=self.gate()))
+            stack.enter_context(
+                mock.patch.object(module, "resolve_workflow_labels", return_value=("reviewed:approve", "reviewed:changes"))
+            )
+            stack.enter_context(
+                mock.patch.object(module, "require_current_review_state", return_value=self.gate())
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "owner_directive_state",
+                    side_effect=lambda *args, **kwargs: {"carried": next(states)},
+                )
+            )
+            stubs = {
+                name: stack.enter_context(mock.patch.object(module, name))
+                for name in ("post_comment", "set_verdict_label", "clear_verdict_labels", "verify_publication", "mark_ready_for_review")
+            }
+            stubs["verify_publication"].return_value = {
+                "comment_url": "u", "labels": ["reviewed:approve"], "ready_for_review": True,
+            }
+            results = [
+                {
+                    "reviewer": module.CODEX_REVIEWER,
+                    "display_name": module.CODEX_REVIEWER.display_name,
+                    "verdict": "APPROVE",
+                    "summary": "ok",
+                    "blocking_concerns": [],
+                }
+            ]
+            try:
+                outcome = module.publish_results(
+                    Path("/fake-repo"), "coghex/kanban", 89, self.pr(), self.gate(),
+                    [module.CODEX_REVIEWER], results, {"pr": 89},
+                    allow_no_issue=False,
+                    owner_directives=directives,
+                    carried_directives=briefed_carried,
+                )
+            except module.WorkflowError as exc:
+                outcome = exc
+        return outcome, stubs
+
+    def test_a_directive_published_mid_review_is_never_buried(self):
+        # Round A was briefed with no directive; round B publishes one on the
+        # same head while A's reviewer runs. A's approval must not land on
+        # top of it, or the next round would carry nothing.
+        for brand, module in self.modules.items():
+            with self.subTest(coordinator=brand):
+                outcome, stubs = self.run_publication(
+                    module, records=[[DIRECTIVE]], briefed_carried=[], directives=[]
+                )
+                self.assertIsInstance(outcome, module.WorkflowError)
+                self.assertIn("changed during review", str(outcome))
+                self.assertFalse(stubs["post_comment"].called)
+                self.assertFalse(stubs["set_verdict_label"].called)
+
+    def test_a_record_that_moved_after_posting_is_never_labeled(self):
+        for brand, module in self.modules.items():
+            with self.subTest(coordinator=brand):
+                outcome, stubs = self.run_publication(
+                    module, records=[[], [DIRECTIVE]], briefed_carried=[], directives=[]
+                )
+                self.assertIsInstance(outcome, module.WorkflowError)
+                self.assertTrue(stubs["post_comment"].called)
+                self.assertFalse(stubs["set_verdict_label"].called)
+                self.assertTrue(stubs["clear_verdict_labels"].called)
+
+    def test_an_unmoved_record_publishes(self):
+        for brand, module in self.modules.items():
+            with self.subTest(coordinator=brand):
+                outcome, stubs = self.run_publication(
+                    module,
+                    records=[[DIRECTIVE], [DIRECTIVE, LATER]],
+                    briefed_carried=[DIRECTIVE],
+                    directives=[DIRECTIVE, LATER],
+                )
+                self.assertEqual(outcome[0], 0, outcome)
+                self.assertTrue(stubs["set_verdict_label"].called)
 
     # ----------------------------------------------- 4. the verdict is bound to it
 
@@ -576,6 +713,8 @@ class OwnerDirectiveAssetTests(unittest.TestCase):
                     text,
                 )
                 self.assertIn("owner_directives.in_force", text)
+                self.assertIn("Repeat the flag, one verbatim text each", text)
+                self.assertIn("never join two into one", text)
                 self.assertIn("it amends the spec under step 2: relay it", text)
 
     def test_autosolve_relays_its_standing_directive_word_for_word(self):
@@ -607,6 +746,7 @@ class OwnerDirectiveAssetTests(unittest.TestCase):
                 self.assertIn(NEVER_COMPOSE, text)
                 self.assertIn('"status": "owner_directive_refused"', text)
                 self.assertIn("pass the identical `--owner-directive` here", text)
+                self.assertIn("repeating the flag once per directive", text)
 
     def test_the_coordinator_accepts_the_flag_every_asset_names(self):
         for brand in COORDINATORS:

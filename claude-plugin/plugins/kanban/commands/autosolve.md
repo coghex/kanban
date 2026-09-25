@@ -279,7 +279,10 @@ this document's, never this session's. Pass `--owner-directive "<the words,
 verbatim>"` to **both** the dry run and the real round of the first round after
 the user gives a direction under step 2, and pass step 3's standing directive,
 exactly as written there, to both halves of round 1 when step 3 chose the
-worthy-of-review disposition. The coordinator quotes each directive above the
+worthy-of-review disposition. Repeat the flag, one verbatim text each, when a
+round owes the reviewer more than one directive — round 1 can owe both the
+user's words and the standing directive — and never join two into one. The
+coordinator quotes each directive above the
 verdict and records it, and every later round on this pull request carries it
 without the flag, including after new pushes; passing words already in force
 again changes nothing. A blank one returns `"status": "owner_directive_refused"`
