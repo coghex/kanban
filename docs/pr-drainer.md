@@ -764,8 +764,12 @@ reached against requirements the rejection never saw, and it lifts that
 rejection. Nothing else changes: a second canonical opinion under the same
 directives still lifts nothing, a `pr-review:v1` approval records no
 directives, a rejection published under the new directives is a veto of its
-own, and a record that cannot be read — or sits anywhere but a comment's first
-line — lifts nothing.
+own, and a record that sits anywhere but a comment's first line lifts nothing.
+"After" means a later comment, not a later position among the markers one
+comment carries, so an approval never lifts a rejection published beside it.
+A record that cannot be read is an unknown contract rather than an empty one:
+a rejection carrying one is never lifted, and an approval carrying one lifts
+nothing.
 
 Two consequences worth knowing before you meet them:
 

@@ -187,6 +187,7 @@ PR_REVIEW_V2_RE = re.compile(
 # JSON list of the directives that review was performed under. Mirrored from
 # `<bundle>/scripts/review_pr.py`'s OWNER_DIRECTIVE_RECORD_RE rather than
 # imported, like every marker spelling this module reads.
+OWNER_DIRECTIVE_RECORD_PREFIX = "<!-- pr-owner-directive:"
 OWNER_DIRECTIVE_RECORD_RE = re.compile(
     r"<!-- pr-owner-directive:v1 (?P<payload>[A-Za-z0-9_-]+={0,2}) -->"
 )
@@ -1152,9 +1153,11 @@ class ReviewMarker:
     comment_url: str = ""
     # The owner directives a canonical review was performed under, read from
     # its comment's first line by `review_markers`; empty for every other
-    # marker. What `blocking_marker_in` asks of it is whether an approval was
-    # reached under a contract a rejection of the same head never saw.
-    directives: tuple[str, ...] = ()
+    # marker, and None when the comment opens a record that cannot be read --
+    # a contract that cannot be established. What `blocking_marker_in` asks of
+    # it is whether an approval was reached under a contract a rejection of
+    # the same head never saw.
+    directives: tuple[str, ...] | None = ()
 
 
 def parse_review_marker_records(body: str) -> list[ReviewMarker]:
@@ -1202,27 +1205,34 @@ def parse_review_marker_records(body: str) -> list[ReviewMarker]:
     return records
 
 
-def recorded_owner_directives(body: str) -> tuple[str, ...]:
+def recorded_owner_directives(body: str) -> tuple[str, ...] | None:
     """The owner directives one comment records, from its first line only.
 
     Only the first line, because that is the one line of a published review
     the coordinator writes before any reviewer- or owner-supplied text; a
-    record-shaped string anywhere else is inert. A record that cannot be read
-    records nothing here. That is the conservative reading for this module:
-    directives can only LIFT a veto, so a damaged record leaves a rejection
-    standing rather than inventing a contract change nobody can see.
+    record-shaped string anywhere else is inert. No record is an empty tuple.
+
+    A first line that opens a record which cannot be read -- a damaged
+    envelope or payload -- is None, not empty: the contract that review was
+    performed under is unknown. Reading it as empty would be the opposite of
+    conservative on a rejection, since every directive a later approval
+    recorded would then look new to it; `blocking_marker_in` lets neither a
+    rejection nor an approval with an unknown contract take part in a lift.
     """
-    match = OWNER_DIRECTIVE_RECORD_RE.fullmatch(body.split("\n", 1)[0].strip())
-    if not match:
+    first = body.split("\n", 1)[0].strip()
+    if not first.startswith(OWNER_DIRECTIVE_RECORD_PREFIX):
         return ()
+    match = OWNER_DIRECTIVE_RECORD_RE.fullmatch(first)
+    if not match:
+        return None
     try:
         value = json.loads(base64.urlsafe_b64decode(match.group("payload")).decode("utf-8"))
     except (binascii.Error, UnicodeDecodeError, ValueError):
-        return ()
+        return None
     if not isinstance(value, list) or not all(
         isinstance(item, str) and item.strip() for item in value
     ):
-        return ()
+        return None
     return tuple(value)
 
 
@@ -1422,20 +1432,39 @@ def blocking_marker_in(
     same directives is exactly the second canonical verdict above, a
     `pr-review:v1` approval records no directives at all, and a later rejection
     under the new directives is a veto of its own.
+
+    "Published after" is a comment, not a list position. `review_markers`
+    returns comments newest first, but the markers inside one comment in
+    parser-pattern order, so an approval can precede a rejection it was
+    published together with. A lifting approval must therefore come from a
+    different, identified comment than the rejection; markers carrying no
+    comment identity never lift anything. And a contract that cannot be
+    established -- an unreadable record on either side -- lifts nothing.
     """
     if not head:
         return None
     wanted = head.lower()
-    # Newest first, so every approval seen before a rejection is newer than it.
+    # Comments newest first, so an approval seen before a rejection, from
+    # another comment, was published after it.
     newer_approvals: list[ReviewMarker] = []
     for marker in markers:
         if marker.head != wanted:
             continue
         if marker.verdict == "CHANGES_REQUESTED":
-            seen = set(marker.directives)
-            if not any(set(approval.directives) - seen for approval in newer_approvals):
+            if marker.directives is None or not marker.comment_id:
                 return marker
-        elif marker.version == MARKER_CANONICAL:
+            seen = set(marker.directives)
+            if not any(
+                approval.comment_id != marker.comment_id
+                and set(approval.directives or ()) - seen
+                for approval in newer_approvals
+            ):
+                return marker
+        elif (
+            marker.version == MARKER_CANONICAL
+            and marker.comment_id
+            and marker.directives is not None
+        ):
             newer_approvals.append(marker)
     return None
 

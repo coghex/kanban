@@ -1768,7 +1768,10 @@ class CanonicalVerdictPrecedenceTests(ProcessPrFixture):
     DIRECTIVE = "just use a pr, that is fine"
 
     def _directed_feed(self, *comments):
-        """Comments given oldest first, as (marker, directives, record_first)."""
+        """Comments given oldest first, as (marker, directives, record_first).
+
+        `directives` is a list to record, or a string standing for a record
+        line verbatim -- a damaged one, say."""
         import base64
 
         feed = []
@@ -1779,8 +1782,11 @@ class CanonicalVerdictPrecedenceTests(ProcessPrFixture):
                 created_at=f"2026-09-06T09:{40 + index:02d}:00Z",
             )
             if directives:
-                payload = base64.urlsafe_b64encode(json.dumps(directives).encode()).decode()
-                record = f"<!-- pr-owner-directive:v1 {payload} -->"
+                if isinstance(directives, str):
+                    record = directives
+                else:
+                    payload = base64.urlsafe_b64encode(json.dumps(directives).encode()).decode()
+                    record = f"<!-- pr-owner-directive:v1 {payload} -->"
                 comment["body"] = (
                     f"{record}\n{comment['body']}"
                     if record_first
@@ -1819,6 +1825,30 @@ class CanonicalVerdictPrecedenceTests(ProcessPrFixture):
             (self._v2("APPROVE"), [self.DIRECTIVE], True),
         )
         self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_a_damaged_rejection_record_is_not_evidence_of_a_contract_change(self):
+        # The review's own reproduction: a rejection whose record does not
+        # decode, then a same-head approval under a directive.
+        report = self._drive(
+            (
+                self._v2("CHANGES_REQUESTED"),
+                "<!-- pr-owner-directive:v1 bm90IGpzb24= -->",
+                True,
+            ),
+            (self._v2("APPROVE"), [self.DIRECTIVE], True),
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_CANONICAL)
+
+    def test_a_rejection_published_beside_the_approval_is_not_lifted_by_it(self):
+        # The review's other reproduction: one comment carrying a first-line
+        # directive record, a canonical approval, and a legacy rejection.
+        legacy = (
+            f"<!-- codex-review head={self.head_sha} verdict=CHANGES_REQUESTED -->"
+        )
+        report = self._drive(
+            (f"{self._v2('APPROVE')}\n{legacy}", [self.DIRECTIVE], True),
+        )
+        self._assert_vetoed(report, version=drain_prs.MARKER_LEGACY)
 
     def test_a_record_below_the_first_line_releases_nothing(self):
         report = self._drive(

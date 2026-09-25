@@ -907,7 +907,7 @@ class BlockingReviewMarkerTests(unittest.TestCase):
             verdict,
             comment_id,
             "",
-            tuple(directives),
+            None if directives is None else tuple(directives),
         )
 
     def blocking(self, *markers, head=None):
@@ -1018,6 +1018,46 @@ class BlockingReviewMarkerTests(unittest.TestCase):
         )
         self.assertIsNotNone(blocking)
         self.assertEqual(blocking.comment_id, "3")
+
+    def test_a_rejection_whose_contract_is_unknown_is_never_lifted(self):
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2", directives=[self.DIRECTIVE]
+            ),
+            self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", directives=None),
+        )
+        self.assertIsNotNone(blocking)
+
+    def test_an_approval_whose_contract_is_unknown_lifts_nothing(self):
+        self.assertIsNotNone(
+            self.blocking(
+                self.marker(drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="2", directives=None),
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED"),
+            )
+        )
+
+    def test_an_approval_in_the_rejections_own_comment_lifts_nothing(self):
+        # Markers inside one comment come in parser-pattern order, not
+        # publication order: the canonical approval can precede a legacy
+        # rejection it was published together with.
+        blocking = self.blocking(
+            self.marker(
+                drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="7", directives=[self.DIRECTIVE]
+            ),
+            self.marker(drain_prs.MARKER_LEGACY, "CHANGES_REQUESTED", comment_id="7"),
+        )
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking.version, drain_prs.MARKER_LEGACY)
+
+    def test_markers_with_no_comment_identity_lift_nothing(self):
+        self.assertIsNotNone(
+            self.blocking(
+                self.marker(
+                    drain_prs.MARKER_CANONICAL, "APPROVE", comment_id="", directives=[self.DIRECTIVE]
+                ),
+                self.marker(drain_prs.MARKER_CANONICAL, "CHANGES_REQUESTED", comment_id=""),
+            )
+        )
 
     def test_only_a_canonical_approval_can_carry_a_directive_that_lifts(self):
         self.assertIsNotNone(
@@ -1730,17 +1770,21 @@ class RecordedOwnerDirectiveTests(unittest.TestCase):
         body = "APPROVE\n" + self.record(["use a pr"]) + "\n"
         self.assertEqual(drain_prs.recorded_owner_directives(body), ())
 
-    def test_a_damaged_record_lifts_nothing(self):
-        # Directives can only lift a veto here, so an unreadable record reads
-        # as none and leaves every rejection standing.
+    def test_a_damaged_record_is_an_unknown_contract_not_an_empty_one(self):
+        # Empty would make every directive a later approval recorded look new
+        # to a damaged rejection; unknown takes no part in a lift at all.
         for first in (
             "<!-- pr-owner-directive:v1 !!! -->",
             "<!-- pr-owner-directive:v1 bm90IGpzb24= -->",
             "<!-- pr-owner-directive:v1 WzFd -->",
             "<!-- pr-owner-directive:v1 WyJhIl0=",
+            "<!-- pr-owner-directive:v2 WyJhIl0= -->",
         ):
             with self.subTest(first=first):
-                self.assertEqual(drain_prs.recorded_owner_directives(first + "\nAPPROVE"), ())
+                self.assertIsNone(drain_prs.recorded_owner_directives(first + "\nAPPROVE"))
+
+    def test_no_record_is_an_empty_contract(self):
+        self.assertEqual(drain_prs.recorded_owner_directives("APPROVE\n"), ())
 
 
 if __name__ == "__main__":
