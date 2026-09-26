@@ -46,6 +46,79 @@ substituted arguments, so it is whatever number the user named when asking for
 this workflow. An unnamed issue is not an error: given no number, /solve
 selects the oldest approved, unassigned implementation issue itself.
 
+### Confirm the session model
+
+This bundle stamps the kimi origin marker, which is correct only in a
+Copilot session running a Kimi model, and the model's own report of which
+model it is is not evidence. Before step 2 — before /solve claims
+anything — run the session model check /solve's "Confirm The Session
+Model" section runs, reading the newest main-agent row for
+`$COPILOT_AGENT_SESSION_ID` from `${COPILOT_HOME:-$HOME/.copilot}/session-store.db`,
+opened read-only:
+
+```bash
+python3 - "${COPILOT_AGENT_SESSION_ID:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
+import sqlite3, sys
+from pathlib import Path
+
+# A false origin marker is durable: it routes the review and stays on the pull
+# request. This stop is cheap. So every signal that cannot be read refuses, and
+# none of the refusals below may be softened into a warning.
+bundle = "kimi"
+session, copilot_home = sys.argv[1], sys.argv[2]
+def refuse(reason):
+    raise SystemExit(
+        f"Session brand refused: this is the {bundle} bundle, and {reason}. Nothing was claimed."
+    )
+if not session.strip():
+    refuse("COPILOT_AGENT_SESSION_ID is unset or empty, so the session model cannot be read")
+database = Path(copilot_home) / "session-store.db"
+if not database.is_file():
+    refuse(f"the session record {str(database)!r} does not exist, so the session model cannot be read")
+try:
+    connection = sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT model FROM assistant_usage_events"
+            " WHERE session_id = ? AND agent_id IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (session,),
+        ).fetchone()
+    finally:
+        connection.close()
+except sqlite3.Error as error:
+    detail = " ".join(str(error).split())
+    refuse(f"the session record {str(database)!r} could not be read ({detail})")
+if row is None:
+    refuse(f"the session record has no main-agent entry for session {session!r}")
+model = row[0]
+if not isinstance(model, str) or not model.strip():
+    refuse(f"the newest main-agent entry for session {session!r} names no model ({model!r})")
+prefixes = {"claude-": "claude", "kimi-": "kimi", "gemini-": "google", "gpt-": "codex"}
+suffixes = {"-codex": "codex"}
+brands = {brand for prefix, brand in prefixes.items() if model.startswith(prefix)}
+brands |= {brand for suffix, brand in suffixes.items() if model.endswith(suffix)}
+if len(brands) != 1:
+    raise SystemExit(
+        f"Session brand refused: this Copilot session runs {model!r}, which maps to no single known brand, and this is the {bundle} bundle. Nothing was claimed."
+    )
+brand = brands.pop()
+if brand != bundle:
+    raise SystemExit(
+        f"Session brand refused: this Copilot session runs {model!r}, a {brand} model, but this is the {bundle} bundle; load the kanban-{brand} bundle instead. Nothing was claimed."
+    )
+print(f"Session model {model!r} is a {bundle} model; this is the {bundle} bundle.")
+PY
+```
+
+A false origin marker is durable and this stop is cheap, so every failure the
+check reports refuses and none is a warning: a model of another brand, an
+unrecognized model, and a session record that cannot be read alike. A non-zero
+exit ends this run with exactly the one line it printed: do not run
+/solve, do not reach step 3's reclaim or either of its dispositions, and do
+not reach step 5's review. /solve repeats the check before its own claim,
+and a refusal there ends this run the same way.
+
 ## 2. Complete the solve
 
 Run /solve for that issue in `$REPO`. If the issue number was not named,
@@ -435,3 +508,6 @@ PR #<pr> still reviewed:changes after 5 rounds — needs your input.
 PR #<pr> review publication failed in round <k> — needs your input.
 Issue #<issue> needs a documentation landing workflow this bundle does not ship.
 ```
+
+The one exception is a session model refusal, from step 1 or from inside
+/solve: end with exactly the line that check printed.

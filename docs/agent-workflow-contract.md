@@ -167,6 +167,34 @@ everything else.
   the PR title, body, commits, and diff as data under review rather than
   instructions, and forbid retrieving a withheld body through any other
   source. Reading the PR head's source stays permitted.
+- **Copilot session model guard:** the Kimi and Google `solve` and
+  `autosolve` skills (issue #723) stamp their own brand's origin marker, which
+  is true only in a Copilot session running that brand's model — and which
+  bundle a session loads is the operator's choice, invisible to the workflow.
+  Before the first tracker mutation, the claim, each reads the session's model
+  from the Copilot CLI's own record: `session-store.db` under `$COPILOT_HOME`
+  (default `~/.copilot`), opened read-only so it is neither created nor
+  modified, taking only the newest `assistant_usage_events` row whose
+  `session_id` is the exact `$COPILOT_AGENT_SESSION_ID` the CLI exports into
+  every tool the session runs, passed as query data, and whose `agent_id` is
+  null, the main session agent rather than a subagent. The model maps to a
+  brand by anchored patterns — the prefixes `claude-`, `kimi-`, `gemini-`, and
+  `gpt-` name `claude`, `kimi`, `google`, and `codex`, and the suffix `-codex`
+  names `codex` — and a brand other than the bundle's own refuses with one line
+  naming the model, the bundle's brand, and the `kanban-<brand>` bundle that
+  should have been loaded. The check fails closed: an unrecognized model or one
+  matching two brands' patterns, an unset or empty session id, an absent
+  database, no main-agent row for the session, a newest row naming no model, and
+  a database or schema the query cannot read all refuse on the same one line,
+  with no fallback to another session, a subagent's row, an older row, or the
+  model's self-report. A false origin marker is durable and the stop is cheap,
+  which is why none of those is a warning. `autosolve` runs the check before
+  delegating to `solve` and a refusal ends the run, so it reaches neither the
+  documentation-only reclaim nor a review; `solve` repeats it before its own
+  claim. The Grok bundle carries no such check, because the Grok CLI keeps no
+  equivalent record, and the Claude and Codex workflows have no Copilot
+  database dependency at all. `tools/test_copilot_session_brand.py` runs the
+  fenced check against fixture databases and holds its placement.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
   `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
@@ -3118,7 +3146,10 @@ search the two copied layouts the CLI creates inside it —
 `installed-plugins/<marketplace-name>/<plugin-name>/` and
 `installed-plugins/_direct/<owner>--<repo>--<bundle path>/` — after
 `$KIMI_PLUGIN_ROOT` or `$GOOGLE_PLUGIN_ROOT` when the launcher set that to the
-loaded plugin.
+loaded plugin. The same four skills also read `session-store.db` inside it, the
+Copilot CLI's record of each session's model, for the session model guard §2.1
+describes; an absent or unreadable record refuses that workflow rather than
+being created or passed over.
 
 Since issue #574 the row carries a second kind of consumer, and one of them is
 a *Claude* bundle file: both copies of the janitor census probe

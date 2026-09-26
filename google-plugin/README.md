@@ -32,6 +32,10 @@ bundle's `/solve` or `/autosolve`. The tested launches below use a dedicated
 worked repository must not provide a same-named project skill. A Copilot
 session using a Claude model is a canonical Claude participant and must not
 load this Google bundle.
+Both skills enforce that before they claim anything: they read the session's
+model from `$COPILOT_HOME/session-store.db` for `$COPILOT_AGENT_SESSION_ID` and
+refuse unless it is a Gemini model, and they refuse just the same when that
+record cannot be read.
 
 The direct way loads the tracked checkout live, with no install:
 
