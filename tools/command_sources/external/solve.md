@@ -12,6 +12,73 @@ argument-hint: "[issue number]"
 
 Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows. This session is {{brand:title}}. The pull request it opens is reviewed by Codex, never by Claude, and never by this session.
 
+## Confirm The Session Model
+
+<!-- brand:grok -->
+This bundle stamps the {{brand:name}} origin marker, which is correct only in a session running a {{brand:title}} model. The Grok CLI keeps no session record this workflow can read deterministically, so this bundle has no runtime check that the session's model is a {{brand:title}} one: it relies on the operator loading it only into a {{brand:title}} session. Do not stand in for the missing check with the model's own report of which model it is — a self-report is not evidence, and a check built on one would only look like a guard.
+<!-- brand:kimi,google -->
+This bundle stamps the {{brand:name}} origin marker, which is correct only in a Copilot session running a {{brand:title}} model. Which bundle a session loads is the operator's choice, invisible to this workflow, and the model's own report of which model it is is not evidence. The Copilot CLI records the session's model deterministically, so before anything else — and always before the first tracker mutation, the claim in "Select And Claim" step 3 — read it from `${COPILOT_HOME:-$HOME/.copilot}/session-store.db`, opened read-only, for the exact `$COPILOT_AGENT_SESSION_ID` the CLI exports into every tool the session runs, and refuse unless it is a {{brand:name}} model:
+
+```bash
+python3 - "${COPILOT_AGENT_SESSION_ID:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
+import sqlite3, sys
+from pathlib import Path
+
+# A false origin marker is durable: it routes the review and stays on the pull
+# request. This stop is cheap. So every signal that cannot be read refuses, and
+# none of the refusals below may be softened into a warning.
+bundle = "{{brand:name}}"
+session, copilot_home = sys.argv[1], sys.argv[2]
+def refuse(reason):
+    raise SystemExit(
+        f"Session brand refused: this is the {bundle} bundle, and {reason}. Nothing was claimed."
+    )
+if not session.strip():
+    refuse("COPILOT_AGENT_SESSION_ID is unset or empty, so the session model cannot be read")
+database = Path(copilot_home) / "session-store.db"
+if not database.is_file():
+    refuse(f"the session record {str(database)!r} does not exist, so the session model cannot be read")
+try:
+    connection = sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT model FROM assistant_usage_events"
+            " WHERE session_id = ? AND agent_id IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (session,),
+        ).fetchone()
+    finally:
+        connection.close()
+except sqlite3.Error as error:
+    detail = " ".join(str(error).split())
+    refuse(f"the session record {str(database)!r} could not be read ({detail})")
+if row is None:
+    refuse(f"the session record has no main-agent entry for session {session!r}")
+model = row[0]
+if not isinstance(model, str) or not model.strip():
+    refuse(f"the newest main-agent entry for session {session!r} names no model ({model!r})")
+prefixes = {"claude-": "claude", "kimi-": "kimi", "gemini-": "google", "gpt-": "codex"}
+suffixes = {"-codex": "codex"}
+brands = {brand for prefix, brand in prefixes.items() if model.startswith(prefix)}
+brands |= {brand for suffix, brand in suffixes.items() if model.endswith(suffix)}
+if len(brands) != 1:
+    raise SystemExit(
+        f"Session brand refused: this Copilot session runs {model!r}, which maps to no single known brand, and this is the {bundle} bundle. Nothing was claimed."
+    )
+brand = brands.pop()
+if brand != bundle:
+    raise SystemExit(
+        f"Session brand refused: this Copilot session runs {model!r}, a {brand} model, but this is the {bundle} bundle; load the kanban-{brand} bundle instead. Nothing was claimed."
+    )
+print(f"Session model {model!r} is a {bundle} model; this is the {bundle} bundle.")
+PY
+```
+
+The check reads only the newest main-agent row (`agent_id IS NULL`) for that one session id, passed to the query as data. The model maps to a brand by anchored patterns: the prefixes `claude-`, `kimi-`, `gemini-`, and `gpt-` name `claude`, `kimi`, `google`, and `codex`, and the suffix `-codex` names `codex`. A name no pattern matches, or one matching the patterns of two brands, refuses rather than defaulting to this bundle.
+
+A false origin marker is durable — it routes the review and stays on the pull request — while this stop is cheap, so every failure refuses and none is a warning: a model of another brand, an unrecognized model, an unset or empty `$COPILOT_AGENT_SESSION_ID`, an absent database, no main-agent row for the session, a newest row naming no model, and a database or schema the query cannot read. Never soften a refusal, never retry against another session, a subagent's row, or an older row, and never substitute your own belief about which model you are. On a non-zero exit, stop with exactly the one line it printed: claim no issue, push no branch, and open no pull request.
+<!-- /brand -->
+
 ## Resolving The Canonical Backend
 
 Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:
@@ -248,6 +315,11 @@ End this workflow with exactly:
 ```text
 PR #<number> - <one-sentence summary>
 ```
+<!-- brand:kimi,google -->
+
+The one exception is a refusal from "Confirm The Session Model": end this
+workflow with exactly the line that check printed, having claimed nothing.
+<!-- /brand -->
 
 That line ends *this workflow*. It does not end a larger run that delegated to
 it: a caller which invoked this workflow as one of its own steps — an
