@@ -1,0 +1,8 @@
+{
+  "name": "kanban",
+  "version": "1.0.0",
+  "description": "Kanban's Claude-on-Copilot workflow bundle: /solve claims and implements a GitHub issue through a claude-origin pull request, and /autosolve drives Codex review of that pull request until approval. Never spawns another Claude session.",
+  "author": {
+    "name": "Kanban"
+  }
+}

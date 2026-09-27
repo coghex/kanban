@@ -15,6 +15,18 @@ created above it.
 
 ### Unreleased
 
+- A Copilot CLI session running a Claude model has a Kanban bundle of its own:
+  `claude-copilot-plugin/`, a Copilot marketplace named `kanban-claude` whose
+  `/solve` and `/autosolve` stamp `pr-origin:claude` and drive a Codex review.
+  A bundle's brand is the model its session runs, so such a session is a Claude
+  participant, and until now it could obey the rule against loading the Kimi
+  or Google bundle only by not running the workflow at all. Both skills refuse
+  a session whose model is not Claude, and autosolve stops on a fork pull
+  request, where the bundled coordinator reads a claude marker as an unknown
+  origin. Enable one Copilot Kanban bundle per `COPILOT_HOME`; the README has
+  the tested launch. Every other bundle's version rises because the helpers it
+  vendors now name the new copy.
+
 - The PR drainer lets an owner directive lift a rejection of the same head. A
   canonical approval published after a `CHANGES_REQUESTED` marker on the
   current head, whose comment records an owner directive that rejection was

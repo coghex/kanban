@@ -12,8 +12,8 @@ now the render of `tools/command_sources/external/solve.md`, and
 `tools/test_render_command_sources.py` byte-compares every rendered output
 against its source. What this module adds is the property that registration
 alone does not prove: a shared-policy edit in that source reaches exactly the
-three external `solve` assets, and each brand's runtime text reaches only its
-own.
+external `solve` assets -- four since issue #722 added the Claude-on-Copilot
+bundle -- and each brand's runtime text reaches only its own.
 
 The Claude and Codex `solve` pair stays hand-edited (design D-5), so it is the
 negative control for the reach test, in the shape
@@ -38,7 +38,11 @@ ASSETS = {
     "grok": "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
     "kimi": "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
     "google": "google-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "claude-copilot": "claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md",
 }
+# The Copilot-hosted bundles, each keyed by its brand-table entry and the
+# origin brand its session stamps.
+COPILOT_BUNDLES = {"kimi": "kimi", "google": "google", "claude-copilot": "claude"}
 # Hand-edited, and deliberately outside this source's reach.
 CANONICAL_SOLVE_ASSETS = (
     "claude-plugin/plugins/kanban/commands/solve.md",
@@ -85,9 +89,10 @@ def plant(anchor, count=1):
 
 
 class RegistrationTests(unittest.TestCase):
-    """Requirements 1 to 3: one source, three outputs, all current."""
+    """Requirements 1 to 3: one source, one output per external bundle, all
+    current."""
 
-    def test_the_source_renders_exactly_the_three_external_solve_assets(self):
+    def test_the_source_renders_exactly_the_external_solve_assets(self):
         self.assertEqual(renderer.output_paths(entry()), ASSETS)
 
     def test_each_asset_is_the_render_of_the_one_source(self):
@@ -115,7 +120,7 @@ class RegistrationTests(unittest.TestCase):
 
 
 class ReachTests(unittest.TestCase):
-    """Requirement 4: a shared edit reaches the three and no other asset."""
+    """Requirement 4: a shared edit reaches the external assets and no other."""
 
     def setUp(self):
         self.baseline = renderer.render_all(REPO_ROOT)
@@ -130,7 +135,7 @@ class ReachTests(unittest.TestCase):
         for path in (*ASSETS.values(), *CANONICAL_SOLVE_ASSETS, SOURCE):
             self.assertNotIn(SENTINEL, read(path), path)
 
-    def test_a_shared_policy_edit_reaches_all_three_solve_assets_and_nothing_else(self):
+    def test_a_shared_policy_edit_reaches_every_external_solve_asset_and_nothing_else(self):
         rendered = render_with_source(plant(SHARED_ANCHOR))
         self.assertEqual(self.changed(plant(SHARED_ANCHOR)), set(ASSETS.values()))
         for path in ASSETS.values():
@@ -148,7 +153,8 @@ class ReachTests(unittest.TestCase):
     def test_a_grok_only_edit_reaches_grok_alone(self):
         # The control that keeps the shared-edit assertion discriminating: the
         # same comparison reports one path when the edit is scoped to one
-        # brand, so three is a property of where the text was planted.
+        # brand, so reaching every asset is a property of where the text was
+        # planted.
         source = read(SOURCE).replace(
             GROK_ONLY_ANCHOR,
             "<!-- brand:grok -->\n" + SENTINEL + "\n1. Capture the issue number",
@@ -175,32 +181,57 @@ class BrandIsolationTests(unittest.TestCase):
         self.assert_only('(Path(grok_home) / "installed-plugins").glob("kanban-*/"', {"grok"})
         self.assert_only("$GROK_HOME/installed-plugins/kanban-<hash>/", {"grok"})
 
-    def test_the_copilot_pair_alone_reads_settings_and_both_install_layouts(self):
-        self.assert_only("$COPILOT_HOME/settings.json", {"kimi", "google"})
-        self.assert_only('settings = Path(copilot_home) / "settings.json"', {"kimi", "google"})
-        self.assert_only('direct = installed / "_direct"', {"kimi", "google"})
-        for brand in ("kimi", "google"):
-            self.assert_only(f"the marketplace layout `kanban-{brand}/kanban/`", {brand})
+    def test_the_copilot_bundles_alone_read_settings_and_both_install_layouts(self):
+        copilot = set(COPILOT_BUNDLES)
+        self.assert_only("$COPILOT_HOME/settings.json", copilot)
+        self.assert_only('settings = Path(copilot_home) / "settings.json"', copilot)
+        self.assert_only('direct = installed / "_direct"', copilot)
+        for bundle, origin in COPILOT_BUNDLES.items():
+            self.assert_only(f"the marketplace layout `kanban-{origin}/kanban/`", {bundle})
             self.assert_only(
-                f"_direct/<owner>--<repo>--{brand}-plugin-plugins-kanban/", {brand}
+                f"_direct/<owner>--<repo>--{bundle}-plugin-plugins-kanban/", {bundle}
             )
-            self.assert_only(f"${brand.upper()}_PLUGIN_ROOT", {brand})
+            variable = bundle.upper().replace("-", "_")
+            self.assert_only(f"${variable}_PLUGIN_ROOT", {bundle})
 
     def test_each_origin_marker_is_its_own_brands(self):
-        for brand in ASSETS:
-            self.assert_only(f"<!-- pr-origin:{brand} -->", {brand})
+        for bundle in ASSETS:
+            origin = COPILOT_BUNDLES.get(bundle, bundle)
+            self.assert_only(f"<!-- pr-origin:{origin} -->", {bundle})
 
     def test_each_brand_refuses_the_brands_that_preceded_it(self):
+        # Requirement 5 of issue #722: every external bundle's sibling list
+        # accounts for the Claude-on-Copilot bundle. The three earlier ones
+        # already name Claude, which is that bundle's brand; the new bundle
+        # names every earlier brand but its own, since Claude Code's bundle is
+        # the same brand on another host, and refuses that bundle by host.
         expected = {
             "grok": "never follow a Claude or Codex solve skill",
             "kimi": "never follow a Claude, Codex, or Grok solve skill",
             "google": "never follow a Claude, Codex, Grok, or Kimi solve skill",
+            "claude-copilot": "never follow a Codex, Grok, Kimi, or Google solve skill",
         }
         for brand, phrase in expected.items():
             self.assert_only(phrase, {brand})
         self.assert_only(
+            "never follow Claude Code's solve command, which is packaged for a different host",
+            {"claude-copilot"},
+        )
+        self.assert_only(
             "never follow a generic solve agent that would leave the pull request unmarked",
-            {"kimi", "google"},
+            set(COPILOT_BUNDLES),
+        )
+
+    def test_the_claude_session_is_not_told_to_refuse_its_own_brand(self):
+        # The review's correction: the sibling refusal must not tell the
+        # Claude-on-Copilot session to refuse Claude.
+        text = self.assets["claude-copilot"]
+        self.assertNotIn("never follow a Claude", text)
+        self.assertNotIn("Never stamp a Claude", text)
+        self.assertNotIn("reviewed by Codex, never by Claude, and never by this session", text)
+        self.assertIn(
+            "reviewed by Codex, never by this session and never by any other Claude session",
+            text,
         )
 
 

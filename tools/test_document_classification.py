@@ -110,6 +110,9 @@ TEST_PARSED_PATHS = {
     "kimi-plugin/",
     # tools/test_google_plugin.py reads the tracked Google skills the same way.
     "google-plugin/",
+    # tools/test_claude_copilot_plugin.py reads the tracked Claude-on-Copilot
+    # skills the same way.
+    "claude-copilot-plugin/",
     # tools/test_render_command_sources.py reads the authored command sources
     # under tools/command_sources/ and byte-compares the files rendered from
     # them, so editing either alone fails build-test (issue #375).
@@ -567,7 +570,7 @@ class ClassificationCoverageTests(unittest.TestCase):
 
     def test_the_plugin_bundles_are_covered_through_a_directory_row(self):
         # Requirement 1's directory row, exercised rather than assumed: the
-        # tracked bundle documents reach their class through five rows.
+        # tracked bundle documents reach their class through six rows.
         bundle_docs = [
             path
             for path in self.markdown
@@ -578,6 +581,7 @@ class ClassificationCoverageTests(unittest.TestCase):
                     "grok-plugin/",
                     "kimi-plugin/",
                     "google-plugin/",
+                    "claude-copilot-plugin/",
                 )
             )
         ]

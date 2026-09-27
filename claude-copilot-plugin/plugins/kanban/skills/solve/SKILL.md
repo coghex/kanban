@@ -1,29 +1,15 @@
 ---
 name: solve
-<!-- brand:grok -->
-description: Claim a GitHub issue, implement its minimal verified fix in an isolated worktree, and open a {{brand:name}}-origin PR. Use when the user invokes {{cmd:solve}} or explicitly asks to take an issue through PR creation. This is the {{brand:title}} brand; never follow a {{brand:predecessors}} solve skill that would stamp a different origin marker.
-<!-- brand:kimi,google -->
-description: Claim a GitHub issue, implement its minimal verified fix in an isolated worktree, and open a {{brand:name}}-origin PR. Use when the user invokes {{cmd:solve}} or explicitly asks to take an issue through PR creation. This is the {{brand:title}} brand; never follow a {{brand:predecessors}} solve skill that would stamp a different origin marker, and never follow a generic solve agent that would leave the pull request unmarked.
-<!-- brand:claude-copilot -->
-description: Claim a GitHub issue, implement its minimal verified fix in an isolated worktree, and open a {{brand:name}}-origin PR from a Copilot CLI session running a {{brand:title}} model. Use when the user invokes {{cmd:solve}} or explicitly asks to take an issue through PR creation. This is the {{brand:title}} brand on the Copilot CLI; never follow a {{brand:predecessors}} solve skill that would stamp a different origin marker, never follow Claude Code's solve command, which is packaged for a different host, and never follow a generic solve agent that would leave the pull request unmarked.
-<!-- /brand -->
-argument-hint: "[issue number]"
+description: Claim a GitHub issue, implement its minimal verified fix in an isolated worktree, and open a claude-origin PR from a Copilot CLI session running a Claude model. Use when the user invokes /solve or explicitly asks to take an issue through PR creation. This is the Claude brand on the Copilot CLI; never follow a Codex, Grok, Kimi, or Google solve skill that would stamp a different origin marker, never follow Claude Code's solve command, which is packaged for a different host, and never follow a generic solve agent that would leave the pull request unmarked.
 ---
 
 # Solve Issue
 
-<!-- brand:grok,kimi,google -->
-Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows. This session is {{brand:title}}. The pull request it opens is reviewed by Codex, never by Claude, and never by this session.
-<!-- brand:claude-copilot -->
-Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows. This session is {{brand:title}}, running on the Copilot CLI. The pull request it opens is reviewed by Codex, never by this session and never by any other {{brand:title}} session.
-<!-- /brand -->
+Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows. This session is Claude, running on the Copilot CLI. The pull request it opens is reviewed by Codex, never by this session and never by any other Claude session.
 
 ## Confirm The Session Model
 
-<!-- brand:grok -->
-This bundle stamps the {{brand:name}} origin marker, which is correct only in a session running a {{brand:title}} model. The Grok CLI keeps no session record this workflow can read deterministically, so this bundle has no runtime check that the session's model is a {{brand:title}} one: it relies on the operator loading it only into a {{brand:title}} session. Do not stand in for the missing check with the model's own report of which model it is — a self-report is not evidence, and a check built on one would only look like a guard.
-<!-- brand:kimi,google,claude-copilot -->
-This bundle stamps the {{brand:name}} origin marker, which is correct only in a Copilot session running a {{brand:title}} model. Which bundle a session loads is the operator's choice, invisible to this workflow, and the model's own report of which model it is is not evidence. The Copilot CLI records the session's model deterministically, so before anything else — and always before the first tracker mutation, the claim in "Select And Claim" step 3 — read it from `${COPILOT_HOME:-$HOME/.copilot}/session-store.db`, opened read-only, for the exact `$COPILOT_AGENT_SESSION_ID` the CLI exports into every tool the session runs, and refuse unless it is a {{brand:name}} model:
+This bundle stamps the claude origin marker, which is correct only in a Copilot session running a Claude model. Which bundle a session loads is the operator's choice, invisible to this workflow, and the model's own report of which model it is is not evidence. The Copilot CLI records the session's model deterministically, so before anything else — and always before the first tracker mutation, the claim in "Select And Claim" step 3 — read it from `${COPILOT_HOME:-$HOME/.copilot}/session-store.db`, opened read-only, for the exact `$COPILOT_AGENT_SESSION_ID` the CLI exports into every tool the session runs, and refuse unless it is a claude model:
 
 ```bash
 python3 - "${COPILOT_AGENT_SESSION_ID:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
@@ -33,7 +19,7 @@ from pathlib import Path
 # A false origin marker is durable: it routes the review and stays on the pull
 # request. This stop is cheap. So every signal that cannot be read refuses, and
 # none of the refusals below may be softened into a warning.
-bundle = "{{brand:name}}"
+bundle = "claude"
 session, copilot_home = sys.argv[1], sys.argv[2]
 def refuse(reason):
     raise SystemExit(
@@ -83,7 +69,6 @@ PY
 The check reads only the newest main-agent row (`agent_id IS NULL`) for that one session id, passed to the query as data. The model maps to a brand by anchored patterns: the prefixes `claude-`, `kimi-`, `gemini-`, and `gpt-` name `claude`, `kimi`, `google`, and `codex`, and the suffix `-codex` names `codex`. A name no pattern matches, or one matching the patterns of two brands, refuses rather than defaulting to this bundle.
 
 A false origin marker is durable — it routes the review and stays on the pull request — while this stop is cheap, so every failure refuses and none is a warning: a model of another brand, an unrecognized model, an unset or empty `$COPILOT_AGENT_SESSION_ID`, an absent database, no main-agent row for the session, a newest row naming no model, and a database or schema the query cannot read. Never soften a refusal, never retry against another session, a subagent's row, or an older row, and never substitute your own belief about which model you are. On a non-zero exit, stop with exactly the one line it printed: claim no issue, push no branch, and open no pull request.
-<!-- /brand -->
 
 ## Resolving The Canonical Backend
 
@@ -145,11 +130,7 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 ## Select And Claim
 
-<!-- brand:grok -->
-1. Capture the issue number from `$ARGUMENTS` (Grok substitutes the text after `{{cmd:solve}}` before this skill runs). If `$ARGUMENTS` is empty, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
-<!-- brand:kimi,google,claude-copilot -->
 1. Take the issue number from the user's request. Copilot skills receive no substituted arguments: the number is whatever the user named when they asked for this workflow. If none was named, select the oldest open, unassigned implementation issue carrying the approval label, in the established repository:
-<!-- /brand -->
 
    ```bash
    gh issue list -R "$REPO" --state open --search "sort:created-asc no:assignee label:reviewed:approve -label:epic -label:needs-decision -label:wip -label:blocked -label:reviewed:changes"
@@ -176,39 +157,16 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 
 1. Resolve the repository root and default branch. Fetch `origin`. The GitHub repository identity is the `$REPO` established above; do not resolve it again and do not derive it from the local checkout directory name.
 2. Keep newly created worktrees outside the source-checkout directory. Set `WORKTREES_ROOT=${WORKTREES_ROOT:-"$HOME/worktrees"}` and use the repository-scoped directory `$WORKTREES_ROOT/$REPO/issue-<issue>-<slug>`, named by the established identity. Create its parent if needed. If no same-issue recovery worktree was found above, create that worktree from the latest `origin/<default-branch>`; otherwise continue in the recovered worktree. `git worktree list` remains the sole collision/recovery source and therefore continues to recognize legacy worktrees at their existing paths. Never move, rename, or bulk-clean legacy worktrees as part of solving. Use absolute paths for every later command because tool working directories are not persistent.
-<!-- brand:grok -->
-3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Grok invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory this session loaded, whether a hashed install or a local marketplace source outside `$GROK_HOME`. Otherwise search the documented install layout `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`). Never search a fabricated `$GROK_HOME/plugins/user/kanban` path, and never resolve a checkout-relative copy:
+3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `$CLAUDE_COPILOT_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-claude` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the two copied layouts the Copilot CLI actually creates under `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace layout `kanban-claude/kanban/`, and a direct install `_direct/<owner>--<repo>--claude-copilot-plugin-plugins-kanban/`. Those two form one candidate set — an absent marketplace-layout install still admits a direct one, and two eligible roots across them refuse as ambiguous rather than picking either. Roots are identified before the helper is looked for, so a root missing the helper refuses instead of silently losing to a competitor. An absent settings file, one with no `kanban-claude` entry, or a `kanban-claude` entry the CLI recorded from a remote `github`, `git`, or `url` source reaches that search; unreadable or malformed applicable settings, a recorded source kind that is unsupported or does not carry the field that kind locates its marketplace by (`repo` for `github`, `url` for the other two), a relative recorded directory path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
 
    ```bash
-   TRUSTED_SPEC="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
-import sys
-from pathlib import Path
-
-plugin_root, grok_home = sys.argv[1], sys.argv[2]
-relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
-if plugin_root:
-    candidate = Path(plugin_root) / relative
-    if not candidate.is_file():
-        raise SystemExit(f"trusted helper was not found at {candidate}")
-    print(candidate)
-    raise SystemExit(0)
-matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
-if not matches:
-    raise SystemExit("trusted helper was not found under $GROK_HOME/installed-plugins/kanban-*")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
-<!-- brand:kimi,google,claude-copilot -->
-3. Fetch the effective spec through this bundle's vendored trusted-comment helper before editing. It returns the COMPLETE paginated comment timeline in chronological order while keeping untrusted comment bodies out of this session. Kanban and Copilot invoke this workflow with the *worked* repository as the working directory, not this plugin's own install location. Prefer `${{brand:upper}}_PLUGIN_ROOT` when the launcher set it — that is the plugin directory this session loaded, whether a marketplace install or a local `--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-{{brand:name}}` marketplace's recorded local path out of `$COPILOT_HOME/settings.json` (how a local marketplace install loads), and only then search the two copied layouts the Copilot CLI actually creates under `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace layout `kanban-{{brand:name}}/kanban/`, and a direct install `_direct/<owner>--<repo>--{{brand:bundle}}-plugin-plugins-kanban/`. Those two form one candidate set — an absent marketplace-layout install still admits a direct one, and two eligible roots across them refuse as ambiguous rather than picking either. Roots are identified before the helper is looked for, so a root missing the helper refuses instead of silently losing to a competitor. An absent settings file, one with no `kanban-{{brand:name}}` entry, or a `kanban-{{brand:name}}` entry the CLI recorded from a remote `github`, `git`, or `url` source reaches that search; unreadable or malformed applicable settings, a recorded source kind that is unsupported or does not carry the field that kind locates its marketplace by (`repo` for `github`, `url` for the other two), a relative recorded directory path, and a recorded tree missing the helper refuse without falling through. Never resolve a checkout-relative copy:
-
-   ```bash
-   TRUSTED_SPEC="$(python3 - "${{{brand:upper}}_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
+   TRUSTED_SPEC="$(python3 - "${CLAUDE_COPILOT_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
 import json, os, sys
 from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
-marketplace, plugin, bundle = "kanban-{{brand:name}}", "kanban", "{{brand:bundle}}-plugin-plugins-kanban"
+marketplace, plugin, bundle = "kanban-claude", "kanban", "claude-copilot-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"trusted helper was not found at {candidate}")
@@ -274,11 +232,10 @@ if direct.is_dir():
         if child.is_dir() and installs_this_bundle(child.name)
     )
 if not roots:
-    raise SystemExit(f"trusted helper was not found: ${{brand:upper}}_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+    raise SystemExit(f"trusted helper was not found: $CLAUDE_COPILOT_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
 if len(roots) != 1:
     raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
 finish(roots[0] / relative)
-<!-- /brand -->
 PY
 )"
    python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>
@@ -307,30 +264,24 @@ PY
    gh pr create -R "$REPO" --base <default-branch> --head <push-owner>:<branch> --title <title> --body <body>
    ```
 
-   `$REPO` scopes pull-request metadata only; the branch itself still goes to the checkout's push remote, and the base is `$REPO`'s branch of the same name the worktree branched from. Supply the owner-qualified `--head <push-owner>:<branch>` whenever that push remote is a repository other than `$REPO`, since GitHub needs it to open the cross-repository pull request; if GitHub cannot open one at all (unrelated repositories, no fork relationship), stop and report the pushed branch rather than opening a pull request in the push remote's repository. Confirm the returned pull-request URL names `$REPO`. The body must include `Closes #<issue>`, a short approach summary, the exact checks run, and `<!-- pr-origin:{{brand:name}} -->` as the final line for Codex review routing. Never stamp a {{brand:predecessors}} origin marker from this session. If authoritative comments amended or clarified the body, include a concise spec note identifying what comment-derived requirements were implemented. Do not write the origin HTML comment anywhere except as that final line; a second occurrence makes the origin unreadable.
+   `$REPO` scopes pull-request metadata only; the branch itself still goes to the checkout's push remote, and the base is `$REPO`'s branch of the same name the worktree branched from. Supply the owner-qualified `--head <push-owner>:<branch>` whenever that push remote is a repository other than `$REPO`, since GitHub needs it to open the cross-repository pull request; if GitHub cannot open one at all (unrelated repositories, no fork relationship), stop and report the pushed branch rather than opening a pull request in the push remote's repository. Confirm the returned pull-request URL names `$REPO`. The body must include `Closes #<issue>`, a short approach summary, the exact checks run, and `<!-- pr-origin:claude -->` as the final line for Codex review routing. Never stamp a Codex, Grok, Kimi, or Google origin marker from this session. If authoritative comments amended or clarified the body, include a concise spec note identifying what comment-derived requirements were implemented. Do not write the origin HTML comment anywhere except as that final line; a second occurrence makes the origin unreadable.
 4. If the work is abandoned before opening the PR, release the issue claim.
 
 ## Stop Condition
 
 Do not review, label, merge, or finalize the PR. That prohibition is absolute
 and holds however this workflow was invoked: the review is Codex's to perform,
-<!-- brand:grok,kimi,google -->
-never Claude's, and this session is the pull request's own origin brand.
-<!-- brand:claude-copilot -->
-never this session's or another {{brand:title}} session's, and this session is the pull
+never this session's or another Claude session's, and this session is the pull
 request's own origin brand.
-<!-- /brand -->
 
 End this workflow with exactly:
 
 ```text
 PR #<number> - <one-sentence summary>
 ```
-<!-- brand:kimi,google,claude-copilot -->
 
 The one exception is a refusal from "Confirm The Session Model": end this
 workflow with exactly the line that check printed, having claimed nothing.
-<!-- /brand -->
 
 That line ends *this workflow*. It does not end a larger run that delegated to
 it: a caller which invoked this workflow as one of its own steps — an

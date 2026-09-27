@@ -88,7 +88,8 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   `PATH`.
 - Never open or push to a pull request over a failing gate you selected.
 - A workflow command or skill Markdown file is the program an agent executes, so an
-  edit under `claude-plugin/`, `codex-plugin/`, `grok-plugin/`, `kimi-plugin/`, or `google-plugin/`
+  edit under `claude-plugin/`, `codex-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`,
+  or `claude-copilot-plugin/`
   is a behavior change and takes a
   regression assertion like any other. `WriteLocationTests` in
   `tools/test_drafting_workflow_contract.py` is the pattern: the rules asserted against
@@ -169,7 +170,9 @@ Elsewhere: `app/` is the executable entry point, `test/` the Haskell tests,
 `Fixture` the invented board the golden frames and the tracked screenshot are drawn
 from, `codex-plugin/` and `claude-plugin/` the tracked workflow bundles Kanban's
 AI actions invoke by name, and `grok-plugin/`, `kimi-plugin/`, and `google-plugin/` the external-origin
-solve/autosolve bundles whose pull requests route to Codex.
+solve/autosolve bundles whose pull requests route to Codex. `claude-copilot-plugin/` is the
+same pair for a Copilot CLI session running a Claude model: the brand is the model, not the
+host, so it stamps the claude origin and Codex reviews it.
 
 ## Pipeline conventions
 

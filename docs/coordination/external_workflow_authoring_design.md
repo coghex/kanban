@@ -227,6 +227,17 @@ the operator chooses which bundle to load, and a Copilot session running Claude
 that loads the Kimi bundle would stamp a false origin. That is a gap in the
 current bundles rather than in this migration, and belongs in its own finding.
 
+*Since closed:* #723 enforces the rule at runtime — the Copilot bundles read
+the session's model from the CLI's own record and refuse another brand's — and
+#722 gives a Copilot session running Claude a bundle of its own to load,
+`claude-copilot-plugin/`, so the rule no longer leaves such a session with
+nothing to run. That bundle is the first renderer target whose key is not its
+origin brand: Claude Code's `claude` entry keeps its own layout and keys, so the
+new `claude-copilot` entry declares `origin="claude"`. `{{brand:name}}` and
+`{{brand:title}}` still spell the model brand, as this decision requires, while
+`{{brand:bundle}}` and `{{brand:upper}}` spell the bundle's directory and
+plugin-root variable. The origin vocabulary above is unchanged.
+
 ### D-2. One authored source per workflow, covering every brand it renders
 
 Not one source for Grok and another for the Copilot pair. Approved by the owner
