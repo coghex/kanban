@@ -2010,9 +2010,34 @@ def rerun_failed_ci(
         entry["ci_rerun_active"] = False
         entry["ci_rerun_attempt_identity"] = None
         entry["ci_rerun_exhausted_head"] = None
+        entry["ci_rerun_unconfirmed"] = None
 
     check = latest_check(pr, check_name)
     observed = ci_attempt_identity(check)
+
+    unconfirmed = entry.get("ci_rerun_unconfirmed")
+    if unconfirmed is not None:
+        # A rerun requested just as the network failed (issue #735): it is
+        # recorded as requested, and settled before anything asks again.
+        if (
+            entry.get("ci_rerun_active")
+            and observed is not None
+            and observed == entry.get("ci_rerun_attempt_identity")
+            and not ci_rerun_accepted(ctx, str(unconfirmed))
+        ):
+            # The same failure, and a run that is not going: the request never
+            # reached GitHub, so it is taken back, budget and all, and the
+            # ordinary decision below makes it again.
+            log(
+                f"PR #{number}: the rerun requested before the network failed "
+                "was never accepted; requesting it again"
+            )
+            entry["ci_rerun_attempts"] = max(
+                0, int(entry.get("ci_rerun_attempts", 0)) - 1
+            )
+            entry["ci_rerun_active"] = False
+            entry["ci_rerun_attempt_identity"] = None
+        entry["ci_rerun_unconfirmed"] = None
 
     if entry.get("ci_rerun_active"):
         recorded = entry.get("ci_rerun_attempt_identity")
@@ -2070,18 +2095,30 @@ def rerun_failed_ci(
             f"PR #{number}: rerunning failed Actions run {run_id} "
             f"({attempts}/{MAX_CI_RERUN_ATTEMPTS})"
         )
-        run(
-            [
-                "gh",
-                "run",
-                "rerun",
-                run_id,
-                "--failed",
-                "--repo",
-                ctx.repo_slug,
-            ],
-            cwd=ctx.path,
-        )
+        try:
+            run(
+                [
+                    "gh",
+                    "run",
+                    "rerun",
+                    run_id,
+                    "--failed",
+                    "--repo",
+                    ctx.repo_slug,
+                ],
+                cwd=ctx.path,
+            )
+        except DrainError:
+            if NETWORK_OFFLINE is not None:
+                # GitHub may have accepted it with only the response lost, so
+                # it is recorded exactly as a request that returned, marked
+                # unconfirmed for the next look to settle.
+                entry["ci_rerun_head"] = head
+                entry["ci_rerun_attempts"] = attempts
+                entry["ci_rerun_active"] = True
+                entry["ci_rerun_attempt_identity"] = observed
+                entry["ci_rerun_unconfirmed"] = run_id
+            raise
     entry["ci_rerun_head"] = head
     entry["ci_rerun_attempts"] = attempts
     entry["ci_rerun_active"] = True
@@ -2101,6 +2138,22 @@ def clear_ci_rerun(state: dict[str, Any], number: int) -> None:
     entry["ci_rerun_active"] = False
     entry["ci_rerun_attempt_identity"] = None
     entry["ci_rerun_exhausted_head"] = None
+    entry["ci_rerun_unconfirmed"] = None
+
+
+def ci_rerun_accepted(ctx: RepoContext, run_id: str) -> bool:
+    """Whether GitHub took a rerun of an Actions run: the run is going again.
+
+    A run that is queued or in progress was rerun; one still completed was
+    not, since a rerun that had already finished would show a new attempt in
+    the check rollup instead of the failure that asked for it.
+    """
+    payload = run_json(
+        ["gh", "run", "view", run_id, "--repo", ctx.repo_slug, "--json", "status"],
+        cwd=ctx.path,
+    )
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return isinstance(status, str) and status.lower() != "completed"
 
 
 def classify_check(item: dict[str, Any] | None) -> str:
@@ -2811,6 +2864,10 @@ def merge_past_base_advance(
             log(f"PR #{number}: {note}; deferring before the swap")
             set_outcome(report, reason, message)
             return MERGE_GATES_CHANGED, None
+        if report is not None:
+            # What an interrupted push may have landed, for recovery to look
+            # for on the default branch (issue #735).
+            report["staged_merge_commit"] = merge_commit
         swap = swap_default_branch_to(ctx, ref, merge_commit, approval)
         if swap == SWAP_UNKNOWN:
             raise DrainError(
@@ -5793,6 +5850,7 @@ def process_pr(
                 pr,
                 landed=report["merged"],
                 confirm_merged=base_advance is not None,
+                merge_commit=report.get("staged_merge_commit"),
             )
         raise
 
@@ -5909,6 +5967,7 @@ def record_interrupted_merge(
     *,
     landed: bool,
     confirm_merged: bool,
+    merge_commit: str | None = None,
 ) -> None:
     """Persist what a merge the network interrupted still has to establish.
 
@@ -5916,7 +5975,9 @@ def record_interrupted_merge(
     One it accepted is durable, so its cleanup is recorded exactly as a
     completed merge records it, beside the post-merge audit that never got its
     read. One whose outcome the failure left unknown -- the merge call, or the
-    push behind a base-advance swap -- records only the head it tried to land.
+    push behind a base-advance swap -- records the head it tried to land and,
+    for the swap, the merge commit the push may already have put on the
+    default branch.
     Recovery reads the pull request before it does anything else with it: see
     settle_interrupted_merge(). Nothing is retried on the strength of either
     record, so no effect is repeated and no debt is dropped.
@@ -5936,11 +5997,36 @@ def record_interrupted_merge(
         )
     else:
         entry["merge_attempt"] = {"head": head}
+        if merge_commit is not None:
+            entry["merge_attempt"]["merge_commit"] = merge_commit
         log(
             f"PR #{number}: went offline while merging {head[:12]}; whether it "
             "landed is established from GitHub on recovery"
         )
     save_drain_state(ctx, state, dry_run=False)
+
+
+def swap_landed(ctx: RepoContext, number: int, merge_commit: Any) -> bool:
+    """Whether an interrupted base-advance swap put its merge commit on the
+    default branch. False when there was no swap to ask about.
+
+    A commit that is not even in the local object store after the default
+    branch was fetched was never pushed -- the push names it from here -- so
+    it cannot have landed. Anything else that cannot be answered raises: a
+    merge is neither claimed nor retried on a guess.
+    """
+    if not isinstance(merge_commit, str):
+        return False
+    landed = default_branch_contains(ctx, merge_commit)
+    if landed is None and not commit_exists_locally(ctx, merge_commit):
+        return False
+    if landed is None:
+        raise DrainError(
+            f"PR #{number}: whether {merge_commit[:12]}, pushed before the "
+            f"network failed, is on {ctx.default_branch} could not be "
+            "established; neither a merge nor a retry is claimed for it"
+        )
+    return landed
 
 
 def settle_interrupted_merge(
@@ -5977,6 +6063,20 @@ def settle_interrupted_merge(
             )
             entry["cleanup"] = plan_cleanup(pr)
             entry["pending_audit"] = {"head": attempted, "confirm_merged": False}
+        elif pr.get("state") == "OPEN" and swap_landed(
+            ctx, number, attempt.get("merge_commit")
+        ):
+            # A base-advance swap whose push landed with its response lost:
+            # the default branch already holds the merge, and GitHub has yet
+            # to record the pull request as merged. The merged-state wait
+            # joins the audit, exactly as after a swap that had returned.
+            log(
+                f"PR #{number}: the merge commit the interrupted swap pushed is "
+                f"on {ctx.default_branch}; recording its cleanup and "
+                "completing its audit"
+            )
+            entry["cleanup"] = plan_cleanup(pr)
+            entry["pending_audit"] = {"head": attempted, "confirm_merged": True}
         elif pr.get("state") == "MERGED":
             # Merged, but at a head this drainer never tried to land: someone
             # else's merge. Nothing here is this drainer's to audit, so the

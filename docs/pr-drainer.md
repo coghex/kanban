@@ -285,15 +285,22 @@ counting it against the pull request or the cleanup step it was working on:
   retried. A merge call that failed is looked up: a pull request that merged at
   the attempted head gets its cleanup and its post-merge audit exactly as a
   merge that had returned would; one merged at some other head is someone
-  else's merge and is handled as any merged pull request is; and one that did
-  not merge goes back through every gate. A merge that landed before its audit
+  else's merge and is handled as any merged pull request is; one still open
+  after a [base-advance swap](#merging-past-a-coordination-only-base-advance)
+  whose push may have landed is checked against the default branch, and
+  treated as merged when the default branch holds its merge commit; and one
+  that did not merge goes back through every gate. A merge that landed before its audit
   could read it back has its cleanup recorded before the wait and its audit
   completed after it — a real gate violation found then is still the fatal
   incident it always was. A branch update whose response was lost is not
   requested again while it could still be landing: a head that moved settles
   it through the ordinary stale-approval verdict, and only a head still
   unchanged after GitHub's three-minute window for applying an update is asked
-  for once more.
+  for once more. An [automatic CI rerun](#automatic-ci-reruns) whose response
+  was lost is recorded as requested; if the same failure is still showing
+  afterwards, the Actions run itself says whether it was accepted, and one
+  that never reached GitHub is taken back, budget and all, and requested once
+  more.
 - Authentication and permission failures, certificate failures, malformed
   responses, a command that timed out locally, and unexpected errors are never
   read as an outage. They keep the behavior they had.

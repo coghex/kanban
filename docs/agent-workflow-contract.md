@@ -1223,9 +1223,10 @@ reimplement the removal, and `--check` remains read-only.
   read-only `gh api repos/<slug>` check every 60 seconds, each bounded well
   inside that, until one gets through. Recovery happens inside the same run and
   rereads every gate before any mutation; the interrupted pass advances no
-  pass counter or attempt; and a merge or branch update the outage left
-  uncertain is settled from GitHub rather than retried blind — a merge is
-  claimed only at the head it tried to land. Authentication, permission,
+  pass counter or attempt; and a merge, base-advance swap, branch update, or
+  CI rerun the outage left uncertain is settled from GitHub rather than
+  retried blind — a merge is claimed only at the head it tried to land, and a
+  swap only when the default branch holds its merge commit. Authentication, permission,
   certificate, malformed-response, local-timeout, and unexpected failures are
   never read as an outage, and a check that meets one ends the wait so the
   ordinary failure handling applies. The controller reports the state as

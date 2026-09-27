@@ -1316,6 +1316,118 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(len(self._update_branch_calls()), 0)
         self.assertNotIn("42", state["prs"])
 
+    def _interrupted_swap(self, *, push_lands):
+        """Issue #735: the leased push's response is lost to the network.
+
+        With `push_lands`, the real push runs first and only its answer is
+        lost; without it, the network failed before anything was sent.
+        """
+        real_run = drain_prs.run
+
+        def run(args, **kwargs):
+            if args[:2] == ["git", "push"] and any(
+                arg.startswith("--force-with-lease") for arg in args
+            ):
+                if push_lands:
+                    real_run(args, **kwargs)
+                failure = drain_prs.TransportError(
+                    "Command failed: git push", category="reset", command="git push"
+                )
+                drain_prs.NETWORK_OFFLINE = failure
+                raise failure
+            return real_run(args, **kwargs)
+
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 3,
+            "active_pr": None,
+            "prs": {
+                "42": {
+                    "approved_head": self.head_sha,
+                    "last_rereviewed_head": None,
+                    "consecutive_failures": 0,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 2,
+                    "last_error": None,
+                    "cleanup": None,
+                }
+            },
+        }
+        self._ensure_marker_reads()
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", True),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs, "run", side_effect=run),
+        ):
+            with self.assertRaises(drain_prs.TransportError):
+                drain_prs.process_pr(
+                    self.ctx,
+                    42,
+                    dry_run=False,
+                    state=state,
+                    gates=self._gates(),
+                    report=drain_prs.new_single_pr_report(42),
+                )
+        return state
+
+    def _gates(self):
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+    def _settle(self, state):
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", True),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs.time, "sleep"),
+        ):
+            drain_prs.settle_interrupted_merge(
+                self.ctx, state, 42, gates=self._gates(), dry_run=False
+            )
+
+    def test_a_swap_whose_push_landed_with_its_response_lost_is_a_merge(self):
+        state = self._interrupted_swap(push_lands=True)
+        self.assertTrue(self._swapped())
+        entry = state["prs"]["42"]
+        self.assertEqual(
+            entry["merge_attempt"],
+            {"head": self.head_sha, "merge_commit": self.MERGE_COMMIT},
+        )
+        # Recovery finds the pull request still OPEN -- GitHub has not caught
+        # up -- and then merged, as the confirmation wait expects.
+        self._script_pr_view(self._behind(), self._behind(), {"state": "MERGED"})
+
+        self._settle(state)
+
+        self.assertIsNone(entry["merge_attempt"])
+        self.assertIsNone(entry["pending_audit"])
+        self.assertEqual(
+            [item["kind"] for item in entry["cleanup"]["pending"]],
+            ["issue", "worktree", "local-branch", "remote-branch", "fast-forward"],
+        )
+        # Nothing was merged or updated a second time.
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+
+    def test_a_swap_that_never_pushed_goes_back_through_the_gates(self):
+        state = self._interrupted_swap(push_lands=False)
+        self.assertFalse(self._swapped())
+        self._script_pr_view(self._behind())
+
+        self._settle(state)
+
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["merge_attempt"])
+        self.assertIsNone(entry.get("pending_audit"))
+        self.assertIsNone(entry["cleanup"])
+
     def test_a_push_whose_outcome_cannot_be_established_claims_neither(self):
         self._script_pr_view(self._behind(), self._behind(), self._behind())
         self._script_tip(self.TIP)
@@ -5257,7 +5369,12 @@ class OfflineDrainLoopTests(ProcessPrFixture):
         self.observed_while_offline = []
 
     def _sleep(self, seconds):
-        if seconds == self.INTERVAL:
+        # A pass's own sleep -- the queue interval, or the short cadence of a
+        # rerun in flight -- as opposed to the offline wait's.
+        if drain_prs.NETWORK_OFFLINE is None and seconds in (
+            self.INTERVAL,
+            drain_prs.CI_RERUN_INTERVAL_SECONDS,
+        ):
             self.pass_sleeps += 1
             if (
                 self.stop_after_passes is not None
@@ -5622,6 +5739,72 @@ class OfflineDrainLoopTests(ProcessPrFixture):
         entry = self._state()["prs"]["42"]
         self.assertIsNone(entry.get("branch_update_attempt"))
         self.assertEqual(entry["approved_head"], moved)
+
+    RERUN = ["run", "rerun", "9911"]
+    RUN_VIEW = ["run", "view", "9911"]
+
+    def _failed_ci_rollup(self):
+        return [
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "completedAt": "2026-07-18T00:00:00Z",
+                "detailsUrl": "https://github.com/acme/widgets/actions/runs/9911/job/770001",
+            },
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:01Z",
+            },
+        ]
+
+    def _reruns(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:3] == self.RERUN]
+
+    def _script_rerun_lost(self, run_status):
+        # The same failed attempt is still what the rollup shows when the
+        # network comes back; only the run itself can say what happened.
+        self._queue(self._approved(), self._approved())
+        self._script_pr_view({"statusCheckRollup": self._failed_ci_rollup()})
+        self.fake.script("gh", self.RERUN, stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", self.RERUN, stdout="")
+        self.fake.script(
+            "gh", self.RUN_VIEW, stdout=json.dumps({"status": run_status})
+        )
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+    def test_a_rerun_accepted_with_its_response_lost_is_not_requested_again(self):
+        self._script_rerun_lost("in_progress")
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(
+            len([c for c in self.fake.calls("gh") if c["args"][:3] == self.RUN_VIEW]), 1
+        )
+        offline_entry = self.observed_while_offline[0]["state"]["prs"]["42"]
+        self.assertEqual(offline_entry["ci_rerun_unconfirmed"], "9911")
+        self.assertTrue(offline_entry["ci_rerun_active"])
+        entry = self._state()["prs"]["42"]
+        # Settled as the one request it was: counted once, still a barrier.
+        self.assertIsNone(entry["ci_rerun_unconfirmed"])
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertEqual(entry["consecutive_failures"], 0)
+
+    def test_a_rerun_that_never_reached_github_is_requested_once_more(self):
+        self._script_rerun_lost("completed")
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 2)
+        entry = self._state()["prs"]["42"]
+        # The lost request was taken back, so the budget counts one rerun.
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_unconfirmed"])
 
     def test_an_outage_inside_incident_reconciliation_enters_the_wait(self):
         # Those reads used to swallow a failure silently and carry on; offline
