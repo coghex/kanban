@@ -240,7 +240,9 @@ the controller's `start`.
 
 Once started, the run outlives whatever asked for it. The managed job
 supervises a polling drainer that keeps sweeping the queue on its own interval
-until it is stopped explicitly or exits unexpectedly. Quitting Kanban does not
+until it is stopped explicitly or exits unexpectedly — losing the network
+pauses it rather than ending it; see
+[waiting out a network outage](#waiting-out-a-network-outage). Quitting Kanban does not
 stop it — that repository's drainer keeps merging, and the next Kanban window
 opened on that repository reports it as still running. Press `d` again, or run
 the controller's `stop`, to end it.
@@ -250,6 +252,62 @@ service log records it as `PR drainer stopped intentionally; no incident
 notification sent` and writes no incident. That line is exactly what separates
 an intentional stop from an unexpected exit, which does write a crash incident
 and does notify.
+
+#### Waiting out a network outage
+
+Losing the network is neither of those. A polling run that meets a recognized
+transport failure — a DNS lookup that fails, a connection refused, reset, or
+unreachable, a connection or TLS-handshake timeout — goes **offline** instead of
+counting it toward the three consecutive failures that end a run, and instead of
+counting it against the pull request or the cleanup step it was working on:
+
+- It stops where the failure struck and starts no further drain work: no queue,
+  pull-request, check, or review read, no branch update, merge, CI rerun,
+  rereview, incident reconciliation, or post-merge cleanup. Nothing it had
+  already recorded is lost — a discharged cleanup step stays discharged — and
+  no pass, attempt, retry budget, or failed-pass count moves while it waits.
+- Its only scheduled external operation is one read-only check of the GitHub
+  API path the drainer itself uses (`gh api repos/OWNER/NAME`), once a minute
+  on a fixed schedule whatever the queue interval, with no backoff and no
+  catch-up. Each check gives up after 20 seconds, so two never overlap. Wi-Fi
+  association, or some other host answering, is not evidence of recovery.
+- A check that fails for want of a network leaves it waiting, indefinitely.
+  One that gets through returns it to normal operation inside the same run: the
+  next pass reads every gate again before it changes anything. A check that
+  fails for any other reason — authentication, permission, a certificate, a
+  malformed answer — is not an outage, so it ends the wait and the ordinary
+  failure handling decides; three such failures in a row still end the run
+  with a crash incident.
+- A write the outage left uncertain is settled from GitHub before it is
+  retried. A merge call that failed is looked up: a pull request that merged at
+  the attempted head gets its cleanup and its post-merge audit exactly as a
+  merge that had returned would, and one that did not goes back through every
+  gate. A merge that landed before its audit could read it back has its cleanup
+  recorded before the wait and its audit completed after it — a real gate
+  violation found then is still the fatal incident it always was.
+- Authentication and permission failures, certificate failures, malformed
+  responses, a command that timed out locally, and unexpected errors are never
+  read as an outage. They keep the behavior they had.
+- The run logs one line on going offline, naming the command that failed and
+  what kind of failure it was, one line per failed check, and one on
+  recovering.
+
+Offline is a live, paused service state. `status` reports `state: "offline"`,
+with an `offline` field giving when it began, what failed, and when GitHub was
+last checked, and Kanban's sidebar shows `offline · waiting for network` beside
+any unrelated incident and the cleanup debt, both of which stay visible. The
+drainer still owns the repository: `start` is a no-op, `d` stops it, and the
+direct single-pull-request merge stays refused. The state is read from a marker
+the drainer child writes and believed only while that child is the live child
+of a live runner, so one left by a dead process can never make it look alive;
+reading `status` never runs a check and never starts drain work. A prolonged
+outage writes no incident, sends no notification, and needs no restart or
+acknowledgement.
+
+Only a polling run waits. `--once` and the single-pull-request mode report the
+failure through their ordinary result, as they always have. And the only
+startup step that needs the network — `gh repo view`, when the remote's `HEAD`
+reference is unset — waits the same way a pass does.
 
 #### What the run says about the code it is running
 
@@ -1212,6 +1270,13 @@ any of them, and drops the record only once every one of them is done.
     succeeds: outstanding debt is a debt to retry, not a failed stop.
   - A stop with nothing recorded runs no command and writes no state, so it
     costs exactly what it did before.
+  - A stop while the drainer is [offline](#waiting-out-a-network-outage) makes
+    no final pass at all — every obligation needs the network, so the pass
+    could only fail. The log says the pass was skipped because the drainer was
+    offline, `stop` reports `cleanup_discharged` of 0 and
+    `cleanup_outstanding` unchanged, and every obligation stays recorded for
+    the next connected run. That is the one exception to the final pass; a
+    connected stop keeps it exactly as described above.
 - Outstanding obligations are visible in `status` before any of that: its
   `cleanup_obligations` field names every pull request that still owes, its
   remaining steps, how many passes have failed, and the last error — whether or
@@ -1276,7 +1341,9 @@ installation.
   fixed, and `--install-dir` does not move it. Its `repositories` table holds
   one entry per installed repository, carrying the backend that wrote it, that
   job's identifier, the definition's path, the checkout, and `config_path`.
-- Runtime status and incidents: `<install-dir>/runtime/<slug>/`
+- Runtime status and incidents: `<install-dir>/runtime/<slug>/`, plus
+  `offline.json` there only while the drainer is
+  [waiting out a network outage](#waiting-out-a-network-outage)
 - Logs: `<log-root>/<slug>/`
 - Service definition: `~/Library/LaunchAgents/com.coghex.drain-prs.<slug>.plist`
   under launchd, or `~/.config/systemd/user/com.coghex.drain-prs.<slug>.service`

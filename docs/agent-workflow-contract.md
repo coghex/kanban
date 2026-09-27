@@ -1213,6 +1213,27 @@ reimplement the removal, and `--check` remains read-only.
   (repository, pull request), never asks the drainer to exit, and resolves
   itself once every step succeeds. Only the crash kind means the drainer is
   not running.
+
+  A network outage is none of those kinds (issue #735). A polling drainer
+  whose `gh` or remote `git` command fails with a recognized transport failure
+  — DNS, a refused, reset or unreachable connection, a connection or TLS
+  handshake timeout — goes offline: it starts no further drain work of any
+  kind, counts nothing toward the three-consecutive-failure exit, a pull
+  request's backoff, or a cleanup record's failed passes, and runs one
+  read-only `gh api repos/<slug>` check every 60 seconds, each bounded well
+  inside that, until one gets through. Recovery happens inside the same run and
+  rereads every gate before any mutation; a merge the outage left uncertain is
+  settled from GitHub rather than retried blind. Authentication, permission,
+  certificate, malformed-response, local-timeout, and unexpected failures are
+  never read as an outage, and a check that meets one ends the wait so the
+  ordinary failure handling applies. The controller reports the state as
+  `offline` — live, holding the repository, distinct from `running`,
+  `stopped`, and a crash — only while the marker naming it was written by the
+  live child of a live runner; Kanban renders it as `DrainerOffline`, counts it
+  as running for the `d` toggle, and refuses the direct merge. An outage writes
+  no incident and sends no notification. A stop while offline skips the final
+  cleanup pass #216 established and leaves every obligation recorded; a
+  connected stop is unchanged. `--once` and `--pr` runs never wait.
 - **Required authority:** the same GitHub write scope, plus local control of
   the signed-in user's own service manager — launchd's GUI domain on macOS,
   that user's systemd manager on Linux. Neither requires root, and neither
@@ -1221,8 +1242,9 @@ reimplement the removal, and `--check` remains read-only.
   a LaunchAgent plist under `~/Library/LaunchAgents` or a unit file under
   `~/.config/systemd/user`, named for the identifier
   `tools/service_manager.py` derives from that repository's normalized
-  identity; a runtime directory holding the status file and incidents at
-  `<install-dir>/runtime/<slug>`; and a log
+  identity; a runtime directory holding the status file, incidents, and —
+  only while the drainer waits out a network outage — the `offline.json`
+  marker at `<install-dir>/runtime/<slug>`; and a log
   directory holding the service and dated logs at
   `<log-root>/<slug>`. Shared across repositories — the
   discovery record at `<record-dir>/config.json`, whose

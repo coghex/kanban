@@ -3320,6 +3320,27 @@ above are unchanged, and persistence the user switched off is not a failure.
   how many obligations it discharged and how many remain, both read off the
   persisted state either side of it, and succeeds either way: outstanding debt
   is a debt to retry, not a failed stop.
+- Losing the network pauses a polling drainer rather than ending it (issue
+  #735). A recognized transport failure on one of its `gh` or remote `git`
+  commands — DNS, a refused, reset or unreachable connection, a connection or
+  TLS-handshake timeout — stops the pass where it struck and counts toward
+  nothing: not the three consecutive failures that end a run, not a pull
+  request's backoff, and not a cleanup record's failed passes. Until GitHub
+  answers again the drainer's only external operation is one read-only check of
+  its own API path a minute, on a fixed schedule, each bounded inside the
+  minute. A check that gets through resumes draining in the same run, and the
+  next pass rereads every gate before it mutates anything; a merge the outage
+  left uncertain is looked up rather than retried, and one that landed gets its
+  cleanup and its post-merge audit as if the call had returned. A check that
+  meets anything other than an outage — authentication, permission, a
+  certificate, a malformed answer — ends the wait for the ordinary failure
+  handling. The controller reports the state as `offline` only while the live
+  drainer child is the one that said so, and the sidebar renders it as its own
+  state, `offline · waiting for network`, in the pending color, beside any
+  incident and the debt clause. Offline is running for `d`, so the toggle
+  stops it and a start is a no-op; a stop while offline skips the final
+  cleanup pass above, since every obligation needs the network, and leaves the
+  debt recorded for a connected run. An outage raises no incident.
 - A controller invocation runs as its own process group, and ownership of that
   group is established while the controller is known alive rather than at
   cleanup time, so a timeout can terminate what the controller started even
@@ -3367,7 +3388,7 @@ above are unchanged, and persistence the user switched off is not a failure.
   naming the pull request still running, so a repeated key press starts no
   second process. An unresolved incident then outranks every service state and
   is refused with its summary. Only a service *known* to be stopped may launch:
-  running, starting, stopping, a drainer running outside the service manager
+  running, offline, starting, stopping, a drainer running outside the service manager
   the controller reported, a checkout
   stopped part-way through a git operation, and a state that could not be
   established at all — including one no status was ever obtained for — all
@@ -4615,7 +4636,9 @@ progress, and the on-demand Codex and Claude usage providers are also
 implemented. Malformed tracker diagnostics now fail visibly while preserving
 valid membership and standalone fallbacks. The sidebar also controls and
 monitors the local service-managed PR drainer, which runs as a launchd job on
-macOS and a systemd user unit on Linux. The persistent per-repository issue
+macOS and a systemd user unit on Linux, and which now waits out a network
+outage in a live `offline` state — one connectivity check a minute, no drain
+work, no incident — instead of exiting on it. The persistent per-repository issue
 approval service now has the same dashboard lifecycle — discovery, status and
 incident decoding, the durable ordered barrier, the start/stop seam, the
 canonical-review interlock, and the board refresh a result requires — and the

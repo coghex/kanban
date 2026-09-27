@@ -3437,6 +3437,186 @@ class StatusAndTransitionTests(RedirectedControllerTestCase):
         probe.assert_not_called()
 
 
+class OfflineControllerTests(RedirectedControllerTestCase):
+    """Issue #735: a drainer waiting out a network outage is a live, paused
+    service -- distinguishable from stopped, from healthy draining, and from a
+    crash -- and only while the process that said so is the live child."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.checkout("widgets", "git@github.com:acme/widgets.git")
+        self.job = drain_prs_service.resolve_job(self.repo)
+
+    def publish_offline(self, pid):
+        return drain_prs_service.record_offline(
+            self.repo,
+            {
+                "drainer_pid": pid,
+                "since": "2026-09-24T17:52:31Z",
+                "category": "reset",
+                "command": "gh pr list --repo acme/widgets",
+                "last_check": None,
+                "check_interval_seconds": 60,
+            },
+        )
+
+    def test_a_live_child_that_published_offline_reads_offline(self):
+        self.write_status(self.job, self.repo)
+        marker = self.publish_offline(os.getpid())
+        self.assertEqual(marker, drain_prs_service.offline_marker_path(self.job))
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "offline")
+        self.assertEqual(snapshot["drainer_pid"], os.getpid())
+        self.assertEqual(snapshot["offline"]["category"], "reset")
+        self.assertEqual(snapshot["offline"]["since"], "2026-09-24T17:52:31Z")
+
+    def test_a_connected_drainer_reports_no_outage(self):
+        self.write_status(self.job, self.repo)
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "running")
+        self.assertIsNone(snapshot["offline"])
+
+    def test_a_marker_some_other_process_wrote_is_not_believed(self):
+        # The previous run's leftover, say: the live child did not write it.
+        self.write_status(self.job, self.repo)
+        self.publish_offline(os.getpid() + 1)
+        snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "running")
+        self.assertIsNone(snapshot["offline"])
+
+    def test_a_dead_drainers_marker_never_makes_it_look_alive(self):
+        self.write_status(self.job, self.repo)
+        self.publish_offline(os.getpid())
+        with (
+            mock.patch.object(drain_prs_service, "pid_alive", return_value=False),
+            mock.patch.object(
+                drain_prs_service, "external_drainer_pid", return_value=None
+            ),
+            mock.patch.object(
+                drain_prs_service, "in_progress_operation", return_value=None
+            ),
+        ):
+            snapshot = drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(snapshot["state"], "stopped")
+        self.assertIsNone(snapshot["offline"])
+        self.assertIsNone(snapshot["drainer_pid"])
+
+    def test_reading_status_checks_nothing_and_changes_nothing(self):
+        # Status polling must never become the connectivity check, or start
+        # drain work: it reads the marker and leaves it byte for byte.
+        self.write_status(self.job, self.repo)
+        marker = self.publish_offline(os.getpid())
+        before = marker.read_bytes()
+        del self.commands[:]
+        for _ in range(3):
+            drain_prs_service.status_snapshot(self.job)
+        self.assertEqual(marker.read_bytes(), before)
+        self.assertEqual(
+            [command for command in self.commands if command[0] == "gh"], []
+        )
+
+    def test_withdrawing_the_marker_returns_the_state_to_running(self):
+        self.write_status(self.job, self.repo)
+        self.publish_offline(os.getpid())
+        drain_prs_service.clear_offline(self.repo)
+        drain_prs_service.clear_offline(self.repo)
+        self.assertEqual(drain_prs_service.status_snapshot(self.job)["state"], "running")
+
+    def _offline_snapshot(self, active_repo=None):
+        return {
+            "state": "offline",
+            "drainer_pid": 4242,
+            "active_repo": str(active_repo or self.repo),
+            "service_manager": "launchd",
+        }
+
+    def test_starting_an_offline_drainer_is_a_no_op(self):
+        with (
+            mock.patch.object(drain_prs_service, "require_no_operation_in_progress"),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                return_value=self._offline_snapshot(),
+            ),
+            mock.patch.object(drain_prs_service, "install_job") as install_job,
+        ):
+            result = drain_prs_service.start_service(self.job)
+        self.assertFalse(result["started"])
+        self.assertEqual(result["state"], "offline")
+        install_job.assert_not_called()
+
+    def test_an_offline_drainer_in_another_checkout_still_owns_the_repository(self):
+        elsewhere = self.root / "clone-b"
+        self.assertEqual(
+            drain_prs_service.another_checkout_running(
+                self.job, self._offline_snapshot(elsewhere)
+            ),
+            str(elsewhere),
+        )
+
+    def test_install_and_uninstall_refuse_an_offline_drainer(self):
+        with mock.patch.object(
+            drain_prs_service, "status_snapshot", return_value=self._offline_snapshot()
+        ):
+            with self.assertRaisesRegex(drain_prs_service.ServiceError, "Stop the"):
+                drain_prs_service.install_job(self.job)
+            with self.assertRaisesRegex(drain_prs_service.ServiceError, "Stop the"):
+                drain_prs_service.uninstall_job(self.job)
+
+    def test_a_drainer_that_starts_straight_into_the_wait_has_started(self):
+        # Offline is a live state: a start whose drainer went offline on its
+        # first pass succeeded rather than timing out.
+        stopped = {"state": "stopped", "drainer_pid": None, "active_repo": None}
+        clock = iter(float(tick) for tick in range(1000))
+        with (
+            mock.patch.object(drain_prs_service, "require_no_operation_in_progress"),
+            mock.patch.object(drain_prs_service, "require_default_branch"),
+            mock.patch.object(drain_prs_service, "install_job"),
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[stopped] + [self._offline_snapshot()] * 20,
+            ),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service.time, "monotonic", side_effect=lambda: next(clock)
+            ),
+        ):
+            result = drain_prs_service.start_service(self.job)
+        self.assertTrue(result["started"])
+        self.assertEqual(result["state"], "offline")
+
+    def test_an_offline_stop_reports_its_debt_undischarged_and_outstanding(self):
+        # The drainer skips its final pass while offline, so everything the
+        # queue state recorded at the signal is still recorded after the exit.
+        owed = [
+            {
+                "pull_request": 42,
+                "steps": ["closing acme/widgets#99", "deleting remote branch x"],
+                "failed_passes": 0,
+                "last_error": None,
+            }
+        ]
+        offline = {**self._offline_snapshot(), "cleanup_obligations": owed}
+        stopped = {"state": "stopped", "active_repo": None, "cleanup_obligations": owed}
+        with (
+            mock.patch.object(
+                drain_prs_service,
+                "status_snapshot",
+                side_effect=[offline, stopped, stopped],
+            ),
+            mock.patch.object(drain_prs_service.time, "sleep"),
+            mock.patch.object(
+                drain_prs_service, "resolve_crash_incidents", return_value=[]
+            ),
+        ):
+            result = drain_prs_service.stop_service(self.job)
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["cleanup_discharged"], 0)
+        self.assertEqual(result["cleanup_outstanding"], 2)
+
+
 class CleanupObligationTests(RedirectedControllerTestCase):
     """The post-merge debt `status` projects out of the drainer's queue state.
 

@@ -153,7 +153,10 @@ python3 "$CONTROL" --path "$ROOT" --repo "$REPO" --json ack --note "<note>"
 before their flags; without one, each acts on the latest open incident.
 
 - `status`: summarize the live state, PIDs, last activity, and any open
-  incident.
+  incident. `offline` is a live state: the drainer is waiting out a network
+  outage, draining nothing and checking GitHub once a minute, and resumes on
+  its own when a check gets through. Name when it went offline and what failed
+  from the `offline` field; it is not a crash and needs no recovery.
 - `install`: install or refresh this repository's managed job without starting
   the drainer.
 - `start`: report whether it started or was already running. Run this only when
@@ -162,7 +165,7 @@ before their flags; without one, each acts on the latest open incident.
 - `stop`: an intentional stop. It must raise no incident and send no
   notification.
 - `restart`: run `stop`, then `start`, then `status`, and succeed only when the
-  status is `running`. The controller has no `restart` subcommand; this
+  status is `running` or `offline`. The controller has no `restart` subcommand; this
   operation is composed from those three.
 - `logs [N]`: the end of this repository's own dated drainer log, `--lines`
   defaulting to 120.
@@ -192,7 +195,9 @@ incident JSON by hand. Do not expose the controller's `run`, `notify-test`, or
    as the first test of a speculative fix.
 5. Run `python3 "$CONTROL" --path "$ROOT" --repo "$REPO" --json start`, then
    verify with `python3 "$CONTROL" --path "$ROOT" --repo "$REPO" --json status`
-   that the state is `running`.
+   that the state is `running` or `offline`. `offline` is live: the drainer
+   came up and is waiting for the network, and drains again on its own once a
+   connectivity check gets through.
 6. Only after successful recovery, acknowledge the incident with
    `python3 "$CONTROL" --path "$ROOT" --repo "$REPO" --json ack --note "<concise resolution>"`,
    supplying the incident ID when more than one is open.
@@ -207,6 +212,11 @@ required.
 
 - Expected per-pull-request failures remain inside the fair retry and backoff
   scheduler and raise no incident.
+- A network outage is not a failure. The drainer goes `offline`, does no drain
+  work, checks GitHub once a minute, and resumes itself when a check gets
+  through; it raises no incident, sends no notification, and needs no
+  `recover`, `restart`, or `ack`. A stop while offline skips the final cleanup
+  pass and leaves the obligations recorded for a connected run.
 - Repeated global failures and unexpected process exits stop the daemon and send
   one urgent notification to the endpoint `KANBAN_DRAINER_NTFY_URL` configures,
   when one is configured.
@@ -214,4 +224,4 @@ required.
   `/drain-prs recover` controls the same incident and is equivalent from
   Claude.
 - One incident is one recovery unit. Never acknowledge it until the repaired
-  drainer is running.
+  drainer is running or offline.

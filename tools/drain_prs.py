@@ -98,6 +98,68 @@ SHUTDOWN_CLEANUP_BUDGET_SECONDS = 8.0
 SHUTDOWN_MIN_COMMAND_TIMEOUT_SECONDS = 1.0
 MAX_BACKOFF_ATTEMPTS = 16
 MAX_CONSECUTIVE_GLOBAL_FAILURES = 3
+# While a polling run is offline (issue #735) its only scheduled external
+# operation is one read-only GitHub connectivity check on this fixed cadence:
+# the managed queue's own 60 seconds, independent of `--interval`, with no
+# backoff and no catch-up. Each check is bounded well inside the interval, so
+# two can never overlap.
+OFFLINE_PROBE_INTERVAL_SECONDS = 60
+OFFLINE_PROBE_TIMEOUT_SECONDS = 20
+# Whether a recognized transport failure moves this run into the offline wait
+# instead of failing it: true only for a polling run (`loop()` with
+# once=False), set by main(). A `--once` or `--pr` run keeps its bounded
+# result contract and reports the failure exactly as it always has.
+OFFLINE_WAIT_ENABLED = False
+# The transport failure this run is offline on, or None while connected. Set
+# by run() the instant one is recognized and cleared only by a connectivity
+# check that gets through; while it is set, run() starts no network command.
+NETWORK_OFFLINE: TransportError | None = None
+# The one documented transport-failure recognizer, applied to a failed network
+# command's own stderr and stdout -- never to its argv, which can name a branch
+# called anything. The wording is Go net/http's, as `gh` reports it, and
+# curl's and OpenSSH's, as `git` reports it. First match names the category.
+# Anything it does not recognize keeps the behavior it had before issue #735.
+TRANSPORT_FAILURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "dns",
+        re.compile(
+            r"no such host|could not resolve host|temporary failure in name "
+            r"resolution|name or service not known|nodename nor servname",
+            re.IGNORECASE,
+        ),
+    ),
+    ("refused", re.compile(r"connection refused", re.IGNORECASE)),
+    (
+        "unreachable",
+        re.compile(
+            r"network is unreachable|no route to host|host is unreachable|"
+            r"network is down",
+            re.IGNORECASE,
+        ),
+    ),
+    ("reset", re.compile(r"connection reset by peer", re.IGNORECASE)),
+    (
+        "timeout",
+        re.compile(
+            r"tls handshake timeout|i/o timeout|connection timed out|"
+            r"operation timed out|failed to connect to",
+            re.IGNORECASE,
+        ),
+    ),
+    ("dial", re.compile(r"\bdial tcp\b", re.IGNORECASE)),
+)
+# Text that proves the other end answered, or that the failure is about trust
+# rather than reachability: an HTTP status line, or any certificate complaint.
+# Either one outranks every pattern above, so a captive portal presenting the
+# wrong certificate, or a 401, is never mistaken for being offline.
+NOT_TRANSPORT_FAILURE_RE = re.compile(
+    r"x509|certificate|\bHTTP [0-9]{3}\b", re.IGNORECASE
+)
+# The `git` subcommands that talk to a remote. Every other `git` invocation the
+# drainer makes is local and can neither fail for want of a network nor be
+# withheld while offline -- the restoration of a user's stashed changes above
+# all.
+NETWORK_GIT_SUBCOMMANDS = frozenset({"fetch", "push", "pull", "ls-remote"})
 # The stale-head rereview's provider, model and effort: the roster's
 # `drain_rereview` cell for the provider this installation's operating mode
 # selects, rather than three literals. Resolved per drain cycle rather than
@@ -314,6 +376,21 @@ class ModelUnavailableError(DrainError):
 
 class PostMergeAuditError(DrainError):
     pass
+
+
+class TransportError(DrainError):
+    """A network command that never reached GitHub or the Git remote at all.
+
+    Still a DrainError, so a `--once` or `--pr` run -- which never waits -- and
+    every handler written before issue #735 treat it exactly as they always
+    treated the failure it is. A polling run tells it apart: it pauses drain
+    work and waits for connectivity rather than counting it as a failure.
+    """
+
+    def __init__(self, message: str, *, category: str, command: str):
+        super().__init__(message)
+        self.category = category
+        self.command = command
 
 
 class RunLockedError(DrainError):
@@ -583,6 +660,49 @@ def effective_timeout(timeout: float | None) -> float | None:
     return remaining if timeout is None else min(timeout, remaining)
 
 
+def classify_transport_failure(*outputs: str | None) -> str | None:
+    """The transport category a failed network command's output names, or None.
+
+    None whenever anything shows the remote answered or that trust, not
+    reachability, failed -- see NOT_TRANSPORT_FAILURE_RE -- and for every
+    output no pattern recognizes. A local deadline expiring is not an output
+    and is never reclassified here: run() reports it as it always has.
+    """
+    text = "\n".join(output for output in outputs if output)
+    if not text or NOT_TRANSPORT_FAILURE_RE.search(text):
+        return None
+    for category, pattern in TRANSPORT_FAILURE_PATTERNS:
+        if pattern.search(text):
+            return category
+    return None
+
+
+def is_network_command(args: list[str]) -> bool:
+    """Whether a command talks to GitHub or the Git remote.
+
+    Every `gh` invocation does. A `git` invocation does only for the
+    subcommands in NETWORK_GIT_SUBCOMMANDS, found past git's own global
+    options. A provider CLI does not count: an outage inside a rereview
+    session stays on the model-failure path (issue #735's out of scope).
+    """
+    if not args:
+        return False
+    program = os.path.basename(args[0])
+    if program == "gh":
+        return True
+    if program != "git":
+        return False
+    rest = iter(args[1:])
+    for token in rest:
+        if token in ("-c", "-C"):
+            next(rest, None)
+            continue
+        if token.startswith("-"):
+            continue
+        return token in NETWORK_GIT_SUBCOMMANDS
+    return False
+
+
 def run(
     args: list[str],
     *,
@@ -592,6 +712,18 @@ def run(
     input_text: str | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    global NETWORK_OFFLINE
+    network = is_network_command(args)
+    if network and NETWORK_OFFLINE is not None:
+        # Once one command has reported the network gone, nothing starts
+        # another until a connectivity check gets through: every handler that
+        # absorbs a failure and carries on reaches here with its next command
+        # and is stopped before it is spawned.
+        raise TransportError(
+            f"Not started while offline: {' '.join(args)}",
+            category=NETWORK_OFFLINE.category,
+            command=NETWORK_OFFLINE.command,
+        )
     timeout = effective_timeout(timeout)
     try:
         proc = subprocess.run(
@@ -607,6 +739,22 @@ def run(
         raise DrainError(
             f"Command timed out after {timeout} seconds: {cmd}"
         ) from exc
+    if network and proc.returncode != 0:
+        category = classify_transport_failure(proc.stderr, proc.stdout)
+        # Raised for an unchecked command too, but only where the run can wait
+        # for the network: a transport failure never answers the question an
+        # unchecked caller asked -- "is that branch gone?" -- and reading it as
+        # an answer is how a debt would be discharged unperformed. Elsewhere an
+        # unchecked command returns exactly as it did before.
+        if category is not None and (check or OFFLINE_WAIT_ENABLED):
+            cmd = " ".join(args)
+            detail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+            failure = TransportError(
+                f"Command failed: {cmd}\n{detail}", category=category, command=cmd
+            )
+            if OFFLINE_WAIT_ENABLED:
+                NETWORK_OFFLINE = failure
+            raise failure
     if check and proc.returncode != 0:
         cmd = " ".join(args)
         stderr = (proc.stderr or "").strip()
@@ -624,6 +772,179 @@ def run_json(args: list[str], *, cwd: Path) -> Any:
         raise DrainError(
             f"Failed to parse JSON from {' '.join(args)}:\n{proc.stdout}"
         ) from exc
+
+
+PROBE_CONNECTED = "connected"
+PROBE_OFFLINE = "offline"
+PROBE_FAILED = "failed"
+
+
+def probe_connectivity(repo_slug: str, cwd: Path) -> tuple[str, str]:
+    """One read-only GitHub connectivity check, and what it established.
+
+    The drainer's own API path -- the same `gh`, host and repository its drain
+    work uses -- because Wi-Fi association or some other host answering says
+    nothing about whether that path works. Bounded by
+    OFFLINE_PROBE_TIMEOUT_SECONDS, so a check that hangs ends before the next
+    one is due, and an interrupt ends it at once.
+
+    Returns PROBE_CONNECTED for a usable answer, PROBE_OFFLINE for a
+    recognized transport failure or no answer at all, and PROBE_FAILED for
+    everything else -- authentication, permission, a certificate, a malformed
+    response -- which is not an outage and must not be waited out as one.
+    """
+    args = ["gh", "api", f"repos/{repo_slug}"]
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            # Nothing to say to it, and a check that waited on its input
+            # would only ever end at the timeout.
+            stdin=subprocess.DEVNULL,
+            timeout=OFFLINE_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            PROBE_OFFLINE,
+            f"no answer within {OFFLINE_PROBE_TIMEOUT_SECONDS}s",
+        )
+    except OSError as exc:
+        return PROBE_FAILED, f"could not run {' '.join(args)}: {exc}"
+    if proc.returncode == 0:
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return PROBE_CONNECTED, f"{' '.join(args)} answered"
+        return PROBE_FAILED, f"{' '.join(args)} returned a malformed response"
+    detail = (
+        (proc.stderr or "").strip()
+        or (proc.stdout or "").strip()
+        or f"exit code {proc.returncode}"
+    )
+    category = classify_transport_failure(proc.stderr, proc.stdout)
+    if category is not None:
+        return PROBE_OFFLINE, f"{category}: {detail}"
+    return PROBE_FAILED, detail
+
+
+def publish_offline(
+    repo_path: Path,
+    failure: TransportError,
+    since: str,
+    *,
+    last_check: str | None,
+    dry_run: bool,
+) -> None:
+    """Record for the controller that this live process is offline.
+
+    The marker names this process, so a status read only believes it while
+    this process is the running drainer child -- one a dead process left
+    behind can never make it look alive. Best effort: a marker that cannot be
+    written costs the sidebar its offline label, never the wait itself.
+    """
+    if dry_run:
+        return
+    try:
+        drain_prs_service.record_offline(
+            repo_path,
+            {
+                "drainer_pid": os.getpid(),
+                "since": since,
+                "category": failure.category,
+                "command": failure.command,
+                "last_check": last_check,
+                "check_interval_seconds": OFFLINE_PROBE_INTERVAL_SECONDS,
+            },
+        )
+    except (OSError, drain_prs_service.ServiceError) as exc:
+        log(f"Could not record the offline state for the controller: {exc}")
+
+
+def withdraw_offline(repo_path: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    try:
+        drain_prs_service.clear_offline(repo_path)
+    except (OSError, drain_prs_service.ServiceError) as exc:
+        log(f"Could not clear the offline state for the controller: {exc}")
+
+
+def wait_for_connectivity(
+    repo_path: Path,
+    repo_slug: str,
+    failure: TransportError,
+    *,
+    dry_run: bool,
+) -> None:
+    """Pause every kind of drain work until GitHub answers again.
+
+    The only external operation this starts is probe_connectivity(), once per
+    OFFLINE_PROBE_INTERVAL_SECONDS on a fixed schedule: the first one interval
+    after the failure, each later one an interval after the previous one
+    started. A check that fails for want of a network leaves the wait exactly
+    where it is, indefinitely -- no attempt, retry budget, cleanup count or
+    incident moves while it does. One that gets through returns, and the
+    caller rereads everything before it mutates anything. One that fails for
+    any other reason also returns, so the ordinary failure handling -- the
+    global three-strike exit included -- deals with what is not an outage.
+
+    Logs one line on entering, one per failed check, and one on leaving; the
+    newest is what the controller's `last_activity` shows. An interrupt ends
+    the wait at once, from the sleep or from the check alike.
+    """
+    global NETWORK_OFFLINE
+    failure = NETWORK_OFFLINE or failure
+    NETWORK_OFFLINE = failure
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    log(
+        f"Offline ({failure.category}): {failure.command} could not reach its "
+        "remote; pausing all drain work and checking GitHub connectivity every "
+        f"{OFFLINE_PROBE_INTERVAL_SECONDS}s"
+    )
+    publish_offline(repo_path, failure, since, last_check=None, dry_run=dry_run)
+    try:
+        next_check = time.monotonic() + OFFLINE_PROBE_INTERVAL_SECONDS
+        while True:
+            delay = next_check - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            # Scheduled from when this check actually starts, so a sleep that
+            # overran -- a suspended laptop -- yields one late check rather
+            # than a burst of catch-up ones.
+            next_check = time.monotonic() + OFFLINE_PROBE_INTERVAL_SECONDS
+            outcome, detail = probe_connectivity(repo_slug, repo_path)
+            if outcome == PROBE_OFFLINE:
+                log(f"Still offline; GitHub connectivity check failed ({detail})")
+                publish_offline(
+                    repo_path,
+                    failure,
+                    since,
+                    last_check=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    dry_run=dry_run,
+                )
+                continue
+            NETWORK_OFFLINE = None
+            if outcome == PROBE_CONNECTED:
+                log(
+                    f"Back online ({detail}); resuming with fresh reads of every "
+                    "gate before any further change"
+                )
+            else:
+                log(
+                    "Leaving the offline wait: the GitHub connectivity check "
+                    f"failed for a reason other than the network ({detail}); "
+                    "ordinary failure handling applies"
+                )
+            return
+    finally:
+        # Withdrawn however the wait ends, an interrupt included. An
+        # interrupted run stays offline in NETWORK_OFFLINE, which is what
+        # tells its stop to skip the final cleanup pass.
+        withdraw_offline(repo_path, dry_run=dry_run)
 
 
 def repo_root(path: Path) -> Path:
@@ -729,6 +1050,30 @@ def get_repo_context(path: Path, remote_name: str = "origin") -> RepoContext:
         default_branch=default_branch,
         remote_name=remote_name,
     )
+
+
+def connected_repo_context(
+    root: Path, remote_name: str, *, dry_run: bool
+) -> RepoContext:
+    """get_repo_context(), waiting out an outage in a polling run.
+
+    Resolving the repository is local except for one fallback -- `gh repo
+    view`, when the remote's HEAD reference is unset -- and that is the one
+    startup step a polling run waits on rather than failing over.
+    """
+    while True:
+        try:
+            return get_repo_context(root, remote_name)
+        except DrainError:
+            failure = NETWORK_OFFLINE
+            if failure is None:
+                raise
+            remote_url = run(
+                ["git", "remote", "get-url", remote_name], cwd=root
+            ).stdout.strip()
+            wait_for_connectivity(
+                root, parse_repo_slug(remote_url), failure, dry_run=dry_run
+            )
 
 
 def require_requested_identity(ctx: RepoContext, requested: str | None) -> None:
@@ -1942,6 +2287,10 @@ def default_branch_tip(ctx: RepoContext) -> str | None:
             cwd=ctx.path,
         )
     except DrainError as exc:
+        # Offline, this failure is the network being gone rather than
+        # this read's answer: it goes on to the polling loop's wait.
+        if NETWORK_OFFLINE is not None:
+            raise
         log(f"Could not read the {ctx.default_branch} tip: {exc}")
         return None
     if not isinstance(payload, dict):
@@ -1966,6 +2315,10 @@ def compared_paths(
             cwd=ctx.path,
         )
     except DrainError as exc:
+        # Offline, this failure is the network being gone rather than
+        # this read's answer: it goes on to the polling loop's wait.
+        if NETWORK_OFFLINE is not None:
+            raise
         log(f"Could not compare {base[:12]}...{head[:12]}: {exc}")
         return None
     if not isinstance(payload, dict):
@@ -2323,9 +2676,7 @@ def swap_default_branch_to(
     return SWAP_REFUSED
 
 
-def confirm_pull_request_merged(
-    ctx: RepoContext, number: int, approval: BaseAdvanceApproval
-) -> None:
+def confirm_pull_request_merged(ctx: RepoContext, number: int, head: str) -> None:
     """Wait for GitHub to record the pull request the swap just merged.
 
     The swap lands the head commit on the default branch, and GitHub marks a
@@ -2347,18 +2698,18 @@ def confirm_pull_request_merged(
             # Closed without being merged, above all: GitHub never recorded
             # this as a merge, so nothing here may report one.
             raise PostMergeAuditError(
-                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"PR #{number}: {head} merged into {ctx.default_branch}, "
                 f"but GitHub recorded the pull request as {state}, not MERGED"
             )
-        if pr.get("headRefOid") != approval.head:
+        if pr.get("headRefOid") != head:
             raise PostMergeAuditError(
-                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"PR #{number}: {head} merged into {ctx.default_branch}, "
                 f"but its head had already moved to {pr.get('headRefOid')}, so the "
                 "pull request stayed open over commits that did not land"
             )
         if time.time() >= deadline:
             raise PostMergeAuditError(
-                f"PR #{number}: {approval.head} merged into {ctx.default_branch}, "
+                f"PR #{number}: {head} merged into {ctx.default_branch}, "
                 f"but the pull request was still open {MERGED_STATE_WAIT_SECONDS}s later"
             )
         time.sleep(MERGED_STATE_POLL_SECONDS)
@@ -2489,7 +2840,7 @@ def merge_past_base_advance(
         f"on {approval.tip[:12]}.",
         merged=True,
     )
-    confirm_pull_request_merged(ctx, number, approval)
+    confirm_pull_request_merged(ctx, number, approval.head)
     audit_merged_pr(ctx, number, approval.head, gates)
     return MERGE_DONE, None
 
@@ -2509,6 +2860,10 @@ def audit_merged_pr(
     try:
         audited = get_pr(ctx, number)
     except DrainError as exc:
+        # Offline, this failure is the network being gone rather than
+        # this read's answer: it goes on to the polling loop's wait.
+        if NETWORK_OFFLINE is not None:
+            raise
         raise PostMergeAuditError(
             f"PR #{number}: post-merge audit read failed after merging "
             f"{expected_head}: {exc}"
@@ -3065,6 +3420,7 @@ def recover_stale_approval(
     state: dict[str, Any],
     *,
     dry_run: bool,
+    gates: GateConfig | None = None,
 ) -> bool:
     # Entries needing only forget_pr() bookkeeping are swept in full here and
     # never report recovery work: returning early for each one cost a whole
@@ -3073,6 +3429,13 @@ def recover_stale_approval(
     for key in sorted(state["prs"], key=int):
         number = int(key)
         entry = state["prs"][key]
+        if gates is not None and (
+            entry.get("merge_attempt") is not None
+            or entry.get("pending_audit") is not None
+        ):
+            # A merge the network interrupted is settled before anything else
+            # touches this pull request (issue #735).
+            settle_interrupted_merge(ctx, state, number, gates=gates, dry_run=dry_run)
         if entry.get("cleanup") is not None:
             # A recorded cleanup names everything the merge still owes, so it
             # is worked without reading the pull request again: that read can
@@ -4365,7 +4728,8 @@ def run_cleanup_pass(
     number = record["pr"]["number"]
     remaining: list[dict[str, Any]] = []
     errors: list[str] = []
-    for obligation in record["pending"]:
+    pending = list(record["pending"])
+    for index, obligation in enumerate(pending):
         if command_deadline_expired():
             # A bounded pass starts nothing more once its budget is spent.
             # Untouched rather than attempted-and-failed: nothing was learned
@@ -4382,6 +4746,13 @@ def run_cleanup_pass(
         # the whole step: a path that disappears under a command leaves an
         # obligation outstanding, it does not abort the pass or the queue.
         except (DrainError, OSError) as exc:
+            if NETWORK_OFFLINE is not None and isinstance(exc, DrainError):
+                # Offline (issue #735): this step and every one after it stay
+                # owed exactly as they stood, unattempted rather than failed,
+                # so no failed-pass count moves and no incident escalates. The
+                # steps already discharged stay discharged.
+                record["pending"] = remaining + pending[index:]
+                raise
             described = describe_cleanup_obligation(obligation)
             remaining.append(obligation)
             errors.append(f"{described}: {exc}")
@@ -4659,6 +5030,23 @@ def discharge_recorded_cleanup(
     return discharged
 
 
+def final_stop_cleanup(ctx: RepoContext, *, dry_run: bool) -> int:
+    """What an intentional stop of a polling run spends on recorded cleanup.
+
+    Connected, the bounded final pass above (issue #216). Offline (issue
+    #735), nothing: every obligation needs the network, so a pass could only
+    fail, and failing it is not worth the stop's budget. The obligations stay
+    recorded and projected, exactly as they stood, for a later connected run.
+    """
+    if NETWORK_OFFLINE is not None:
+        log(
+            "Stopping while offline: skipped the final post-merge cleanup "
+            "pass; recorded obligations stay outstanding for a connected run"
+        )
+        return 0
+    return discharge_recorded_cleanup(ctx, dry_run=dry_run)
+
+
 def fetch_pr_head(ctx: RepoContext, pr: dict[str, Any]) -> bool:
     """Make the PR's exact head commit available locally.
 
@@ -4721,6 +5109,10 @@ def merge_conflict_paths(ctx: RepoContext, pr: dict[str, Any]) -> list[str]:
             check=False,
         )
     except DrainError as exc:
+        # Offline, this failure is the network being gone rather than
+        # this read's answer: it goes on to the polling loop's wait.
+        if NETWORK_OFFLINE is not None:
+            raise
         log(f"PR #{number}: could not inspect the conflicting files: {exc}")
         return []
     if proc.returncode == 0:
@@ -4851,6 +5243,10 @@ def reconcile_no_agent_incidents(
         try:
             pr = get_pr(ctx, number)
         except DrainError as exc:
+            # Offline, this failure is the network being gone rather than
+            # this read's answer: it goes on to the polling loop's wait.
+            if NETWORK_OFFLINE is not None:
+                raise
             log(
                 f"PR #{number}: could not confirm whether it still needs a "
                 f"rereview; keeping its incident open: {exc}"
@@ -4869,6 +5265,10 @@ def reconcile_no_agent_incidents(
             try:
                 details = latest_review_details(ctx, number)
             except DrainError as exc:
+                # Offline, this failure is the network being gone rather than
+                # this read's answer: it goes on to the polling loop's wait.
+                if NETWORK_OFFLINE is not None:
+                    raise
                 log(
                     f"PR #{number}: could not read its review markers; keeping "
                     f"its incident open: {exc}"
@@ -4922,6 +5322,10 @@ def reconcile_conflict_incidents(ctx: RepoContext, *, dry_run: bool) -> None:
         try:
             pr = get_pr(ctx, number)
         except DrainError as exc:
+            # Offline, this failure is the network being gone rather than
+            # this read's answer: it goes on to the polling loop's wait.
+            if NETWORK_OFFLINE is not None:
+                raise
             log(
                 f"PR #{number}: could not confirm the merge conflict cleared; "
                 f"keeping its incident open: {exc}"
@@ -5311,18 +5715,34 @@ def process_pr(
                     f"{base_advance.tip[:12]} was superseded before the merge."
                 ),
             )
-        outcome, merge_detail = merge_past_base_advance(
-            ctx,
-            pr,
-            approval=base_advance,
-            gates=gates,
-            dry_run=dry_run,
-            report=report,
-        )
-    else:
-        merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
-        outcome = MERGE_DONE if merged else MERGE_HEAD_CHANGED
-        merge_detail = None
+    # Needed below whoever called: whether GitHub accepted the merge is read
+    # off it if the network goes away mid-merge.
+    if report is None:
+        report = new_single_pr_report(number)
+    try:
+        if base_advance is not None:
+            outcome, merge_detail = merge_past_base_advance(
+                ctx,
+                pr,
+                approval=base_advance,
+                gates=gates,
+                dry_run=dry_run,
+                report=report,
+            )
+        else:
+            merged = merge_pr(ctx, pr, dry_run=dry_run, gates=gates, report=report)
+            outcome = MERGE_DONE if merged else MERGE_HEAD_CHANGED
+            merge_detail = None
+    except DrainError:
+        if NETWORK_OFFLINE is not None and not dry_run:
+            record_interrupted_merge(
+                ctx,
+                state,
+                pr,
+                landed=report["merged"],
+                confirm_merged=base_advance is not None,
+            )
+        raise
 
     if outcome == MERGE_GATES_CHANGED:
         # The attempt recorded which gate withdrew, on the response that saw
@@ -5428,6 +5848,109 @@ def process_pr(
             merged=True,
         )
     return True
+
+
+def record_interrupted_merge(
+    ctx: RepoContext,
+    state: dict[str, Any],
+    pr: dict[str, Any],
+    *,
+    landed: bool,
+    confirm_merged: bool,
+) -> None:
+    """Persist what a merge the network interrupted still has to establish.
+
+    Two cases, told apart by whether GitHub had already accepted the merge.
+    One it accepted is durable, so its cleanup is recorded exactly as a
+    completed merge records it, beside the post-merge audit that never got its
+    read. One whose outcome the failure left unknown -- the merge call, or the
+    push behind a base-advance swap -- records only the head it tried to land.
+    Recovery reads the pull request before it does anything else with it: see
+    settle_interrupted_merge(). Nothing is retried on the strength of either
+    record, so no effect is repeated and no debt is dropped.
+    """
+    number = pr["number"]
+    head = pr["headRefOid"]
+    entry = state["prs"].get(str(number))
+    if entry is None:
+        remember_approved_head(state, number, head)
+        entry = state["prs"][str(number)]
+    if landed:
+        entry["cleanup"] = plan_cleanup(pr)
+        entry["pending_audit"] = {"head": head, "confirm_merged": confirm_merged}
+        log(
+            f"PR #{number}: merged {head[:12]}, but went offline before its "
+            "post-merge audit; recorded its cleanup and the audit for recovery"
+        )
+    else:
+        entry["merge_attempt"] = {"head": head}
+        log(
+            f"PR #{number}: went offline while merging {head[:12]}; whether it "
+            "landed is established from GitHub on recovery"
+        )
+    save_drain_state(ctx, state, dry_run=False)
+
+
+def settle_interrupted_merge(
+    ctx: RepoContext,
+    state: dict[str, Any],
+    number: int,
+    *,
+    gates: GateConfig,
+    dry_run: bool,
+) -> None:
+    """Finish what record_interrupted_merge() left for recovery, before any
+    other work on this pull request.
+
+    An unknown outcome is read from GitHub. A pull request that merged at the
+    attempted head is treated exactly as a merge call that had returned
+    success: its cleanup is recorded and its audit becomes pending below. Any
+    other state landed nothing, so the record is dropped and the pull request
+    goes back through every ordinary gate, fresh.
+
+    A pending audit is then completed. A transport failure leaves it pending
+    for the next recovery; a real gate violation is recorded as done before it
+    is raised, so it is reported once -- as the post-merge audit always
+    reports one -- rather than again on every later start.
+    """
+    entry = state["prs"][str(number)]
+    attempt = entry.get("merge_attempt")
+    if isinstance(attempt, dict):
+        pr = get_pr(ctx, number)
+        if pr.get("state") == "MERGED":
+            log(
+                f"PR #{number}: the merge interrupted by the network landed; "
+                "recording its cleanup and completing its audit"
+            )
+            entry["cleanup"] = plan_cleanup(pr)
+            entry["pending_audit"] = {
+                "head": attempt.get("head"),
+                "confirm_merged": False,
+            }
+        else:
+            log(
+                f"PR #{number}: the merge interrupted by the network did not "
+                "land; it goes back through the ordinary gates"
+            )
+        entry["merge_attempt"] = None
+        save_drain_state(ctx, state, dry_run=dry_run)
+    audit = entry.get("pending_audit")
+    if not isinstance(audit, dict):
+        return
+    head = audit.get("head")
+    if not isinstance(head, str):
+        entry["pending_audit"] = None
+        return
+    try:
+        if audit.get("confirm_merged"):
+            confirm_pull_request_merged(ctx, number, head)
+        audit_merged_pr(ctx, number, head, gates)
+    except PostMergeAuditError:
+        entry["pending_audit"] = None
+        save_drain_state(ctx, state, dry_run=dry_run)
+        raise
+    entry["pending_audit"] = None
+    log(f"PR #{number}: completed the post-merge audit the network interrupted")
 
 
 def lock_path_for(root: Path) -> Path:
@@ -5683,6 +6206,10 @@ def attempt_candidate(
     except (ModelUnavailableError, PostMergeAuditError):
         raise
     except DrainError as exc:
+        if NETWORK_OFFLINE is not None:
+            # The network failed, not this candidate: nothing is counted
+            # against it, and the polling loop waits for connectivity.
+            raise
         raised = True
         report["message"] = str(exc)
     outcome = classify_pass_outcome(report["reason"], raised=raised)
@@ -5789,94 +6316,112 @@ def loop(
     stale_recovery_failures = 0
     queue_refresh_failures = 0
     while True:
-        # The per-cycle roster read, ahead of stale-approval recovery and every
-        # queue decision that could reach a rereview. Re-read here rather than
-        # frozen at import so an operator's edit takes effect on the next pass;
-        # refused here rather than at the spawn so a broken file stops the pass
-        # before it starts changing anything.
-        refresh_finalize_assignment()
-        reconcile_conflict_incidents(ctx, dry_run=dry_run)
-        reconcile_no_agent_incidents(ctx, state, dry_run=dry_run)
         try:
-            recovered = recover_stale_approval(ctx, state, dry_run=dry_run)
-        except ModelUnavailableError:
-            raise
-        except DrainError as exc:
-            if once:
-                raise
-            stale_recovery_failures += 1
-            if stale_recovery_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
-                raise DrainError(
-                    "Stale-approval recovery failed "
-                    f"{stale_recovery_failures} consecutive times: {exc}"
-                ) from exc
-            log(
-                "Stale-approval recovery failed "
-                f"({stale_recovery_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
-                f"will retry: {exc}"
-            )
-            time.sleep(interval)
-            continue
-        else:
-            stale_recovery_failures = 0
-        save_drain_state(ctx, state, dry_run=dry_run)
-
-        try:
-            approved = get_open_approved_prs(ctx, dry_run=dry_run)
-        except DrainError as exc:
-            if once:
-                raise
-            queue_refresh_failures += 1
-            if queue_refresh_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
-                raise DrainError(
-                    "Failed to refresh the PR queue "
-                    f"{queue_refresh_failures} consecutive times: {exc}"
-                ) from exc
-            log(
-                "Failed to refresh the PR queue "
-                f"({queue_refresh_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
-                f"will retry: {exc}"
-            )
-            time.sleep(interval)
-            continue
-        else:
-            queue_refresh_failures = 0
-        eligible: list[dict[str, Any]] = []
-        for pr in approved:
-            key = str(pr["number"])
-            entry = state["prs"].get(key)
-            if entry is None:
-                remember_approved_head(state, pr["number"], pr["headRefOid"])
-                eligible.append(pr)
-            elif entry["approved_head"] == pr["headRefOid"]:
-                eligible.append(pr)
-            else:
-                log(
-                    f"PR #{pr['number']}: approved label is still attached to "
-                    "an unexpected new head; waiting for invalidation"
+            # The per-cycle roster read, ahead of stale-approval recovery and every
+            # queue decision that could reach a rereview. Re-read here rather than
+            # frozen at import so an operator's edit takes effect on the next pass;
+            # refused here rather than at the spawn so a broken file stops the pass
+            # before it starts changing anything.
+            refresh_finalize_assignment()
+            reconcile_conflict_incidents(ctx, dry_run=dry_run)
+            reconcile_no_agent_incidents(ctx, state, dry_run=dry_run)
+            try:
+                recovered = recover_stale_approval(
+                    ctx, state, dry_run=dry_run, gates=gates
                 )
-        save_drain_state(ctx, state, dry_run=dry_run)
-
-        # Advanced once per pass, including a pass that recovers or skips
-        # everything, because it is the clock every failure cooldown is
-        # denominated in.
-        begin_drain_pass(state)
-        if recovered:
+            except (ModelUnavailableError, PostMergeAuditError):
+                raise
+            except DrainError as exc:
+                if once or NETWORK_OFFLINE is not None:
+                    raise
+                stale_recovery_failures += 1
+                if stale_recovery_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
+                    raise DrainError(
+                        "Stale-approval recovery failed "
+                        f"{stale_recovery_failures} consecutive times: {exc}"
+                    ) from exc
+                log(
+                    "Stale-approval recovery failed "
+                    f"({stale_recovery_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
+                    f"will retry: {exc}"
+                )
+                time.sleep(interval)
+                continue
+            else:
+                stale_recovery_failures = 0
             save_drain_state(ctx, state, dry_run=dry_run)
-        else:
-            run_drain_pass(ctx, eligible, state=state, gates=gates, dry_run=dry_run)
-        if once:
-            return
-        # The short cadence follows the lane rather than the last candidate
-        # examined: a pass can end on a barrier owned by an earlier one.
-        active = state.get("active_pr")
-        active_entry = state["prs"].get(str(active)) if active is not None else None
-        sleep_seconds = (
-            CI_RERUN_INTERVAL_SECONDS
-            if active_entry and active_entry.get("ci_rerun_active")
-            else interval
-        )
-        time.sleep(sleep_seconds)
+
+            try:
+                approved = get_open_approved_prs(ctx, dry_run=dry_run)
+            except DrainError as exc:
+                if once or NETWORK_OFFLINE is not None:
+                    raise
+                queue_refresh_failures += 1
+                if queue_refresh_failures >= MAX_CONSECUTIVE_GLOBAL_FAILURES:
+                    raise DrainError(
+                        "Failed to refresh the PR queue "
+                        f"{queue_refresh_failures} consecutive times: {exc}"
+                    ) from exc
+                log(
+                    "Failed to refresh the PR queue "
+                    f"({queue_refresh_failures}/{MAX_CONSECUTIVE_GLOBAL_FAILURES}); "
+                    f"will retry: {exc}"
+                )
+                time.sleep(interval)
+                continue
+            else:
+                queue_refresh_failures = 0
+            eligible: list[dict[str, Any]] = []
+            for pr in approved:
+                key = str(pr["number"])
+                entry = state["prs"].get(key)
+                if entry is None:
+                    remember_approved_head(state, pr["number"], pr["headRefOid"])
+                    eligible.append(pr)
+                elif entry["approved_head"] == pr["headRefOid"]:
+                    eligible.append(pr)
+                else:
+                    log(
+                        f"PR #{pr['number']}: approved label is still attached to "
+                        "an unexpected new head; waiting for invalidation"
+                    )
+            save_drain_state(ctx, state, dry_run=dry_run)
+
+            # Advanced once per pass, including a pass that recovers or skips
+            # everything, because it is the clock every failure cooldown is
+            # denominated in.
+            begin_drain_pass(state)
+            if recovered:
+                save_drain_state(ctx, state, dry_run=dry_run)
+            else:
+                run_drain_pass(ctx, eligible, state=state, gates=gates, dry_run=dry_run)
+            if once:
+                return
+            # The short cadence follows the lane rather than the last candidate
+            # examined: a pass can end on a barrier owned by an earlier one.
+            active = state.get("active_pr")
+            active_entry = state["prs"].get(str(active)) if active is not None else None
+            sleep_seconds = (
+                CI_RERUN_INTERVAL_SECONDS
+                if active_entry and active_entry.get("ci_rerun_active")
+                else interval
+            )
+            time.sleep(sleep_seconds)
+        except DrainError as exc:
+            failure = NETWORK_OFFLINE
+            if (
+                once
+                or failure is None
+                or isinstance(exc, (ModelUnavailableError, PostMergeAuditError))
+            ):
+                raise
+            # Offline (issue #735): the pass stops where the network failed.
+            # What it had already recorded -- a discharged cleanup step, an
+            # interrupted merge -- is kept; nothing is counted as a failure;
+            # and nothing more happens until GitHub answers again, when the
+            # next pass rereads every gate before it changes anything.
+            save_drain_state(ctx, state, dry_run=dry_run)
+            wait_for_connectivity(ctx.path, ctx.repo_slug, failure, dry_run=dry_run)
 
 
 def single_pr_result(
@@ -6169,8 +6714,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     global LOG_DIR, APPROVE_LABEL, CHANGES_LABEL, COORDINATION_PATHS, LOG_TO_STDERR
+    global OFFLINE_WAIT_ENABLED
     number = args.pr
     single = number is not None
+    # Only a polling run waits out an outage; a `--once` or `--pr` run reports
+    # the failure through its bounded result path, as it always has.
+    OFFLINE_WAIT_ENABLED = not single and not args.once
     # A single-PR run owns stdout for its one JSON result.
     LOG_TO_STDERR = single
     # A dry run leaves the filesystem exactly as it found it, so it opens no
@@ -6199,7 +6748,9 @@ def main() -> None:
                 pull_request=number,
                 dry_run=args.dry_run,
             )
-            ctx = get_repo_context(root, raw_config.remote_name)
+            ctx = connected_repo_context(
+                root, raw_config.remote_name, dry_run=args.dry_run
+            )
             # Before any label, gate, or pull request is read: a caller whose
             # repository this is not must find that out before this run acts
             # on a number that means something else here.
@@ -6301,7 +6852,7 @@ def main() -> None:
             # the caller's own result document, which the pass must never
             # write to or displace, so it goes first and speaks only to stderr.
             if ctx is not None:
-                discharge_recorded_cleanup(ctx, dry_run=args.dry_run)
+                final_stop_cleanup(ctx, dry_run=args.dry_run)
             if single:
                 emit_single_pr_result(
                     single_pr_result(

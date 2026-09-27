@@ -724,7 +724,8 @@ class OperationSurfaceTests(unittest.TestCase):
         for relative_path in RENDERED_ASSETS:
             self.assertIn(
                 "`restart`: run `stop`, then `start`, then `status`, and "
-                "succeed only when the status is `running`. The controller has "
+                "succeed only when the status is `running` or `offline`. The "
+                "controller has "
                 "no `restart` subcommand; this operation is composed from those "
                 "three.",
                 flat(read(relative_path)),
@@ -1004,7 +1005,7 @@ class PreservedBehaviorTests(unittest.TestCase):
             )
             self.assertIn(
                 "One incident is one recovery unit. Never acknowledge it until "
-                "the repaired drainer is running.",
+                "the repaired drainer is running or offline.",
                 flattened,
                 relative_path,
             )
@@ -1077,6 +1078,53 @@ class BrandBoundaryTests(unittest.TestCase):
                 flat(read(relative_path)),
                 relative_path,
             )
+
+
+
+class OfflineStateTests(unittest.TestCase):
+    """Issue #735: `offline` is a live state the controller reports, so every
+    place the workflow checks for a live drainer must accept it, and the
+    incident policy must not send an outage through `recover`."""
+
+    # Every place the workflow waits for, or requires, a live drainer.
+    LIVE_CHECKS = (
+        re.compile(r"status is `running` or `offline`"),
+        re.compile(r"that the state is `running` or `offline`"),
+        re.compile(r"drainer is running or offline\."),
+    )
+
+    def test_every_live_check_accepts_the_offline_state(self):
+        for relative_path in (SOURCE, *RENDERED_ASSETS):
+            text = read(relative_path)
+            for check in self.LIVE_CHECKS:
+                with self.subTest(asset=relative_path, check=check.pattern):
+                    self.assertRegex(text, check)
+
+    def test_no_live_check_still_demands_running_alone(self):
+        # The negative control: the spellings the offline state made wrong.
+        stale = re.compile(
+            r"(status is|the state is) `running`(?! or `offline`)|"
+            r"drainer is running\.(?!\S)"
+        )
+        for relative_path in (SOURCE, *RENDERED_ASSETS):
+            with self.subTest(asset=relative_path):
+                self.assertIsNone(stale.search(read(relative_path)))
+        planted = "   that the state is `running`.\n"
+        self.assertIsNotNone(stale.search(planted))
+
+    def test_the_live_states_named_are_the_controllers_own(self):
+        import drain_prs_service
+
+        self.assertEqual(drain_prs_service.LIVE_STATES, frozenset({"running", "offline"}))
+
+    def test_the_incident_policy_keeps_an_outage_out_of_recovery(self):
+        for relative_path in (SOURCE, *RENDERED_ASSETS):
+            policy = read(relative_path).split("## Incident policy", 1)[1]
+            with self.subTest(asset=relative_path):
+                self.assertIn("A network outage is not a failure.", policy)
+                self.assertIn("raises no incident", policy)
+                self.assertIn("needs no\n  `recover`, `restart`, or `ack`", policy)
+                self.assertIn("skips the final cleanup\n  pass", policy)
 
 
 if __name__ == "__main__":
