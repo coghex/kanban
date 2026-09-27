@@ -827,6 +827,28 @@ spec = do
       decodedStatus "{\"state\":\"foreign\",\"open_incident\":null}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: foreign" DrainerServiceUnknown Nothing)
 
+    it "renders an offline drainer as live and waiting, distinct from on, off and a crash" $ do
+      -- Issue #735: a drainer waiting out a network outage still holds the
+      -- repository, so it is running for the toggle and the direct-merge
+      -- refusal, while its own state and colour say it is draining nothing.
+      let result =
+            decodedStatus
+              "{\"state\":\"offline\",\"offline\":{\"since\":\"2026-09-24T17:52:31Z\",\"category\":\"reset\"},\"open_incident\":null}"
+      result `shouldBe` Right (DrainerStatus DrainerOffline "offline · waiting for network" DrainerServiceOffline Nothing)
+      result `shouldSatisfy` either (const False) drainerIsRunning
+      fmap (drainerToggle False) result `shouldBe` Right StopDrainer
+
+    it "keeps an unrelated incident and the cleanup debt visible while offline" $
+      decodedStatus
+        "{\"state\":\"offline\",\"open_incident\":{\"summary\":\"PR #7 has a merge conflict\"},\"cleanup_obligations\":[{\"pull_request\":42,\"steps\":[\"closing acme/widgets#99\"]}]}"
+        `shouldBe` Right
+          ( DrainerStatus
+              DrainerOffline
+              "offline · waiting for network · unresolved incident · PR #7 has a merge conflict · 1 PR owes cleanup"
+              DrainerServiceOffline
+              (Just "PR #7 has a merge conflict")
+          )
+
     it "renders a state the controller reports but this version does not know as an error" $
       decodedStatus "{\"state\":\"paused\"}"
         `shouldBe` Right (DrainerStatus DrainerError "unknown state: paused" DrainerServiceUnknown Nothing)

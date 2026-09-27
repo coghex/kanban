@@ -223,6 +223,10 @@ examples = do
       refusalFor (DrainerServiceExternal "launchd") "on outside launchd" `shouldMention` "outside launchd"
       refusalFor (DrainerServiceExternal "systemd") "on outside systemd" `shouldMention` "outside systemd"
       refusalFor DrainerServiceBlocked "rebase in progress; finish or abort it" `shouldMention` "rebase in progress"
+      -- Issue #735: offline still owns the repository, so a direct merge
+      -- would race the drainer's own recovery the moment the network returns.
+      refusalFor DrainerServiceOffline "offline · waiting for network" `shouldMention` "offline"
+      refusalFor DrainerServiceOffline "offline · waiting for network" `shouldMention` "stop it with d"
 
     -- The fail-closed case that matters most: a controller that could not be
     -- discovered, run, or decoded leaves the service's state unknown, and
@@ -242,6 +246,8 @@ examples = do
       drainerIsRunning running `shouldBe` True
       drainerIsRunning external `shouldBe` True
       drainerIsRunning stopped `shouldBe` False
+      drainerIsRunning (reportedStatus DrainerOffline DrainerServiceOffline "offline · waiting for network" Nothing)
+        `shouldBe` True
 
   describe "invoking the single-PR path" $ do
     let repository = Repository "/Users/example/work/project" "Example" "Project"

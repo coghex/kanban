@@ -80,6 +80,7 @@ drainerStatusAttr status = case status.drainerState of
   DrainerStopping -> pendingAttr
   DrainerWarning -> pendingAttr
   DrainerError -> problemAttr
+  DrainerOffline -> pendingAttr
 
 -- | The issue approval service's colour, declared beside the drainer's
 -- because the two controls stack in the same sidebar and a reader comparing

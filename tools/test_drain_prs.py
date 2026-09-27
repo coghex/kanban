@@ -21,12 +21,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import drain_prs
 import drain_prs_service
+import fake_cli
 import kanban_models
 
 
@@ -1364,3 +1366,475 @@ class LoadedProviderDrainRereviewTests(RosterBackedDrainRereviewTests):
                             drain_prs.marker_provider_accepted(marker_provider),
                             accepted,
                         )
+
+
+class OfflineFixture(unittest.TestCase):
+    """Issue #735's module state, isolated per case: whether this run waits
+    out an outage, and the transport failure it is currently offline on."""
+
+    def setUp(self):
+        for name, value in (("OFFLINE_WAIT_ENABLED", False), ("NETWORK_OFFLINE", None)):
+            patched = mock.patch.object(drain_prs, name, value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.logged = []
+        patched = mock.patch.object(drain_prs, "log", side_effect=self.logged.append)
+        patched.start()
+        self.addCleanup(patched.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.fake = fake_cli.FakeCli(self.root / "fake-cli")
+        self.fake.install("gh")
+        patched = mock.patch.dict(os.environ, self.fake.environ_overrides())
+        patched.start()
+        self.addCleanup(patched.stop)
+
+
+GH_RESET = (
+    'Get "https://api.github.com/graphql": read tcp 10.0.0.2:5123->'
+    "140.82.112.6:443: read: connection reset by peer"
+)
+
+
+class TransportRecognizerTests(unittest.TestCase):
+    """The one recognizer, per category, with the controls it must reject."""
+
+    def test_each_supported_category_is_recognized(self):
+        cases = {
+            "dns": [
+                'Get "https://api.github.com/user": dial tcp: lookup '
+                "api.github.com: no such host",
+                "fatal: unable to access 'https://github.com/acme/widgets.git/': "
+                "Could not resolve host: github.com",
+                "ssh: Could not resolve hostname github.com: nodename nor servname "
+                "provided, or not known",
+            ],
+            "refused": [
+                'Post "https://api.github.com/graphql": dial tcp 140.82.112.6:443: '
+                "connect: connection refused",
+                "ssh: connect to host github.com port 22: Connection refused",
+            ],
+            "unreachable": [
+                'Get "https://api.github.com/": dial tcp 140.82.112.6:443: '
+                "connect: network is unreachable",
+            ],
+            "reset": [GH_RESET, "fatal: unable to access: Connection reset by peer"],
+            "timeout": [
+                'Post "https://api.github.com/graphql": net/http: TLS handshake timeout',
+                'Get "https://api.github.com/": dial tcp 140.82.112.6:443: i/o timeout',
+                "fatal: unable to access 'https://github.com/acme/widgets.git/': "
+                "Failed to connect to github.com port 443 after 75003 ms: "
+                "Connection timed out",
+            ],
+        }
+        for category, texts in cases.items():
+            for text in texts:
+                with self.subTest(text=text):
+                    self.assertEqual(
+                        drain_prs.classify_transport_failure(text, None), category
+                    )
+
+    def test_an_answer_or_a_trust_failure_is_never_an_outage(self):
+        for text in (
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            "HTTP 403: Resource not accessible by integration",
+            "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets)",
+            "HTTP 502: Bad Gateway",
+            'Get "https://api.github.com/": tls: failed to verify certificate: '
+            "x509: certificate signed by unknown authority",
+            "fatal: unable to access: SSL certificate problem: unable to get "
+            "local issuer certificate",
+            "GraphQL: Could not resolve to a PullRequest with the number of 42.",
+            "To get started with GitHub CLI, please run:  gh auth login",
+            "no scripted response",
+            "",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(drain_prs.classify_transport_failure(text, None))
+
+    def test_only_commands_that_reach_a_remote_are_network_commands(self):
+        for args in (
+            ["gh", "pr", "list"],
+            ["/usr/local/bin/gh", "api", "user"],
+            ["git", "fetch", "--quiet", "origin"],
+            ["git", "-c", "core.quotePath=false", "push", "origin", "x"],
+            ["git", "-C", "/repo", "ls-remote", "origin"],
+        ):
+            with self.subTest(args=args):
+                self.assertTrue(drain_prs.is_network_command(args))
+        for args in (
+            ["git", "status", "--porcelain"],
+            ["git", "-c", "core.quotePath=false", "merge-tree", "a", "b"],
+            ["git", "stash", "apply"],
+            ["codex", "exec"],
+            ["claude", "-p"],
+            [],
+        ):
+            with self.subTest(args=args):
+                self.assertFalse(drain_prs.is_network_command(args))
+
+
+class TransportFailureRunTests(OfflineFixture):
+    def test_a_checked_failure_is_a_transport_error_that_still_reads_as_before(self):
+        self.fake.script("gh", ["pr", "list"], stderr=GH_RESET, exit_code=1)
+        with self.assertRaises(drain_prs.TransportError) as raised:
+            drain_prs.run(["gh", "pr", "list"], cwd=self.root)
+        self.assertIsInstance(raised.exception, drain_prs.DrainError)
+        self.assertEqual(raised.exception.category, "reset")
+        self.assertIn("Command failed: gh pr list", str(raised.exception))
+        # A run that cannot wait -- `--once`, `--pr` -- never goes offline.
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+    def test_an_unchecked_failure_is_returned_unchanged_where_nothing_waits(self):
+        self.fake.script("gh", ["pr", "merge"], stderr=GH_RESET, exit_code=1)
+        proc = drain_prs.run(["gh", "pr", "merge", "42"], cwd=self.root, check=False)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+    def test_a_polling_run_goes_offline_on_the_first_transport_failure(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        self.fake.script("gh", ["pr", "merge"], stderr=GH_RESET, exit_code=1)
+        with self.assertRaises(drain_prs.TransportError):
+            # Unchecked, and raised all the same: a transport failure never
+            # answers the question an unchecked caller asked.
+            drain_prs.run(["gh", "pr", "merge", "42"], cwd=self.root, check=False)
+        self.assertIsNotNone(drain_prs.NETWORK_OFFLINE)
+        self.assertEqual(drain_prs.NETWORK_OFFLINE.command, "gh pr merge 42")
+
+    def test_offline_no_further_network_command_is_started(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        self.fake.script("gh", ["pr", "list"], stderr=GH_RESET, exit_code=1)
+        self.fake.script("gh", ["issue", "close"], stdout="")
+        with self.assertRaises(drain_prs.TransportError):
+            drain_prs.run(["gh", "pr", "list"], cwd=self.root)
+        with self.assertRaises(drain_prs.TransportError) as raised:
+            drain_prs.run(["gh", "issue", "close", "99"], cwd=self.root)
+        self.assertIn("Not started while offline", str(raised.exception))
+        self.assertEqual(
+            [call["args"][:2] for call in self.fake.calls("gh")], [["pr", "list"]]
+        )
+        # Local work -- restoring a user's stashed changes, above all -- is
+        # never withheld.
+        local = drain_prs.run(["git", "--version"], cwd=self.root)
+        self.assertEqual(local.returncode, 0)
+
+    def test_what_the_recognizer_does_not_know_keeps_its_old_behavior(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        # The argv names a branch that reads like an outage; only the output
+        # is classified, and it is an ordinary refusal.
+        self.fake.script(
+            "gh", ["pr", "view"], stderr="HTTP 401: Bad credentials", exit_code=1
+        )
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            drain_prs.run(
+                ["gh", "pr", "view", "fix-connection-refused"], cwd=self.root
+            )
+        self.assertNotIsInstance(raised.exception, drain_prs.TransportError)
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+    def test_a_malformed_response_is_not_an_outage(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        self.fake.script("gh", ["pr", "list"], stdout="<html>captive portal</html>")
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            drain_prs.run_json(["gh", "pr", "list"], cwd=self.root)
+        self.assertNotIsInstance(raised.exception, drain_prs.TransportError)
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+    def test_a_local_deadline_expiring_is_not_reclassified(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        self.fake.script("gh", ["pr", "list"], sleep_seconds=5)
+        with self.assertRaises(drain_prs.DrainError) as raised:
+            drain_prs.run(["gh", "pr", "list"], cwd=self.root, timeout=0.3)
+        self.assertNotIsInstance(raised.exception, drain_prs.TransportError)
+        self.assertIn("timed out", str(raised.exception))
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+
+class ConnectivityProbeTests(OfflineFixture):
+    ENDPOINT = ["api", "repos/acme/widgets"]
+
+    def probe(self):
+        return drain_prs.probe_connectivity("acme/widgets", self.root)
+
+    def test_a_usable_answer_is_connectivity(self):
+        self.fake.script("gh", self.ENDPOINT, stdout=json.dumps({"full_name": "acme/widgets"}))
+        self.assertEqual(self.probe()[0], drain_prs.PROBE_CONNECTED)
+        # One read-only call, on the drainer's own API path.
+        self.assertEqual(
+            [call["args"] for call in self.fake.calls("gh")],
+            [["api", "repos/acme/widgets"]],
+        )
+
+    def test_a_transport_failure_is_still_offline(self):
+        self.fake.script("gh", self.ENDPOINT, stderr=GH_RESET, exit_code=1)
+        outcome, detail = self.probe()
+        self.assertEqual(outcome, drain_prs.PROBE_OFFLINE)
+        self.assertIn("reset", detail)
+
+    def test_everything_that_is_not_an_outage_ends_the_wait(self):
+        for stderr, stdout in (
+            ("HTTP 401: Bad credentials", ""),
+            ("HTTP 403: Must have admin rights to Repository.", ""),
+            ("tls: failed to verify certificate: x509: certificate is not valid", ""),
+            ("", ""),
+        ):
+            with self.subTest(stderr=stderr):
+                fake_root = self.root / f"case-{len(stderr)}"
+                fake = fake_cli.FakeCli(fake_root)
+                fake.install("gh")
+                fake.script("gh", self.ENDPOINT, stderr=stderr, stdout=stdout, exit_code=1)
+                with mock.patch.dict(os.environ, fake.environ_overrides()):
+                    self.assertEqual(self.probe()[0], drain_prs.PROBE_FAILED)
+        malformed = fake_cli.FakeCli(self.root / "malformed")
+        malformed.install("gh")
+        malformed.script("gh", self.ENDPOINT, stdout="<html>captive portal</html>")
+        with mock.patch.dict(os.environ, malformed.environ_overrides()):
+            self.assertEqual(self.probe()[0], drain_prs.PROBE_FAILED)
+
+    def test_a_hanging_check_is_bounded_and_counts_as_offline(self):
+        self.fake.script("gh", self.ENDPOINT, sleep_seconds=10)
+        with mock.patch.object(drain_prs, "OFFLINE_PROBE_TIMEOUT_SECONDS", 0.5):
+            started = time.monotonic()
+            outcome, _ = self.probe()
+            elapsed = time.monotonic() - started
+        self.assertEqual(outcome, drain_prs.PROBE_OFFLINE)
+        self.assertLess(elapsed, 5)
+
+    def test_the_bound_fits_inside_the_interval(self):
+        # So one check can never still be running when the next is due.
+        self.assertLess(
+            drain_prs.OFFLINE_PROBE_TIMEOUT_SECONDS,
+            drain_prs.OFFLINE_PROBE_INTERVAL_SECONDS,
+        )
+        self.assertEqual(drain_prs.OFFLINE_PROBE_INTERVAL_SECONDS, 60)
+
+
+class FakeClock:
+    """time.monotonic() and time.sleep() for a wait that must not really wait."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += max(0.0, seconds)
+
+
+class OfflineWaitTests(OfflineFixture):
+    def setUp(self):
+        super().setUp()
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        self.clock = FakeClock()
+        for name in ("monotonic", "sleep"):
+            patched = mock.patch.object(drain_prs.time, name, getattr(self.clock, name))
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.markers = []
+        self.withdrawn = 0
+        patched = mock.patch.object(
+            drain_prs_service,
+            "record_offline",
+            side_effect=lambda path, marker: self.markers.append(dict(marker)),
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        patched = mock.patch.object(
+            drain_prs_service, "clear_offline", side_effect=self._withdraw
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.failure = drain_prs.TransportError(
+            "Command failed: gh pr list", category="reset", command="gh pr list"
+        )
+        drain_prs.NETWORK_OFFLINE = self.failure
+
+    def _withdraw(self, path):
+        self.withdrawn += 1
+
+    def wait_with(self, outcomes, *, took=0.0):
+        checks = []
+        answers = iter(outcomes)
+
+        def probe(repo_slug, cwd):
+            checks.append(self.clock.now)
+            self.clock.now += took
+            answer = next(answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        with mock.patch.object(drain_prs, "probe_connectivity", side_effect=probe):
+            drain_prs.wait_for_connectivity(
+                self.root, "acme/widgets", self.failure, dry_run=False
+            )
+        return checks
+
+    def test_failed_checks_keep_waiting_at_one_check_per_interval(self):
+        still = (drain_prs.PROBE_OFFLINE, "reset: connection reset by peer")
+        checks = self.wait_with([still] * 7 + [(drain_prs.PROBE_CONNECTED, "ok")])
+        self.assertEqual(len(checks), 8)
+        self.assertEqual(checks[0], 1060.0)
+        self.assertEqual(
+            {later - earlier for earlier, later in zip(checks, checks[1:])}, {60.0}
+        )
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+
+    def test_a_slow_check_does_not_shift_or_crowd_the_schedule(self):
+        still = (drain_prs.PROBE_OFFLINE, "no answer within 20s")
+        checks = self.wait_with(
+            [still] * 3 + [(drain_prs.PROBE_CONNECTED, "ok")], took=20.0
+        )
+        self.assertEqual(
+            {later - earlier for earlier, later in zip(checks, checks[1:])}, {60.0}
+        )
+
+    def test_an_overrun_sleep_yields_one_late_check_not_a_burst(self):
+        still = (drain_prs.PROBE_OFFLINE, "reset")
+        checks = []
+        answers = iter([still, still, (drain_prs.PROBE_CONNECTED, "ok")])
+
+        def probe(repo_slug, cwd):
+            checks.append(self.clock.now)
+            if len(checks) == 1:
+                # A laptop lid closed for an hour after the first check.
+                self.clock.now += 3600
+            return next(answers)
+
+        with mock.patch.object(drain_prs, "probe_connectivity", side_effect=probe):
+            drain_prs.wait_for_connectivity(
+                self.root, "acme/widgets", self.failure, dry_run=False
+            )
+        self.assertEqual(checks[1] - checks[0], 3600.0)
+        self.assertEqual(checks[2] - checks[1], 60.0)
+
+    def test_the_wait_is_published_and_withdrawn_for_the_controller(self):
+        still = (drain_prs.PROBE_OFFLINE, "reset")
+        self.wait_with([still, still, (drain_prs.PROBE_CONNECTED, "ok")])
+        self.assertEqual(len(self.markers), 3)
+        self.assertEqual({marker["drainer_pid"] for marker in self.markers}, {os.getpid()})
+        self.assertIsNone(self.markers[0]["last_check"])
+        self.assertIsNotNone(self.markers[-1]["last_check"])
+        self.assertEqual(self.markers[0]["category"], "reset")
+        self.assertEqual(self.withdrawn, 1)
+
+    def test_logging_is_one_line_in_one_per_check_and_one_out(self):
+        still = (drain_prs.PROBE_OFFLINE, "reset")
+        self.wait_with([still] * 4 + [(drain_prs.PROBE_CONNECTED, "ok")])
+        self.assertEqual(len(self.logged), 1 + 4 + 1)
+        self.assertIn("Offline (reset): gh pr list", self.logged[0])
+        self.assertTrue(all("Still offline" in line for line in self.logged[1:5]))
+        self.assertIn("Back online", self.logged[-1])
+
+    def test_a_non_network_failure_ends_the_wait_for_ordinary_handling(self):
+        checks = self.wait_with([(drain_prs.PROBE_FAILED, "HTTP 401: Bad credentials")])
+        self.assertEqual(len(checks), 1)
+        self.assertIsNone(drain_prs.NETWORK_OFFLINE)
+        self.assertIn("other than the network", self.logged[-1])
+
+    def test_an_interrupt_ends_the_wait_at_once_and_stays_offline(self):
+        for interrupted_in in ("sleep", "check"):
+            with self.subTest(interrupted_in=interrupted_in):
+                drain_prs.NETWORK_OFFLINE = self.failure
+                self.withdrawn = 0
+                if interrupted_in == "sleep":
+                    with mock.patch.object(
+                        drain_prs.time, "sleep", side_effect=KeyboardInterrupt
+                    ):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.wait_with([])
+                else:
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.wait_with([KeyboardInterrupt()])
+                self.assertEqual(self.withdrawn, 1)
+                # Still offline: this is what tells the stop to skip its pass.
+                self.assertIs(drain_prs.NETWORK_OFFLINE, self.failure)
+
+    def test_a_dry_run_publishes_nothing(self):
+        with mock.patch.object(
+            drain_prs, "probe_connectivity", return_value=(drain_prs.PROBE_CONNECTED, "ok")
+        ):
+            drain_prs.wait_for_connectivity(
+                self.root, "acme/widgets", self.failure, dry_run=True
+            )
+        self.assertEqual(self.markers, [])
+        self.assertEqual(self.withdrawn, 0)
+
+
+class OfflineStopTests(OfflineFixture):
+    def test_an_offline_stop_attempts_no_final_cleanup(self):
+        drain_prs.NETWORK_OFFLINE = drain_prs.TransportError(
+            "x", category="dns", command="gh pr list"
+        )
+        with mock.patch.object(drain_prs, "discharge_recorded_cleanup") as discharge:
+            self.assertEqual(
+                drain_prs.final_stop_cleanup(make_ctx(), dry_run=False), 0
+            )
+        discharge.assert_not_called()
+        self.assertIn("skipped the final post-merge cleanup pass", self.logged[-1])
+
+    def test_a_connected_stop_keeps_its_final_pass(self):
+        with mock.patch.object(
+            drain_prs, "discharge_recorded_cleanup", return_value=3
+        ) as discharge:
+            self.assertEqual(
+                drain_prs.final_stop_cleanup(make_ctx(), dry_run=False), 3
+            )
+        discharge.assert_called_once()
+
+
+class OfflineStartupTests(OfflineFixture):
+    """The one network-dependent startup step, `gh repo view` when the
+    remote's HEAD reference is unset, waits in a polling run and fails fast
+    everywhere else."""
+
+    def _failing_then(self, ctx):
+        attempts = []
+
+        def resolve(root, remote_name):
+            attempts.append(remote_name)
+            if len(attempts) == 1:
+                failure = drain_prs.TransportError(
+                    "Command failed: gh repo view acme/widgets",
+                    category="dns",
+                    command="gh repo view acme/widgets",
+                )
+                if drain_prs.OFFLINE_WAIT_ENABLED:
+                    drain_prs.NETWORK_OFFLINE = failure
+                raise failure
+            return ctx
+
+        return resolve, attempts
+
+    def test_a_polling_run_waits_and_then_resolves_the_repository(self):
+        drain_prs.OFFLINE_WAIT_ENABLED = True
+        ctx = make_ctx("acme/widgets", "origin")
+        resolve, attempts = self._failing_then(ctx)
+        remote = subprocess.CompletedProcess(
+            ["git"], 0, stdout="git@github.com:acme/widgets.git\n", stderr=""
+        )
+        with (
+            mock.patch.object(drain_prs, "get_repo_context", side_effect=resolve),
+            mock.patch.object(drain_prs, "run", return_value=remote),
+            mock.patch.object(drain_prs, "wait_for_connectivity") as wait,
+        ):
+            self.assertIs(
+                drain_prs.connected_repo_context(self.root, "origin", dry_run=False),
+                ctx,
+            )
+        self.assertEqual(attempts, ["origin", "origin"])
+        wait.assert_called_once()
+        self.assertEqual(wait.call_args.args[1], "acme/widgets")
+
+    def test_a_one_shot_run_reports_the_failure_without_waiting(self):
+        resolve, attempts = self._failing_then(make_ctx())
+        with (
+            mock.patch.object(drain_prs, "get_repo_context", side_effect=resolve),
+            mock.patch.object(drain_prs, "wait_for_connectivity") as wait,
+        ):
+            with self.assertRaises(drain_prs.TransportError):
+                drain_prs.connected_repo_context(self.root, "origin", dry_run=False)
+        self.assertEqual(attempts, ["origin"])
+        wait.assert_not_called()

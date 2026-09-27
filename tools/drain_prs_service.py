@@ -1906,6 +1906,53 @@ def autostash_inventory(repo_path: Path) -> dict[str, list[dict[str, Any]] | Non
     return {"kept_autostash_anchors": kept, "drainer_stashes": reported}
 
 
+# The marker a drainer child writes while it waits out a network outage
+# (issue #735), beside the runner's own status file. Only ever believed while
+# the process it names is the live drainer child of a live runner, so a marker
+# a dead process left behind can never make it look alive.
+OFFLINE_MARKER_NAME = "offline.json"
+# The states in which a drainer is draining this repository -- or, offline,
+# holding it and waiting to. Every question "is one live?" asks this set.
+LIVE_STATES = frozenset({"running", "offline"})
+
+
+def offline_marker_path(job: DrainerJob) -> Path:
+    return job.runtime_dir / OFFLINE_MARKER_NAME
+
+
+def record_offline(repo_path: Path, marker: dict[str, Any]) -> Path:
+    """Publish that this checkout's drainer is offline; see OFFLINE_MARKER_NAME."""
+    path = offline_marker_path(incident_job(repo_path))
+    atomic_write_json(path, marker)
+    return path
+
+
+def clear_offline(repo_path: Path) -> None:
+    offline_marker_path(incident_job(repo_path)).unlink(missing_ok=True)
+
+
+def live_offline_marker(job: DrainerJob, drainer_pid: int) -> dict[str, Any] | None:
+    """The offline marker, only when the live drainer child wrote it."""
+    marker = read_json(offline_marker_path(job))
+    if not isinstance(marker, dict):
+        return None
+    pid = marker.get("drainer_pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid != drainer_pid:
+        return None
+    return marker
+
+
+def offline_projection(marker: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What `status` reports about an outage: when it began, what failed, and
+    when GitHub was last checked. Null whenever the drainer is not offline."""
+    if marker is None:
+        return None
+    return {
+        key: marker.get(key)
+        for key in ("since", "category", "command", "last_check", "check_interval_seconds")
+    }
+
+
 def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     """This repository's drainer state, read from this repository's own status
     file.
@@ -1960,8 +2007,12 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     child_alive = pid_alive(child_pid if isinstance(child_pid, int) else None)
     operation: str | None = None
     external_pid: int | None = None
+    offline: dict[str, Any] | None = None
     if runner_alive and child_alive:
-        state = "running"
+        # Offline is a live state, so it is decided only here: a marker read
+        # anywhere else would let a dead process's leftover look alive.
+        offline = live_offline_marker(job, child_pid)
+        state = "offline" if offline is not None else "running"
     elif runner_alive:
         state = "starting"
     # The one state whose answer the probe changes, and so the only one that
@@ -1993,6 +2044,10 @@ def status_snapshot(job: DrainerJob) -> dict[str, Any]:
     return {
         "state": state,
         "operation": operation,
+        # Set only in the `offline` state: the outage the live drainer is
+        # waiting out. A reader predating it sees an unknown state, not a
+        # healthy one.
+        "offline": offline_projection(offline),
         # The key name is the contract Kanban reads, so it stays `launchd_`
         # whatever answers it; the answer itself is the backend's.
         "launchd_loaded": backend.is_loaded(job.label),
@@ -2044,7 +2099,7 @@ def another_checkout_running(job: DrainerJob, snapshot: dict[str, Any]) -> str |
     everything inside a single checkout.
     """
     active_repo = snapshot.get("active_repo")
-    if snapshot.get("state") not in {"running", "starting"}:
+    if snapshot.get("state") not in LIVE_STATES | {"starting"}:
         return None
     if not isinstance(active_repo, str) or active_repo == str(job.repo_path):
         return None
@@ -2204,7 +2259,7 @@ def install_job(job: DrainerJob) -> dict[str, Any]:
                 f"{job.repo_path}. Stop it before installing this checkout's "
                 f"{manager} job."
             )
-        if snapshot["state"] in {"running", "starting", "external"}:
+        if snapshot["state"] in LIVE_STATES | {"starting", "external"}:
             raise ServiceError(
                 f"Stop the running drainer before installing its {manager} job."
             )
@@ -2259,7 +2314,7 @@ def uninstall_job(job: DrainerJob) -> dict[str, Any]:
     with installation_transaction():
         backend = service_backend()
         snapshot = status_snapshot(job)
-        if snapshot["state"] in {"running", "starting", "external"}:
+        if snapshot["state"] in LIVE_STATES | {"starting", "external"}:
             raise ServiceError(
                 "Stop the PR drainer before uninstalling its "
                 f"{backend.backend_name()} job."
@@ -2311,7 +2366,7 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
                 f"{job.repo_path}. One repository drains from one checkout at a "
                 "time."
             )
-        if snapshot["state"] in {"running", "starting"}:
+        if snapshot["state"] in LIVE_STATES | {"starting"}:
             return {
                 "started": False,
                 "message": "PR drainer is already running",
@@ -2332,7 +2387,9 @@ def start_service(job: DrainerJob) -> dict[str, Any]:
     while time.monotonic() < deadline:
         time.sleep(0.25)
         snapshot = status_snapshot(job)
-        if snapshot["state"] == "running":
+        # A drainer that came up and is already waiting for the network has
+        # started: offline is a live state, not a failed start.
+        if snapshot["state"] in LIVE_STATES:
             if running_since is None:
                 running_since = time.monotonic()
             elif time.monotonic() - running_since >= START_STABILITY_SECONDS:
@@ -3241,6 +3298,10 @@ def _supervise(
             job.status_path.unlink()
         except FileNotFoundError:
             pass
+        # A child that died mid-wait cannot withdraw its own marker. The pid
+        # check already keeps a leftover from reading as offline; this keeps
+        # it from lying around at all.
+        offline_marker_path(job).unlink(missing_ok=True)
 
     if stop_requested:
         service_log(job, "PR drainer stopped intentionally; no incident notification sent")

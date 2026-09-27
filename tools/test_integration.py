@@ -1316,6 +1316,160 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(len(self._update_branch_calls()), 0)
         self.assertNotIn("42", state["prs"])
 
+    def _interrupted_swap(self, *, push_lands):
+        """Issue #735: the leased push's response is lost to the network.
+
+        With `push_lands`, the real push runs first and only its answer is
+        lost; without it, the network failed before anything was sent.
+        """
+        real_run = drain_prs.run
+
+        def run(args, **kwargs):
+            if args[:2] == ["git", "push"] and any(
+                arg.startswith("--force-with-lease") for arg in args
+            ):
+                if push_lands:
+                    real_run(args, **kwargs)
+                failure = drain_prs.TransportError(
+                    "Command failed: git push", category="reset", command="git push"
+                )
+                drain_prs.NETWORK_OFFLINE = failure
+                raise failure
+            return real_run(args, **kwargs)
+
+        self._script_pr_view(self._behind(), self._behind(), self._behind())
+        self._script_tip(self.TIP)
+        self._script_file_sets(advanced=[{"filename": self.COORDINATION_PATH}])
+        self._script_merge_of_this_pr()
+        state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 3,
+            "active_pr": None,
+            "prs": {
+                "42": {
+                    "approved_head": self.head_sha,
+                    "last_rereviewed_head": None,
+                    "consecutive_failures": 0,
+                    "retry_after_attempt": 0,
+                    "last_attempt": 2,
+                    "last_error": None,
+                    "cleanup": None,
+                }
+            },
+        }
+        self._ensure_marker_reads()
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", True),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs, "run", side_effect=run),
+        ):
+            with self.assertRaises(drain_prs.TransportError):
+                drain_prs.process_pr(
+                    self.ctx,
+                    42,
+                    dry_run=False,
+                    state=state,
+                    gates=self._gates(),
+                    report=drain_prs.new_single_pr_report(42),
+                )
+        return state
+
+    def _gates(self):
+        return drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+
+    def _settle(self, state):
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", True),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs.time, "sleep"),
+        ):
+            drain_prs.settle_interrupted_merge(
+                self.ctx, state, 42, gates=self._gates(), dry_run=False
+            )
+
+    def test_a_swap_whose_push_landed_with_its_response_lost_is_a_merge(self):
+        state = self._interrupted_swap(push_lands=True)
+        self.assertTrue(self._swapped())
+        entry = state["prs"]["42"]
+        self.assertEqual(
+            entry["merge_attempt"],
+            {"head": self.head_sha, "merge_commit": self.MERGE_COMMIT},
+        )
+        # Recovery finds the pull request still OPEN -- GitHub has not caught
+        # up -- and then merged, as the confirmation wait expects.
+        self._script_pr_view(self._behind(), self._behind(), {"state": "MERGED"})
+
+        self._settle(state)
+
+        self.assertIsNone(entry["merge_attempt"])
+        self.assertIsNone(entry["pending_audit"])
+        self.assertEqual(
+            [item["kind"] for item in entry["cleanup"]["pending"]],
+            ["issue", "worktree", "local-branch", "remote-branch", "fast-forward"],
+        )
+        # Nothing was merged or updated a second time.
+        self.assertEqual(len(self._pr_merge_calls()), 0)
+        self.assertEqual(len(self._update_branch_calls()), 0)
+
+    def _issue_closes(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:2] == ["issue", "close"]]
+
+    def test_a_landed_swap_github_never_records_is_fatal_and_cleans_nothing(self):
+        # Open at recovery, then closed without GitHub recording the merge:
+        # the confirmation fails, and no cleanup is ever owed -- not now, and
+        # not on the restart that follows the incident.
+        state = self._interrupted_swap(push_lands=True)
+        self._script_pr_view(self._behind(), {"state": "CLOSED"})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError):
+            self._settle(state)
+
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["cleanup"])
+        self.assertIsNone(entry["pending_audit"])
+        self.assertIsNone(entry["merge_attempt"])
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+        ):
+            drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False, gates=self._gates()
+            )
+        self.assertNotIn("42", state["prs"])
+        self.assertEqual(self._issue_closes(), [])
+
+    def test_a_landed_swap_found_closed_is_still_checked_and_fatal(self):
+        # Closed by the time the network returns: the default branch still
+        # holds the merge, so it is neither forgotten as an unmerged closure
+        # nor cleaned up -- the missing merged record is the incident.
+        state = self._interrupted_swap(push_lands=True)
+        self._script_pr_view({"state": "CLOSED"})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._settle(state)
+
+        self.assertIn("CLOSED", str(raised.exception))
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["cleanup"])
+        self.assertEqual(self._issue_closes(), [])
+
+    def test_a_swap_that_never_pushed_goes_back_through_the_gates(self):
+        state = self._interrupted_swap(push_lands=False)
+        self.assertFalse(self._swapped())
+        self._script_pr_view(self._behind())
+
+        self._settle(state)
+
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["merge_attempt"])
+        self.assertIsNone(entry.get("pending_audit"))
+        self.assertIsNone(entry["cleanup"])
+
     def test_a_push_whose_outcome_cannot_be_established_claims_neither(self):
         self._script_pr_view(self._behind(), self._behind(), self._behind())
         self._script_tip(self.TIP)
@@ -5221,6 +5375,595 @@ class QueueOrderTests(ProcessPrFixture):
         self.assertEqual(self._advancing_gh_calls(), [])
         self.assertEqual(list(self.incident_dir.glob("*.json")), [])
         self.assertFalse(self.state_path.exists())
+
+
+
+GH_OUTAGE = (
+    'Post "https://api.github.com/graphql": read tcp 10.0.0.2:5123->'
+    "140.82.112.6:443: read: connection reset by peer"
+)
+
+
+class StopLoop(BaseException):
+    """Ends a polling loop from inside its sleep; never caught by the loop."""
+
+
+class OfflineDrainLoopTests(ProcessPrFixture):
+    """Issue #735 end to end: a polling loop over a real repository and a
+    scripted `gh`, driven by a controlled clock. An outage pauses every kind
+    of drain work behind one connectivity check a minute, and recovery
+    resumes only through fresh gates, with no effect repeated and no debt
+    lost."""
+
+    INTERVAL = 300
+
+    def setUp(self):
+        super().setUp()
+        self.incident_dir = self.root / "incidents"
+        self.drainer_log_dir = self.root / "drainer-logs"
+        self.drainer_log_dir.mkdir()
+        self.now = 1000.0
+        self.wall = 1_800_000_000.0
+        self.pass_sleeps = 0
+        self.stop_after_passes = 1
+        self.checks = []
+        self.check_outcomes = []
+        self.observed_while_offline = []
+
+    def _sleep(self, seconds):
+        # A pass's own sleep -- the queue interval, or the short cadence of a
+        # rerun in flight -- as opposed to the offline wait's.
+        if drain_prs.NETWORK_OFFLINE is None and seconds in (
+            self.INTERVAL,
+            drain_prs.CI_RERUN_INTERVAL_SECONDS,
+        ):
+            self.pass_sleeps += 1
+            if (
+                self.stop_after_passes is not None
+                and self.pass_sleeps >= self.stop_after_passes
+            ):
+                raise StopLoop()
+        self.now += max(0.0, seconds)
+        self.wall += max(0.0, seconds)
+
+    def _check(self, repo_slug, cwd):
+        """The connectivity check, scripted, recording what it could see."""
+        self.assertEqual(repo_slug, "acme/widgets")
+        self.checks.append(self.now)
+        self.observed_while_offline.append(
+            {
+                "gh_calls": len(self.fake.calls("gh")),
+                "state": self._state(),
+                "offline": drain_prs.NETWORK_OFFLINE is not None,
+            }
+        )
+        outcome = self.check_outcomes.pop(0)
+        return outcome, "scripted"
+
+    def _state(self):
+        path = drain_prs.drain_state_path(self.ctx)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _run_loop(self, *, expect=StopLoop):
+        self._ensure_marker_reads()
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", True),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs.time, "sleep", side_effect=self._sleep),
+            mock.patch.object(drain_prs.time, "monotonic", side_effect=lambda: self.now),
+            mock.patch.object(drain_prs.time, "time", side_effect=lambda: self.wall),
+            mock.patch.object(drain_prs, "probe_connectivity", side_effect=self._check),
+        ):
+            with self.assertRaises(expect) as raised:
+                drain_prs.loop(
+                    self.ctx,
+                    interval=self.INTERVAL,
+                    once=False,
+                    dry_run=False,
+                    gates=drain_prs.GateConfig(
+                        required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                    ),
+                )
+        return raised.exception
+
+    def _queue(self, *responses):
+        for response in responses:
+            if response is None:
+                self.fake.script("gh", ["pr", "list"], stderr=GH_OUTAGE, exit_code=1)
+            else:
+                self.fake.script("gh", ["pr", "list"], stdout=json.dumps(response))
+
+    def _approved(self):
+        return [
+            {
+                "number": 42,
+                "labels": [{"name": drain_prs.APPROVE_LABEL}],
+                "isDraft": False,
+                "headRefOid": self.head_sha,
+            }
+        ]
+
+    def _script_cleanup(self):
+        self.fake.script(
+            "gh", ["issue", "view", "99"], stdout=json.dumps({"state": "OPEN"})
+        )
+        self.fake.script("gh", ["issue", "close", "99"], stdout="")
+
+    def _assert_no_work_while_offline(self):
+        # One outage, however many checks it took: the gh call log and the
+        # queue state stand still from the first check to the last.
+        self.assertGreater(len(self.observed_while_offline), 0)
+        for seen in self.observed_while_offline:
+            self.assertTrue(seen["offline"])
+        first = self.observed_while_offline[0]
+        for seen in self.observed_while_offline[1:]:
+            self.assertEqual(seen["gh_calls"], first["gh_calls"])
+            self.assertEqual(seen["state"], first["state"])
+
+    def _assert_no_incidents(self):
+        self.assertEqual(sorted(self.incident_dir.glob("*.json")), [])
+
+    def test_a_prolonged_queue_refresh_outage_waits_then_drains_normally(self):
+        # More failed checks than the three-strike limit, with an eligible
+        # pull request waiting the whole time.
+        self._queue(None, self._approved(), [])
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_OFFLINE] * 5 + [drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self.assertEqual(len(self.checks), 6)
+        self.assertEqual(
+            {later - earlier for earlier, later in zip(self.checks, self.checks[1:])},
+            {60.0},
+        )
+        self._assert_no_work_while_offline()
+        # Nothing but the failed refresh happened before the wait.
+        self.assertEqual(self.observed_while_offline[0]["gh_calls"], 1)
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self._assert_no_incidents()
+        state = self._state()
+        self.assertNotIn("42", state["prs"])
+        # The outage advanced no pass: only the one after recovery counted.
+        self.assertEqual(state["attempt_counter"], 1)
+
+    def test_a_merge_the_outage_interrupted_that_landed_is_not_repeated(self):
+        self._queue(self._approved(), [])
+        self._script_pr_view({}, {}, {"state": "MERGED"}, {"state": "MERGED"})
+        self.fake.script("gh", ["pr", "merge", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_OFFLINE, drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self._assert_no_work_while_offline()
+        offline_entry = self.observed_while_offline[0]["state"]["prs"]["42"]
+        self.assertEqual(offline_entry["merge_attempt"], {"head": self.head_sha})
+        # Not a failure of this pull request: the network failed.
+        self.assertEqual(offline_entry["consecutive_failures"], 0)
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        # The landed merge's cleanup ran as if the merge call had returned.
+        self.assertEqual(
+            [c["args"][:3] for c in self.fake.calls("gh") if c["args"][:2] == ["issue", "close"]],
+            [["issue", "close", "99"]],
+        )
+        self.assertFalse(git_ref_exists(self.main, "refs/heads/issue-99-demo"))
+        self.assertNotIn("42", self._state()["prs"])
+        self._assert_no_incidents()
+
+    def test_a_merge_the_outage_interrupted_that_did_not_land_goes_through_fresh_gates(self):
+        self._queue(self._approved(), self._approved(), [])
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+        self.stop_after_passes = 1
+
+        self._run_loop()
+
+        merges = self._pr_merge_calls()
+        self.assertEqual(len(merges), 2)
+        self.assertEqual({tuple(m["args"]) for m in merges}, {tuple(merges[0]["args"])})
+        # Every gate was read again after recovery, before the second merge.
+        calls = self.fake.calls("gh")
+        first, second = [i for i, c in enumerate(calls) if c["args"][:2] == ["pr", "merge"]]
+        between = [c["args"][:2] for c in calls[first + 1 : second]]
+        self.assertGreaterEqual(between.count(["pr", "view"]), 2)
+        self.assertIn(["pr", "list"], between)
+        self.assertNotIn("42", self._state()["prs"])
+        self._assert_no_incidents()
+
+    def test_an_audit_the_outage_interrupted_is_completed_and_its_cleanup_kept(self):
+        self._queue(self._approved(), [])
+        self._script_pr_view({}, {})
+        self.fake.script("gh", ["pr", "view", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_pr_view({"state": "MERGED"})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_OFFLINE] * 3 + [drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self._assert_no_work_while_offline()
+        offline_entry = self.observed_while_offline[0]["state"]["prs"]["42"]
+        # Durable before the wait: the merge's whole debt, and the audit.
+        self.assertEqual(offline_entry["pending_audit"]["head"], self.head_sha)
+        self.assertEqual(
+            [item["kind"] for item in offline_entry["cleanup"]["pending"]],
+            ["issue", "worktree", "local-branch", "remote-branch", "fast-forward"],
+        )
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(len(self._pr_view_calls()), 4)
+        self.assertNotIn("42", self._state()["prs"])
+        self._assert_no_incidents()
+
+    def test_an_audit_violation_found_after_recovery_is_still_fatal_once(self):
+        self._queue(self._approved(), [])
+        self._script_pr_view({}, {})
+        self.fake.script("gh", ["pr", "view", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_pr_view({"state": "MERGED", "labels": []})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+        self._run_loop(expect=drain_prs.PostMergeAuditError)
+
+        entry = self._state()["prs"]["42"]
+        # Reported once, and the merge's debt is still recorded for later.
+        self.assertIsNone(entry["pending_audit"])
+        self.assertIsNotNone(entry["cleanup"])
+
+    def test_repeated_outages_during_cleanup_neither_count_nor_escalate(self):
+        # Three consecutive passes struck by an outage at the same cleanup
+        # step: the count that raises a cleanup incident never moves.
+        self._queue(self._approved(), [])
+        self._script_pr_view()
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        for _ in range(3):
+            self.fake.script("gh", ["issue", "view", "99"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED] * 3
+
+        self._run_loop()
+
+        self.assertEqual(len(self.checks), 3)
+        for seen in self.observed_while_offline:
+            record = seen["state"]["prs"]["42"]["cleanup"]
+            self.assertEqual(record["failed_passes"], 0)
+            self.assertEqual(record["pending"][0]["kind"], "issue")
+            self.assertEqual(len(record["pending"]), 5)
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        self.assertEqual(
+            len([c for c in self.fake.calls("gh") if c["args"][:2] == ["issue", "close"]]),
+            1,
+        )
+        self.assertNotIn("42", self._state()["prs"])
+        self._assert_no_incidents()
+
+    def _seed_entry(self, **fields):
+        entry = {
+            "approved_head": self.head_sha,
+            "last_rereviewed_head": None,
+            "consecutive_failures": 0,
+            "retry_after_attempt": 0,
+            "last_attempt": 2,
+            "last_error": None,
+            "cleanup": None,
+        }
+        entry.update(fields)
+        drain_prs.drain_state_path(self.ctx).write_text(
+            json.dumps(
+                {
+                    "version": drain_prs.STATE_VERSION,
+                    "attempt_counter": 3,
+                    "active_pr": None,
+                    "prs": {"42": entry},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_a_pass_the_outage_cut_short_advances_no_scheduler_counter(self):
+        # The outage strikes after the pass opened and the candidate's attempt
+        # began: the pass clock and the attempt go back to where they were, so
+        # no cooldown anywhere expires early on a pass that attempted nothing.
+        self._seed_entry()
+        self._queue(self._approved(), self._approved(), [])
+        # Stale-approval recovery reads it first; the candidate's own first
+        # read is the one that fails.
+        self._script_pr_view({})
+        self.fake.script("gh", ["pr", "view", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_pr_view({})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_OFFLINE, drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self._assert_no_work_while_offline()
+        offline_state = self.observed_while_offline[0]["state"]
+        self.assertEqual(offline_state["attempt_counter"], 3)
+        self.assertEqual(offline_state["prs"]["42"]["last_attempt"], 2)
+        self.assertEqual(offline_state["prs"]["42"]["consecutive_failures"], 0)
+        # Only the pass after recovery counted.
+        self.assertEqual(self._state()["attempt_counter"], 4)
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+
+    def test_a_merge_someone_else_made_at_another_head_is_not_claimed(self):
+        other_head = "f" * 40
+        self._queue(self._approved(), [])
+        self._script_pr_view(
+            {}, {}, {"state": "MERGED", "headRefOid": other_head}
+        )
+        self.fake.script("gh", ["pr", "merge", "42"], stderr=GH_OUTAGE, exit_code=1)
+        self._script_cleanup()
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+        # No false post-merge audit violation: the loop runs to its pass sleep.
+        self._run_loop()
+
+        self.assertEqual(len(self._pr_merge_calls()), 1)
+        # Settled as any other merged pull request: its cleanup was planned
+        # and worked, and nothing audited it against the attempted head.
+        self.assertNotIn("42", self._state()["prs"])
+        self.assertEqual(
+            len([c for c in self.fake.calls("gh") if c["args"][:2] == ["issue", "close"]]),
+            1,
+        )
+
+    UPDATE_BRANCH = ["api", "-X", "PUT", "repos/acme/widgets/pulls/42/update-branch"]
+
+    def _update_calls(self):
+        return [
+            c for c in self.fake.calls("gh") if c["args"][: len(self.UPDATE_BRANCH)] == self.UPDATE_BRANCH
+        ]
+
+    def test_a_branch_update_the_outage_interrupted_is_not_requested_twice(self):
+        # Accepted with its response lost: after recovery the pull request
+        # still reads behind at the same head while GitHub applies it.
+        self._queue(self._approved(), self._approved())
+        self._script_pr_view({"mergeStateStatus": "BEHIND"})
+        self.fake.script("gh", self.UPDATE_BRANCH, stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", self.UPDATE_BRANCH, stdout="")
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self.assertEqual(len(self._update_calls()), 1)
+        entry = self._state()["prs"]["42"]
+        self.assertEqual(entry["branch_update_attempt"]["head"], self.head_sha)
+        self.assertEqual(entry["consecutive_failures"], 0)
+
+    def test_a_branch_update_that_never_landed_is_requested_once_more(self):
+        # GitHub's own window for applying an update has passed and the head
+        # never moved: the first request did not land, so exactly one more.
+        moved = "c" * 40
+        self._queue(self._approved(), self._approved())
+        self._script_pr_view(
+            {"mergeStateStatus": "BEHIND"},
+            {"mergeStateStatus": "BEHIND"},
+            {"mergeStateStatus": "BEHIND"},
+        )
+        policy = self._base_pr_json()["statusCheckRollup"] + [
+            {
+                "name": drain_prs.STALE_APPROVAL_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:02Z",
+            }
+        ]
+        self._script_pr_view({"headRefOid": moved, "statusCheckRollup": policy})
+        self.fake.script("gh", self.UPDATE_BRANCH, stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", self.UPDATE_BRANCH, stdout="")
+
+        def check(repo_slug, cwd):
+            self.wall += drain_prs.UPDATE_BRANCH_WAIT_SECONDS + 1
+            return original(repo_slug, cwd)
+
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+        original = self._check
+        self._check = check
+        try:
+            self._run_loop()
+        finally:
+            self._check = original
+
+        self.assertEqual(len(self._update_calls()), 2)
+        entry = self._state()["prs"]["42"]
+        self.assertIsNone(entry.get("branch_update_attempt"))
+        self.assertEqual(entry["approved_head"], moved)
+
+    RERUN = ["run", "rerun", "9911"]
+    RUN_VIEW = ["run", "view", "9911"]
+
+    def _failed_ci_rollup(self):
+        return [
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "completedAt": "2026-07-18T00:00:00Z",
+                "detailsUrl": "https://github.com/acme/widgets/actions/runs/9911/job/770001",
+            },
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "completedAt": "2026-07-18T00:00:01Z",
+            },
+        ]
+
+    def _reruns(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:3] == self.RERUN]
+
+    def _script_rerun_lost(self, run_view):
+        # The same failed attempt is still what the rollup shows when the
+        # network comes back; only the run itself can say what happened.
+        self._queue(self._approved(), self._approved())
+        self._script_pr_view({"statusCheckRollup": self._failed_ci_rollup()})
+        self.fake.script("gh", self.RERUN, stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script("gh", self.RERUN, stdout="")
+        self.fake.script("gh", self.RUN_VIEW, stdout=json.dumps(run_view))
+        self.check_outcomes = [drain_prs.PROBE_CONNECTED]
+
+    def _run_views(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:3] == self.RUN_VIEW]
+
+    def _assert_settled_as_one_request(self):
+        self.assertEqual(len(self._reruns()), 1)
+        self.assertEqual(len(self._run_views()), 1)
+        offline_entry = self.observed_while_offline[0]["state"]["prs"]["42"]
+        self.assertEqual(offline_entry["ci_rerun_unconfirmed"], "9911")
+        self.assertTrue(offline_entry["ci_rerun_active"])
+        entry = self._state()["prs"]["42"]
+        # Counted once, and still the barrier it was.
+        self.assertIsNone(entry["ci_rerun_unconfirmed"])
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertEqual(entry["consecutive_failures"], 0)
+
+    def test_a_rerun_accepted_with_its_response_lost_is_not_requested_again(self):
+        self._script_rerun_lost(
+            {"status": "in_progress", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_settled_as_one_request()
+
+    def test_a_rerun_accepted_and_finished_during_the_outage_is_not_repeated(self):
+        # The new attempt already completed while the rollup still reports
+        # the old failure: completion is no evidence the rerun never ran.
+        self._script_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_settled_as_one_request()
+
+    def test_a_rerun_that_never_reached_github_is_requested_once_more(self):
+        self._script_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770001}]}
+        )
+
+        self._run_loop()
+
+        self.assertEqual(len(self._reruns()), 2)
+        entry = self._state()["prs"]["42"]
+        # The lost request was taken back, so the budget counts one rerun.
+        self.assertEqual(entry["ci_rerun_attempts"], 1)
+        self.assertTrue(entry["ci_rerun_active"])
+        self.assertIsNone(entry["ci_rerun_unconfirmed"])
+
+    def test_an_answer_that_names_no_attempt_neither_retracts_nor_repeats(self):
+        for run_view in ({"status": "completed"}, {"jobs": [{"databaseId": "x"}]}):
+            with self.subTest(run_view=run_view):
+                self.setUp()
+                self._script_rerun_lost(run_view)
+
+                self._run_loop()
+
+                self.assertEqual(len(self._reruns()), 1)
+                entry = self._state()["prs"]["42"]
+                # Fail closed: the request stays recorded and unconfirmed, and
+                # the attempt fails the ordinary way.
+                self.assertEqual(entry["ci_rerun_unconfirmed"], "9911")
+                self.assertTrue(entry["ci_rerun_active"])
+                self.assertEqual(entry["ci_rerun_attempts"], 1)
+                self.assertEqual(entry["consecutive_failures"], 1)
+
+    def test_an_outage_inside_incident_reconciliation_enters_the_wait(self):
+        # Those reads used to swallow a failure silently and carry on; offline
+        # they must stop everything instead.
+        with (
+            mock.patch.object(drain_prs_service, "RUNTIME_ROOT", self.root),
+            mock.patch.object(drain_prs_service, "LOG_ROOT", self.drainer_log_dir),
+            mock.patch.object(drain_prs_service, "NTFY_URL", None),
+        ):
+            drain_prs_service.record_conflict_incident(
+                repo_path=self.ctx.path, pull_request=77, files=["README"]
+            )
+        self.fake.script("gh", ["pr", "view", "77"], stderr=GH_OUTAGE, exit_code=1)
+        self.fake.script(
+            "gh", ["pr", "view", "77"], stdout=json.dumps({"state": "CLOSED"})
+        )
+        self._queue([])
+        self.check_outcomes = [drain_prs.PROBE_OFFLINE, drain_prs.PROBE_CONNECTED]
+
+        self._run_loop()
+
+        self.assertEqual(len(self.checks), 2)
+        self._assert_no_work_while_offline()
+        self.assertEqual(self.observed_while_offline[0]["gh_calls"], 1)
+        open_incidents = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in self.incident_dir.glob("*.json")
+        ]
+        self.assertEqual(
+            [incident["status"] for incident in open_incidents], ["resolved"]
+        )
+
+    def test_an_authentication_failure_keeps_its_three_strike_exit(self):
+        for _ in range(3):
+            self.fake.script(
+                "gh", ["pr", "list"], stderr="HTTP 401: Bad credentials", exit_code=1
+            )
+        self.stop_after_passes = None
+
+        raised = self._run_loop(expect=drain_prs.DrainError)
+
+        self.assertNotIsInstance(raised, drain_prs.TransportError)
+        self.assertIn("3 consecutive times", str(raised))
+        self.assertEqual(self.checks, [])
+
+    def test_a_check_that_meets_a_non_network_failure_hands_back_to_it(self):
+        # A captive portal's certificate, say: the wait ends, and the
+        # ordinary failure handling decides -- here, the three-strike exit.
+        self._queue(None)
+        for _ in range(3):
+            self.fake.script(
+                "gh",
+                ["pr", "list"],
+                stderr="x509: certificate signed by unknown authority",
+                exit_code=1,
+            )
+        self.check_outcomes = [drain_prs.PROBE_FAILED]
+        self.stop_after_passes = None
+
+        raised = self._run_loop(expect=drain_prs.DrainError)
+
+        self.assertEqual(len(self.checks), 1)
+        self.assertIn("3 consecutive times", str(raised))
+        self.assertIn("x509", str(raised))
+
+    def test_a_once_run_still_reports_the_failure_instead_of_waiting(self):
+        self._queue(None)
+        self._ensure_marker_reads()
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "OFFLINE_WAIT_ENABLED", False),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+            mock.patch.object(drain_prs, "probe_connectivity") as check,
+        ):
+            with self.assertRaises(drain_prs.DrainError) as raised:
+                drain_prs.loop(
+                    self.ctx,
+                    interval=0,
+                    once=True,
+                    dry_run=False,
+                    gates=drain_prs.GateConfig(
+                        required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                        required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+                    ),
+                )
+        self.assertIn("connection reset by peer", str(raised.exception))
+        check.assert_not_called()
 
 
 if __name__ == "__main__":

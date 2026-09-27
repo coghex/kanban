@@ -132,6 +132,9 @@ data DrainerState
   | DrainerStopping
   | DrainerWarning
   | DrainerError
+  | -- | Live, holding the repository, and doing no drain work until GitHub
+    -- answers again: distinct from off, from healthy, and from a crash.
+    DrainerOffline
   deriving stock (Eq, Show)
 
 -- | What the controller reported about the service itself, separated from the
@@ -145,6 +148,11 @@ data DrainerActivity
     DrainerServiceStopped
   | -- | The runner and its drainer child are both alive under launchd.
     DrainerServiceRunning
+  | -- | The runner and its drainer child are both alive, and the child is
+    -- waiting out a network outage: it still owns the repository, so it is
+    -- running for every decision a live drainer governs, while it drains
+    -- nothing until a connectivity check gets through.
+    DrainerServiceOffline
   | -- | A runner is up without its drainer child, so launchd is mid-start.
     DrainerServiceStarting
   | -- | A stop is still in flight. Only ever set locally: the controller
@@ -1117,6 +1125,7 @@ decodeDrainerStatus bytes = do
 drainerIsRunning :: DrainerStatus -> Bool
 drainerIsRunning status = case status.drainerActivity of
   DrainerServiceRunning -> True
+  DrainerServiceOffline -> True
   DrainerServiceExternal _ -> True
   _ -> False
 
@@ -1201,6 +1210,12 @@ statusFromRaw :: RawStatus -> DrainerStatus
 statusFromRaw rawStatus = case (rawStatus.rawState, incident) of
   ("running", Nothing) -> reported DrainerOn DrainerServiceRunning "on"
   ("running", Just _) -> reported DrainerWarning DrainerServiceRunning ("on · unresolved incident" <> incidentDetail)
+  ("offline", Nothing) -> reported DrainerOffline DrainerServiceOffline offlineDetail
+  ("offline", Just _) ->
+    reported
+      DrainerOffline
+      DrainerServiceOffline
+      (offlineDetail <> " · unresolved incident" <> incidentDetail)
   ("starting", _) -> reported DrainerStarting DrainerServiceStarting "starting…"
   ("external", _) ->
     reported
@@ -1213,6 +1228,7 @@ statusFromRaw rawStatus = case (rawStatus.rawState, incident) of
   (other, _) -> reported DrainerError DrainerServiceUnknown ("unknown state: " <> other)
   where
     incident = fmap (fromMaybe "" . rawIncidentSummary) rawStatus.rawIncident
+    offlineDetail = "offline · waiting for network"
     incidentDetail = case incident of
       Just summary | not (Text.null summary) -> " · " <> summary
       _ -> ""
@@ -1426,6 +1442,8 @@ directMergeDecision config pending status selection
               DrainerServiceStopped -> RunDirectMerge number
               DrainerServiceRunning ->
                 RefuseDirectMerge "the PR drainer is running and merges approved pull requests itself; stop it with d to merge one directly"
+              DrainerServiceOffline ->
+                RefuseDirectMerge "the PR drainer is offline, waiting for the network, and still holds this repository; stop it with d to merge one directly"
               DrainerServiceStarting ->
                 RefuseDirectMerge "the PR drainer is starting; wait for it to settle, then stop it with d to merge one directly"
               DrainerServiceStopping ->
