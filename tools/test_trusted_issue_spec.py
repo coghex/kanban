@@ -5,7 +5,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 Issue #238 vendored `trusted_issue_spec.py` into the tracked plugin bundles and
 made it the solve workflows' only permitted view of an issue's comment timeline.
 The Grok bundle carries a third byte-identical copy, the Kimi bundle a fourth,
-and the Google bundle a fifth. Every behavioural
+the Google bundle a fifth, and the Claude-on-Copilot bundle a sixth. Every behavioural
 assertion here runs against every copy: a trust boundary enforced in one
 bundle and not the others is not enforced, and these files are the whole
 boundary — the tracked solve workflows have no fallback comment source to fail
@@ -55,18 +55,23 @@ CLAUDE_PLUGIN_ROOT = REPO_ROOT / "claude-plugin" / "plugins" / "kanban"
 GROK_PLUGIN_ROOT = REPO_ROOT / "grok-plugin" / "plugins" / "kanban"
 KIMI_PLUGIN_ROOT = REPO_ROOT / "kimi-plugin" / "plugins" / "kanban"
 GOOGLE_PLUGIN_ROOT = REPO_ROOT / "google-plugin" / "plugins" / "kanban"
+CLAUDE_COPILOT_PLUGIN_ROOT = REPO_ROOT / "claude-copilot-plugin" / "plugins" / "kanban"
 
 CODEX_HELPER = CODEX_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 CLAUDE_HELPER = CLAUDE_PLUGIN_ROOT / "scripts" / "trusted_issue_spec.py"
 GROK_HELPER = GROK_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 KIMI_HELPER = KIMI_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
 GOOGLE_HELPER = GOOGLE_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+CLAUDE_COPILOT_HELPER = (
+    CLAUDE_COPILOT_PLUGIN_ROOT / "skills" / "solve" / "scripts" / "trusted_issue_spec.py"
+)
 HELPERS = {
     "codex": CODEX_HELPER,
     "claude": CLAUDE_HELPER,
     "grok": GROK_HELPER,
     "kimi": KIMI_HELPER,
     "google": GOOGLE_HELPER,
+    "claude-copilot": CLAUDE_COPILOT_HELPER,
 }
 
 CODEX_SOLVE = CODEX_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
@@ -74,12 +79,14 @@ CLAUDE_SOLVE = CLAUDE_PLUGIN_ROOT / "commands" / "solve.md"
 GROK_SOLVE = GROK_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 KIMI_SOLVE = KIMI_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 GOOGLE_SOLVE = GOOGLE_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
+CLAUDE_COPILOT_SOLVE = CLAUDE_COPILOT_PLUGIN_ROOT / "skills" / "solve" / "SKILL.md"
 SOLVE_WORKFLOWS = {
     "codex": CODEX_SOLVE,
     "claude": CLAUDE_SOLVE,
     "grok": GROK_SOLVE,
     "kimi": KIMI_SOLVE,
     "google": GOOGLE_SOLVE,
+    "claude-copilot": CLAUDE_COPILOT_SOLVE,
 }
 
 # The exact lookup each solve workflow uses to find its own installed copy. The
@@ -280,10 +287,94 @@ GOOGLE_HELPER_LOOKUP = (
     + "PY"
 )
 
+CLAUDE_COPILOT_HELPER_PYTHON = '''import json, os, sys
+from pathlib import Path
+
+plugin_root, copilot_home = sys.argv[1], sys.argv[2]
+relative = Path("skills") / "solve" / "scripts" / "trusted_issue_spec.py"
+marketplace, plugin, bundle = "kanban-claude", "kanban", "claude-copilot-plugin-plugins-kanban"
+def finish(candidate):
+    if not candidate.is_file():
+        raise SystemExit(f"trusted helper was not found at {candidate}")
+    print(candidate)
+    raise SystemExit(0)
+if plugin_root:
+    finish(Path(plugin_root) / relative)
+settings = Path(copilot_home) / "settings.json"
+if os.path.lexists(settings):
+    try:
+        document = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"Copilot settings at {settings} are unreadable ({error}).")
+    if not isinstance(document, dict):
+        raise SystemExit(f"Copilot settings at {settings} are not a JSON object.")
+    marketplaces = document.get("extraKnownMarketplaces")
+    if marketplaces is not None and not isinstance(marketplaces, dict):
+        raise SystemExit(
+            f"Copilot settings at {settings} have malformed extraKnownMarketplaces."
+        )
+    if isinstance(marketplaces, dict) and marketplace in marketplaces:
+        entry = marketplaces[marketplace]
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed {marketplace} entry."
+            )
+        source = entry.get("source")
+        if not isinstance(source, dict):
+            raise SystemExit(
+                f"Copilot settings at {settings} have a malformed {marketplace} source."
+            )
+        kind = source.get("source")
+        if kind == "directory":
+            recorded = source.get("path")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise SystemExit(
+                    f"Copilot settings at {settings} do not name an absolute {marketplace} path: {recorded!r}."
+                )
+            finish(Path(recorded) / "plugins" / plugin / relative)
+        locates = {"github": "repo", "git": "url", "url": "url"}.get(kind)
+        if locates is None:
+            raise SystemExit(
+                f"Copilot settings at {settings} name an unsupported {marketplace} source kind: {kind!r}."
+            )
+        located = source.get(locates)
+        if not isinstance(located, str) or not located.strip():
+            raise SystemExit(
+                f"Copilot settings at {settings} do not name a {locates} for the {kind} {marketplace} source: {located!r}."
+            )
+installed = Path(copilot_home) / "installed-plugins"
+def installs_this_bundle(name):
+    repository, separator, subdirectory = name.rpartition("--")
+    return separator == "--" and subdirectory == bundle and "--" in repository
+roots = []
+from_marketplace = installed / marketplace / plugin
+if from_marketplace.is_dir():
+    roots.append(from_marketplace)
+direct = installed / "_direct"
+if direct.is_dir():
+    roots += sorted(
+        child
+        for child in direct.iterdir()
+        if child.is_dir() and installs_this_bundle(child.name)
+    )
+if not roots:
+    raise SystemExit(f"trusted helper was not found: $CLAUDE_COPILOT_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+if len(roots) != 1:
+    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
+finish(roots[0] / relative)
+'''
+CLAUDE_COPILOT_HELPER_LOOKUP = (
+    'python3 - "${CLAUDE_COPILOT_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<\'PY\'\n'
+    + CLAUDE_COPILOT_HELPER_PYTHON
+    + "PY"
+)
+
 # The entry names `copilot plugin install coghex/kanban:<bundle>/plugins/kanban`
 # writes under `$COPILOT_HOME/installed-plugins/_direct/`, observed with GitHub
 # Copilot CLI 1.0.85 and re-pinned against the real CLI by RealCopilotInstallTests
-# in tools/test_kimi_plugin.py and tools/test_google_plugin.py.
+# in tools/test_kimi_plugin.py and tools/test_google_plugin.py. The
+# Claude-on-Copilot bundle's entry follows the same flattening rule; its own
+# discovery matrix lives in tools/test_claude_copilot_plugin.py.
 KIMI_DIRECT_ENTRY = "coghex--kanban--kimi-plugin-plugins-kanban"
 GOOGLE_DIRECT_ENTRY = "coghex--kanban--google-plugin-plugins-kanban"
 
@@ -431,9 +522,9 @@ def imported_modules(path):
 
 
 def load_helper(brand: str):
-    """Import one vendored copy by file path. None of the five lives under
+    """Import one vendored copy by file path. None of the six lives under
     tools/, so none is ever on sys.path via `-s tools` discovery, and the
-    five must be loaded under distinct module names so importing one cannot
+    six must be loaded under distinct module names so importing one cannot
     serve another's assertions from sys.modules."""
     path = HELPERS[brand]
     spec = importlib.util.spec_from_file_location(
@@ -1883,6 +1974,14 @@ class SolveWorkflowContractTests(unittest.TestCase):
             'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
             GOOGLE_SOLVE.read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            'python3 "$TRUSTED_SPEC" --repo "$REPO" <issue>',
+            CLAUDE_COPILOT_SOLVE.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            CLAUDE_COPILOT_HELPER_LOOKUP,
+            CLAUDE_COPILOT_SOLVE.read_text(encoding="utf-8"),
+        )
 
     def test_each_workflow_forbids_every_unfiltered_comment_source(self):
         for brand, text in self.texts():
@@ -2097,7 +2196,7 @@ class ForkCheckoutRepositoryScopeTests(unittest.TestCase):
 
 class SolveRepositoryScopeTests(unittest.TestCase):
     """Issue #277 requirements 1, 2, 4, and 5: one established identity scopes
-    the whole solve run, in all five bundles. Kanban's resolved repository need not
+    the whole solve run, in all six bundles. Kanban's resolved repository need not
     be the checkout's own remote, so a lane that re-derives one for its
     selection, claim, spec fetch, or pull request works a different
     repository's issue #N than the one Kanban gated and displays."""
@@ -2137,13 +2236,15 @@ class SolveRepositoryScopeTests(unittest.TestCase):
             self.assertIn("are forbidden here", squashed, brand)
 
     def test_the_gate_check_and_the_helper_both_receive_the_identity(self):
-        # The five bundles resolve the helper differently — `$TRUSTED_SPEC`
+        # The six bundles resolve the helper differently — `$TRUSTED_SPEC`
         # under `$CODEX_HOME`, `${CLAUDE_PLUGIN_ROOT}`,
         # `$GROK_PLUGIN_ROOT` / `$GROK_HOME/installed-plugins/kanban-<hash>`,
         # `$KIMI_PLUGIN_ROOT` / the recorded `kanban-kimi` marketplace path /
         # the copied layouts under `$COPILOT_HOME/installed-plugins/`,
-        # or `$GOOGLE_PLUGIN_ROOT` / the recorded `kanban-google` marketplace path /
-        # those same copied layouts — so the invocation is
+        # `$GOOGLE_PLUGIN_ROOT` / the recorded `kanban-google` marketplace path /
+        # those same copied layouts, or `$CLAUDE_COPILOT_PLUGIN_ROOT` / the
+        # recorded `kanban-claude` marketplace path / those same copied
+        # layouts — so the invocation is
         # matched by what it targets rather than by any one literal spelling, and
         # every match found must carry the identity.
         for brand, text in self.documents():

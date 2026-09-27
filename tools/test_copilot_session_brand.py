@@ -11,18 +11,21 @@ pull request it had no business marking. The Kimi and Google `solve` and
 `autosolve` skills now read the session's model from the record the Copilot
 CLI keeps -- `session-store.db`, opened read-only, for
 `$COPILOT_AGENT_SESSION_ID` -- before the claim, and refuse on a mismatch and
-on every signal they cannot read.
+on every signal they cannot read. Issue #722's Claude-on-Copilot bundle runs
+the same check for the claude brand, so a Claude session has a bundle of its
+own to load rather than only a refusal.
 
 String search alone cannot prove the check refuses what it must, so the
 fenced program is lifted out of each rendered asset and run against fixture
 databases. The rest of the module holds where it lives: in all four Copilot
 workflow assets, authored once per source, ahead of the claim, ending the
-autosolve run on refusal -- and in no Grok, Claude, or Codex asset, which keep
-no Copilot database requirement.
+autosolve run on refusal -- and in no Grok, Claude Code, or Codex asset, which
+keep no Copilot database requirement.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -35,10 +38,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SOLVE_SOURCE = "tools/command_sources/external/solve.md"
 AUTOSOLVE_SOURCE = "tools/command_sources/external/autosolve.md"
-COPILOT_BRANDS = ("kimi", "google")
+# Each Copilot bundle's origin brand, keyed by the brand the model check
+# enforces, and the directory it ships from.
+COPILOT_BUNDLES = {
+    "kimi": "kimi-plugin",
+    "google": "google-plugin",
+    "claude": "claude-copilot-plugin",
+}
+COPILOT_BRANDS = tuple(COPILOT_BUNDLES)
 COPILOT_ASSETS = {
-    (brand, workflow): f"{brand}-plugin/plugins/kanban/skills/{workflow}/SKILL.md"
-    for brand in COPILOT_BRANDS
+    (brand, workflow): f"{directory}/plugins/kanban/skills/{workflow}/SKILL.md"
+    for brand, directory in COPILOT_BUNDLES.items()
     for workflow in ("solve", "autosolve")
 }
 # The negative controls: none of these runs inside a Copilot session, so none
@@ -59,7 +69,7 @@ CLAIM_COMMAND = 'gh issue edit -R "$REPO" <issue> --add-assignee @me'
 
 BASH_FENCE_RE = re.compile(r"```bash\n(?P<body>.*?)\n[ \t]*```", re.DOTALL)
 BRAND_BLOCK_RE = re.compile(
-    r"<!-- brand:(?P<brands>[a-z,]+) -->\n(?P<body>.*?)(?=<!-- /?brand)", re.DOTALL
+    r"<!-- brand:(?P<brands>[a-z,-]+) -->\n(?P<body>.*?)(?=<!-- /?brand)", re.DOTALL
 )
 
 
@@ -157,7 +167,11 @@ class GuardBehaviorTests(unittest.TestCase):
         )
 
     def test_a_matching_model_proceeds_in_each_copilot_bundle(self):
-        for brand, model in (("kimi", "kimi-k3"), ("google", "gemini-3-pro")):
+        for brand, model in (
+            ("kimi", "kimi-k3"),
+            ("google", "gemini-3-pro"),
+            ("claude", "claude-opus-5.5"),
+        ):
             for workflow in ("solve", "autosolve"):
                 with self.subTest(brand=brand, workflow=workflow):
                     self.database.unlink(missing_ok=True)
@@ -176,6 +190,29 @@ class GuardBehaviorTests(unittest.TestCase):
             "load the kanban-claude bundle instead",
         )
         self.assertIn("Nothing was claimed.", line)
+
+    def test_the_bundle_the_kimi_refusal_names_now_exists_and_accepts_claude(self):
+        # Issue #722: the refusal above names `kanban-claude`, and that is the
+        # Claude-on-Copilot marketplace's name, so the recommendation leads
+        # somewhere and the session it redirects is admitted there.
+        marketplace = (
+            REPO_ROOT / "claude-copilot-plugin" / ".github" / "plugin" / "marketplace.json"
+        )
+        self.assertEqual(json.loads(marketplace.read_text(encoding="utf-8"))["name"], "kanban-claude")
+        make_database(self.database, [("session-1", None, "claude-opus-5")])
+        self.assert_proceeds(self.run_guard("claude"), "claude-opus-5", "claude")
+
+    def test_a_kimi_session_loading_the_claude_bundle_refuses_naming_kimi(self):
+        make_database(self.database, [("session-1", None, "kimi-k3")])
+        for workflow in ("solve", "autosolve"):
+            with self.subTest(workflow=workflow):
+                self.assert_refused(
+                    self.run_guard("claude", workflow=workflow),
+                    "'kimi-k3'",
+                    "a kimi model",
+                    "this is the claude bundle",
+                    "load the kanban-kimi bundle instead",
+                )
 
     def test_every_declared_pattern_maps_to_its_brand(self):
         # Requirement 4, as the issue review anchored it: four prefixes and one
@@ -342,7 +379,7 @@ class GuardPlacementTests(unittest.TestCase):
                 for block in BRAND_BLOCK_RE.finditer(text)
                 if GUARD_TOKEN in block.group("body")
             ]
-            self.assertEqual(owners, ["kimi,google"], source)
+            self.assertEqual(owners, ["kimi,google,claude-copilot"], source)
         # The two workflows run one program, not two that could drift.
         self.assertEqual(texts[SOLVE_SOURCE], texts[AUTOSOLVE_SOURCE])
 

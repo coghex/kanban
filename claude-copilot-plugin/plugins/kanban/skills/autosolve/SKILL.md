@@ -1,39 +1,29 @@
 ---
 name: autosolve
-<!-- brand:grok,kimi,google -->
-description: Run {{cmd:solve}} for one GitHub issue, then drive a Codex review loop of up to five rounds until the pull request is approved. Documentation-only issues that require a landing helper this bundle does not ship are reported and stopped. Stops at reviewed:approve and never merges, labels, or finalizes. Use only when the user invokes {{cmd:autosolve}} or explicitly asks for this autonomous workflow. This is the {{brand:title}} brand; never invoke Claude.
-<!-- brand:claude-copilot -->
-description: Run {{cmd:solve}} for one GitHub issue, then drive a Codex review loop of up to five rounds until the pull request is approved. Documentation-only issues that require a landing helper this bundle does not ship are reported and stopped. Stops at reviewed:approve and never merges, labels, or finalizes. Use only when the user invokes {{cmd:autosolve}} or explicitly asks for this autonomous workflow. This is the {{brand:title}} brand on the Copilot CLI; never spawn another {{brand:title}} session, and never review its own pull request.
-<!-- /brand -->
-argument-hint: "[issue number]"
+description: Run /solve for one GitHub issue, then drive a Codex review loop of up to five rounds until the pull request is approved. Documentation-only issues that require a landing helper this bundle does not ship are reported and stopped. Stops at reviewed:approve and never merges, labels, or finalizes. Use only when the user invokes /autosolve or explicitly asks for this autonomous workflow. This is the Claude brand on the Copilot CLI; never spawn another Claude session, and never review its own pull request.
 ---
 
 # Autosolve With Inline Review
 
-Complete {{cmd:solve}} for one GitHub issue, then obtain a Codex
+Complete /solve for one GitHub issue, then obtain a Codex
 review until approval. The solver must never review its own pull request. Stop
-<!-- brand:grok,kimi,google -->
-at approval; never merge or finalize. This session is {{brand:title}}. It must never
-spawn, invoke, or impersonate Claude.
-<!-- brand:claude-copilot -->
-at approval; never merge or finalize. This session is {{brand:title}}, running on
-the Copilot CLI. It must never spawn or invoke another {{brand:title}} session, and
+at approval; never merge or finalize. This session is Claude, running on
+the Copilot CLI. It must never spawn or invoke another Claude session, and
 never impersonate Codex.
-<!-- /brand -->
 
-{{cmd:solve}} is a delegated sub-step of this workflow. It was written to be
+/solve is a delegated sub-step of this workflow. It was written to be
 invoked directly, so it states its own terminal stop condition. Where that
 conflicts with a step below, **this document wins**.
 
 ## 1. Resolve the repository, then the issue
 
-Set `REPO` once, before {{cmd:solve}} claims anything, and pass `-R "$REPO"` on
+Set `REPO` once, before /solve claims anything, and pass `-R "$REPO"` on
 every `gh` issue and pull-request call this workflow makes. A `gh` call without
 `-R` targets whatever repository the session's working directory happens to be
 in, and this run assigns an issue, opens a pull request, and drives a review
 against it.
 
-Resolve it exactly the way {{cmd:solve}} resolves it, so the identity this
+Resolve it exactly the way /solve resolves it, so the identity this
 workflow reports and the identity that step establishes are one derivation
 rather than two that can disagree:
 
@@ -44,7 +34,7 @@ REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 If the invocation already supplied an identity — Kanban's prompt passes
 `--repo <owner>/<name>` — that identity is the target and this resolution does
 not run. Either way it is resolved once, and every step below uses that one
-value, including the one handed to {{cmd:solve}} and the coordinator invocation
+value, including the one handed to /solve and the coordinator invocation
 in step 5.
 
 **Announce, then act:** name the resolved `$REPO` and the issue number before
@@ -52,28 +42,17 @@ the first step below. Reporting what was resolved is what catches a wrong
 resolution, and it catches it only while nothing has been claimed in the wrong
 repository yet.
 
-<!-- brand:grok -->
-```bash
-ISSUE="$ARGUMENTS"
-```
-
-`$ARGUMENTS` is what Grok substitutes before the session reads this file.
-An empty `$ISSUE` is not an error: given no number, {{cmd:solve}} selects the
-oldest approved, unassigned implementation issue itself.
-<!-- brand:kimi,google,claude-copilot -->
 The issue number comes from the user's request: Copilot skills receive no
 substituted arguments, so it is whatever number the user named when asking for
-this workflow. An unnamed issue is not an error: given no number, {{cmd:solve}}
+this workflow. An unnamed issue is not an error: given no number, /solve
 selects the oldest approved, unassigned implementation issue itself.
-<!-- /brand -->
 
-<!-- brand:kimi,google,claude-copilot -->
 ### Confirm the session model
 
-This bundle stamps the {{brand:name}} origin marker, which is correct only in a
-Copilot session running a {{brand:title}} model, and the model's own report of which
-model it is is not evidence. Before step 2 — before {{cmd:solve}} claims
-anything — run the session model check {{cmd:solve}}'s "Confirm The Session
+This bundle stamps the claude origin marker, which is correct only in a
+Copilot session running a Claude model, and the model's own report of which
+model it is is not evidence. Before step 2 — before /solve claims
+anything — run the session model check /solve's "Confirm The Session
 Model" section runs, reading the newest main-agent row for
 `$COPILOT_AGENT_SESSION_ID` from `${COPILOT_HOME:-$HOME/.copilot}/session-store.db`,
 opened read-only:
@@ -86,7 +65,7 @@ from pathlib import Path
 # A false origin marker is durable: it routes the review and stays on the pull
 # request. This stop is cheap. So every signal that cannot be read refuses, and
 # none of the refusals below may be softened into a warning.
-bundle = "{{brand:name}}"
+bundle = "claude"
 session, copilot_home = sys.argv[1], sys.argv[2]
 def refuse(reason):
     raise SystemExit(
@@ -137,25 +116,19 @@ A false origin marker is durable and this stop is cheap, so every failure the
 check reports refuses and none is a warning: a model of another brand, an
 unrecognized model, and a session record that cannot be read alike. A non-zero
 exit ends this run with exactly the one line it printed: do not run
-{{cmd:solve}}, do not reach step 3's reclaim or either of its dispositions, and do
-not reach step 5's review. {{cmd:solve}} repeats the check before its own claim,
+/solve, do not reach step 3's reclaim or either of its dispositions, and do
+not reach step 5's review. /solve repeats the check before its own claim,
 and a refusal there ends this run the same way.
-<!-- /brand -->
 
 ## 2. Complete the solve
 
-<!-- brand:grok -->
-Run {{cmd:solve}} for that issue in `$REPO`. If the issue number was empty, capture
-the number {{cmd:solve}} selects and claims now: step 3's issue mutations assume it
-<!-- brand:kimi,google,claude-copilot -->
-Run {{cmd:solve}} for that issue in `$REPO`. If the issue number was not named,
-capture the number {{cmd:solve}} selects and claims now: step 3's issue mutations
+Run /solve for that issue in `$REPO`. If the issue number was not named,
+capture the number /solve selects and claims now: step 3's issue mutations
 assume it
-<!-- /brand -->
 is populated, and there is no other point in this document where that number
 is recorded.
 
-**Its stop condition ends that workflow, not this run.** {{cmd:solve}} closes
+**Its stop condition ends that workflow, not this run.** /solve closes
 with a `## Stop Condition` section telling you to end with exactly
 `PR #<number> - <summary>`; that line is the handoff into step 4, not a final
 answer. Never emit it as this run's last output — the closing lines at the end
@@ -201,7 +174,7 @@ asset, an unresolved open decision — ends this run; report it.
 **Override, not a stop.** Some issues' effective spec states that the change
 must land through the target repository's own direct-publication tooling — a
 documentation worktree and a landing script such as `tools/docs_land.sh` —
-rather than through a pull request. {{cmd:solve}}'s own contract only knows
+rather than through a pull request. /solve's own contract only knows
 how to open a pull request, so left alone it treats that instruction as a
 conflict and releases the claim without implementing anything. This step
 overrides that stop for exactly this situation, in favor of a judgment call
@@ -227,7 +200,7 @@ gh repo view --json nameWithOwner --jq .nameWithOwner
 ```
 
 Choose the disposition on the merits of the specific change, not the label on
-the issue. {{cmd:solve}} already released the claim at the stop, so reclaim only
+the issue. /solve already released the claim at the stop, so reclaim only
 the branch that will keep working:
 
 - **Worthy of review** — this checkout's own repository does not match
@@ -235,10 +208,10 @@ the branch that will keep working:
   listed acceptance check cannot be run and confirmed before landing; or this
   session is not fully confident the correction is right. Override the "not
   through a pull request" instruction instead of honoring it: reclaim the
-  issue, immediately repeat the collision check {{cmd:solve}}'s own "Select And
+  issue, immediately repeat the collision check /solve's own "Select And
   Claim" step performs right after claiming (no open pull request already
   closes this issue, no other worktree already claims it), then continue
-  {{cmd:solve}} exactly as it runs for any other issue — implement in the
+  /solve exactly as it runs for any other issue — implement in the
   issue's own worktree, open the pull request with `Closes #<issue>` — and
   resume at step 4.
 
@@ -249,17 +222,11 @@ the branch that will keep working:
 - **Needs a documentation landing workflow this bundle does not ship** —
   this checkout's own repository matches `$REPO` and the change is otherwise
   simple enough to land without a pull request. Stop and report that. Do
-  not reclaim the issue; {{cmd:solve}} already released it. This {{brand:title}} bundle
-<!-- brand:grok,kimi,google -->
-  packages only {{cmd:solve}} and {{cmd:autosolve}}; it does not package {{cmd:push-docs}}. Do
-  not invent a landing, do not call a Claude or Codex {{cmd:push-docs}} skill,
-  and do not open a pull request just to avoid the stop.
-<!-- brand:claude-copilot -->
-  packages only {{cmd:solve}} and {{cmd:autosolve}}; it does not package {{cmd:push-docs}}. Do
-  not invent a landing, do not call Claude Code's or Codex's {{cmd:push-docs}},
+  not reclaim the issue; /solve already released it. This Claude bundle
+  packages only /solve and /autosolve; it does not package /push-docs. Do
+  not invent a landing, do not call Claude Code's or Codex's /push-docs,
   which are packaged for other hosts, and do not open a pull request just to
   avoid the stop.
-<!-- /brand -->
 
 When step 3 chose the worthy-of-review disposition, the issue's own
 no-pull-request requirement is one the reviewer would otherwise block on, so
@@ -272,7 +239,7 @@ Standing owner directive from the autosolve workflow's documentation-only step: 
 
 ## 4. Record the pull request and its worktree
 
-Record the pull request number and the absolute issue worktree {{cmd:solve}}
+Record the pull request number and the absolute issue worktree /solve
 selected. A worktree it created lives at
 `${WORKTREES_ROOT:-$HOME/worktrees}/<owner>/<repo>/issue-<n>-<slug>`; a
 recovered legacy worktree keeps its existing path. Every fix in step 6 is made
@@ -281,101 +248,58 @@ in that worktree and nowhere else.
 Then verify the origin marker the review routing depends on:
 
 ```bash
-<!-- brand:grok,kimi,google -->
-gh pr view "$PR" -R "$REPO" --json body
-<!-- brand:claude-copilot -->
 gh pr view "$PR" -R "$REPO" --json body,isCrossRepository
-<!-- /brand -->
 ```
 
-The body's final non-whitespace content must be `<!-- pr-origin:{{brand:name}} -->`,
+The body's final non-whitespace content must be `<!-- pr-origin:claude -->`,
 and that marker is what routes the review to Codex. A body that carries none,
 or carries a duplicated or mixed marker, has an unknown origin and routes to
-<!-- brand:grok,kimi,google -->
-both brands — including Claude — instead; stop and report it rather than
-reviewing anything yourself, and rather than letting a dual review start. A
-pull request {{cmd:solve}} opened from a different push remote is still {{brand:name}}-origin:
-the bundled coordinator reads that marker even when GitHub reports
-`isCrossRepository`.
-<!-- brand:claude-copilot -->
-both brands — another {{brand:title}} reviewer among them — instead; stop and report it
+both brands — another Claude reviewer among them — instead; stop and report it
 rather than reviewing anything yourself, and rather than letting a dual review
 start.
 
-A pull request {{cmd:solve}} opened from a different push remote is the one case
+A pull request /solve opened from a different push remote is the one case
 where a correct marker still reads as unknown. The bundled coordinator keeps
 only a grok, kimi, or google marker when GitHub reports `isCrossRepository`,
 exactly as Claude Code's and Codex's own coordinators do, so a
-`pr-origin:{{brand:name}}` marker on a fork pull request routes to both brands. When
+`pr-origin:claude` marker on a fork pull request routes to both brands. When
 the `isCrossRepository` read above is `true`, stop and report that this fork
-pull request's {{brand:name}} origin cannot be routed to Codex from this bundle: do
+pull request's claude origin cannot be routed to Codex from this bundle: do
 not run step 5, and do not review, label, or ask the coordinator for anything.
 Step 5's dry run reports the same pull request as an unknown origin on a dual
 route, which is a stop there too.
-<!-- /brand -->
 
 ## 5. The review loop
 
 For rounds 1 through 5, invoke this bundle's coordinator with `--review` in
 round 1 and `--rereview` after each pushed fix.
 
-The pull request's {{brand:name}} origin marker requires a fresh **Codex** review. Do
-<!-- brand:grok,kimi,google -->
-not review, comment, or label the pull request yourself. Do not invoke Claude
-for any step of this loop.
-<!-- brand:claude-copilot -->
+The pull request's claude origin marker requires a fresh **Codex** review. Do
 not review, comment, or label the pull request yourself. Do not spawn another
-{{brand:title}} session for any step of this loop.
-<!-- /brand -->
+Claude session for any step of this loop.
 
 **Never pass `--self-review` to the bundled coordinator.** This session is
-{{brand:title}}, and it authored the {{brand:name}}-origin pull request it is now trying to get
+Claude, and it authored the claude-origin pull request it is now trying to get
 reviewed. Omitting the flag makes the coordinator spawn the real Codex
 reviewer, which is the whole point of this step. Passing `--self-review-as
 claude` or any other declaration is forbidden.
 
-Locate the coordinator the same way {{cmd:solve}} locates the trusted-comment
+Locate the coordinator the same way /solve locates the trusted-comment
 helper, because the working directory is the repository being worked.
-<!-- brand:grok -->
-Prefer `$GROK_PLUGIN_ROOT` when Grok set it — that is the plugin directory
-this session loaded, whether a hashed install or a local marketplace source
-outside `$GROK_HOME`. Otherwise search the documented install layout
-`$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`):
-
-```bash
-COORDINATOR="$(python3 - "${GROK_PLUGIN_ROOT:-}" "${GROK_HOME:-$HOME/.grok}" <<'PY'
-import sys
-from pathlib import Path
-
-plugin_root, grok_home = sys.argv[1], sys.argv[2]
-relative = Path("scripts") / "review_pr.py"
-if plugin_root:
-    candidate = Path(plugin_root) / relative
-    if not candidate.is_file():
-        raise SystemExit(f"coordinator was not found at {candidate}")
-    print(candidate)
-    raise SystemExit(0)
-matches = sorted((Path(grok_home) / "installed-plugins").glob("kanban-*/" + relative.as_posix()))
-if not matches:
-    raise SystemExit("coordinator was not found under $GROK_HOME/installed-plugins/kanban-*")
-if len(matches) != 1:
-    raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(path) for path in matches))
-print(matches[0])
-<!-- brand:kimi,google,claude-copilot -->
-Prefer `${{brand:upper}}_PLUGIN_ROOT` when the launcher set it — that is the plugin
+Prefer `$CLAUDE_COPILOT_PLUGIN_ROOT` when the launcher set it — that is the plugin
 directory this session loaded, whether a marketplace install or a local
-`--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-{{brand:name}}`
+`--plugin-dir` source outside `$COPILOT_HOME`. Otherwise read the `kanban-claude`
 marketplace's recorded local path out of `$COPILOT_HOME/settings.json`, and
 only then search the two copied layouts the Copilot CLI actually creates under
 `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`): the marketplace
-layout `kanban-{{brand:name}}/kanban/`, and a direct install
-`_direct/<owner>--<repo>--{{brand:bundle}}-plugin-plugins-kanban/`. Those two form one
+layout `kanban-claude/kanban/`, and a direct install
+`_direct/<owner>--<repo>--claude-copilot-plugin-plugins-kanban/`. Those two form one
 candidate set — an absent marketplace-layout install still admits a direct
 one, and two eligible roots across them refuse as ambiguous rather than
 picking either. Roots are
 identified before the coordinator is looked for, so a root missing it refuses
 instead of silently losing to a competitor. An absent settings file, one with
-no `kanban-{{brand:name}}` entry, or a `kanban-{{brand:name}}` entry the CLI recorded from a
+no `kanban-claude` entry, or a `kanban-claude` entry the CLI recorded from a
 remote `github`, `git`, or `url` source reaches that search; unreadable or
 malformed applicable settings, a recorded source kind that is unsupported or
 does not carry the field that kind locates its marketplace by (`repo` for
@@ -383,13 +307,13 @@ does not carry the field that kind locates its marketplace by (`repo` for
 recorded tree missing the coordinator refuse without falling through:
 
 ```bash
-COORDINATOR="$(python3 - "${{{brand:upper}}_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
+COORDINATOR="$(python3 - "${CLAUDE_COPILOT_PLUGIN_ROOT:-}" "${COPILOT_HOME:-$HOME/.copilot}" <<'PY'
 import json, os, sys
 from pathlib import Path
 
 plugin_root, copilot_home = sys.argv[1], sys.argv[2]
 relative = Path("scripts") / "review_pr.py"
-marketplace, plugin, bundle = "kanban-{{brand:name}}", "kanban", "{{brand:bundle}}-plugin-plugins-kanban"
+marketplace, plugin, bundle = "kanban-claude", "kanban", "claude-copilot-plugin-plugins-kanban"
 def finish(candidate):
     if not candidate.is_file():
         raise SystemExit(f"coordinator was not found at {candidate}")
@@ -455,28 +379,18 @@ if direct.is_dir():
         if child.is_dir() and installs_this_bundle(child.name)
     )
 if not roots:
-    raise SystemExit(f"coordinator was not found: ${{brand:upper}}_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
+    raise SystemExit(f"coordinator was not found: $CLAUDE_COPILOT_PLUGIN_ROOT is unset, the {marketplace} marketplace has no recorded local path, and neither {from_marketplace} nor {direct}/<owner>--<repo>--{bundle} exists")
 if len(roots) != 1:
     raise SystemExit("ambiguous Kanban installs: " + ", ".join(str(root) for root in roots))
 finish(roots[0] / relative)
-<!-- /brand -->
 PY
 )"
 ```
 
-<!-- brand:grok -->
-If that leaves `$COORDINATOR` empty, stop and report it. Never fall back to a
-{{brand:predecessors}} plugin path, a checkout-relative path, or a personal copy.
-<!-- brand:kimi,google -->
-If that leaves `$COORDINATOR` empty, stop and report it. Never fall back to a
-{{brand:predecessors}} plugin path, a checkout-relative path, or a personal
-copy.
-<!-- brand:claude-copilot -->
 If that leaves `$COORDINATOR` empty, stop and report it. Never fall back to
-Claude Code's plugin path, a {{brand:predecessors}} plugin path, a
+Claude Code's plugin path, a Codex, Grok, Kimi, or Google plugin path, a
 checkout-relative path, or a personal copy: Claude Code's `${CLAUDE_PLUGIN_ROOT}`
 names another host's bundle even when a launch left it exported.
-<!-- /brand -->
 
 Confirm the route before trusting a verdict. The coordinator's `--dry-run` mode
 reads the gate and reports the route without a write or a model call:
@@ -523,19 +437,14 @@ again changes nothing. A blank one returns `"status": "owner_directive_refused"`
 and publishes nothing. Before trusting the round, confirm the dry run's
 `owner_directives.in_force` lists every directive relayed so far.
 
-The dry run must report `"origin": "{{brand:name}}"` and `"route": "codex"`. If it
+The dry run must report `"origin": "claude"` and `"route": "codex"`. If it
 reports `"route": "claude"`, a comma-separated dual route, or an empty route,
-<!-- brand:grok,kimi,google -->
-stop and report it: that is a mis-stamped origin or a stale coordinator, and
-continuing would invoke Claude. Do not compensate by reviewing it yourself.
-<!-- brand:claude-copilot -->
 stop and report it: that is a mis-stamped origin, a fork pull request step 4
 should already have stopped, or a stale coordinator, and continuing would spawn
-a {{brand:title}} reviewer on a {{brand:title}}-origin pull request. Do not compensate by
+a Claude reviewer on a Claude-origin pull request. Do not compensate by
 reviewing it yourself.
-<!-- /brand -->
 
-Then run the real round with the same flags plus `--expected-origin {{brand:name}}` and
+Then run the real round with the same flags plus `--expected-origin claude` and
 `--expected-route codex`, so a pull request whose origin drifted after the
 dry run is refused before any reviewer is spawned:
 
@@ -544,19 +453,14 @@ python3 "$COORDINATOR" \
   --path "$(git rev-parse --show-toplevel)" \
   --repo "$REPO" \
   --review "$PR" \
-  --expected-origin {{brand:name}} \
+  --expected-origin claude \
   --expected-route codex \
   --json
 ```
 
 A `"status": "route_mismatch"` result means the live origin or route is no
-<!-- brand:grok,kimi,google -->
-longer {{brand:name}}/codex; stop and report it. Do not retry without those flags, and
-do not invoke Claude. The published success result must report
-<!-- brand:claude-copilot -->
-longer {{brand:name}}/codex; stop and report it. Do not retry without those flags, and
-do not spawn a {{brand:title}} reviewer. The published success result must report
-<!-- /brand -->
+longer claude/codex; stop and report it. Do not retry without those flags, and
+do not spawn a Claude reviewer. The published success result must report
 `"status": "reviewed"`, and the `pr-review:v2` marker the coordinator
 posts on the pull request must carry `reviewers=codex`. An
 `"awaiting_self_review"` status means `--self-review` leaked in and the round
@@ -581,26 +485,16 @@ gh pr view "$PR" -R "$REPO" --json headRefOid,labels,comments
   probes, and audits relevant to the changed paths and the review concern. Do
   not run a whole suite or a local CI mirror unless the user explicitly
   requests it. Commit, push, and rereview; never push with a failing selected
-<!-- brand:grok,kimi,google -->
-  required check. {{brand:title}} revises in this same session; do not ask the board to
-  spawn a reviser, and do not ask Claude to revise.
-<!-- brand:claude-copilot -->
   required check. Revise in this same session; do not ask the board to spawn a
-  reviser, and do not start another {{brand:title}} session to revise.
-<!-- /brand -->
+  reviser, and do not start another Claude session to revise.
 - Neither label, a marker whose head is not the current head, a marker whose
   verdict does not match the label beside it, or a marker whose `reviewers`
   names this session's own brand rather than Codex: stop and report
   review publication failure. Do not add or alter a verdict yourself.
 
-This session's own brand is `{{brand:name}}`, so a marker reading `reviewers={{brand:name}}` on
-this {{brand:name}}-origin pull request is the publication failure that last
-<!-- brand:grok,kimi,google -->
-bullet names, however green the label sitting beside it looks. A marker
-reading `reviewers=claude` is also a publication failure: this origin is
-<!-- brand:claude-copilot -->
+This session's own brand is `claude`, so a marker reading `reviewers=claude` on
+this claude-origin pull request is the publication failure that last
 bullet names, however green the label sitting beside it looks: this origin is
-<!-- /brand -->
 reviewed by Codex only.
 
 ## 7. Where this run stops
@@ -626,12 +520,8 @@ PR #<pr> approved after <k> inline review round(s) — this run merges nothing.
 PR #<pr> still reviewed:changes after 5 rounds — needs your input.
 PR #<pr> review publication failed in round <k> — needs your input.
 Issue #<issue> needs a documentation landing workflow this bundle does not ship.
-<!-- brand:claude-copilot -->
 PR #<pr> is a fork pull request whose claude origin this bundle cannot route to Codex — needs your input.
-<!-- /brand -->
 ```
-<!-- brand:kimi,google,claude-copilot -->
 
 The one exception is a session model refusal, from step 1 or from inside
-{{cmd:solve}}: end with exactly the line that check printed.
-<!-- /brand -->
+/solve: end with exactly the line that check printed.

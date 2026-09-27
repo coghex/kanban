@@ -82,14 +82,16 @@ everything else.
   (`codex-plugin/plugins/kanban/skills/solve/SKILL.md`,
   `claude-plugin/plugins/kanban/commands/solve.md`,
   `grok-plugin/plugins/kanban/skills/solve/SKILL.md`,
-  `kimi-plugin/plugins/kanban/skills/solve/SKILL.md`, and
-  `google-plugin/plugins/kanban/skills/solve/SKILL.md`) fetch the issue's effective
+  `kimi-plugin/plugins/kanban/skills/solve/SKILL.md`,
+  `google-plugin/plugins/kanban/skills/solve/SKILL.md`, and
+  `claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md`) fetch the issue's effective
   spec exclusively through their own bundle's vendored `trusted_issue_spec.py`
   (`codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
   `claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py`,
   `grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
   `kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
-  `google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`). Each copy
+  `google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`,
+  `claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py`). Each copy
   retrieves the complete paginated timeline in deterministic chronological
   order and serializes a comment body only for the exact, case-insensitive
   login `coghex`; every other comment is returned as metadata alone — id,
@@ -111,9 +113,10 @@ everything else.
   resolves `$GROK_PLUGIN_ROOT` when Grok set it (the loaded plugin directory,
   including a local marketplace source outside `$GROK_HOME`) and otherwise
   searches `$GROK_HOME/installed-plugins/kanban-<hash>/` (default `~/.grok`);
-  the Kimi and Google skills resolve `$KIMI_PLUGIN_ROOT` or
-  `$GOOGLE_PLUGIN_ROOT` when the launcher set it, then the `kanban-kimi` or
-  `kanban-google` marketplace's recorded local path in
+  the Kimi, Google, and Claude-on-Copilot skills resolve `$KIMI_PLUGIN_ROOT`,
+  `$GOOGLE_PLUGIN_ROOT`, or `$CLAUDE_COPILOT_PLUGIN_ROOT` when the launcher set
+  it, then the `kanban-kimi`, `kanban-google`, or `kanban-claude` marketplace's
+  recorded local path in
   `$COPILOT_HOME/settings.json` (how a local Copilot marketplace install
   loads). Copilot CLI 1.0.85 records that absolute root at
   `extraKnownMarketplaces.<name>.source.path`, beside a `source` value of
@@ -128,11 +131,11 @@ everything else.
   copied layouts the CLI actually creates under
   `$COPILOT_HOME/installed-plugins/` (default `~/.copilot`), searched as one
   candidate set: the documented marketplace layout
-  `<marketplace-name>/<plugin-name>/`, so `kanban-kimi/kanban/` or
-  `kanban-google/kanban/`, and a direct install
+  `<marketplace-name>/<plugin-name>/`, so `kanban-kimi/kanban/`,
+  `kanban-google/kanban/`, or `kanban-claude/kanban/`, and a direct install
   `_direct/<owner>--<repo>--<bundle path>/`, so
-  `_direct/coghex--kanban--kimi-plugin-plugins-kanban/` or its Google
-  equivalent. Both are anchored to that bundle's own marketplace, plugin, and
+  `_direct/coghex--kanban--kimi-plugin-plugins-kanban/` or its Google or
+  Claude-on-Copilot equivalent. Both are anchored to that bundle's own marketplace, plugin, and
   bundle path rather than to any `kanban-*` directory, roots are identified
   before the helper is looked for, and zero roots, several roots, or a sole
   root missing the helper each refuse without fall-through.
@@ -142,13 +145,14 @@ everything else.
   ([drafting-workflow-contract.md §3.6](drafting-workflow-contract.md#36-the-repair-loop-issue-rereview-and-issue-rereview))
   read the timeline through the Codex and Claude copies, resolved the same
   two ways and under the identical no-unfiltered-fallback rule; they do not
-  add a sixth copy.
+  add a seventh copy.
 - **PR reviewer comment trust boundary:** each bundle's review coordinator
   (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`,
   `claude-plugin/plugins/kanban/scripts/review_pr.py`,
   `grok-plugin/plugins/kanban/scripts/review_pr.py`,
-  `kimi-plugin/plugins/kanban/scripts/review_pr.py`, and
-  `google-plugin/plugins/kanban/scripts/review_pr.py`) applies the same rule to
+  `kimi-plugin/plugins/kanban/scripts/review_pr.py`,
+  `google-plugin/plugins/kanban/scripts/review_pr.py`, and
+  `claude-copilot-plugin/plugins/kanban/scripts/review_pr.py`) applies the same rule to
   the payload it hands a reviewer, because on a public repository every
   discussion surface is open to any account and an APPROVE verdict is what the
   drainer merges on. Its `collect_context` serializes a body from the PR
@@ -167,8 +171,9 @@ everything else.
   the PR title, body, commits, and diff as data under review rather than
   instructions, and forbid retrieving a withheld body through any other
   source. Reading the PR head's source stays permitted.
-- **Copilot session model guard:** the Kimi and Google `solve` and
-  `autosolve` skills (issue #723) stamp their own brand's origin marker, which
+- **Copilot session model guard:** the Kimi, Google, and Claude-on-Copilot
+  `solve` and `autosolve` skills (issues #723 and #722) stamp their own
+  brand's origin marker, which
   is true only in a Copilot session running that brand's model — and which
   bundle a session loads is the operator's choice, invisible to the workflow.
   Before the first tracker mutation, the claim, each reads the session's model
@@ -192,13 +197,16 @@ everything else.
   delegating to `solve` and a refusal ends the run, so it reaches neither the
   documentation-only reclaim nor a review; `solve` repeats it before its own
   claim. The Grok bundle carries no such check, because the Grok CLI keeps no
-  equivalent record, and the Claude and Codex workflows have no Copilot
-  database dependency at all. `tools/test_copilot_session_brand.py` runs the
+  equivalent record, and Claude Code's and Codex's own workflows have no
+  Copilot database dependency at all. `tools/test_copilot_session_brand.py` runs the
   fenced check against fixture databases and holds its placement.
 - **Outputs:** a durable session log, worker events, and on success a pushed
   branch and an opened pull request whose body ends with
-  `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`.
-  A pull request may also carry `<!-- pr-origin:grok -->`,
+  `<!-- pr-origin:codex -->` or `<!-- pr-origin:claude -->`. A Copilot CLI
+  session running a Claude model stamps `pr-origin:claude` as well, through
+  the Claude-on-Copilot bundle (`claude-copilot-plugin/`, issue #722), because
+  a bundle's brand is the model its session runs rather than the executable
+  hosting it. A pull request may also carry `<!-- pr-origin:grok -->`,
   `<!-- pr-origin:kimi -->`, or `<!-- pr-origin:google -->` when Grok, Kimi,
   or Google opened it
   outside Kanban's spawned solvers; those markers are known origins, not
@@ -296,7 +304,7 @@ that a particular comment should not.
   Kimi, or Google is a spawned provider, so board revision and repair of a
   grok-origin, kimi-origin, or google-origin pull request are refused in
   every operating mode; the session that opened the pull request revises
-  it itself. All five bundled
+  it itself. All six bundled
   coordinators collapse that routing to the one loaded provider in
   single-agent mode — every pull request, whatever its origin marker, and
   including an unknown or external one — and refuse the workflow outright in
@@ -353,7 +361,7 @@ that a particular comment should not.
   `reviewed:*` label and review comment, and an approval marks a draft PR ready
   for review so it enters Done without waiting for CI — Kanban never sets a
   verdict label or changes draft state directly.
-- **Large nested-review inputs:** all five packaged coordinators keep initial
+- **Large nested-review inputs:** all six packaged coordinators keep initial
   prompts up to 64 KiB inline. Above that threshold they place the complete
   metadata and unmodified patch in a unique read-only directory inside the
   reviewer's private source extraction, with a per-file patch index containing
@@ -479,14 +487,18 @@ that a particular comment should not.
   `models.toml.example` declare — the cells Kanban's own
   `PullRequestReview`/`PullRequestRereview` spawns resolve — and binds the
   verified model in the published `pr-review:v2` marker instead of
-  `unspecified`. The tracked Grok, Kimi, and Google coordinators
-  (`grok-plugin/plugins/kanban/scripts/review_pr.py`,
-  `kimi-plugin/plugins/kanban/scripts/review_pr.py`, and
-  `google-plugin/plugins/kanban/scripts/review_pr.py`) are byte-identical copies
-  of one external-origin coordinator. It carries the same pinned nested-spawn
-  behavior plus `--expected-origin` / `--expected-route`
-  refuse-before-spawn, so either external bundle's `/autosolve` cannot drift
-  into a Claude review. Since issue #483 the pinning exception's *mechanism* is roster
+  `unspecified`. The tracked Grok, Kimi, Google, and Claude-on-Copilot
+  coordinators (`grok-plugin/plugins/kanban/scripts/review_pr.py`,
+  `kimi-plugin/plugins/kanban/scripts/review_pr.py`,
+  `google-plugin/plugins/kanban/scripts/review_pr.py`, and
+  `claude-copilot-plugin/plugins/kanban/scripts/review_pr.py`) are
+  byte-identical copies of one external-bundle coordinator. It carries the same
+  pinned nested-spawn behavior plus `--expected-origin` / `--expected-route`
+  refuse-before-spawn, so no external bundle's `/autosolve` can drift into a
+  Claude review. It keeps a grok, kimi, or google marker on a fork pull request
+  and, like the Claude and Codex coordinators, reads a claude marker there as an
+  unknown origin, so the Claude-on-Copilot `/autosolve` stops on a fork pull
+  request rather than requesting the dual route that origin would take. Since issue #483 the pinning exception's *mechanism* is roster
   resolution rather than a pinned constant, and the exception itself is
   unchanged: those coordinators load a byte-identical copy of
   `tools/kanban_models.py` from beside themselves -- never from `tools/`, which an
@@ -499,18 +511,19 @@ that a particular comment should not.
   that reader too, at
   `codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py`,
   because every coordinator reads the roster's `agents` list to route; the
-  Grok, Kimi, and Google bundles ship the fourth, fifth, and sixth copies beside their
-  coordinators. The pinning
-  exception is now exactly this: the Claude, Grok, Kimi, and Google copies resolve an
-  assignment *cell* and pin its model and effort. The Codex copy
+  Grok, Kimi, Google, and Claude-on-Copilot bundles ship the fourth through
+  seventh copies beside their coordinators. The pinning
+  exception is now exactly this: the Claude, Grok, Kimi, Google, and
+  Claude-on-Copilot copies resolve an assignment *cell* and pin its model and
+  effort. The Codex copy
   resolves none and passes no model or effort at all, which
   `tools/test_codex_plugin.py` asserts rather than assumes.
   `tools/test_claude_plugin.py` holds the coordinator's
-  compiled fallbacks against those cells and all six copies of the reader
+  compiled fallbacks against those cells and all seven copies of the reader
   byte-identical to each other, so the lanes still cannot silently diverge.
   `tools/test_coordinator_parity.py` bounds Claude-vs-Codex to the pinning
-  exception, Claude-vs-Grok to the expected-origin/route extension, and Kimi
-  and Google to byte identity with Grok.
+  exception, Claude-vs-Grok to the expected-origin/route extension, and Kimi,
+  Google, and Claude-on-Copilot to byte identity with Grok.
   See [claude-plugin/README.md](../claude-plugin/README.md) for the
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
@@ -1516,7 +1529,9 @@ reimplement the removal, and `--check` remains read-only.
   it loads (issue #589): the routed reviewer, the coordinator, the amendment
   author, and both sides of each supported handoff are the same brand, so no
   action is blocked on a CLI this install never spawns. The Kimi and Google
-  revision refusals remain in force. `--doctor` is the exception and
+  revision refusals remain in force. A claude-origin issue or pull request
+  authored through the Claude-on-Copilot bundle is an ordinary Claude one
+  here: its marker names the brand, not the host that ran it. `--doctor` is the exception and
   stays on the whole dual matrix: it is answered before any configuration is
   read, so it has no roster to derive a mode from, and dual is the superset.
 - **Required authority:** setup needs write access to the user's own
@@ -2691,11 +2706,13 @@ which also reconciles this manifest against the tracked Codex plugin's own
 bash surface (`codex-plugin/plugins/kanban/skills/*/SKILL.md`), the
 tracked Claude plugin's own bash surface
 (`claude-plugin/plugins/kanban/commands/*.md`), the tracked Grok plugin's
-own bash surface (`grok-plugin/plugins/kanban/skills/*/SKILL.md`), and the
+own bash surface (`grok-plugin/plugins/kanban/skills/*/SKILL.md`), the
 tracked Kimi plugin's own bash surface
-(`kimi-plugin/plugins/kanban/skills/*/SKILL.md`), and the tracked Google
+(`kimi-plugin/plugins/kanban/skills/*/SKILL.md`), the tracked Google
 plugin's own bash surface
-(`google-plugin/plugins/kanban/skills/*/SKILL.md`), every non-test Python
+(`google-plugin/plugins/kanban/skills/*/SKILL.md`), and the tracked
+Claude-on-Copilot plugin's own bash surface
+(`claude-copilot-plugin/plugins/kanban/skills/*/SKILL.md`), every non-test Python
 module under `tools/`, and the repository's enumerated shell helpers —
 today `tools/docs_land.sh` — in addition to the Haskell invocation surface: a
 command a packaged workflow or a repository tool shells out to is as
@@ -2713,7 +2730,8 @@ markdown counterpart of the Haskell home-relative-path check.
 Columns: `id | kind | token | files | owner | status | mandatory`.
 
 - `kind`: `executable` (a literal command Kanban's Haskell source, the tracked
-  Codex, Claude, Grok, Kimi, or Google plugin's packaged workflows, or a non-test module under
+  Codex, Claude, Grok, Kimi, Google, or Claude-on-Copilot plugin's packaged
+  workflows, or a non-test module under
   `tools/` spawns or resolves) or `personal-path` (a home-relative path
   Kanban's Haskell source, a packaged markdown workflow, or one of the
   issue-approval modules scanned below builds or depends on).
@@ -2737,10 +2755,10 @@ shared scripts root; all three are held byte-identical to
 Issue #483 vendored
 `kanban_models.py` into the Claude bundle on the same terms and issue #572
 vendored it into the Codex bundle as well, beside that bundle's own
-coordinator; the Grok, Kimi, and Google bundles ship the fourth, fifth, and sixth copies
-beside their coordinators,
-because all five coordinators read the roster's loaded provider set
-to route; all six copies are held byte-identical by
+coordinator; the Grok, Kimi, Google, and Claude-on-Copilot bundles ship the
+fourth through seventh copies beside their coordinators,
+because all six coordinators read the roster's loaded provider set
+to route; all seven copies are held byte-identical by
 `tools/test_claude_plugin.py`, whose diagnostic names the one that drifted.
 No copy of either module appears in a row below, because neither writes
 down a managed location of its own. Being identical by test is what
@@ -2752,12 +2770,12 @@ by the same rule and is listed per copy, because that surface is scanned per
 file rather than per definition.
 
 ```text
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs;tools/mission_runner_service.py | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
@@ -2766,8 +2784,8 @@ approve-issues-backend | personal-path | /Library/Application Support/kanban/iss
 approve-issues-backend-xdg | personal-path | /.local/share/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir | personal-path | /Library/Logs/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
 issue-review-log-dir-xdg | personal-path | /.local/state/kanban/issue-review | tools/kanban_config.py | kanban | supported | no
-issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
-issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record | personal-path | /Library/Application Support/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
+issue-review-discovery-record-xdg | personal-path | /.local/share/kanban/issue-review/config.json | src/Kanban/ManagedPaths.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;claude-plugin/plugins/kanban/commands/issue-review.md;codex-plugin/plugins/kanban/skills/solve/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md | kanban | supported | no
 drainer-launchagent-label | personal-path | com.coghex.drain-prs | tools/service_manager.py | kanban | supported | no
 drainer-discovery-record | personal-path | /Library/Application Support/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
 drainer-discovery-record-xdg | personal-path | /.local/share/kanban/pr-drainer/config.json | tools/kanban_config.py;src/Kanban/ManagedPaths.hs | kanban | supported | no
@@ -2786,11 +2804,12 @@ launchagents-dir | personal-path | /Library/LaunchAgents | tools/service_manager
 systemd-user-unit-dir | personal-path | /.config/systemd/user | tools/service_manager.py | kanban | supported | no
 find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
+worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | external | supported | no
 grok-plugin-cache-root | personal-path | /.grok | grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 kimi-plugin-cache-root | personal-path | /.copilot | kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 google-plugin-cache-root | personal-path | /.copilot | google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
+claude-copilot-plugin-cache-root | personal-path | /.copilot | claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
 sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
@@ -2834,10 +2853,10 @@ because that is where the record's own path is spelled whole:
 separate file name, so it carries neither literal, while the Haskell resolver
 spells each one for the same reason this manifest needs it spelled — a
 reconciliation matches a literal, not an expression. Both record rows also
-carry the same eighteen packaged assets, because since issue #445 each of them
+carry the same twenty packaged assets, because since issue #445 each of them
 resolves the record by probing the two locations in that one order rather than
-naming the macOS one: the thirteen Markdown workflow assets whose `bash` fence
-resolves the backend, and the five pull-request coordinators. An asset that spells
+naming the macOS one: the fourteen Markdown workflow assets whose `bash` fence
+resolves the backend, and the six pull-request coordinators. An asset that spells
 both literals is declared against both rows, so neither spelling can be
 reverted in one asset while the other row still passes. The log directory moves
 only with `approve_issues.py --log-dir`, never with `--install-dir` or
@@ -3138,15 +3157,16 @@ own directory, and the Grok `/solve` and `/autosolve` lookups are rooted at the
 hashed `installed-plugins/kanban-<hash>/` tree inside it, or at
 `$GROK_PLUGIN_ROOT` when Grok set that to the loaded plugin. It is likewise
 `external`/`mandatory: no`. `kimi-plugin-cache-root` and
-`google-plugin-cache-root` are the same shape for Kimi and Google:
+`google-plugin-cache-root` are the same shape for Kimi and Google, and
+`claude-copilot-plugin-cache-root` for the Claude-on-Copilot bundle:
 `$COPILOT_HOME` (default `~/.copilot`) is the Copilot CLI's own directory, and
-the Kimi and Google `/solve` and `/autosolve` lookups read the recorded
-`kanban-kimi` or `kanban-google` marketplace path from its `settings.json` or
-search the two copied layouts the CLI creates inside it —
-`installed-plugins/<marketplace-name>/<plugin-name>/` and
+the Kimi, Google, and Claude-on-Copilot `/solve` and `/autosolve` lookups read
+the recorded `kanban-kimi`, `kanban-google`, or `kanban-claude` marketplace
+path from its `settings.json` or search the two copied layouts the CLI creates
+inside it — `installed-plugins/<marketplace-name>/<plugin-name>/` and
 `installed-plugins/_direct/<owner>--<repo>--<bundle path>/` — after
-`$KIMI_PLUGIN_ROOT` or `$GOOGLE_PLUGIN_ROOT` when the launcher set that to the
-loaded plugin. The same four skills also read `session-store.db` inside it, the
+`$KIMI_PLUGIN_ROOT`, `$GOOGLE_PLUGIN_ROOT`, or `$CLAUDE_COPILOT_PLUGIN_ROOT`
+when the launcher set that to the loaded plugin. The same six skills also read `session-store.db` inside it, the
 Copilot CLI's record of each session's model, for the session model guard §2.1
 describes; an absent or unreadable record refuses that workflow rather than
 being created or passed over.
@@ -3799,9 +3819,9 @@ brand's asset speaking a tool its declaration does not carry.
   the environment, never through the option it was installed with, and that
   is unchanged by the per-platform defaults.
   Resolution precedence, identical in `src/Kanban/Review/Canonical.hs`,
-  `src/Kanban/Preflight.hs`, the five packaged `review_pr.py` coordinators, and
+  `src/Kanban/Preflight.hs`, the six packaged `review_pr.py` coordinators, and
   the packaged Codex/Claude `issue-review` and `solve` workflows plus Grok,
-  Kimi, and Google `/solve`: a non-empty
+  Kimi, Google, and Claude-on-Copilot `/solve`: a non-empty
   `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then a recorded `backend_path`, then —
   only when that field is absent, which is exactly how an installation
   predating the record reads — the directory holding the record. A selected
@@ -3959,20 +3979,23 @@ runs) parses the manifest in §4 and:
 - fails if any of the tracked Codex plugin's packaged `SKILL.md` files, the
   tracked Claude plugin's packaged `commands/*.md` files, the tracked Grok
   plugin's packaged `SKILL.md` files, the tracked Kimi plugin's packaged
-  `SKILL.md` files, or the tracked Google plugin's packaged `SKILL.md` files invoke a command,
+  `SKILL.md` files, the tracked Google plugin's packaged `SKILL.md` files, or
+  the tracked Claude-on-Copilot plugin's packaged `SKILL.md` files invoke a command,
   inside a fenced ```` ```bash ```` block, that has no matching `executable`
-  manifest entry — each of those five surfaces is the enumerated list named in
+  manifest entry — each of those six surfaces is the enumerated list named in
   §4 (`PLUGIN_SURFACE_FILES`, `CLAUDE_PLUGIN_SURFACE_FILES`,
-  `GROK_PLUGIN_SURFACE_FILES`, `KIMI_PLUGIN_SURFACE_FILES`, and
-  `GOOGLE_PLUGIN_SURFACE_FILES` in that module)
+  `GROK_PLUGIN_SURFACE_FILES`, `KIMI_PLUGIN_SURFACE_FILES`,
+  `GOOGLE_PLUGIN_SURFACE_FILES`, and `CLAUDE_COPILOT_PLUGIN_SURFACE_FILES` in
+  that module)
   rather than a directory glob, so a newly packaged asset is scanned only once
   it is added to its list;
 - fails if any packaged plugin's own bundled coordinator
   (`codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py`,
   `claude-plugin/plugins/kanban/scripts/review_pr.py`,
   `grok-plugin/plugins/kanban/scripts/review_pr.py`,
-  `kimi-plugin/plugins/kanban/scripts/review_pr.py`, or
-  `google-plugin/plugins/kanban/scripts/review_pr.py`) invokes a command, as
+  `kimi-plugin/plugins/kanban/scripts/review_pr.py`,
+  `google-plugin/plugins/kanban/scripts/review_pr.py`, or
+  `claude-copilot-plugin/plugins/kanban/scripts/review_pr.py`) invokes a command, as
   the first element of a `run`/`subprocess.run` argument list, that has no
   matching `executable` manifest entry — the coordinator is Python, not
   bash, so it is reconciled with a separate extractor from the `.md` files
@@ -4250,6 +4273,7 @@ CONTRIBUTING.md | pr-atomic | release-document
 README.md | pr-atomic | release-document
 SECURITY.md | pr-atomic | release-document
 SUPPORT.md | pr-atomic | test-parsed;release-document
+claude-copilot-plugin/ | pr-atomic | test-parsed;release-document
 claude-plugin/ | pr-atomic | test-parsed;release-document
 codex-plugin/ | pr-atomic | test-parsed;release-document
 docs/README.md | pr-atomic | release-document
@@ -4301,7 +4325,7 @@ kimi-plugin/ | pr-atomic | test-parsed;release-document
 tools/ | pr-atomic | test-parsed;release-document
 ```
 
-The fifteen `test-parsed` rows name what actually parses them:
+The sixteen `test-parsed` rows name what actually parses them:
 `tools/test_issue_templates.py` reads the frontmatter, headings, and
 preselected labels of every template under `.github/ISSUE_TEMPLATE/`, the
 `Children` checklist of the epic one, and the blank-issue switch and contact
@@ -4321,10 +4345,11 @@ tables, `tools/test_board_screenshot.py` reconciles the regeneration procedure
 in `docs/media/README.md` against the renderer's own constants,
 `tools/test_claude_plugin.py`, `tools/test_codex_plugin.py`,
 `tools/test_grok_plugin.py`,
-`tools/test_kimi_plugin.py`, and
-`tools/test_google_plugin.py` read the frontmatter and body of every packaged
-workflow under `claude-plugin/`, `codex-plugin/`, `grok-plugin/`,
-`kimi-plugin/`, and `google-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
+`tools/test_kimi_plugin.py`,
+`tools/test_google_plugin.py`, and `tools/test_claude_copilot_plugin.py` read
+the frontmatter and body of every packaged workflow under `claude-plugin/`,
+`codex-plugin/`, `grok-plugin/`, `kimi-plugin/`, `google-plugin/`, and
+`claude-copilot-plugin/`, `tools/test_release_runbook.py` reads the ordered steps of
 `docs/releasing.md` and the safety rules inside them — the recorded
 authorization gate ahead of the tag push, the prohibitions that keep a pushed
 tag immutable, where a release's evidence lives, what the dependency review

@@ -17,8 +17,8 @@ takes Codex's layout with Claude's sigil (issue #716):
 * **File layout.** Claude reads `commands/<name>.md`; every other brand reads
   `skills/<name>/SKILL.md`.
 * **Frontmatter keys.** Claude declares `description` and `argument-hint`;
-  Codex, Kimi, and Google declare `name` and `description`; Grok declares all
-  three. The
+  Codex, Kimi, Google, and Claude-on-Copilot declare `name` and `description`;
+  Grok declares all three. The
   projection here is an allowlist per brand, and the source's own key set is
   an allowlist too, so a
   `model:` or `permission-mode:` key that would override the model, effort, or
@@ -70,6 +70,19 @@ mostly by such values — a plugin-root variable, a marketplace name, an origin
 marker — and a block per value would put three near-copies of every such line
 back into the one source.
 
+A `BRAND_TABLE` key names a bundle, and for every brand but one it also names
+the origin brand that bundle's session is. The exception is `claude-copilot`
+(issue #722): a Copilot CLI session running a Claude model is a Claude
+participant (design D-0 of
+`docs/coordination/external_workflow_authoring_design.md`), so it stamps the
+claude origin, yet Claude Code's `claude` entry keeps its own layout,
+frontmatter and output paths. That entry declares `origin="claude"`, so
+`{{brand:name}}` and `{{brand:title}}` spell the brand, while `{{brand:bundle}}`
+and `{{brand:upper}}` spell the bundle — its directory and its plugin-root
+variable — and `{{brand:predecessors}}` leaves out an earlier bundle of its own
+brand, which is not a sibling to refuse. For every other entry the bundle and
+the brand are one word, so none of those forms renders differently for them.
+
 `COMMAND_SOURCES` is the registry, and `--check` re-renders every entry and
 byte-compares it against the tracked output, so a source edited without
 re-rendering fails `tools/test_render_command_sources.py` in the required
@@ -87,8 +100,8 @@ grok, which proves the generalized mechanism without an external bundle
 changing. `triage` — VEND-1, the first real rendering — renders into the Claude
 and Codex bundle directories and is therefore shipped, named by both bundles'
 manifests and discovered by both providers. The external `solve` — EXT-2 —
-and the external `autosolve` — EXT-3 — render into the Grok, Kimi, and Google
-bundles and neither of those two, whose own `solve` stays hand-edited and whose
+and the external `autosolve` — EXT-3 — render into the Grok, Kimi, Google, and
+Claude-on-Copilot bundles and neither of those two, whose own `solve` stays hand-edited and whose
 own `autosolve` is the separate entry above it. Two entries may therefore share
 a name, and are told apart by their source path, never by that name.
 """
@@ -132,6 +145,10 @@ class Brand:
     # A key absent from the source is simply omitted; a key absent from this
     # tuple never reaches the brand's file.
     frontmatter_keys: tuple[str, ...]
+    # The origin brand a session loading this bundle is, when that is not the
+    # bundle's own key: design D-0 makes the brand the model the session runs,
+    # not the executable hosting it.
+    origin: str | None = None
 
 
 # In the order the brands joined, which is what `{{brand:predecessors}}`
@@ -168,9 +185,25 @@ BRAND_TABLE = {
         layout="skill-directory",
         frontmatter_keys=("name", "description"),
     ),
+    # Issue #722: the Copilot CLI running a Claude model. Another host's
+    # packaging of the Claude brand rather than a sixth origin, so it renders
+    # the claude origin with the Copilot bundles' layout and keys.
+    "claude-copilot": Brand(
+        title="Claude",
+        sigil="/",
+        layout="skill-directory",
+        frontmatter_keys=("name", "description"),
+        origin="claude",
+    ),
 }
 
 BRANDS = tuple(BRAND_TABLE)
+
+
+def origin_brand(brand: str) -> str:
+    """The origin brand a session loading `brand`'s bundle stamps."""
+    return BRAND_TABLE[brand].origin or brand
+
 
 # The two per-brand views the workflow tests read, derived from the table so
 # they cannot disagree with it.
@@ -188,15 +221,18 @@ CODEX_SKILLS_DIR = "codex-plugin/plugins/kanban/skills"
 BUNDLE_OUTPUTS = MappingProxyType(
     {"claude": CLAUDE_COMMANDS_DIR, "codex": CODEX_SKILLS_DIR}
 )
-# Where the three external bundles discover theirs. None is a spawned provider
-# and each ships only the workflows its session opens a pull request with, so
-# an entry rendering here ships in those bundles and in neither of the two
-# above.
+# Where the four external bundles discover theirs. None is a spawned
+# provider's own bundle and each ships only the workflows its session opens a
+# pull request with, so an entry rendering here ships in those bundles and in
+# neither of the two above. The Claude-on-Copilot bundle is external in that
+# sense although its brand is Claude: Kanban spawns Claude through Claude Code,
+# never through the Copilot CLI.
 EXTERNAL_OUTPUTS = MappingProxyType(
     {
         "grok": "grok-plugin/plugins/kanban/skills",
         "kimi": "kimi-plugin/plugins/kanban/skills",
         "google": "google-plugin/plugins/kanban/skills",
+        "claude-copilot": "claude-copilot-plugin/plugins/kanban/skills",
     }
 )
 
@@ -250,7 +286,7 @@ DIRECTIVE_RE = re.compile(r"\{\{(?!\{).*?\}\}", re.DOTALL)
 # The per-brand values a source may reference by name, each a function of the
 # brand and of `BRAND_TABLE` alone.
 BRAND_TOKEN_RE = re.compile(r"\{\{brand:(?P<form>[a-z]+)\}\}")
-BRAND_TOKEN_FORMS = ("name", "title", "upper", "predecessors")
+BRAND_TOKEN_FORMS = ("name", "title", "upper", "bundle", "predecessors")
 
 # The repair every stale-artifact failure names, kept as one constant so the
 # test asserts the words the failure actually prints.
@@ -483,8 +519,9 @@ COMMAND_SOURCES = (
         note=(
             "EXT-2 of docs/coordination/external_workflow_authoring_design.md "
             "(issue #717), and the first entry rendering into the external "
-            "bundles rather than the Claude and Codex pair: grok, kimi and "
-            "google each ship a solve that opens a pull request Codex reviews. "
+            "bundles rather than the Claude and Codex pair: grok, kimi, "
+            "google and, since issue #722, claude-copilot each ship a solve "
+            "that opens a pull request Codex reviews. "
             "The Claude and Codex solve stay hand-edited, so this source lives "
             "under external/ and renders into neither of their bundles. Its "
             "per-brand text is of three kinds: {{brand:...}} tokens for the "
@@ -493,8 +530,11 @@ COMMAND_SOURCES = (
             "to imitate, which is the brands that existed when it was added "
             "rather than every other brand; and two brand blocks -- argument "
             "binding and helper discovery -- where Grok says one thing and the "
-            "two Copilot-hosted bundles another, plus the description clause "
-            "only those two carry. Its migration moved no rendered byte."
+            "Copilot-hosted bundles another, plus the description clause "
+            "only those carry. The claude-copilot bundle adds the one variant "
+            "whose session is Claude, where the others' 'never by Claude' "
+            "identity text would contradict itself. Its migration moved no "
+            "rendered byte, and adding that bundle moved none either."
         ),
     ),
     CommandSource(
@@ -503,21 +543,26 @@ COMMAND_SOURCES = (
         outputs=EXTERNAL_OUTPUTS,
         note=(
             "EXT-3 of docs/coordination/external_workflow_authoring_design.md "
-            "(issue #718): the grok, kimi and google autosolve, each driving a "
-            "Codex review of the pull request its own solve opened. It shares "
+            "(issue #718): the grok, kimi, google and claude-copilot autosolve, "
+            "each driving a Codex review of the pull request its own solve "
+            "opened. It shares "
             "a name with the Claude and Codex autosolve rendered from "
             "tools/command_sources/autosolve.md above, and the two sources are "
             "deliberately not merged, so this one lives under external/ and "
             "renders into neither of their bundles. The reviewer route is "
-            "shared text -- all three brands route to Codex -- and only the "
+            "shared text -- every one of them routes to Codex -- and only the "
             "origin beside it is a {{brand:name}} token, so no brand block "
             "sits around the route. {{brand:predecessors}} spells the sibling "
             "plugin paths the coordinator fallback refuses. Four brand blocks "
-            "carry where Grok says one thing and the two Copilot-hosted "
+            "carry where Grok says one thing and the Copilot-hosted "
             "bundles another: the argument binding, the step 2 sentence that "
             "follows from it, the coordinator discovery, and that refusal "
-            "line, which the two sides wrap differently. Its migration moved "
-            "no rendered byte."
+            "line, which the two sides wrap differently. Issue #722 added the "
+            "claude-copilot variants: a Claude session cannot be told never "
+            "to invoke Claude, and its claude marker is the one a fork pull "
+            "request loses, so its step 4 reads isCrossRepository and stops. "
+            "Its migration moved no rendered byte, and adding that bundle "
+            "moved none either."
         ),
     ),
 )
@@ -799,20 +844,30 @@ def enumerate_titles(titles: list[str]) -> str:
 def brand_token_value(form: str, brand: str, *, origin: str) -> str:
     """What `{{brand:<form>}}` renders for `brand`.
 
-    `name` is the brand as origin markers and bundle directories spell it,
-    `title` as prose does, and `upper` as an environment-variable prefix does.
+    `name` is the origin brand as origin markers and marketplace names spell
+    it, and `title` that brand as prose does. `bundle` is the bundle as its
+    directory spells it, and `upper` that bundle as an environment-variable
+    prefix does. The two pairs differ only for an entry declaring an `origin`.
     `predecessors` lists, by title, every brand `BRAND_TABLE` declares before
-    this one. That is an explicit ordering, not "every other brand": each
-    external bundle names the brands that existed when it was added, so a
-    derivation from the whole brand set would rewrite all of them.
+    this one whose origin is not this one's. That is an explicit ordering, not
+    "every other brand": each external bundle names the brands that existed
+    when it was added, so a derivation from the whole brand set would rewrite
+    all of them. An earlier bundle of this bundle's own brand is left out
+    because it is no sibling brand to refuse.
     """
     if form == "name":
-        return brand
+        return origin_brand(brand)
     if form == "title":
         return BRAND_TABLE[brand].title
+    if form == "bundle":
+        return brand
     if form == "upper":
-        return brand.upper()
-    earlier = [BRAND_TABLE[other].title for other in BRANDS[: BRANDS.index(brand)]]
+        return brand.upper().replace("-", "_")
+    earlier = [
+        BRAND_TABLE[other].title
+        for other in BRANDS[: BRANDS.index(brand)]
+        if origin_brand(other) != origin_brand(brand)
+    ]
     if not earlier:
         raise CommandSourceError(
             f"{origin}: {{{{brand:predecessors}}}} has nothing to enumerate for "

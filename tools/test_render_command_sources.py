@@ -36,9 +36,12 @@ which do render into both bundles, so the same class pins
 the shipped sets at twenty-six and twenty-five and pins which registered
 source belongs to which kind. Since EXT-2 (issue #717) it holds a third kind
 too, the external `solve` and, since EXT-3 (issue #718), the external
-`autosolve`, which render into the Grok, Kimi, and Google bundles and neither
-of the other two; `tools/test_external_solve_workflow.py` and
-`tools/test_external_autosolve_workflow.py` hold their reach.
+`autosolve`, which render into the Grok, Kimi, and Google bundles and, since
+issue #722, the Claude-on-Copilot one, and neither of the other two;
+`tools/test_external_solve_workflow.py` and
+`tools/test_external_autosolve_workflow.py` hold their reach. That bundle is
+the one brand-table entry whose origin is another entry's brand, which
+`OriginBrandTokenTests` pins.
 """
 
 from __future__ import annotations
@@ -95,7 +98,7 @@ SHIPPING_SOURCE_NAMES = {
     "auto-project-review",
 }
 
-# The registered sources that render into the three external bundles and
+# The registered sources that render into the four external bundles and
 # neither of the two above. Keyed by source path rather than by name, because
 # each shares its name with a Claude and Codex pair it deliberately does not
 # render: the hand-edited `solve`, and the `autosolve` another source renders.
@@ -103,7 +106,12 @@ EXTERNAL_SOURCES = {
     "tools/command_sources/external/solve.md",
     "tools/command_sources/external/autosolve.md",
 }
-EXTERNAL_PREFIXES = ("grok-plugin/", "kimi-plugin/", "google-plugin/")
+EXTERNAL_PREFIXES = (
+    "grok-plugin/",
+    "kimi-plugin/",
+    "google-plugin/",
+    "claude-copilot-plugin/",
+)
 
 FIXTURE_SOURCE = "tools/command_sources/fixture-command.md"
 FIXTURE_CLAUDE_OUTPUT = "tools/command_render_fixture/claude/commands/fixture-command.md"
@@ -173,6 +181,7 @@ SYNTHETIC_OUTPUTS = {
     "grok": "tools/out/grok/skills",
     "kimi": "tools/out/kimi/skills",
     "google": "tools/out/google/skills",
+    "claude-copilot": "tools/out/claude-copilot/skills",
 }
 
 
@@ -541,8 +550,8 @@ class FixtureIsNotShippedTests(unittest.TestCase):
 
 
     def test_an_external_source_renders_into_the_external_bundles_alone(self):
-        # The third kind: it ships in the grok, kimi and google bundles, and
-        # in neither the Claude nor the Codex one.
+        # The third kind: it ships in the grok, kimi, google and
+        # claude-copilot bundles, and in neither the Claude nor the Codex one.
         external = [
             entry
             for entry in renderer.COMMAND_SOURCES
@@ -551,7 +560,9 @@ class FixtureIsNotShippedTests(unittest.TestCase):
         self.assertEqual({entry.source for entry in external}, EXTERNAL_SOURCES)
         for entry in external:
             paths = renderer.output_paths(entry)
-            self.assertEqual(sorted(paths), ["google", "grok", "kimi"], entry.source)
+            self.assertEqual(
+                sorted(paths), ["claude-copilot", "google", "grok", "kimi"], entry.source
+            )
             for brand, path in paths.items():
                 self.assertTrue(path.startswith(f"{brand}-plugin/"), path)
                 self.assertTrue((REPO_ROOT / path).is_file(), f"missing {path}")
@@ -1150,13 +1161,17 @@ class BrandTokenTests(unittest.TestCase):
         # The brands that existed when each was added, in that order -- not
         # every other brand, which would rewrite every external bundle.
         self.assertEqual(
-            renderer.BRANDS, ("claude", "codex", "grok", "kimi", "google")
+            renderer.BRANDS,
+            ("claude", "codex", "grok", "kimi", "google", "claude-copilot"),
         )
         expected = {
             "codex": "Claude",
             "grok": "Claude or Codex",
             "kimi": "Claude, Codex, or Grok",
             "google": "Claude, Codex, Grok, or Kimi",
+            # Every earlier brand but its own: Claude Code's bundle is the
+            # same brand on another host, not a sibling it refuses.
+            "claude-copilot": "Codex, Grok, Kimi, or Google",
         }
         for brand, listed in expected.items():
             self.assertEqual(
@@ -1183,6 +1198,98 @@ class BrandTokenTests(unittest.TestCase):
         with self.assertRaises(renderer.CommandSourceError) as raised:
             render_text(source, "kimi", brands=EXTERNAL_BRANDS)
         self.assertIn("{{brand:UPPER}}", str(raised.exception))
+
+
+class OriginBrandTokenTests(unittest.TestCase):
+    """Issue #722: a bundle whose origin is another entry's brand.
+
+    The Claude-on-Copilot bundle stamps the claude origin while Claude Code's
+    `claude` entry keeps its own layout and keys, so its `BRAND_TABLE` key
+    names the bundle and its `origin` names the brand. `name` and `title`
+    follow the brand and `bundle` and `upper` the bundle; for every other
+    entry the two are one word.
+    """
+
+    SOURCE = textwrap.dedent(
+        """\
+        ---
+        name: synthetic
+        description: Opens a {{brand:name}}-origin PR, never imitating a {{brand:predecessors}} one.
+        ---
+
+        This session is {{brand:title}}. Prefer `${{brand:upper}}_PLUGIN_ROOT`,
+        spelled `"${{{brand:upper}}_PLUGIN_ROOT:-}"` in shell, search
+        `kanban-{{brand:name}}/kanban/` and `{{brand:bundle}}-plugin-plugins-kanban`,
+        and stamp `<!-- pr-origin:{{brand:name}} -->`.
+        """
+    )
+
+    def test_the_brand_forms_follow_the_origin_and_the_bundle_forms_the_key(self):
+        rendered = render_text(self.SOURCE, "claude-copilot", brands=("claude-copilot",))
+        self.assertIn("This session is Claude.", rendered)
+        self.assertIn("`<!-- pr-origin:claude -->`", rendered)
+        self.assertIn("`kanban-claude/kanban/`", rendered)
+        self.assertIn("`claude-copilot-plugin-plugins-kanban`", rendered)
+        self.assertIn("`$CLAUDE_COPILOT_PLUGIN_ROOT`", rendered)
+        self.assertIn('`"${CLAUDE_COPILOT_PLUGIN_ROOT:-}"`', rendered)
+        self.assertIn(
+            "description: Opens a claude-origin PR, never imitating a Codex, "
+            "Grok, Kimi, or Google one.\n",
+            rendered,
+        )
+        self.assertNotIn("{{", rendered)
+        self.assertNotIn("claude-copilot-origin", rendered)
+        self.assertNotIn("pr-origin:claude-copilot", rendered)
+
+    def test_an_entry_without_an_origin_spells_one_word_in_every_form(self):
+        for brand in renderer.BRANDS:
+            if renderer.BRAND_TABLE[brand].origin is not None:
+                continue
+            with self.subTest(brand=brand):
+                self.assertEqual(renderer.origin_brand(brand), brand)
+                self.assertEqual(
+                    renderer.brand_token_value("bundle", brand, origin="o"),
+                    renderer.brand_token_value("name", brand, origin="o"),
+                )
+                self.assertEqual(
+                    renderer.brand_token_value("upper", brand, origin="o"),
+                    brand.upper(),
+                )
+
+    def test_the_origin_names_a_brand_the_table_declares_without_one(self):
+        # An origin must be a brand in its own right: one naming another
+        # origin-bearing entry, or nothing in the table, would stamp a marker
+        # no router knows.
+        origins = {
+            brand: spec.origin
+            for brand, spec in renderer.BRAND_TABLE.items()
+            if spec.origin is not None
+        }
+        self.assertEqual(origins, {"claude-copilot": "claude"})
+        for brand, origin in origins.items():
+            self.assertIn(origin, renderer.BRAND_TABLE, brand)
+            self.assertIsNone(renderer.BRAND_TABLE[origin].origin, brand)
+            self.assertEqual(
+                renderer.BRAND_TABLE[brand].title, renderer.BRAND_TABLE[origin].title
+            )
+
+    def test_the_bundle_keeps_claude_codes_entry_untouched(self):
+        # The review's correction: another host's packaging of the brand, not
+        # a change to Claude Code's layout, keys, or output paths.
+        claude = renderer.BRAND_TABLE["claude"]
+        self.assertEqual(claude.layout, "command-file")
+        self.assertEqual(claude.frontmatter_keys, ("description", "argument-hint"))
+        self.assertIsNone(claude.origin)
+        self.assertEqual(renderer.BUNDLE_OUTPUTS["claude"], renderer.CLAUDE_COMMANDS_DIR)
+        copilot = renderer.BRAND_TABLE["claude-copilot"]
+        self.assertEqual(copilot.layout, renderer.BRAND_TABLE["kimi"].layout)
+        self.assertEqual(
+            copilot.frontmatter_keys, renderer.BRAND_TABLE["kimi"].frontmatter_keys
+        )
+        self.assertEqual(
+            renderer.EXTERNAL_OUTPUTS["claude-copilot"],
+            "claude-copilot-plugin/plugins/kanban/skills",
+        )
 
 
 class FrontmatterBrandBlockTests(unittest.TestCase):

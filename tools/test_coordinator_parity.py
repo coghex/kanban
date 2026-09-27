@@ -1,4 +1,4 @@
-"""Bounded-divergence gate for the five tracked review coordinators.
+"""Bounded-divergence gate for the six tracked review coordinators.
 
 Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 
@@ -120,6 +120,9 @@ KIMI_COORDINATOR = (
 )
 GOOGLE_COORDINATOR = (
     REPO_ROOT / "google-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
+)
+CLAUDE_COPILOT_COORDINATOR = (
+    REPO_ROOT / "claude-copilot-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py"
 )
 
 # Every non-blank line on which the two copies differ, as Codex-only (`-`) and
@@ -345,7 +348,7 @@ DOCUMENTED_DIVERGENCE = r'''@@
 # Cross-repository provenance is deliberately NOT recorded here (issue #696).
 # It was, while only the Grok copy kept a grok marker on a fork pull request,
 # and recording it let the gate pass over a standard coordinator that
-# contradicted its own route_reviewers. All five copies now read the same
+# contradicted its own route_reviewers. All six copies now read the same
 # {"grok", "kimi", "google"} set and assert it in the same self-test lines, so
 # any reappearance of that difference is an unrecorded divergence and fails.
 GROK_DOCUMENTED_DIVERGENCE = r'''@@
@@ -992,8 +995,9 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
     in not vendoring kanban_config.py beside the coordinator, and in nothing
     else. Cross-repository origin reading is no longer among the differences
     (issue #696): both copies keep a grok, kimi, or google marker on a fork
-    pull request. The Kimi and Google bundles are held byte-identical to this
-    copy by test_kimi_plugin.py and test_google_plugin.py."""
+    pull request. The Kimi, Google, and Claude-on-Copilot bundles are held
+    byte-identical to this copy by test_kimi_plugin.py, test_google_plugin.py,
+    and test_claude_copilot_plugin.py."""
 
     def setUp(self):
         self.claude_source = CLAUDE_COORDINATOR.read_text(encoding="utf-8")
@@ -1044,12 +1048,14 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
         report = divergence_report(regressed, self.grok_source, self.units)
         self.assertIsNotNone(report)
 
-    def test_the_fork_origin_set_is_one_expression_in_all_five_copies(self):
+    def test_the_fork_origin_set_is_one_expression_in_all_six_copies(self):
         # The parity walk above compares Claude against Grok, and separate
-        # identity tests hold Kimi and Google to Grok. Codex is held to Claude
-        # by CoordinatorBoundedDivergenceTests. Named here anyway so the one
-        # line this issue is about is pinned in every copy directly, rather
-        # than only as a consequence of three different comparisons.
+        # identity tests hold Kimi, Google, and Claude-on-Copilot to Grok.
+        # Codex is held to Claude by CoordinatorBoundedDivergenceTests. Named
+        # here anyway so the one line this issue is about is pinned in every
+        # copy directly, rather than only as a consequence of several
+        # different comparisons. Issue #722 added no claude to the set: the
+        # Claude-on-Copilot autosolve stops on a fork pull request instead.
         expression = 'return origin if origin in {"grok", "kimi", "google"} else None'
         for name, path in (
             ("codex", CODEX_COORDINATOR),
@@ -1057,6 +1063,7 @@ class GrokCoordinatorBoundedDivergenceTests(unittest.TestCase):
             ("grok", GROK_COORDINATOR),
             ("kimi", KIMI_COORDINATOR),
             ("google", GOOGLE_COORDINATOR),
+            ("claude-copilot", CLAUDE_COPILOT_COORDINATOR),
         ):
             with self.subTest(coordinator=name):
                 self.assertIn(expression, path.read_text(encoding="utf-8"))
@@ -1081,6 +1088,19 @@ class GoogleCoordinatorIdentityTests(unittest.TestCase):
             GOOGLE_COORDINATOR.read_bytes(),
             GROK_COORDINATOR.read_bytes(),
             "The Google coordinator must remain byte-for-byte identical to Grok's",
+        )
+
+
+class ClaudeCopilotCoordinatorIdentityTests(unittest.TestCase):
+    """The Claude-on-Copilot bundle executes the same external-bundle
+    coordinator as Grok, Kimi, and Google (issue #722): its own brand changes
+    no routing, so it needs no coordinator of its own."""
+
+    def test_claude_copilot_coordinator_is_byte_identical_to_grok(self):
+        self.assertEqual(
+            CLAUDE_COPILOT_COORDINATOR.read_bytes(),
+            GROK_COORDINATOR.read_bytes(),
+            "The Claude-on-Copilot coordinator must remain byte-for-byte identical to Grok's",
         )
 
 

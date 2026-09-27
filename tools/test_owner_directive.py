@@ -56,6 +56,12 @@ COORDINATORS = {
     "grok": REPO_ROOT / "grok-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py",
     "kimi": REPO_ROOT / "kimi-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py",
     "google": REPO_ROOT / "google-plugin" / "plugins" / "kanban" / "scripts" / "review_pr.py",
+    "claude-copilot": REPO_ROOT
+    / "claude-copilot-plugin"
+    / "plugins"
+    / "kanban"
+    / "scripts"
+    / "review_pr.py",
 }
 
 DIRECTIVE = "just use a pr, that is fine"
@@ -656,6 +662,7 @@ AUTOSOLVE_ASSETS = (
     "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "google-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 )
 REVIEW_ASSETS = (
     "claude-plugin/plugins/kanban/commands/pr-review.md",
@@ -671,6 +678,7 @@ DELEGATING_ASSETS = (
     "grok-plugin/plugins/kanban/skills/solve/SKILL.md",
     "kimi-plugin/plugins/kanban/skills/solve/SKILL.md",
     "google-plugin/plugins/kanban/skills/solve/SKILL.md",
+    "claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md",
 )
 STANDING_DIRECTIVE = (
     "Standing owner directive from the autosolve workflow's documentation-only "

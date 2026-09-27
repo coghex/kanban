@@ -12,8 +12,8 @@ now the render of `tools/command_sources/external/autosolve.md`, and
 `tools/test_render_command_sources.py` byte-compares every rendered output
 against its source. What this module adds is the property that registration
 alone does not prove: a shared-policy edit in that source reaches exactly the
-three external `autosolve` assets, and each brand's runtime text reaches only
-its own.
+external `autosolve` assets -- four since issue #722 added the
+Claude-on-Copilot bundle -- and each brand's runtime text reaches only its own.
 
 Unlike the external `solve`, the Claude and Codex `autosolve` pair is itself
 rendered -- from `tools/command_sources/autosolve.md`, a separate source this
@@ -42,7 +42,11 @@ ASSETS = {
     "grok": "grok-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "kimi": "kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md",
     "google": "google-plugin/plugins/kanban/skills/autosolve/SKILL.md",
+    "claude-copilot": "claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md",
 }
+# The Copilot-hosted bundles, each keyed by its brand-table entry and the
+# origin brand its session stamps.
+COPILOT_BUNDLES = {"kimi": "kimi", "google": "google", "claude-copilot": "claude"}
 # Rendered from tools/command_sources/autosolve.md, and deliberately outside
 # this source's reach.
 CANONICAL_SOURCE = "tools/command_sources/autosolve.md"
@@ -57,7 +61,7 @@ SENTINEL = "PLANTED-SHARED-POLICY-SENTINEL-718"
 SHARED_ANCHOR = "## 6. Read the verdict after every round\n"
 GROK_ONLY_ANCHOR = '<!-- brand:grok -->\n```bash\nISSUE="$ARGUMENTS"'
 
-BRAND_MARKER_RE = re.compile(r"\A<!--\s*/?brand(?::[a-z,]+)?\s*-->\s*\Z")
+BRAND_MARKER_RE = re.compile(r"\A<!--\s*/?brand(?::[a-z,-]+)?\s*-->\s*\Z")
 
 
 def read(path):
@@ -94,7 +98,7 @@ def plant(anchor):
 
 def split_lines(source):
     """`(shared, branded)`: the source lines outside every brand block -- the
-    text all three brands render -- and the lines inside one."""
+    text every brand renders -- and the lines inside one."""
     shared, branded, inside = [], [], False
     for line in source.splitlines():
         if BRAND_MARKER_RE.match(line):
@@ -105,9 +109,10 @@ def split_lines(source):
 
 
 class RegistrationTests(unittest.TestCase):
-    """Requirements 1 to 3: one source, three outputs, all current."""
+    """Requirements 1 to 3: one source, one output per external bundle, all
+    current."""
 
-    def test_the_source_renders_exactly_the_three_external_autosolve_assets(self):
+    def test_the_source_renders_exactly_the_external_autosolve_assets(self):
         self.assertEqual(renderer.output_paths(entry()), ASSETS)
 
     def test_each_asset_is_the_render_of_the_one_source(self):
@@ -147,7 +152,7 @@ class RegistrationTests(unittest.TestCase):
 
 
 class ReachTests(unittest.TestCase):
-    """Requirement 4: a shared edit reaches the three and no other asset."""
+    """Requirement 4: a shared edit reaches the external assets and no other."""
 
     def setUp(self):
         self.baseline = renderer.render_all(REPO_ROOT)
@@ -162,7 +167,7 @@ class ReachTests(unittest.TestCase):
         for path in (*ASSETS.values(), *CANONICAL_AUTOSOLVE_ASSETS, SOURCE, CANONICAL_SOURCE):
             self.assertNotIn(SENTINEL, read(path), path)
 
-    def test_a_shared_policy_edit_reaches_all_three_autosolve_assets_and_nothing_else(self):
+    def test_a_shared_policy_edit_reaches_every_external_autosolve_asset_and_nothing_else(self):
         rendered = render_with_source(plant(SHARED_ANCHOR))
         self.assertEqual(self.changed(plant(SHARED_ANCHOR)), set(ASSETS.values()))
         for path in ASSETS.values():
@@ -181,7 +186,8 @@ class ReachTests(unittest.TestCase):
     def test_a_grok_only_edit_reaches_grok_alone(self):
         # The control that keeps the shared-edit assertion discriminating: the
         # same comparison reports one path when the edit is scoped to one
-        # brand, so three is a property of where the text was planted.
+        # brand, so reaching every asset is a property of where the text was
+        # planted.
         source = read(SOURCE)
         self.assertEqual(source.count(GROK_ONLY_ANCHOR), 1)
         source = source.replace(
@@ -211,38 +217,92 @@ class BrandIsolationTests(unittest.TestCase):
         self.assert_only("$GROK_HOME/installed-plugins/kanban-<hash>/", {"grok"})
         self.assert_only('argument-hint: "[issue number]"', {"grok"})
 
-    def test_the_copilot_pair_alone_reads_settings_and_both_install_layouts(self):
-        self.assert_only("Copilot skills receive no\nsubstituted arguments", {"kimi", "google"})
-        self.assert_only("$COPILOT_HOME/settings.json", {"kimi", "google"})
-        self.assert_only('settings = Path(copilot_home) / "settings.json"', {"kimi", "google"})
-        self.assert_only('direct = installed / "_direct"', {"kimi", "google"})
-        for brand in ("kimi", "google"):
-            self.assert_only(f"layout `kanban-{brand}/kanban/`", {brand})
+    def test_the_copilot_bundles_alone_read_settings_and_both_install_layouts(self):
+        copilot = set(COPILOT_BUNDLES)
+        self.assert_only("Copilot skills receive no\nsubstituted arguments", copilot)
+        self.assert_only("$COPILOT_HOME/settings.json", copilot)
+        self.assert_only('settings = Path(copilot_home) / "settings.json"', copilot)
+        self.assert_only('direct = installed / "_direct"', copilot)
+        for bundle, origin in COPILOT_BUNDLES.items():
+            self.assert_only(f"layout `kanban-{origin}/kanban/`", {bundle})
             self.assert_only(
-                f"_direct/<owner>--<repo>--{brand}-plugin-plugins-kanban/", {brand}
+                f"_direct/<owner>--<repo>--{bundle}-plugin-plugins-kanban/", {bundle}
             )
-            self.assert_only(f"${brand.upper()}_PLUGIN_ROOT", {brand})
+            variable = bundle.upper().replace("-", "_")
+            self.assert_only(f"${variable}_PLUGIN_ROOT", {bundle})
 
     def test_each_origin_marker_and_dry_run_origin_is_its_own_brands(self):
-        for brand in ASSETS:
-            self.assert_only(f"<!-- pr-origin:{brand} -->", {brand})
-            self.assert_only(f'"origin": "{brand}"', {brand})
-            self.assert_only(f"--expected-origin {brand}", {brand})
+        for bundle in ASSETS:
+            origin = COPILOT_BUNDLES.get(bundle, bundle)
+            self.assert_only(f"<!-- pr-origin:{origin} -->", {bundle})
+            self.assert_only(f'"origin": "{origin}"', {bundle})
+            self.assert_only(f"--expected-origin {origin}", {bundle})
 
     def test_each_brand_refuses_the_plugin_paths_of_the_brands_before_it(self):
         # The accretion-order enumeration the issue review's correction names.
+        # The Claude-on-Copilot bundle names every earlier brand but its own,
+        # and names Claude Code's bundle as another host's rather than as a
+        # sibling brand.
         expected = {
             "grok": "Claude or Codex plugin path",
             "kimi": "Claude, Codex, or Grok plugin path",
             "google": "Claude, Codex, Grok, or Kimi plugin path",
+            "claude-copilot": "Claude Code's plugin path, a Codex, Grok, Kimi, or Google plugin path",
         }
         for brand, phrase in expected.items():
             self.assert_only(phrase, {brand})
 
+    def test_only_the_claude_session_reads_fork_status_and_stops_on_it(self):
+        # A claude marker is the one a fork pull request loses: every bundled
+        # coordinator keeps only a grok, kimi, or google marker there.
+        self.assert_only(
+            'gh pr view "$PR" -R "$REPO" --json body,isCrossRepository', {"claude-copilot"}
+        )
+        self.assert_only(
+            'gh pr view "$PR" -R "$REPO" --json body\n', {"grok", "kimi", "google"}
+        )
+        self.assert_only(
+            "the bundled coordinator reads that marker even when GitHub reports",
+            {"grok", "kimi", "google"},
+        )
+        squashed = re.sub(r"\s+", " ", self.assets["claude-copilot"])
+        self.assertIn(
+            "When the `isCrossRepository` read above is `true`, stop and report that "
+            "this fork pull request's claude origin cannot be routed to Codex from "
+            "this bundle: do not run step 5",
+            squashed,
+        )
+        self.assertIn(
+            "PR #<pr> is a fork pull request whose claude origin this bundle cannot "
+            "route to Codex — needs your input.",
+            squashed,
+        )
+
+    def test_the_claude_session_carries_no_never_invoke_claude_identity(self):
+        # The review's correction: adapt the external safety guarantees without
+        # the Kimi identity text a Claude session would contradict.
+        for phrase in (
+            "never invoke Claude.",
+            "spawn, invoke, or impersonate Claude",
+            "Do not invoke Claude",
+            "continuing would invoke Claude",
+            "do not ask Claude to revise",
+            "A marker\nreading `reviewers=claude` is also a publication failure",
+        ):
+            self.assert_only(phrase, {"grok", "kimi", "google"})
+        for phrase in (
+            "never spawn another Claude session, and never review its own pull request.",
+            "It must never spawn or invoke another Claude session",
+            "never impersonate Codex.",
+            "Do not spawn another\nClaude session for any step of this loop.",
+            "do not start another Claude session to revise.",
+        ):
+            self.assert_only(phrase, {"claude-copilot"})
+
 
 class SharedRouteTests(unittest.TestCase):
-    """The reviewer route is shared, not per-brand: all three route to Codex,
-    and only the origin beside the route varies."""
+    """The reviewer route is shared, not per-brand: every external bundle routes
+    to Codex, and only the origin beside the route varies."""
 
     def test_every_brand_routes_to_codex(self):
         for brand, path in ASSETS.items():

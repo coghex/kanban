@@ -41,11 +41,14 @@ extra-source-files:
   google-plugin/**/*.json
   google-plugin/**/*.md
   google-plugin/**/*.py
+  claude-copilot-plugin/**/*.json
+  claude-copilot-plugin/**/*.md
+  claude-copilot-plugin/**/*.py
 
-  -- The ten files `plugin marketplace add` actually reads. Cabal 3.16's
+  -- The twelve files `plugin marketplace add` actually reads. Cabal 3.16's
   -- recursive globs do reach them under their dot-prefixed directories, so
   -- these lines are redundant today; they are kept because that is the one
-  -- glob-semantics detail whose silent change would strand all five bundles
+  -- glob-semantics detail whose silent change would strand all six bundles
   -- while every other bundle file still shipped.
   codex-plugin/.agents/plugins/marketplace.json
   codex-plugin/plugins/kanban/.codex-plugin/plugin.json
@@ -57,6 +60,8 @@ extra-source-files:
   kimi-plugin/plugins/kanban/plugin.json
   google-plugin/.github/plugin/marketplace.json
   google-plugin/plugins/kanban/plugin.json
+  claude-copilot-plugin/.github/plugin/marketplace.json
+  claude-copilot-plugin/plugins/kanban/plugin.json
 
 extra-doc-files:
   .github/pull_request_template.md
