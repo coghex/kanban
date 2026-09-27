@@ -298,9 +298,11 @@ counting it against the pull request or the cleanup step it was working on:
   unchanged after GitHub's three-minute window for applying an update is asked
   for once more. An [automatic CI rerun](#automatic-ci-reruns) whose response
   was lost is recorded as requested; if the same failure is still showing
-  afterwards, the Actions run itself says whether it was accepted, and one
-  that never reached GitHub is taken back, budget and all, and requested once
-  more.
+  afterwards, the Actions run's latest attempt says whether it was accepted —
+  a rerun gives the failed job a new record, so the failed one still being the
+  latest means it never ran. One that never reached GitHub is taken back,
+  budget and all, and requested once more; an answer that names no attempt
+  settles nothing and fails that pull request's attempt the ordinary way.
 - Authentication and permission failures, certificate failures, malformed
   responses, a command that timed out locally, and unexpected errors are never
   read as an outage. They keep the behavior they had.

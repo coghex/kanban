@@ -2023,11 +2023,12 @@ def rerun_failed_ci(
             entry.get("ci_rerun_active")
             and observed is not None
             and observed == entry.get("ci_rerun_attempt_identity")
-            and not ci_rerun_accepted(ctx, str(unconfirmed))
+            and not ci_rerun_accepted(ctx, str(unconfirmed), observed)
         ):
-            # The same failure, and a run that is not going: the request never
-            # reached GitHub, so it is taken back, budget and all, and the
-            # ordinary decision below makes it again.
+            # The same failure, and a run whose latest attempt is still the one
+            # that failed: the request never reached GitHub, so it is taken
+            # back, budget and all, and the ordinary decision below makes it
+            # again.
             log(
                 f"PR #{number}: the rerun requested before the network failed "
                 "was never accepted; requesting it again"
@@ -2141,19 +2142,41 @@ def clear_ci_rerun(state: dict[str, Any], number: int) -> None:
     entry["ci_rerun_unconfirmed"] = None
 
 
-def ci_rerun_accepted(ctx: RepoContext, run_id: str) -> bool:
-    """Whether GitHub took a rerun of an Actions run: the run is going again.
+def ci_rerun_accepted(ctx: RepoContext, run_id: str, failed_attempt: str) -> bool:
+    """Whether GitHub took a rerun of an Actions run, from the run's attempts.
 
-    A run that is queued or in progress was rerun; one still completed was
-    not, since a rerun that had already finished would show a new attempt in
-    the check rollup instead of the failure that asked for it.
+    `failed_attempt` is the `run/job` identity of the failure the rerun was
+    requested against. A rerun starts a new attempt with fresh job records, so
+    the failed job still being among the run's latest-attempt jobs means no
+    rerun ever started, and its absence means one did -- whether it is still
+    going or already finished while the rollup lagged behind. Its status plays
+    no part: an accepted rerun can finish during the outage.
+
+    Anything that does not name the latest attempt's jobs is no answer, and
+    raises: the request is neither taken back nor made again on a guess.
     """
+    failed_job = failed_attempt.rsplit("/", 1)[-1]
     payload = run_json(
-        ["gh", "run", "view", run_id, "--repo", ctx.repo_slug, "--json", "status"],
+        ["gh", "run", "view", run_id, "--repo", ctx.repo_slug, "--json", "jobs"],
         cwd=ctx.path,
     )
-    status = payload.get("status") if isinstance(payload, dict) else None
-    return isinstance(status, str) and status.lower() != "completed"
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    if not isinstance(jobs, list) or not jobs:
+        raise DrainError(
+            f"Actions run {run_id} named no jobs, so whether the rerun requested "
+            "before the network failed was accepted cannot be established"
+        )
+    latest: set[str] = set()
+    for job in jobs:
+        job_id = job.get("databaseId") if isinstance(job, dict) else None
+        if not isinstance(job_id, int) or isinstance(job_id, bool):
+            raise DrainError(
+                f"Actions run {run_id} returned a job with no usable id, so "
+                "whether the rerun requested before the network failed was "
+                "accepted cannot be established"
+            )
+        latest.add(str(job_id))
+    return failed_job not in latest
 
 
 def classify_check(item: dict[str, Any] | None) -> str:

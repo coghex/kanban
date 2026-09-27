@@ -5763,39 +5763,52 @@ class OfflineDrainLoopTests(ProcessPrFixture):
     def _reruns(self):
         return [c for c in self.fake.calls("gh") if c["args"][:3] == self.RERUN]
 
-    def _script_rerun_lost(self, run_status):
+    def _script_rerun_lost(self, run_view):
         # The same failed attempt is still what the rollup shows when the
         # network comes back; only the run itself can say what happened.
         self._queue(self._approved(), self._approved())
         self._script_pr_view({"statusCheckRollup": self._failed_ci_rollup()})
         self.fake.script("gh", self.RERUN, stderr=GH_OUTAGE, exit_code=1)
         self.fake.script("gh", self.RERUN, stdout="")
-        self.fake.script(
-            "gh", self.RUN_VIEW, stdout=json.dumps({"status": run_status})
-        )
+        self.fake.script("gh", self.RUN_VIEW, stdout=json.dumps(run_view))
         self.check_outcomes = [drain_prs.PROBE_CONNECTED]
 
-    def test_a_rerun_accepted_with_its_response_lost_is_not_requested_again(self):
-        self._script_rerun_lost("in_progress")
+    def _run_views(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:3] == self.RUN_VIEW]
 
-        self._run_loop()
-
+    def _assert_settled_as_one_request(self):
         self.assertEqual(len(self._reruns()), 1)
-        self.assertEqual(
-            len([c for c in self.fake.calls("gh") if c["args"][:3] == self.RUN_VIEW]), 1
-        )
+        self.assertEqual(len(self._run_views()), 1)
         offline_entry = self.observed_while_offline[0]["state"]["prs"]["42"]
         self.assertEqual(offline_entry["ci_rerun_unconfirmed"], "9911")
         self.assertTrue(offline_entry["ci_rerun_active"])
         entry = self._state()["prs"]["42"]
-        # Settled as the one request it was: counted once, still a barrier.
+        # Counted once, and still the barrier it was.
         self.assertIsNone(entry["ci_rerun_unconfirmed"])
         self.assertTrue(entry["ci_rerun_active"])
         self.assertEqual(entry["ci_rerun_attempts"], 1)
         self.assertEqual(entry["consecutive_failures"], 0)
 
+    def test_a_rerun_accepted_with_its_response_lost_is_not_requested_again(self):
+        self._script_rerun_lost(
+            {"status": "in_progress", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_settled_as_one_request()
+
+    def test_a_rerun_accepted_and_finished_during_the_outage_is_not_repeated(self):
+        # The new attempt already completed while the rollup still reports
+        # the old failure: completion is no evidence the rerun never ran.
+        self._script_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770002}]}
+        )
+        self._run_loop()
+        self._assert_settled_as_one_request()
+
     def test_a_rerun_that_never_reached_github_is_requested_once_more(self):
-        self._script_rerun_lost("completed")
+        self._script_rerun_lost(
+            {"status": "completed", "jobs": [{"databaseId": 770001}]}
+        )
 
         self._run_loop()
 
@@ -5805,6 +5818,23 @@ class OfflineDrainLoopTests(ProcessPrFixture):
         self.assertEqual(entry["ci_rerun_attempts"], 1)
         self.assertTrue(entry["ci_rerun_active"])
         self.assertIsNone(entry["ci_rerun_unconfirmed"])
+
+    def test_an_answer_that_names_no_attempt_neither_retracts_nor_repeats(self):
+        for run_view in ({"status": "completed"}, {"jobs": [{"databaseId": "x"}]}):
+            with self.subTest(run_view=run_view):
+                self.setUp()
+                self._script_rerun_lost(run_view)
+
+                self._run_loop()
+
+                self.assertEqual(len(self._reruns()), 1)
+                entry = self._state()["prs"]["42"]
+                # Fail closed: the request stays recorded and unconfirmed, and
+                # the attempt fails the ordinary way.
+                self.assertEqual(entry["ci_rerun_unconfirmed"], "9911")
+                self.assertTrue(entry["ci_rerun_active"])
+                self.assertEqual(entry["ci_rerun_attempts"], 1)
+                self.assertEqual(entry["consecutive_failures"], 1)
 
     def test_an_outage_inside_incident_reconciliation_enters_the_wait(self):
         # Those reads used to swallow a failure silently and carry on; offline
