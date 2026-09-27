@@ -3329,9 +3329,11 @@ above are unchanged, and persistence the user switched off is not a failure.
   answers again the drainer's only external operation is one read-only check of
   its own API path a minute, on a fixed schedule, each bounded inside the
   minute. A check that gets through resumes draining in the same run, and the
-  next pass rereads every gate before it mutates anything; a merge the outage
-  left uncertain is looked up rather than retried, and one that landed gets its
-  cleanup and its post-merge audit as if the call had returned. A check that
+  next pass rereads every gate before it mutates anything, and the pass the
+  outage cut short advances no cooldown clock. A merge or branch update the
+  outage left uncertain is looked up rather than retried, and a merge that
+  landed at the attempted head gets its cleanup and its post-merge audit as if
+  the call had returned. A check that
   meets anything other than an outage — authentication, permission, a
   certificate, a malformed answer — ends the wait for the ordinary failure
   handling. The controller reports the state as `offline` only while the live

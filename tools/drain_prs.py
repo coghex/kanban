@@ -3460,6 +3460,17 @@ def recover_stale_approval(
                 forget_pr(state, number)
             continue
 
+        update_attempt = entry.get("branch_update_attempt")
+        if (
+            isinstance(update_attempt, dict)
+            and update_attempt.get("head") != pr["headRefOid"]
+        ):
+            # The head moved, so the branch update an outage interrupted is
+            # settled: it landed, or something newer superseded it. Whether
+            # approval carries across is decided below exactly as for any
+            # branch update, from the stale-approval policy's own verdict.
+            entry["branch_update_attempt"] = None
+
         approved_head = entry["approved_head"]
         current_head = pr["headRefOid"]
         if current_head == approved_head:
@@ -5471,7 +5482,48 @@ def request_base_update(
     always left with an update in flight rather than stranded.
     """
     number = pr["number"]
-    settled = update_branch(ctx, pr, dry_run=dry_run)
+    head = pr["headRefOid"]
+    entry = state["prs"].get(str(number))
+    pending = entry.get("branch_update_attempt") if isinstance(entry, dict) else None
+    if isinstance(pending, dict):
+        requested_at = pending.get("requested_at")
+        if (
+            pending.get("head") == head
+            and isinstance(requested_at, (int, float))
+            and time.time() - requested_at < UPDATE_BRANCH_WAIT_SECONDS
+        ):
+            # An update a network failure interrupted may have been accepted
+            # with only its response lost, and GitHub applies one
+            # asynchronously. Until the head moves or GitHub's own window for
+            # applying it has passed, asking again would be asking twice.
+            log(
+                f"PR #{number}: a branch update requested before the network "
+                "failed may still land; waiting for it rather than requesting "
+                "another"
+            )
+            set_outcome(
+                report,
+                "behind_base",
+                f"PR #{number} is behind {ctx.default_branch}; the branch update "
+                "requested before a network failure may still be landing.",
+            )
+            return True
+        if pending.get("head") == head:
+            log(
+                f"PR #{number}: the branch update requested before the network "
+                "failed never landed; requesting it again"
+            )
+        entry["branch_update_attempt"] = None
+    try:
+        settled = update_branch(ctx, pr, dry_run=dry_run)
+    except DrainError:
+        if NETWORK_OFFLINE is not None and not dry_run and isinstance(entry, dict):
+            # Whether GitHub took the request is unknown -- the response, or
+            # the policy read after it, is what the outage cost -- so it is
+            # recorded as requested, and settled from the head on recovery.
+            entry["branch_update_attempt"] = {"head": head, "requested_at": time.time()}
+            save_drain_state(ctx, state, dry_run=False)
+        raise
     if settled is not None:
         # The only head recordable here is the one the policy cleared, in the
         # very payload that cleared it. An independent read at this point can
@@ -5917,16 +5969,24 @@ def settle_interrupted_merge(
     attempt = entry.get("merge_attempt")
     if isinstance(attempt, dict):
         pr = get_pr(ctx, number)
-        if pr.get("state") == "MERGED":
+        attempted = attempt.get("head")
+        if pr.get("state") == "MERGED" and pr.get("headRefOid") == attempted:
             log(
                 f"PR #{number}: the merge interrupted by the network landed; "
                 "recording its cleanup and completing its audit"
             )
             entry["cleanup"] = plan_cleanup(pr)
-            entry["pending_audit"] = {
-                "head": attempt.get("head"),
-                "confirm_merged": False,
-            }
+            entry["pending_audit"] = {"head": attempted, "confirm_merged": False}
+        elif pr.get("state") == "MERGED":
+            # Merged, but at a head this drainer never tried to land: someone
+            # else's merge. Nothing here is this drainer's to audit, so the
+            # pull request takes the ordinary merged-with-nothing-recorded
+            # path below, exactly as it would have without the outage.
+            log(
+                f"PR #{number}: merged at {str(pr.get('headRefOid'))[:12]} "
+                "rather than the head the interrupted merge tried to land; "
+                "handling it as any other merged pull request"
+            )
         else:
             log(
                 f"PR #{number}: the merge interrupted by the network did not "
@@ -6301,6 +6361,26 @@ def run_drain_pass(
     save_drain_state(ctx, state, dry_run=dry_run)
 
 
+def restore_pass_clock(
+    state: dict[str, Any],
+    pass_clock: int,
+    last_attempts: dict[str, Any],
+) -> None:
+    """Undo what opening a pass the network interrupted did to the scheduler.
+
+    The pass counter goes back to where the pass found it, so no cooldown
+    expires early on the strength of a pass that attempted nothing, and every
+    entry's `last_attempt` goes back with it -- to what it was, or, for an
+    entry the pass itself added, to the none a new entry starts with. Nothing
+    else is touched: what the pass did record, a discharged cleanup step or an
+    interrupted merge or branch update, stands.
+    """
+    state["attempt_counter"] = pass_clock
+    for key, entry in state["prs"].items():
+        if isinstance(entry, dict):
+            entry["last_attempt"] = last_attempts.get(key, 0)
+
+
 def loop(
     ctx: RepoContext,
     *,
@@ -6316,6 +6396,15 @@ def loop(
     stale_recovery_failures = 0
     queue_refresh_failures = 0
     while True:
+        # What an interrupted pass must hand back (issue #735): the pass clock
+        # every cooldown is denominated in, and each entry's last attempt. A
+        # pass the network cut short attempted nothing that counts.
+        pass_clock = state["attempt_counter"]
+        last_attempts = {
+            key: entry.get("last_attempt")
+            for key, entry in state["prs"].items()
+            if isinstance(entry, dict)
+        }
         try:
             # The per-cycle roster read, ahead of stale-approval recovery and every
             # queue decision that could reach a rereview. Re-read here rather than
@@ -6420,6 +6509,7 @@ def loop(
             # interrupted merge -- is kept; nothing is counted as a failure;
             # and nothing more happens until GitHub answers again, when the
             # next pass rereads every gate before it changes anything.
+            restore_pass_clock(state, pass_clock, last_attempts)
             save_drain_state(ctx, state, dry_run=dry_run)
             wait_for_connectivity(ctx.path, ctx.repo_slug, failure, dry_run=dry_run)
 

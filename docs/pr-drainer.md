@@ -278,13 +278,22 @@ counting it against the pull request or the cleanup step it was working on:
   malformed answer — is not an outage, so it ends the wait and the ordinary
   failure handling decides; three such failures in a row still end the run
   with a crash incident.
+- The pass the outage cut short counts for nothing: the pass counter every
+  cooldown is measured in, and the attempt it had begun, go back to where the
+  pass found them.
 - A write the outage left uncertain is settled from GitHub before it is
   retried. A merge call that failed is looked up: a pull request that merged at
   the attempted head gets its cleanup and its post-merge audit exactly as a
-  merge that had returned would, and one that did not goes back through every
-  gate. A merge that landed before its audit could read it back has its cleanup
-  recorded before the wait and its audit completed after it — a real gate
-  violation found then is still the fatal incident it always was.
+  merge that had returned would; one merged at some other head is someone
+  else's merge and is handled as any merged pull request is; and one that did
+  not merge goes back through every gate. A merge that landed before its audit
+  could read it back has its cleanup recorded before the wait and its audit
+  completed after it — a real gate violation found then is still the fatal
+  incident it always was. A branch update whose response was lost is not
+  requested again while it could still be landing: a head that moved settles
+  it through the ordinary stale-approval verdict, and only a head still
+  unchanged after GitHub's three-minute window for applying an update is asked
+  for once more.
 - Authentication and permission failures, certificate failures, malformed
   responses, a command that timed out locally, and unexpected errors are never
   read as an outage. They keep the behavior they had.
