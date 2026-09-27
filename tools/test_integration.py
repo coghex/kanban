@@ -1416,6 +1416,48 @@ class CoordinationOnlyBaseAdvanceTests(ProcessPrFixture):
         self.assertEqual(len(self._pr_merge_calls()), 0)
         self.assertEqual(len(self._update_branch_calls()), 0)
 
+    def _issue_closes(self):
+        return [c for c in self.fake.calls("gh") if c["args"][:2] == ["issue", "close"]]
+
+    def test_a_landed_swap_github_never_records_is_fatal_and_cleans_nothing(self):
+        # Open at recovery, then closed without GitHub recording the merge:
+        # the confirmation fails, and no cleanup is ever owed -- not now, and
+        # not on the restart that follows the incident.
+        state = self._interrupted_swap(push_lands=True)
+        self._script_pr_view(self._behind(), {"state": "CLOSED"})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError):
+            self._settle(state)
+
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["cleanup"])
+        self.assertIsNone(entry["pending_audit"])
+        self.assertIsNone(entry["merge_attempt"])
+        with (
+            mock.patch.dict(os.environ, self.fake.environ_overrides()),
+            mock.patch.object(drain_prs, "NETWORK_OFFLINE", None),
+        ):
+            drain_prs.recover_stale_approval(
+                self.ctx, state, dry_run=False, gates=self._gates()
+            )
+        self.assertNotIn("42", state["prs"])
+        self.assertEqual(self._issue_closes(), [])
+
+    def test_a_landed_swap_found_closed_is_still_checked_and_fatal(self):
+        # Closed by the time the network returns: the default branch still
+        # holds the merge, so it is neither forgotten as an unmerged closure
+        # nor cleaned up -- the missing merged record is the incident.
+        state = self._interrupted_swap(push_lands=True)
+        self._script_pr_view({"state": "CLOSED"})
+
+        with self.assertRaises(drain_prs.PostMergeAuditError) as raised:
+            self._settle(state)
+
+        self.assertIn("CLOSED", str(raised.exception))
+        entry = state["prs"]["42"]
+        self.assertIsNone(entry["cleanup"])
+        self.assertEqual(self._issue_closes(), [])
+
     def test_a_swap_that_never_pushed_goes_back_through_the_gates(self):
         state = self._interrupted_swap(push_lands=False)
         self.assertFalse(self._swapped())

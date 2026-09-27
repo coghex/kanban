@@ -285,11 +285,15 @@ counting it against the pull request or the cleanup step it was working on:
   retried. A merge call that failed is looked up: a pull request that merged at
   the attempted head gets its cleanup and its post-merge audit exactly as a
   merge that had returned would; one merged at some other head is someone
-  else's merge and is handled as any merged pull request is; one still open
-  after a [base-advance swap](#merging-past-a-coordination-only-base-advance)
-  whose push may have landed is checked against the default branch, and
-  treated as merged when the default branch holds its merge commit; and one
-  that did not merge goes back through every gate. A merge that landed before its audit
+  else's merge and is handled as any merged pull request is; one not yet
+  recorded as merged after a
+  [base-advance swap](#merging-past-a-coordination-only-base-advance) whose
+  push may have landed is checked against the default branch, and when the
+  branch holds its merge commit it gets the merged-state confirmation a
+  returned swap gets — its cleanup waits for that confirmation, and a pull
+  request GitHub never records as merged, open or closed, is the fatal audit
+  incident rather than a cleanup; and one that did not merge goes back through
+  every gate. A merge that landed before its audit
   could read it back has its cleanup recorded before the wait and its audit
   completed after it — a real gate violation found then is still the fatal
   incident it always was. A branch update whose response was lost is not

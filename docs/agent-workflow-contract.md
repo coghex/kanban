@@ -1226,7 +1226,8 @@ reimplement the removal, and `--check` remains read-only.
   pass counter or attempt; and a merge, base-advance swap, branch update, or
   CI rerun the outage left uncertain is settled from GitHub rather than
   retried blind — a merge is claimed only at the head it tried to land, and a
-  swap only when the default branch holds its merge commit. Authentication, permission,
+  swap only when the default branch holds its merge commit, with its cleanup
+  waiting on GitHub's record of the merge. Authentication, permission,
   certificate, malformed-response, local-timeout, and unexpected failures are
   never read as an outage, and a check that meets one ends the wait so the
   ordinary failure handling applies. The controller reports the state as

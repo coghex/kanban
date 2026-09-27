@@ -6011,9 +6011,24 @@ def record_interrupted_merge(
     if entry is None:
         remember_approved_head(state, number, head)
         entry = state["prs"][str(number)]
-    if landed:
+    if landed and confirm_merged:
+        # A swap that landed, awaiting GitHub's record of the merge. Its
+        # cleanup waits on that record exactly as it does after a swap that
+        # returned: a pull request GitHub never records as merged is a fatal
+        # incident, never a merge whose issues get closed.
+        entry["pending_audit"] = {
+            "head": head,
+            "confirm_merged": True,
+            "cleanup_after_confirm": True,
+        }
+        log(
+            f"PR #{number}: its merge landed on {ctx.default_branch}, but the "
+            "network failed before GitHub was seen to record it; recorded the "
+            "confirmation and audit for recovery"
+        )
+    elif landed:
         entry["cleanup"] = plan_cleanup(pr)
-        entry["pending_audit"] = {"head": head, "confirm_merged": confirm_merged}
+        entry["pending_audit"] = {"head": head, "confirm_merged": False}
         log(
             f"PR #{number}: merged {head[:12]}, but went offline before its "
             "post-merge audit; recorded its cleanup and the audit for recovery"
@@ -6065,9 +6080,12 @@ def settle_interrupted_merge(
 
     An unknown outcome is read from GitHub. A pull request that merged at the
     attempted head is treated exactly as a merge call that had returned
-    success: its cleanup is recorded and its audit becomes pending below. Any
-    other state landed nothing, so the record is dropped and the pull request
-    goes back through every ordinary gate, fresh.
+    success: its cleanup is recorded and its audit becomes pending below. One
+    not recorded as merged whose base-advance swap commit is on the default
+    branch landed all the same, and gets what a returned swap gets: the
+    merged-state confirmation first, and its cleanup only once that holds. Any
+    other state landed nothing of this drainer's, so the record is dropped and
+    the pull request goes back through the ordinary handling, fresh.
 
     A pending audit is then completed. A transport failure leaves it pending
     for the next recovery; a real gate violation is recorded as done before it
@@ -6086,20 +6104,25 @@ def settle_interrupted_merge(
             )
             entry["cleanup"] = plan_cleanup(pr)
             entry["pending_audit"] = {"head": attempted, "confirm_merged": False}
-        elif pr.get("state") == "OPEN" and swap_landed(
+        elif pr.get("state") != "MERGED" and swap_landed(
             ctx, number, attempt.get("merge_commit")
         ):
             # A base-advance swap whose push landed with its response lost:
-            # the default branch already holds the merge, and GitHub has yet
-            # to record the pull request as merged. The merged-state wait
-            # joins the audit, exactly as after a swap that had returned.
+            # the default branch holds the merge, whatever GitHub says of the
+            # pull request yet. It gets the merged-state confirmation and the
+            # audit a swap that returned gets, and its cleanup only once that
+            # confirmation holds -- open or closed, a pull request GitHub
+            # never records as merged is the fatal incident, not a cleanup.
             log(
                 f"PR #{number}: the merge commit the interrupted swap pushed is "
-                f"on {ctx.default_branch}; recording its cleanup and "
-                "completing its audit"
+                f"on {ctx.default_branch}; confirming GitHub records the merge "
+                "before its cleanup and audit"
             )
-            entry["cleanup"] = plan_cleanup(pr)
-            entry["pending_audit"] = {"head": attempted, "confirm_merged": True}
+            entry["pending_audit"] = {
+                "head": attempted,
+                "confirm_merged": True,
+                "cleanup_after_confirm": True,
+            }
         elif pr.get("state") == "MERGED":
             # Merged, but at a head this drainer never tried to land: someone
             # else's merge. Nothing here is this drainer's to audit, so the
@@ -6127,6 +6150,13 @@ def settle_interrupted_merge(
     try:
         if audit.get("confirm_merged"):
             confirm_pull_request_merged(ctx, number, head)
+        if audit.get("cleanup_after_confirm"):
+            # Confirmed merged: only now does the merge owe its cleanup, and
+            # it is durable before the audit, as after any merge.
+            entry["cleanup"] = plan_cleanup(get_pr(ctx, number))
+            audit = {"head": head, "confirm_merged": False}
+            entry["pending_audit"] = audit
+            save_drain_state(ctx, state, dry_run=dry_run)
         audit_merged_pr(ctx, number, head, gates)
     except PostMergeAuditError:
         entry["pending_audit"] = None
