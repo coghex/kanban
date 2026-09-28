@@ -23,7 +23,7 @@ concrete precondition
 - [x] RUN-2. Install per-repository mission runner jobs with a dedicated installer and discovery record — [#667]
 - [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
 - [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
-- [ ] RUN-5. Admit mission work under a two-agent ceiling with fair rotation
+- [x] RUN-5. Admit mission work under a two-agent ceiling with fair rotation — [#746]
 - [ ] RUN-7. Wait out provider rate limits and drain the runner on stop and upgrade
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
@@ -634,6 +634,12 @@ Resolved by D-15: option (a).
 - **Open questions:** `None`.
 
 ### RUN-5. Admit mission work under a two-agent ceiling with fair rotation
+
+> Filed as [#746], depending on [#666] and [#744]. At filing the operator
+> chose to retire the per-pass mission limit: each pass advances every runnable
+> mission one transition, and only starting an agent is capped. The ceiling
+> takes a key in the existing `[missions]` configuration table. Epic #597 was
+> edited in the same step for RUN-7, D-5, and D-15.
 
 - **Outcome:** At most two mission-dispatched agents run at once per
   repository, counted across missions and passes, and runnable missions share
