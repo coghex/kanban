@@ -1721,8 +1721,11 @@ def _require_admitted(admitted: Any, termination: str) -> None:
 def _require_agents(agents: Any, termination: str) -> None:
     """The agent count a pass observed, or `null` when it counted none.
 
-    A refused pass looked at nothing, so it carries `null`. Otherwise the count
-    is two plain integers: a live count, never negative, and the positive
+    A refused pass looked at nothing, so it carries `null`, and a failed one
+    may, when counting was what failed. A completed pass always counted -- the
+    scheduler fails a pass whose count could not be taken -- so a completed
+    report without one is missing the one number the ceiling is judged by.
+    Otherwise the count is two plain integers: a live count, never negative, and the positive
     ceiling the pass applied. The live count is deliberately not held under
     the ceiling. The ceiling limits what missions may *start*, and an operator
     who lowers it below what is already running is owed those agents running
@@ -1730,6 +1733,11 @@ def _require_agents(agents: Any, termination: str) -> None:
     malformed.
     """
     if agents is None:
+        if termination == PASS_COMPLETED:
+            raise PassFailure(
+                "The mission scheduler report terminated 'completed' without the "
+                "agent count it observed."
+            )
         return
     if termination == PASS_REFUSED:
         raise PassFailure(

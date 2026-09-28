@@ -249,11 +249,17 @@ def pass_document(
     termination="completed",
     admitted=(),
     attention=(),
-    agents=None,
+    agents="counted",
     detail="nothing to do",
     exit_code=None,
 ):
-    """One well-formed pass report, in the shape the scheduler writes."""
+    """One well-formed pass report, in the shape the scheduler writes.
+
+    A pass that got as far as counting reports the count; a refused one
+    looked at nothing and reports none.
+    """
+    if agents == "counted":
+        agents = None if termination == "refused" else {"live": 0, "ceiling": 2}
     return {
         "schema": service.PASS_SCHEMA,
         "version": service.PASS_VERSION,
@@ -822,6 +828,13 @@ class PassReportTests(unittest.TestCase):
             ),
             "a zero agent ceiling": (
                 json.dumps(pass_document(agents={"live": 0, "ceiling": 0})),
+                0,
+            ),
+            # The scheduler always counts on a completed pass, and fails one it
+            # could not count; a completed report without a count is missing
+            # the number the ceiling is judged by.
+            "a completed pass with no agent count": (
+                json.dumps(pass_document(agents=None)),
                 0,
             ),
             "a refused pass that counted agents": (
