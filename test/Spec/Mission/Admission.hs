@@ -19,6 +19,7 @@ import Control.Monad (forM, forM_)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Map.Strict as Map
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (getCurrentTime)
@@ -534,8 +535,30 @@ processSpec = describe "separate processes" $ do
       results <- mapM awaitAdmissionResult [left, right]
       mapM stopAdmissionProbe [left, right] `shouldReturn` [ExitSuccess, ExitSuccess]
       filter (== "dispatched") results `shouldBe` ["dispatched"]
-      filter (== "held") results `shouldBe` ["held"]
+      filter ("held" `isPrefixOf`) results `shouldSatisfy` ((== 1) . length)
       missionAgentsNow `shouldReturn` 1
+
+  -- The same, from two checkouts that spell the repository differently: one
+  -- ceiling, one lock, one occupancy between them.
+  it "start exactly one agent between two checkouts that spell the repository differently" $
+    withSlotRoots $ \lower -> withTemporaryCacheRoot $ \probes -> do
+      let shouting = Repository {repositoryRoot = "/tmp/a-shouting-checkout", repositoryOwner = "Coghex", repositoryName = "Kanban"}
+      reopened <- openMissionStore shouting
+      upper <- either (fail . Text.unpack) pure reopened
+      _ <- putAgentMission lower "quiet-one"
+      _ <- putAgentMission upper "loud-one"
+      quietProbe <- startAdmissionProbe probes ProbeStep "quiet-one" 1
+      loudProbe <- startAdmissionProbeFor shouting probes ProbeStep "loud-one" 1
+      openAdmissionGate probes
+      results <- mapM awaitAdmissionResult [quietProbe, loudProbe]
+      mapM stopAdmissionProbe [quietProbe, loudProbe] `shouldReturn` [ExitSuccess, ExitSuccess]
+      filter (== "dispatched") results `shouldBe` ["dispatched"]
+      -- The one held back saw the other's agent, whichever spelling it was.
+      filter ("held" `isPrefixOf`) results `shouldSatisfy` all ("1 of 1 agent slots are in use" `isInfixOf`)
+      filter ("held" `isPrefixOf`) results `shouldSatisfy` ((== 1) . length)
+      missionAgentsNow `shouldReturn` 1
+      observed <- observeMissionAgents shouting
+      fmap missionAgentsLive observed `shouldBe` Right 1
 
   -- The clarification's interruption cases. A holder killed before it
   -- launched anything leaves its slot to be reused; one killed after its

@@ -35,7 +35,9 @@ module Spec.Support.AgentSlots
     missionAgentsNow,
     slotAdmission,
     agentDriver,
+    agentDriverFor,
     stepAgentMission,
+    stepAgentMissionIn,
     agentPass,
 
     -- * Probes
@@ -44,6 +46,7 @@ module Spec.Support.AgentSlots
     AdmissionProbeMode (..),
     AdmissionProbe,
     startAdmissionProbe,
+    startAdmissionProbeFor,
     openAdmissionGate,
     awaitAdmissionResult,
     killAdmissionProbe,
@@ -143,7 +146,7 @@ putAgentMissionSteps store name steps = do
     specification mission =
       MissionSpecification
         { missionSpecificationId = mission,
-          missionSpecificationRepository = MissionRepository "coghex" "kanban",
+          missionSpecificationRepository = store.missionStoreRepository,
           missionSpecificationRequest = "solve something",
           missionSpecificationSelector =
             MissionSelector
@@ -172,7 +175,7 @@ putAgentMissionSteps store name steps = do
     snapshot mission =
       MissionSnapshot
         { missionSnapshotId = mission,
-          missionSnapshotRepository = MissionRepository "coghex" "kanban",
+          missionSnapshotRepository = store.missionStoreRepository,
           missionSnapshotLifecycle = MissionRunning,
           missionSnapshotCurrentStep = Nothing,
           missionSnapshotNextSteps = [],
@@ -249,7 +252,12 @@ slotAdmission = (liveMissionAdmissionSeams slotRepository) {missionAdmissionPoll
 -- launch is a worker of its own and a second launch of one invocation would
 -- be the same worker rather than another.
 agentDriver :: Int -> MissionStore -> MissionId -> IO MissionDriver
-agentDriver agentCeiling store mission =
+agentDriver = agentDriverFor slotRepository
+
+-- | 'agentDriver' for a checkout of the repository spelled and rooted as
+-- @repository@ says.
+agentDriverFor :: Repository -> Int -> MissionStore -> MissionId -> IO MissionDriver
+agentDriverFor repository agentCeiling store mission =
   pure
     MissionDriver
       { missionDriverInventory = pure (Right (MissionInventory [] [])),
@@ -269,7 +277,7 @@ agentDriver agentCeiling store mission =
                   }
             ),
         missionDriverObserveSession = \session _ -> do
-          descriptor <- agentWorker slotRepository session.unMissionSessionId
+          descriptor <- agentWorker repository session.unMissionSessionId
           state <- readWorkerState descriptor
           now <- getCurrentTime
           pure $ case state of
@@ -278,12 +286,12 @@ agentDriver agentCeiling store mission =
                   Right (Just (MissionTerminalObservation now (MissionObservedExit 0) (Just "it finished")))
             _ -> Right Nothing,
         missionDriverAdoptInvocation = \invocation -> do
-          descriptor <- agentWorker slotRepository (workerFor invocation)
+          descriptor <- agentWorker repository (workerFor invocation)
           present <- doesFileExist descriptor.workerDescriptorSpecPath
           pure (Right (if present then Just (MissionSessionId (workerFor invocation)) else Nothing)),
         missionDriverDispatch = \request -> do
           let identifier = workerFor request.missionDispatchInvocation
-          _ <- writeAgentWorker slotRepository identifier (Just request.missionDispatchInvocation.unMissionInvocationId) solveTask (Just WorkerRunning)
+          _ <- writeAgentWorker repository identifier (Just request.missionDispatchInvocation.unMissionInvocationId) solveTask (Just WorkerRunning)
           pure
             ( Right
                 MissionDispatchAccepted
@@ -295,20 +303,21 @@ agentDriver agentCeiling store mission =
                   }
             ),
         missionDriverClaimSlot = \_ invocation -> do
-          decision <- claimMissionAgentSlot slotAdmission store agentCeiling mission invocation.unMissionInvocationId
+          decision <- claimMissionAgentSlot admission store agentCeiling mission invocation.unMissionInvocationId
           pure $ case decision of
             MissionAgentSlotGranted -> MissionSlotClaimed
             MissionAgentSlotHeld reason -> MissionSlotWaiting reason
             MissionAgentSlotUndecided detail -> MissionSlotUndecided detail,
-        missionDriverSettleSlot = \invocation -> void (settleMissionAgentSlot slotAdmission store invocation.unMissionInvocationId),
+        missionDriverSettleSlot = \invocation -> void (settleMissionAgentSlot admission store invocation.unMissionInvocationId),
         missionDriverTerminate = \_ -> pure (Right []),
         missionDriverSealSession = \_ -> pure []
       }
   where
-    solveTask = (workerFixtureSpec slotRepository (WorkerId "any") 844).workerTask
+    admission = (liveMissionAdmissionSeams repository) {missionAdmissionPollMicros = 20 * 1000, missionAdmissionPolls = 250}
+    solveTask = (workerFixtureSpec repository (WorkerId "any") 844).workerTask
     workerFor invocation = "agent-" <> mission.unMissionId <> "-" <> Text.takeEnd 12 (Text.filter (/= '-') invocation.unMissionInvocationId)
     reading session = do
-      descriptor <- agentWorker slotRepository session.unMissionSessionId
+      descriptor <- agentWorker repository session.unMissionSessionId
       state <- readWorkerState descriptor
       pure $ case state of
         Left _ -> []
@@ -328,8 +337,12 @@ agentDriver agentCeiling store mission =
 
 -- | One scheduled step of one mission under @agentCeiling@.
 stepAgentMission :: Int -> MissionStore -> MissionId -> IO MissionIteration
-stepAgentMission agentCeiling store mission = do
-  stepped <- runMissionStepWith store slotRepository mission (agentDriver agentCeiling)
+stepAgentMission = stepAgentMissionIn slotRepository
+
+-- | 'stepAgentMission' from a checkout of @repository@.
+stepAgentMissionIn :: Repository -> Int -> MissionStore -> MissionId -> IO MissionIteration
+stepAgentMissionIn repository agentCeiling store mission = do
+  stepped <- runMissionStepWith store repository mission (agentDriverFor repository agentCeiling)
   case stepped of
     Left refusal -> fail ("the mission refused to start: " <> Text.unpack (missionStartRefusalMessage refusal))
     Right report -> pure report.missionStepIteration
@@ -381,6 +394,11 @@ data AdmissionProbeMode
 
 data ProbePlan = ProbePlan
   { planMode :: AdmissionProbeMode,
+    -- | The checkout this probe is: its root and its spelling of the
+    -- repository.
+    planRoot :: FilePath,
+    planOwner :: Text,
+    planName :: Text,
     planMission :: Text,
     planCeiling :: Int,
     planStarted :: FilePath,
@@ -401,17 +419,18 @@ runAdmissionProbe :: FilePath -> IO ()
 runAdmissionProbe planPath = do
   decoded <- eitherDecodeFileStrict planPath :: IO (Either String ProbePlan)
   plan <- either (\message -> fail ("unreadable probe plan: " <> message)) pure decoded
-  opened <- openMissionStore slotRepository
+  let repository = Repository {repositoryRoot = plan.planRoot, repositoryOwner = plan.planOwner, repositoryName = plan.planName}
+  opened <- openMissionStore repository
   store <- either (\message -> fail (Text.unpack message)) pure opened
   writeFile plan.planStarted "started"
   awaitFile plan.planGate
   let mission = MissionId plan.planMission
   case plan.planMode of
     ProbeStep -> do
-      iteration <- stepAgentMission plan.planCeiling store mission
+      iteration <- stepAgentMissionIn repository plan.planCeiling store mission
       writeFile plan.planResult $ case iteration of
         MissionAdvanced (MissionStepDispatched {}) -> "dispatched"
-        MissionHeldForSlot _ -> "held"
+        MissionHeldForSlot reason -> "held: " <> Text.unpack reason
         other -> "other: " <> show other
       exitWith ExitSuccess
     ProbeClaimAndHold -> do
@@ -430,11 +449,18 @@ runAdmissionProbe planPath = do
 
 -- | Starts one probe and waits until it is at its gate.
 startAdmissionProbe :: FilePath -> AdmissionProbeMode -> Text -> Int -> IO AdmissionProbe
-startAdmissionProbe directory mode mission agentCeiling = do
+startAdmissionProbe = startAdmissionProbeFor slotRepository
+
+-- | 'startAdmissionProbe' for a probe that is a checkout of @repository@.
+startAdmissionProbeFor :: Repository -> FilePath -> AdmissionProbeMode -> Text -> Int -> IO AdmissionProbe
+startAdmissionProbeFor repository directory mode mission agentCeiling = do
   let base = directory </> Text.unpack mission
       plan =
         ProbePlan
           { planMode = mode,
+            planRoot = repository.repositoryRoot,
+            planOwner = repository.repositoryOwner,
+            planName = repository.repositoryName,
             planMission = mission,
             planCeiling = agentCeiling,
             planStarted = base <> ".started",
