@@ -30,7 +30,7 @@ concrete precondition
 - [x] EPIC. Reconcile the durable `gh` record with readers that hold no repository lease — [#642]
 - [x] GHR-1. Serialize the durable record's read-modify-write across processes — [#720]
 - [x] GHR-2. Classify a recorded `gh` by its writer's liveness rather than by first sight — [#721]
-- [ ] GHR-3. Give the mission runner and the worker precondition one record authority each, and prove three readers together
+- [x] GHR-3. Give the mission runner and the worker precondition one record authority each, and prove three readers together — [#742]
 
 ## Epic contract
 
@@ -548,6 +548,10 @@ Written for P-B (D-2).
 - **Open questions:** `None`
 
 ### GHR-3. Give the mission runner and the worker precondition one record authority each, and prove three readers together
+
+> Filed as [#742], depending on [#721]. Epic #642 was edited in the same
+> step to drop the RUN-1 dependency note from its `Done when` and dependency
+> structure (D-4, overtaken) and to add D-6's process-life lock condition.
 
 - **Outcome:** the mission runner's process and the issue-review host each
   hold one record lock for their process life, so a held-back refusal outlives
