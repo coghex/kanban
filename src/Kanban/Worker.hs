@@ -66,6 +66,7 @@ module Kanban.Worker
     defaultIssueHostTuning,
     runIssueReviewHostWith,
     preconditionStillHolds,
+    preconditionStillHoldsUnder,
     preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
@@ -142,6 +143,7 @@ import Kanban.GitHub.Guard (GhRecordLock, newGhRecordLock)
 import Kanban.Worker.Precondition
   ( preconditionReadSeconds,
     preconditionStillHolds,
+    preconditionStillHoldsUnder,
     workerPreconditionRefusal,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,

@@ -37,6 +37,7 @@
 -- This module is internal — "Kanban.Worker" re-exports it.
 module Kanban.Worker.Precondition
   ( preconditionStillHolds,
+    preconditionStillHoldsUnder,
     preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
@@ -60,7 +61,7 @@ import Kanban.Domain
     targetPreconditionHolds,
     targetPreconditionMessage,
   )
-import Kanban.GitHub.Guard (GhRecordLock, newGhFetchGuard)
+import Kanban.GitHub.Guard (GhFetchGuard, GhRecordLock, newGhFetchGuard)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Provider (ProviderError (..))
 import Kanban.Worker.Types (WorkerSpec (..))
@@ -74,11 +75,15 @@ import Kanban.Worker.Types (WorkerSpec (..))
 --
 -- @recordLock@ is the process's, never one minted for this call.
 preconditionStillHolds :: GhRecordLock -> WorkerSpec -> IO (Maybe Text)
-preconditionStillHolds recordLock spec = case spec.workerExpectedTarget of
+preconditionStillHolds recordLock spec = newGhFetchGuard recordLock >>= (`preconditionStillHoldsUnder` spec)
+
+-- | 'preconditionStillHolds' under a guard its caller built over the process's
+-- record lock, so the guard's own verdict can be read once the reread is over.
+preconditionStillHoldsUnder :: GhFetchGuard -> WorkerSpec -> IO (Maybe Text)
+preconditionStillHoldsUnder guard spec = case spec.workerExpectedTarget of
   Nothing -> pure Nothing
   Just expected -> do
     readSeconds <- preconditionReadSeconds spec
-    guard <- newGhFetchGuard recordLock
     observed <- observeTargetPrecondition guard readSeconds spec.workerRepository expected.preconditionItem
     pure $ case observed of
       Left failure -> Just (workerUnverifiedTargetReason <> ": " <> failure.providerErrorMessage)

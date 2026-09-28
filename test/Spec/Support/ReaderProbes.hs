@@ -17,9 +17,9 @@
 -- So each reader is the test binary run again, taking the branch in @main@
 -- that leads to 'runReaderProbe' instead of to hspec. It reads through the
 -- production entry points -- a refresh coordinator's open job, the mission
--- runner's 'Kanban.Mission.missionBoardRead' and
--- 'Kanban.Mission.missionTargetObservation', and
--- 'Kanban.Worker.preconditionStillHolds' -- under one record lock minted at the
+-- runner's board read and target observation, and a worker's precondition
+-- reread, each through the guard-taking form its lock-taking entry point runs
+-- -- under one record lock minted at the
 -- top of the probe, exactly where the production process mints its own. The
 -- shape is "Spec.Support.RecordWriters"': a marker in the child's environment,
 -- a plan and answers carried through files, every wait bounded, and every
@@ -63,11 +63,11 @@ import GHC.Generics (Generic)
 import Kanban.Cache (GhGroupRecordLoad (..), loadGhGroupRecord)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), defaultTimeoutsConfig)
 import Kanban.Domain (ItemId (..), Repository, TargetPrecondition (..))
-import Kanban.GitHub (GhRecordLock, RefreshJob (..), newGhRecordLock, newHistoryTraversal, newRefreshCoordinator, requestRefreshJob, shutdownRefreshCoordinator)
-import Kanban.Mission (MissionTarget (..), MissionTargetKind (..), missionBoardRead, missionTargetObservation)
+import Kanban.GitHub (GhCleanupFailure (..), GhRecordLock, RefreshJob (..), ghFetchCleanupFailure, newGhFetchGuard, newGhRecordLock, newHistoryTraversal, newRefreshCoordinator, requestRefreshJob, shutdownRefreshCoordinator)
+import Kanban.Mission (MissionTarget (..), MissionTargetKind (..), missionBoardReadUnder, missionTargetObservationUnder)
 import Kanban.UI.Refresh (boardRefreshRunner)
 import Kanban.UI.Types (BoardRefreshOutcome (..))
-import Kanban.Worker (WorkerId (..), WorkerSpec (..), preconditionStillHolds)
+import Kanban.Worker (WorkerId (..), WorkerSpec (..), preconditionStillHoldsUnder)
 import Spec.Support.Board (termIgnoringGh, withForcedCleanup)
 import Spec.Support.Env (ignoringIOException)
 import Spec.Support.Fixtures (testResolvedConfig)
@@ -127,7 +127,11 @@ data ReaderStep = ReaderStep
   { readerStepLabel :: Text,
     readerStepSucceeded :: Bool,
     readerStepDetail :: Text,
-    readerStepSpawned :: Int
+    readerStepSpawned :: Int,
+    -- | The read's own guard verdict once the read was over, spelled as the
+    -- 'Kanban.GitHub.GhCleanupGuard' it carries, or 'Nothing' for a read that
+    -- left nothing held back.
+    readerStepGuard :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
@@ -370,9 +374,14 @@ latchSequence plan recordLock source consumers = do
   pure ((first : later) <> control)
 
 -- | One read of the given kind through @recordLock@, with the @gh@ processes it
--- started counted around it.
+-- started counted around it and its guard's verdict read once it is over.
+--
+-- The guard is built here over the process's lock and handed to the same
+-- production read the lock-taking entry point runs, so the verdict read back
+-- is the one that read's own lifecycle left.
 takeRead :: ReaderPlan -> GhRecordLock -> Text -> ReadKind -> IO ReaderStep
 takeRead plan recordLock label kind = do
+  guard <- newGhFetchGuard recordLock
   before <- countGhMarkers plan.readerPlanMarkerDirectory
   -- A @gh@ whose spawn could not be recorded is aborted by an exception rather
   -- than a returned failure, and a single-item read does not catch it; that
@@ -380,17 +389,18 @@ takeRead plan recordLock label kind = do
   -- reported here as the failed read it is.
   attempted <- try @SomeException $ case kind of
     ReadBoard -> do
-      read' <- missionBoardRead config recordLock plan.readerPlanRepository
+      read' <- missionBoardReadUnder config plan.readerPlanRepository guard
       pure (isRight read', either (Text.pack . show) (const "") read')
     ReadTarget -> do
-      read' <- missionTargetObservation config recordLock plan.readerPlanRepository target
+      read' <- missionTargetObservationUnder config plan.readerPlanRepository target guard
       pure (isRight read', either id (const "") read')
     ReadPrecondition -> do
-      refusal <- preconditionStillHolds recordLock launched
+      refusal <- preconditionStillHoldsUnder guard launched
       pure (isNothing refusal, maybe "" id refusal)
   let (succeeded, detail) = either (\raised -> (False, "raised: " <> Text.pack (show raised))) id attempted
   after <- countGhMarkers plan.readerPlanMarkerDirectory
-  pure (ReaderStep (label <> " (" <> Text.pack (show kind) <> ")") succeeded detail (after - before))
+  verdict <- ghFetchCleanupFailure guard
+  pure (ReaderStep (label <> " (" <> Text.pack (show kind) <> ")") succeeded detail (after - before) (Text.pack . show . ghCleanupGuard <$> verdict))
   where
     target = MissionTarget MissionTargetIssue readerIssueNumber Nothing
     launched =
@@ -419,7 +429,7 @@ dashboardRead plan recordLock = do
   let succeeded = case outcome of
         BoardRefreshCompleted (Right _) -> True
         _ -> False
-  pure (ReaderStep "dashboard open refresh" succeeded (if succeeded then "" else Text.pack (show outcome)) (after - before))
+  pure (ReaderStep "dashboard open refresh" succeeded (if succeeded then "" else Text.pack (show outcome)) (after - before) Nothing)
 
 -- | Every read here is bounded well above what a held @gh@ needs and well
 -- below the suite's own patience.

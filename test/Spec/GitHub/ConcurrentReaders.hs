@@ -18,6 +18,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as Text
 import Kanban.Cache (GhGroupRecordLoad (..), ghGroupRecordPath, loadGhGroupRecord)
 import Kanban.Domain (Repository (..))
+import Kanban.GitHub (GhCleanupGuard (..))
 import Kanban.Process (OwnedProcessGroup (..), ProcessIdentity (..))
 import Kanban.UI.Types (BoardRefreshOutcome (..))
 import Kanban.Worker (workerPreconditionRefusal, workerUnverifiedTargetReason)
@@ -173,20 +174,30 @@ latchedWithin role = withReaderFixture 1 $ \fixture -> do
   probe <- startIn fixture "latch" role [] []
   outcome <- awaitReaderOutcome probe
   let steps = outcome.readerOutcomeSteps
+  -- The first read's own lifecycle is what left the group held back in
+  -- memory, and nothing else: its guard says so once it is over.
   case steps of
-    source : _ -> source.readerStepSucceeded `shouldBe` False
+    source : _ -> (source.readerStepSucceeded, source.readerStepGuard) `shouldBe` (False, Just inMemoryOnly)
     [] -> expectationFailure "the probe took no reads"
+  -- Every later read was refused before it spawned anything, and refused as
+  -- the in-memory case: its own guard carries 'GuardInMemoryOnly', which is
+  -- what the notice a refused read publishes is chosen from.
   forM_ (consumersOf steps) $ \step -> do
-    (step.readerStepLabel, step.readerStepSucceeded, step.readerStepSpawned) `shouldBe` (step.readerStepLabel, False, 0)
+    (step.readerStepLabel, step.readerStepSucceeded, step.readerStepSpawned, step.readerStepGuard)
+      `shouldBe` (step.readerStepLabel, False, 0, Just inMemoryOnly)
     Text.unpack step.readerStepDetail `shouldContain` "refusing to start another until it is"
   case reverse steps of
     control : _ -> do
-      (control.readerStepLabel, control.readerStepSucceeded, control.readerStepSpawned) `shouldBe` (control.readerStepLabel, True, 1)
+      (control.readerStepLabel, control.readerStepSucceeded, control.readerStepSpawned, control.readerStepGuard)
+        `shouldBe` (control.readerStepLabel, True, 1, Nothing)
     [] -> pure ()
   -- Nothing durable holds the group back: the refusals were this process's
   -- memory, which is what makes them the in-memory case.
   outcome.readerOutcomeRecordEmpty `shouldBe` True
   pure steps
+
+inMemoryOnly :: Text.Text
+inMemoryOnly = Text.pack (show GuardInMemoryOnly)
 
 -- | The reads between the first and the control.
 consumersOf :: [ReaderStep] -> [ReaderStep]

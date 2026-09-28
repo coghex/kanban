@@ -45,7 +45,9 @@ module Kanban.Mission.Runner
     runMissionWith,
     liveMissionDriver,
     missionBoardRead,
+    missionBoardReadUnder,
     missionTargetObservation,
+    missionTargetObservationUnder,
     decidingWorkerReading,
     workerHasNotFinished,
     drainMissionConsoleWith,
@@ -101,7 +103,7 @@ import Kanban.Domain
     Repository (..),
     WorkflowConfig (..),
   )
-import Kanban.GitHub (GhRecordLock, GitHubResult (..), fetchGitHubSnapshot, latchingHeldBack, newGhFetchGuard, newGhRecordLock)
+import Kanban.GitHub (GhFetchGuard, GhRecordLock, GitHubResult (..), fetchGitHubSnapshot, latchingHeldBack, newGhFetchGuard, newGhRecordLock)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Mission.Control (parseMissionConsoleCommand)
 import Kanban.Mission.Controller
@@ -1244,8 +1246,13 @@ decidingWorkerReading present = case filter (.missionWorkerLive) present of
 -- durable records, turns away every later read this process takes before it
 -- spawns anything.
 missionBoardRead :: ResolvedConfig -> GhRecordLock -> Repository -> IO (Either MissionStepFailure RepoSnapshot)
-missionBoardRead config recordLock repository = do
-  guard <- newGhFetchGuard recordLock
+missionBoardRead config recordLock repository =
+  newGhFetchGuard recordLock >>= missionBoardReadUnder config repository
+
+-- | 'missionBoardRead' under a guard its caller built over the process's
+-- record lock, so the guard's own verdict can be read once the read is over.
+missionBoardReadUnder :: ResolvedConfig -> Repository -> GhFetchGuard -> IO (Either MissionStepFailure RepoSnapshot)
+missionBoardReadUnder config repository guard = do
   fetched <-
     latchingHeldBack guard $
       fetchGitHubSnapshot
@@ -1285,8 +1292,13 @@ missionBoardRead config recordLock repository = do
 -- 'Kanban.GitHub.Precondition.observeTargetPrecondition' asks and latches that
 -- itself.
 missionTargetObservation :: ResolvedConfig -> GhRecordLock -> Repository -> MissionTarget -> IO (Either Text MissionTargetVersion)
-missionTargetObservation config recordLock repository target = do
-  guard <- newGhFetchGuard recordLock
+missionTargetObservation config recordLock repository target =
+  newGhFetchGuard recordLock >>= missionTargetObservationUnder config repository target
+
+-- | 'missionTargetObservation' under a guard its caller built over the
+-- process's record lock, as 'missionBoardReadUnder' is for the board read.
+missionTargetObservationUnder :: ResolvedConfig -> Repository -> MissionTarget -> GhFetchGuard -> IO (Either Text MissionTargetVersion)
+missionTargetObservationUnder config repository target guard = do
   observed <-
     observeTargetPrecondition
       guard
