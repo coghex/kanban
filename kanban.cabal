@@ -319,6 +319,7 @@ test-suite kanban-test
     Spec.Drainer
     Spec.Drainer.DirectMerge
     Spec.GitHub.BoardRefresh
+    Spec.GitHub.ConcurrentReaders
     Spec.GitHub.Decoding
     Spec.GitHub.History
     Spec.GitHub.Precondition
@@ -353,6 +354,7 @@ test-suite kanban-test
     Spec.Support.SchedulerProbe
     Spec.Support.Preflight
     Spec.Support.Process
+    Spec.Support.ReaderProbes
     Spec.Support.RecordWriters
     Spec.Support.Render
     Spec.Support.Roster

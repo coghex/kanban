@@ -44,6 +44,10 @@ module Kanban.Mission.Runner
     terminalMissionConsole,
     runMissionWith,
     liveMissionDriver,
+    missionBoardRead,
+    missionBoardReadUnder,
+    missionTargetObservation,
+    missionTargetObservationUnder,
     decidingWorkerReading,
     workerHasNotFinished,
     drainMissionConsoleWith,
@@ -99,7 +103,7 @@ import Kanban.Domain
     Repository (..),
     WorkflowConfig (..),
   )
-import Kanban.GitHub (GitHubResult (..), fetchGitHubSnapshot, newGhFetchGuard, newGhRecordLock)
+import Kanban.GitHub (GhFetchGuard, GhRecordLock, GitHubResult (..), fetchGitHubSnapshot, latchingHeldBack, newGhFetchGuard, newGhRecordLock)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Mission.Control (parseMissionConsoleCommand)
 import Kanban.Mission.Controller
@@ -247,12 +251,18 @@ missionRunnerIterationBudget = 10000
 -- specification belonging to another repository, and a mission another
 -- controller is already advancing are each reported as themselves, and none of
 -- them resolves to a different mission.
+--
+-- The @gh@ record lock is minted here, once, because this is once per
+-- @kanban --mission@ process: every board read and target observation the live
+-- driver takes goes through it, so a group one read had to hold back in memory
+-- turns away every later read this process takes (§15).
 runMissionMode :: Options -> ResolvedConfig -> Repository -> Text -> IO (Either MissionStartRefusal MissionRunReport)
 runMissionMode options config repository identifier
   | Text.null (Text.strip identifier) =
       pure (Left (MissionIdentifierUnusable identifier "--mission takes the identifier of exactly one mission"))
   | otherwise = do
       opened <- openMissionStore repository
+      recordLock <- newGhRecordLock
       case opened of
         Left detail -> pure (Left (MissionStoreUnusable detail))
         Right store ->
@@ -265,7 +275,7 @@ runMissionMode options config repository identifier
             store
             repository
             (MissionId (Text.strip identifier))
-            (liveMissionDriver options config repository)
+            (liveMissionDriver options config recordLock repository)
 
 -- | The machine-readable account one run leaves for a scheduler that started
 -- it, from what that run actually did.
@@ -461,8 +471,12 @@ runMissionWith console store repository mission buildDriver = do
 
 -- | The driver that reaches the real registry, the real workers, and real
 -- GitHub.
-liveMissionDriver :: Options -> ResolvedConfig -> Repository -> MissionStore -> MissionId -> IO MissionDriver
-liveMissionDriver options config repository store _ =
+--
+-- @recordLock@ is the caller's, held for the life of the process, and every
+-- GitHub read this driver takes goes through it: minting one per read would
+-- forget a read's held-back refusal the moment that read returned.
+liveMissionDriver :: Options -> ResolvedConfig -> GhRecordLock -> Repository -> MissionStore -> MissionId -> IO MissionDriver
+liveMissionDriver options config recordLock repository store _ =
   pure
     MissionDriver
       { missionDriverInventory = inventory,
@@ -494,17 +508,7 @@ liveMissionDriver options config repository store _ =
 
     workerIdentity descriptor = descriptor.workerDescriptorSpec.workerId.unWorkerId
 
-    readBoard = do
-      recordLock <- newGhRecordLock
-      guard <- newGhFetchGuard recordLock
-      fetched <-
-        fetchGitHubSnapshot
-          guard
-          (const (pure ()))
-          config.resolvedTimeouts.timeoutsGithubSeconds
-          workflowConfig
-          repository
-      pure (either (Left . missionFailureFromProviderError) (Right . (.githubSnapshot)) fetched)
+    readBoard = missionBoardRead config recordLock repository
 
     catalogOf snapshot =
       TargetCatalog
@@ -514,45 +518,7 @@ liveMissionDriver options config repository store _ =
           catalogHistory = CatalogHistoryAbsent
         }
 
-    -- The live reading of one target, taken item by item.
-    --
-    -- Not through a board read, and the reason is the whole point of a
-    -- precondition. A board read covers open work, so an issue closed or a
-    -- pull request merged since the plan was made does not resolve at all —
-    -- and an unresolvable target reaches 'performDispatch' as a precondition
-    -- that could not be read, which ends the run, rather than as the stale
-    -- version it actually is, which returns the step to replanning. A target
-    -- that reached a terminal state is the most ordinary reason a plan is out
-    -- of date; it must be a fact this read can report.
-    --
-    -- It is also the same read the worker takes at its own boundary
-    -- ('Kanban.Worker.preconditionStillHolds'), normalized into the same
-    -- spellings 'targetPreconditionForItem' produces from a board item, so
-    -- every comparison in the chain is between two readings that agree about
-    -- what "unchanged" means.
-    --
-    -- Bounded by the same configured value 'readBoard' bounds a page with,
-    -- read off the same resolved configuration rather than from a second
-    -- setting of its own (issue #645, requirement 3). A read that never
-    -- answers is not merely this step waiting: 'runMissionForeground' takes
-    -- its iterations one at a time and drains queued console commands only
-    -- between them, so an unbounded one stops the whole run responding.
-    observeTarget target = do
-      recordLock <- newGhRecordLock
-      guard <- newGhFetchGuard recordLock
-      observed <-
-        observeTargetPrecondition
-          guard
-          config.resolvedTimeouts.timeoutsGithubSeconds
-          repository
-          (itemIdFor target)
-      pure $ case observed of
-        Left failure -> Left (missionStepFailureText (missionFailureFromProviderError failure))
-        Right precondition -> Right (missionVersionOf precondition)
-
-    itemIdFor target = case target.missionTargetKind of
-      MissionTargetIssue -> IssueId target.missionTargetNumber
-      MissionTargetPullRequest -> PullRequestId target.missionTargetNumber
+    observeTarget = missionTargetObservation config recordLock repository
 
     -- The environment every registry call this driver makes is answered
     -- against.
@@ -1270,6 +1236,82 @@ decidingWorkerReading present = case filter (.missionWorkerLive) present of
     (newest : _) -> Just newest
     [] -> Nothing
   live@(first : _) -> Just (fromMaybe first (find (.missionWorkerCompatible) live))
+
+-- | The live driver's board read: one whole fetch of open work, under a guard
+-- of its own and the process's @recordLock@.
+--
+-- Its final verdict is latched against that lock once the fetch has unwound,
+-- however it ended, which is what the dashboard's coordinator does for each of
+-- its jobs (§15): a group this read could not account for, and that nothing
+-- durable records, turns away every later read this process takes before it
+-- spawns anything.
+missionBoardRead :: ResolvedConfig -> GhRecordLock -> Repository -> IO (Either MissionStepFailure RepoSnapshot)
+missionBoardRead config recordLock repository =
+  newGhFetchGuard recordLock >>= missionBoardReadUnder config repository
+
+-- | 'missionBoardRead' under a guard its caller built over the process's
+-- record lock, so the guard's own verdict can be read once the read is over.
+missionBoardReadUnder :: ResolvedConfig -> Repository -> GhFetchGuard -> IO (Either MissionStepFailure RepoSnapshot)
+missionBoardReadUnder config repository guard = do
+  fetched <-
+    latchingHeldBack guard $
+      fetchGitHubSnapshot
+        guard
+        (const (pure ()))
+        config.resolvedTimeouts.timeoutsGithubSeconds
+        config.resolvedWorkflow
+        repository
+  pure (either (Left . missionFailureFromProviderError) (Right . (.githubSnapshot)) fetched)
+
+-- | The live reading of one target, taken item by item.
+--
+-- Not through a board read, and the reason is the whole point of a
+-- precondition. A board read covers open work, so an issue closed or a
+-- pull request merged since the plan was made does not resolve at all —
+-- and an unresolvable target reaches 'performDispatch' as a precondition
+-- that could not be read, which ends the run, rather than as the stale
+-- version it actually is, which returns the step to replanning. A target
+-- that reached a terminal state is the most ordinary reason a plan is out
+-- of date; it must be a fact this read can report.
+--
+-- It is also the same read the worker takes at its own boundary
+-- ('Kanban.Worker.preconditionStillHolds'), normalized into the same
+-- spellings 'targetPreconditionForItem' produces from a board item, so
+-- every comparison in the chain is between two readings that agree about
+-- what "unchanged" means.
+--
+-- Bounded by the same configured value 'missionBoardRead' bounds a page with,
+-- read off the same resolved configuration rather than from a second
+-- setting of its own (issue #645, requirement 3). A read that never
+-- answers is not merely this step waiting: 'runMissionForeground' takes
+-- its iterations one at a time and drains queued console commands only
+-- between them, so an unbounded one stops the whole run responding.
+--
+-- Through the process's @recordLock@, like 'missionBoardRead', and so turned
+-- away before it spawns anything while this process is holding a group back;
+-- 'Kanban.GitHub.Precondition.observeTargetPrecondition' asks and latches that
+-- itself.
+missionTargetObservation :: ResolvedConfig -> GhRecordLock -> Repository -> MissionTarget -> IO (Either Text MissionTargetVersion)
+missionTargetObservation config recordLock repository target =
+  newGhFetchGuard recordLock >>= missionTargetObservationUnder config repository target
+
+-- | 'missionTargetObservation' under a guard its caller built over the
+-- process's record lock, as 'missionBoardReadUnder' is for the board read.
+missionTargetObservationUnder :: ResolvedConfig -> Repository -> MissionTarget -> GhFetchGuard -> IO (Either Text MissionTargetVersion)
+missionTargetObservationUnder config repository target guard = do
+  observed <-
+    observeTargetPrecondition
+      guard
+      config.resolvedTimeouts.timeoutsGithubSeconds
+      repository
+      itemId
+  pure $ case observed of
+    Left failure -> Left (missionStepFailureText (missionFailureFromProviderError failure))
+    Right precondition -> Right (missionVersionOf precondition)
+  where
+    itemId = case target.missionTargetKind of
+      MissionTargetIssue -> IssueId target.missionTargetNumber
+      MissionTargetPullRequest -> PullRequestId target.missionTargetNumber
 
 -- | The durable record of a precondition, and the precondition it records.
 --

@@ -28,9 +28,16 @@
 -- unreadable refusal, never the moved one -- a read that never answered has
 -- shown nothing about the target.
 --
+-- The @gh@ record lock is the caller's, held for the life of its process:
+-- minted once by the persistent worker, and once by the issue-review host for
+-- the precondition reread of every child it adopts. A read that ended holding
+-- a group back in memory therefore turns away every later reread that process
+-- takes, as the unverified refusal, before it spawns anything (§15).
+--
 -- This module is internal — "Kanban.Worker" re-exports it.
 module Kanban.Worker.Precondition
   ( preconditionStillHolds,
+    preconditionStillHoldsUnder,
     preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
@@ -54,7 +61,7 @@ import Kanban.Domain
     targetPreconditionHolds,
     targetPreconditionMessage,
   )
-import Kanban.GitHub.Guard (newGhFetchGuard, newGhRecordLock)
+import Kanban.GitHub.Guard (GhFetchGuard, GhRecordLock, newGhFetchGuard)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.Provider (ProviderError (..))
 import Kanban.Worker.Types (WorkerSpec (..))
@@ -65,13 +72,18 @@ import Kanban.Worker.Types (WorkerSpec (..))
 -- A specification that recorded no expectation checks nothing and reads
 -- nothing: a dashboard press acts on the item the operator is looking at and
 -- has nothing older to be stale against.
-preconditionStillHolds :: WorkerSpec -> IO (Maybe Text)
-preconditionStillHolds spec = case spec.workerExpectedTarget of
+--
+-- @recordLock@ is the process's, never one minted for this call.
+preconditionStillHolds :: GhRecordLock -> WorkerSpec -> IO (Maybe Text)
+preconditionStillHolds recordLock spec = newGhFetchGuard recordLock >>= (`preconditionStillHoldsUnder` spec)
+
+-- | 'preconditionStillHolds' under a guard its caller built over the process's
+-- record lock, so the guard's own verdict can be read once the reread is over.
+preconditionStillHoldsUnder :: GhFetchGuard -> WorkerSpec -> IO (Maybe Text)
+preconditionStillHoldsUnder guard spec = case spec.workerExpectedTarget of
   Nothing -> pure Nothing
   Just expected -> do
     readSeconds <- preconditionReadSeconds spec
-    recordLock <- newGhRecordLock
-    guard <- newGhFetchGuard recordLock
     observed <- observeTargetPrecondition guard readSeconds spec.workerRepository expected.preconditionItem
     pure $ case observed of
       Left failure -> Just (workerUnverifiedTargetReason <> ": " <> failure.providerErrorMessage)

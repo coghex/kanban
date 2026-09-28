@@ -129,6 +129,7 @@ import Kanban.Worker.Discovery (discoverWorkerHistory)
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
 import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
+import Kanban.GitHub.Guard (GhRecordLock)
 import Kanban.Worker.Precondition (preconditionStillHolds)
 import Kanban.Worker.Types
   ( IssueActionWorkerTask (..),
@@ -377,7 +378,8 @@ data IssueReviewHost = IssueReviewHost
     -- Injected for the reason every other outward call here is: production
     -- reads live GitHub, and a fixture must be able to stage a target that
     -- moved without one. Production is
-    -- 'Kanban.Worker.preconditionStillHolds' and nothing else.
+    -- 'Kanban.Worker.preconditionStillHolds' under the host process's one
+    -- record lock, and nothing else.
     hostCheckPrecondition :: WorkerSpec -> IO (Maybe Text),
     -- | The supervisor's own provider registration, which records a process's
     -- identity, adds it to this worker's census, and makes it reachable by
@@ -403,9 +405,14 @@ data IssueReviewHost = IssueReviewHost
 -- thread and no further (requirement 11). A client that will not start is
 -- reported to every child waiting on it and ends the host, because a host
 -- with no client can serve nobody.
-runIssueReviewHost :: WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-runIssueReviewHost hostSpec =
-  runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider runCanonicalStage preconditionStillHolds hostSpec
+--
+-- @recordLock@ is the host process's own, minted once for its life: every
+-- adopted child's precondition reread goes through it, so a group one reread
+-- had to hold back in memory turns away the next child's before it spawns
+-- anything (§15).
+runIssueReviewHost :: GhRecordLock -> WorkerSpec -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+runIssueReviewHost recordLock hostSpec =
+  runIssueReviewHostWith defaultIssueHostTuning startEmbeddedProvider runCanonicalStage (preconditionStillHolds recordLock) hostSpec
   where
     startEmbeddedProvider spec register sink = do
       rosterResult <- loadModelRoster

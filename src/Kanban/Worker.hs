@@ -66,6 +66,7 @@ module Kanban.Worker
     defaultIssueHostTuning,
     runIssueReviewHostWith,
     preconditionStillHolds,
+    preconditionStillHoldsUnder,
     preconditionReadSeconds,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
@@ -138,9 +139,11 @@ import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Kanban.Cache (normalizedRepositoryIdentity)
 import Kanban.Domain (Repository, TargetPrecondition, WorkflowConfig)
+import Kanban.GitHub.Guard (GhRecordLock, newGhRecordLock)
 import Kanban.Worker.Precondition
   ( preconditionReadSeconds,
     preconditionStillHolds,
+    preconditionStillHoldsUnder,
     workerPreconditionRefusal,
     workerStaleTargetReason,
     workerUnverifiedTargetReason,
@@ -675,8 +678,15 @@ launchWorker spec = do
 runWorker :: FilePath -> IO (Either Text ())
 runWorker = runWorkerWith readProcessSnapshot
 
+-- | A worker process's whole life. Its @gh@ record lock is minted here, once
+-- per process, and every precondition reread the process takes goes through it
+-- -- the persistent worker's one, and every one an issue-review host takes for
+-- the children it adopts -- so a group one read had to hold back in memory
+-- turns away every later read this process takes (§15).
 runWorkerWith :: IO (Either Text [ProcessIdentity]) -> FilePath -> IO (Either Text ())
-runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
+runWorkerWith takeSnapshot specPath = do
+  recordLock <- newGhRecordLock
+  runWorkerWithTask takeSnapshot (defaultRunTask recordLock) specPath
 
 -- | Dispatches a worker's task to its real solve/PR-flow implementation.
 -- Factored out of 'runWorkerWithTask' so tests can substitute a fake task
@@ -697,8 +707,8 @@ runWorkerWith takeSnapshot = runWorkerWithTask takeSnapshot defaultRunTask
 -- provider runs on. A specification that records none spawns nothing and
 -- names itself, which is the same fail-closed shape the launch boundary's
 -- own refusal has.
-defaultRunTask :: WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
+defaultRunTask :: GhRecordLock -> WorkerSpec -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+defaultRunTask recordLock spec aggregator rememberProvider emit = case spec.workerTask of
   -- The review host is asked for no assignment, and records none.
   --
   -- Every other worker replays a cell its launch boundary resolved, because
@@ -710,7 +720,7 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
   -- answer to a question this worker never asks, and 'ActionIssueReview' is
   -- routed to that same resolution at the launch boundary rather than to a
   -- roster read of its own.
-  IssueHostWorkerTaskKind _ -> runIssueReviewHost spec rememberProvider emit
+  IssueHostWorkerTaskKind _ -> runIssueReviewHost recordLock spec rememberProvider emit
   -- Unreachable in practice and refused rather than assumed impossible: a
   -- child action has no supervisor process of its own — its host runs it —
   -- so nothing ever spawns one with @--worker-spec@ naming a child. A
@@ -729,7 +739,7 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
       let message = "worker specification " <> Text.pack descriptor.workerDescriptorSpecPath <> " records no model assignment"
       emit (WorkerDiagnostic message)
       emit (WorkerFinished (SolveFailed message))
-    Just assignment -> runTaskWithAssignment spec assignment aggregator rememberProvider emit
+    Just assignment -> runTaskWithAssignment recordLock spec assignment aggregator rememberProvider emit
 
 -- | Every one of the four recorded values is authoritative, the provider
 -- included: the brand each flow spawns comes from 'brandForProvider' on what
@@ -743,9 +753,9 @@ defaultRunTask spec aggregator rememberProvider emit = case spec.workerTask of
 -- that moved in between is a plan this worker must not carry out. Refusing
 -- here is not a failure of the work — nothing was attempted — so it reports
 -- the typed stale sentence and the mission replans from a fresh reading.
-runTaskWithAssignment :: WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
-runTaskWithAssignment spec recorded aggregator rememberProvider emit = do
-  held <- preconditionStillHolds spec
+runTaskWithAssignment :: GhRecordLock -> WorkerSpec -> RecordedAssignment -> UnknownAggregator -> (ManagedProcess -> IO ()) -> (WorkerEvent -> IO ()) -> IO ()
+runTaskWithAssignment recordLock spec recorded aggregator rememberProvider emit = do
+  held <- preconditionStillHolds recordLock spec
   case held of
     Just stale -> do
       emit (WorkerDiagnostic stale)

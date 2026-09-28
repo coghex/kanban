@@ -58,6 +58,16 @@
 -- because a @gh@ that may still be running is not a clean timeout and the
 -- evidence of one is never deleted to make a read look bounded.
 --
+-- Neither caller is the dashboard's coordinator, so this read does for itself
+-- what the coordinator does for each of its jobs (§15). Before it spawns
+-- anything it asks whether its process is already holding back a group
+-- nothing durable accounts for, and is turned away if so, as the in-memory
+-- case; and once it has unwound, however it ended, it latches its own final
+-- verdict against the process's record lock, so a group this read could not
+-- account for turns away every later read that process takes. That latch is
+-- only worth anything because each caller hands every read the one record
+-- lock its process holds for its whole life.
+--
 -- The decoding is deliberately narrow. It reads only the five facts a
 -- 'TargetPrecondition' is made of, plus the @number@ that identifies them, and
 -- it normalizes GitHub's own spellings into the ones
@@ -78,7 +88,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
 import Kanban.Domain (ItemId (..), Repository (..), TargetPrecondition (..))
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhFetchGuard, ghFetchCleanupFailure)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhFetchGuard, ghFetchCleanupFailure, latchingHeldBack, refuseIfHeldBack)
 import Kanban.GitHub.Message (compactError, decodeGhOutput)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.GitHub.Run (runGh)
@@ -96,11 +106,15 @@ import System.Timeout (timeout)
 -- callers already route every 'ProviderError' into their unverified-precondition
 -- path rather than into a target that moved.
 observeTargetPrecondition :: GhFetchGuard -> Int -> Repository -> ItemId -> IO (Either ProviderError TargetPrecondition)
-observeTargetPrecondition guard readSeconds repository item = do
-  settled <- timeout (readSeconds * 1000000) (runGh guard repository arguments)
-  case settled of
-    Nothing -> Left <$> unanswered
-    Just (code, out, err) -> pure (decoded code out err)
+observeTargetPrecondition guard readSeconds repository item = latchingHeldBack guard $ do
+  admitted <- refuseIfHeldBack guard
+  case admitted of
+    Left refusal -> pure (Left (ProviderError RequestFailed refusal))
+    Right () -> do
+      settled <- timeout (readSeconds * 1000000) (runGh guard repository arguments)
+      case settled of
+        Nothing -> Left <$> unanswered
+        Just (code, out, err) -> pure (decoded code out err)
   where
     -- What an interrupted read reports, decided by what its own cleanup
     -- established rather than by the clock alone. 'runGh' has already unwound

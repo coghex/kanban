@@ -66,6 +66,7 @@ module Kanban.GitHub
     historyGraphqlArguments,
     historyTraversalComplete,
     initialHistoryFetchState,
+    latchingHeldBack,
     newGhFetchGuard,
     newGhRecordLock,
     observeTargetPrecondition,
@@ -177,7 +178,7 @@ import Kanban.GitHub.History
     newHistoryTraversal,
     runCompletedHistoryPage,
   )
-import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhEntryClass (..), GhEntryWriter (..), GhFetchGuard, GhRecordLock, GhSpawnRegistration (..), GhSpawnState, abandonGh, abandonSpawn, newGhSpawnState, classifyGhEntry, describeGhEntry, dropGhGroup, ghFetchCleanupFailure, ghGroupIsPending, ghGroupIsRecorded, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup)
+import Kanban.GitHub.Guard (GhCleanupFailure (..), GhCleanupGuard (..), GhEntryClass (..), GhEntryWriter (..), GhFetchGuard, GhRecordLock, GhSpawnRegistration (..), GhSpawnState, abandonGh, abandonSpawn, newGhSpawnState, classifyGhEntry, describeGhEntry, dropGhGroup, ghFetchCleanupFailure, ghGroupIsPending, ghGroupIsRecorded, latchingHeldBack, newGhFetchGuard, newGhRecordLock, reclaimRecordedGhGroups, recordGhGroup, registerSpawnedGh, releaseSpawnClaim, setCleanupFailure, spawnRegistrationGroup)
 import Kanban.GitHub.Message (classifyFailure, compactError)
 import Kanban.GitHub.Precondition (observeTargetPrecondition)
 import Kanban.GitHub.Rate (HistoryRateVerdict (..), RateSample (..), foregroundRateReserve, historyRateVerdict, rateSampleFromResponse, usableRateSample)
