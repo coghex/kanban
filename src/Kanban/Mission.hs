@@ -261,6 +261,8 @@ module Kanban.Mission
     writeMissionChildResult,
     runMissionWith,
     liveMissionDriver,
+    missionBoardRead,
+    missionTargetObservation,
     decidingWorkerReading,
     workerHasNotFinished,
     MissionConsole (..),

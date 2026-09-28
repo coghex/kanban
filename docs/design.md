@@ -2866,7 +2866,13 @@ above are unchanged, and persistence the user switched off is not a failure.
   fetch a dashboard does, and a worker rereads its precondition the same way,
   so each reclaims from and writes to this repository's shared `gh` record and
   takes its cross-process lock for every rewrite — without holding the
-  dashboard's lease. `--mission` does take a lease of its own, but that is the
+  dashboard's lease. Each of those processes also holds one in-process record
+  lock for its whole life, as a dashboard's refresh coordinator does: the
+  `--mission` runner mints it once and every board read and target observation
+  it takes goes through it, and a persistent worker and an issue-review host
+  each mint theirs once and use it for every precondition reread — the host's
+  for every child it adopts. The in-memory refusal below therefore covers all
+  of that process's later reads. `--mission` does take a lease of its own, but that is the
   selected mission's advancement lease under the state root (section 16),
   which serialises advancement of one mission rather than access to this
   repository's `gh` record. A mission runner and a dashboard on the same
@@ -3116,7 +3122,15 @@ above are unchanged, and persistence the user switched off is not a failure.
   the refusal is recorded once the job's verdict is final and while it still
   holds the owner, and every later fetch of either kind is turned away by it
   before it spawns anything — reported as the in-memory case it is, since a
-  restart cannot know to hold back over a group nothing wrote down.
+  restart cannot know to hold back over a group nothing wrote down. The same
+  holds in every other reader process, because each keeps one record lock for
+  its process life: a `--mission` runner's board read or target observation,
+  and a worker's or an issue-review host's precondition reread, records its
+  own verdict against that lock once it has unwound, however it ended, and
+  every later read the process takes — a single-item read included — is
+  turned away before it spawns anything. A precondition reread refused this
+  way is the unverified refusal. The first refusal recorded is the one kept,
+  so repeated refusals do not nest its message.
 - The drainer is managed by whichever service manager its host has, decided by
   probing rather than by naming a platform: launchd on a macOS host that has
   `launchctl`, systemd on a host whose `systemctl --user` reaches a live user
@@ -4678,7 +4692,11 @@ implemented. The durable `gh` group record is shared safely by every process
 that reads the board: each rewrite takes a cross-process lock, and each entry
 names the process that spawned its `gh`, so a reader skips another process's
 live work, re-verifies a cleanup-pending leftover even while its writer runs,
-and reclaims only what an exited writer left (section 15). Board frames are
+and reclaims only what an exited writer left (section 15). Each reader process
+— a dashboard, a `--mission` runner, a persistent worker, and an issue-review
+host — holds one record lock for its whole life, so a group one of its reads
+could hold back only in memory turns away every later read that process takes
+before it spawns anything. Board frames are
 bounded as section 7 describes: each column is laid out once per change to what
 it shows, and a frame builds the cards its viewport can reach rather than every
 card the column holds. The

@@ -27,12 +27,14 @@ module Kanban.GitHub.Guard
     ghGroupIsPending,
     ghGroupIsRecorded,
     holdBackUnrecordedGroup,
+    latchingHeldBack,
     markGhGroupPending,
     newGhFetchGuard,
     newGhRecordLock,
     newGhSpawnState,
     reclaimRecordedGhGroups,
     recordGhGroup,
+    refuseIfHeldBack,
     registerSpawnedGh,
     releaseSpawnClaim,
     setCleanupFailure,
@@ -48,7 +50,7 @@ import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, 
 import Control.Exception (IOException, finally, mask_, try, uninterruptibleMask_)
 import Control.Monad (unless, void, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Cache (GhGroupRecordLoad (..), GhSpawnClaim, claimGhGroup, ghGroupClaimHeld, loadGhGroupRecord, releaseGhGroupClaim, removeGhGroupRecord, withGhGroupRecordLock, writeGhGroupRecord)
@@ -82,13 +84,15 @@ data GhFetchGuard = GhFetchGuard
 -- groups: an entry is added or removed by rewriting the others beside it. Two
 -- of those interleaving lose whichever entry the later write had not read,
 -- and a lost entry is a possibly-live @gh@ that no later fetch -- and no later
--- run of the dashboard -- knows to reclaim. The lock is what the coordinator
--- owns on behalf of the repository, so every job it schedules writes the
--- record through the same one (§15).
+-- run of the dashboard -- knows to reclaim. Each reader process holds exactly
+-- one for its whole life (§15): the dashboard's refresh coordinator owns it on
+-- behalf of the repository, so every job it schedules writes the record
+-- through the same one, and a mission runner, a persistent worker, and an
+-- issue-review host each mint theirs once at startup and hand it to every read
+-- they take.
 --
--- The mutex below orders this process's rewrites and nothing else's. Another
--- process -- a mission runner or a worker's precondition reread beside the
--- dashboard -- mints a lock of its own, so every rewrite also takes
+-- The mutex below orders this process's rewrites and nothing else's. Every
+-- other reader process holds a lock of its own, so every rewrite also takes
 -- 'Kanban.Cache.withGhGroupRecordLock', which is what orders processes.
 data GhRecordLock = GhRecordLock
   { ghRecordMutex :: MVar (),
@@ -100,13 +104,17 @@ data GhRecordLock = GhRecordLock
     -- process's own refusal to start another @gh@ is all that stands between
     -- a possibly-live group and an overlapping one — and a refusal recorded
     -- only on the guard of the job that ended dies with that job, leaving the
-    -- next one to spawn freely. Every job the coordinator schedules shares
-    -- this lock, so a refusal recorded here outlives the guard that earned it
-    -- and reaches every later fetch, whatever kind of job makes it.
+    -- next one to spawn freely. Every read one process takes shares this lock
+    -- -- every job the coordinator schedules, every board read and target
+    -- observation a mission runner takes, every precondition reread a worker
+    -- or an issue-review host takes -- so a refusal recorded here outlives the
+    -- guard that earned it and reaches every later read, whatever kind it is.
     ghRecordHeldBack :: IORef (Maybe Text)
   }
 
--- | The lock every job one process schedules shares.
+-- | The lock every read one process takes shares, minted once for that
+-- process's life. A reader that minted one per read would forget each read's
+-- held-back refusal the moment the read returned.
 --
 -- It carries no identity of its own. Which process wrote an entry is resolved
 -- afresh for each spawn ('registerSpawnedGh'), because the same record is
@@ -140,14 +148,63 @@ withRecordLock guard repository action =
 -- final. A recorded group needs nothing from this — the durable record already
 -- makes every later fetch re-verify it — and a group confirmed gone is holding
 -- nothing back at all, so only 'GuardInMemoryOnly' latches.
+--
+-- The first refusal latched is the one kept. A read turned away by the latch
+-- ends 'GuardInMemoryOnly' too, carrying the latch's own message wrapped in
+-- its refusal; latching that again would wrap it once more on every refused
+-- read, and a mission runner that polls for hours would grow the message
+-- without bound. The group it names is the same one either way.
 holdBackUnrecordedGroup :: GhFetchGuard -> IO ()
 holdBackUnrecordedGroup guard = do
   verdict <- ghFetchCleanupFailure guard
   case verdict of
     Just failure
-      | failure.ghCleanupGuard == GuardInMemoryOnly ->
-          writeIORef guard.ghGuardRecordLock.ghRecordHeldBack (Just failure.ghCleanupMessage)
+      | failure.ghCleanupGuard == GuardInMemoryOnly -> do
+          latched <- readIORef guard.ghGuardRecordLock.ghRecordHeldBack
+          when (isNothing latched) (writeIORef guard.ghGuardRecordLock.ghRecordHeldBack (Just failure.ghCleanupMessage))
     _ -> pure ()
+
+-- | Runs one read and then latches its final verdict against the process's
+-- record lock ('holdBackUnrecordedGroup'), however the read ended.
+--
+-- For a reader that is not the dashboard's coordinator, which latches each job
+-- itself once the job's thread has settled. A mission runner's board read or
+-- target observation and a worker's or an issue-review host's precondition
+-- reread run on the caller's own thread, so the read has fully unwound --
+-- its @gh@'s bounded cleanup included -- by the time this handler runs, and
+-- the verdict it reads is final whether the read returned, raised, or was
+-- interrupted.
+latchingHeldBack :: GhFetchGuard -> IO result -> IO result
+latchingHeldBack guard action = action `finally` holdBackUnrecordedGroup guard
+
+-- | Turns a read away before it spawns anything when this process is already
+-- holding a group back that nothing durable accounts for.
+--
+-- Answered without consulting the record, because this is exactly the group
+-- the record does not have. A read that ended holding one back leaves nothing
+-- on disk to re-verify, so every later read would find an absent record and
+-- spawn straight past it; the refusal has to come from the one place that
+-- outlived that read. 'Left' is the refusal, already on the guard as
+-- 'GuardInMemoryOnly' rather than 'GuardRecorded': the read is refusing over a
+-- group that is still on nothing but this process's word, and the notice §17
+-- renders for the two differs precisely because a restart cannot know to hold
+-- back over this one.
+refuseIfHeldBack :: GhFetchGuard -> IO (Either Text ())
+refuseIfHeldBack guard = do
+  heldBack <- readIORef guard.ghGuardRecordLock.ghRecordHeldBack
+  case heldBack of
+    Nothing -> pure (Right ())
+    Just message -> do
+      setCleanupFailure guard (GhCleanupFailure (ghRefusalText message) GuardInMemoryOnly)
+      pure (Left (ghRefusalText message))
+
+-- | Says what happened and refuses; it says nothing about whose gh it was.
+-- It wraps both kinds of refusal — a group this process is holding back on
+-- nothing but its own word, and a recorded one — and which process a recorded
+-- one belongs to is said by the per-entry message inside the parentheses,
+-- which is the only text that knows.
+ghRefusalText :: Text -> Text
+ghRefusalText message = "a gh process could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
 
 -- | A cleanup that could not confirm its @gh@ group is gone.
 data GhCleanupFailure = GhCleanupFailure
@@ -707,15 +764,11 @@ data EntrySettlement
 -- spawned alongside one that may still be running.
 reclaimRecordedGhGroups :: GhFetchGuard -> Repository -> IO (Either Text ())
 reclaimRecordedGhGroups guard repository = do
-  -- Asked before the record, and answered without consulting it, because this
-  -- is exactly the group the record does not have. A job that ended holding one
-  -- back leaves nothing on disk to re-verify, so every later fetch would find
-  -- an absent record and spawn straight past it; the refusal has to come from
-  -- the one place that outlived that job.
-  heldBack <- readIORef guard.ghGuardRecordLock.ghRecordHeldBack
+  -- Asked before the record ('refuseIfHeldBack').
+  heldBack <- refuseIfHeldBack guard
   case heldBack of
-    Just message -> refuseUnrecorded message
-    Nothing -> do
+    Left refusal -> pure (Left refusal)
+    Right () -> do
       -- One critical section from the read to the rewrite it pairs with. The
       -- rewrite discards every entry it did not read, so a rewrite landing
       -- between the two -- another process registering its gh -- would be
@@ -731,14 +784,6 @@ reclaimRecordedGhGroups guard repository = do
         Right outcome -> pure outcome
         Left message -> refuse message
   where
-    refuseUnrecorded message = do
-      -- 'GuardInMemoryOnly' rather than 'GuardRecorded': this job is refusing
-      -- over a group that is still on nothing but this process's word, and the
-      -- notice §17 renders for the two differs precisely because a restart
-      -- cannot know to hold back over this one.
-      setCleanupFailure guard (GhCleanupFailure (refusalText message) GuardInMemoryOnly)
-      pure (Left (refusalText message))
-
     reclaimRecorded = do
       recordLoad <- loadGhGroupRecord repository
       case recordLoad of
@@ -751,7 +796,7 @@ reclaimRecordedGhGroups guard repository = do
       -- it has to leave the guard set. It is set now, pessimistically, because
       -- the exits that matter most are the ones that never reach a `case`:
       -- the budget expiring, or this whole reclaim being abandoned.
-      setCleanupFailure guard (GhCleanupFailure (refusalText interrupted) GuardRecorded)
+      setCleanupFailure guard (GhCleanupFailure (ghRefusalText interrupted) GuardRecorded)
       self <- fromIntegral <$> getProcessID
       -- One census classifies every entry, and only an entry with a writer
       -- needs one: an ownerless record asks nothing of it.
@@ -802,17 +847,10 @@ reclaimRecordedGhGroups guard repository = do
       _ -> either EntryUnresolved (const EntryCleared) <$> reclaimGhGroup entryClass group
 
     refuse message = do
-      setCleanupFailure guard (GhCleanupFailure (refusalText message) GuardRecorded)
-      pure (Left (refusalText message))
+      setCleanupFailure guard (GhCleanupFailure (ghRefusalText message) GuardRecorded)
+      pure (Left (ghRefusalText message))
 
     interrupted = "reclaiming it did not run to completion"
-
-    -- Says what happened and refuses; it says nothing about whose gh it was.
-    -- It wraps both kinds of refusal — a group this process is holding back on
-    -- nothing but its own word, and a recorded one — and which process a
-    -- recorded one belongs to is said by the per-entry message inside the
-    -- parentheses, which is the only text that knows.
-    refusalText message = "a gh process could not be confirmed stopped (" <> message <> "); refusing to start another until it is"
 
 -- | One recorded group's second chance.
 --

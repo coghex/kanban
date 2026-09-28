@@ -72,6 +72,7 @@ import Kanban.Config
     resolveGlobalConfig,
   )
 import Kanban.Domain (Issue (..), IssueState (..), NativeSubIssues (..), Repository (..), defaultWorkflowConfig)
+import Kanban.GitHub (newGhRecordLock)
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
 import Kanban.Process (ProcessIdentity (..))
@@ -2653,7 +2654,7 @@ workerPreconditionSpec = describe "the precondition a worker carries" $ do
   it "records nothing when the launch recorded nothing" $ do
     let launched = deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60
     launched.workerExpectedTarget `shouldBe` Nothing
-    preconditionStillHolds launched `shouldReturn` Nothing
+    freshLockPrecondition launched `shouldReturn` Nothing
 
   it "round-trips the recorded expectation through the durable specification" $ do
     let expected = preconditionOf (issueVersion ["reviewed:approve"])
@@ -2674,14 +2675,14 @@ workerPreconditionSpec = describe "the precondition a worker carries" $ do
             (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
               {workerExpectedTarget = Just expected}
       withFakeGh root (ghItem ["reviewed:approve", "blocked"]) $ do
-        moved <- preconditionStillHolds launched
+        moved <- freshLockPrecondition launched
         case moved of
           Nothing -> expectationFailure "a moved target was allowed to start its turn"
           Just detail -> do
             workerPreconditionRefusal detail `shouldBe` Just workerStaleTargetReason
             Text.unpack detail `shouldSatisfy` isInfixOf "its labels changed"
       withFakeGh root (ghItem ["reviewed:approve"]) $
-        preconditionStillHolds launched `shouldReturn` Nothing
+        freshLockPrecondition launched `shouldReturn` Nothing
 
   -- Fail-closed, and this is the half that matters. Requirement 8 permits the
   -- mutation only if the exact recorded precondition still holds, and a target
@@ -2694,7 +2695,7 @@ workerPreconditionSpec = describe "the precondition a worker carries" $ do
             (deadlineFixtureSpec boardRepository (WorkerId "solve-844-0001") 844 fixedTime 60)
               {workerExpectedTarget = Just (preconditionOf (issueVersion ["reviewed:approve"]))}
       withFakeGh root ["#!/bin/sh", "echo 'gh: could not connect' >&2", "exit 1"] $ do
-        unverified <- preconditionStillHolds launched
+        unverified <- freshLockPrecondition launched
         case unverified of
           Nothing -> expectationFailure "an unreadable target was allowed to start its turn"
           Just detail -> do
@@ -2824,7 +2825,7 @@ preconditionDeadlineSpec = describe "the deadline a precondition read runs under
       withFakeGh root termIgnoringGh $ do
         bounded <- timeout preconditionOuterDeadlineMicros $ do
           startedAt <- getCurrentTime
-          refusal <- preconditionStillHolds launched
+          refusal <- freshLockPrecondition launched
           finishedAt <- getCurrentTime
           pure (elapsedSeconds startedAt finishedAt, refusal)
         case bounded of
@@ -2861,7 +2862,7 @@ preconditionDeadlineSpec = describe "the deadline a precondition read runs under
 boundReadingDriver :: Stage -> MissionStore -> MissionId -> IO MissionDriver
 boundReadingDriver stage store mission = do
   staged <- stagedDriver stage store mission
-  live <- liveMissionDriver testOptions oneSecondGithubConfig boardRepository store mission
+  live <- freshLockDriver testOptions oneSecondGithubConfig boardRepository store mission
   pure staged {missionDriverObserveTarget = live.missionDriverObserveTarget}
 
 oneSecondGithubConfig :: ResolvedConfig
@@ -3217,7 +3218,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   -- controller from recording a termination that did not happen.
   it "reports the registered sessions a real termination could not signal" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
-      driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+      driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
       stageWorker (workerFixtureSpec boardRepository (WorkerId "solve-844-0001") 844)
       terminated <-
         driver.missionDriverTerminate [theParent, MissionSessionId "child-collected-0001"]
@@ -3254,7 +3255,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
         stageUnreadableWorker (WorkerId "solve-844-0001")
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith []) $ do
           observed <- driver.missionDriverObserveSession theParent Nothing
           case observed of
@@ -3307,7 +3308,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
         stageOrphanedWorker (WorkerId "solve-844-0001")
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
           gathered <- driver.missionDriverStepEvidence thePlanStep (stepRecord MissionStepRunning [theParent])
           case gathered of
@@ -3355,7 +3356,7 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
   -- it waits for on no evidence at all.
   it "reads a collected worker record as unknown rather than as a clean exit" $
     withRegisteredParent $ \store _ -> do
-      driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+      driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
       observed <- driver.missionDriverObserveSession (MissionSessionId "child-collected-0001") Nothing
       case observed of
         Right (Just observation) -> do
@@ -3633,7 +3634,7 @@ directionSpec = describe "directing a run that has blocked" $ do
   it "reads a target that closed since the plan as a fact, not as an absence" $
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghItemIn "CLOSED" ["reviewed:approve"]) $ do
           observed <- driver.missionDriverObserveTarget theTarget
           case observed of
@@ -3787,7 +3788,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
         stageWorker (workerFixtureSpec boardRepository (WorkerId "solve-844-0001") 844)
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
           gathered <- driver.missionDriverStepEvidence thePlanStep (stepRecord MissionStepRunning [theParent])
           case gathered of
@@ -3810,7 +3811,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
   it "retypes a target that vanished at the dispatch as a stale plan" $
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         -- The board no longer covers #844, and the item read says why.
         withFakeGh root (ghBoardAndItem [] (ghItemIn "CLOSED" ["reviewed:approve"])) $ do
           dispatched <-
@@ -3834,7 +3835,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
   it "leaves a refusal alone when the item read cannot establish a change" $
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardAndItem [] ["#!/bin/sh", "exit 1"]) $ do
           dispatched <-
             driver.missionDriverDispatch
@@ -3858,7 +3859,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
   it "answers the registry's workerless action as it dispatches it" $
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store _ -> do
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith []) $ do
           dispatched <-
             driver.missionDriverDispatch
@@ -3969,7 +3970,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
         stageWorker (workerFixtureSpec boardRepository (WorkerId "child-r-50-0001") 844)
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith [issueNodeJson 844 [emptyLabelsJson, emptyAssigneesJson, emptySubIssuesJson]]) $ do
           observed <-
             driver.missionDriverObserveSession
@@ -3994,7 +3995,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
         stageWorker (workerFixtureSpec boardRepository (WorkerId "child-r-51-0001") 844)
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith []) $ do
           observed <- driver.missionDriverObserveSession (MissionSessionId "child-r-51-0001") Nothing
           case observed of
@@ -4085,7 +4086,7 @@ registryJudgementSpec = describe "who judges a finished worker" $ do
   it "types a child's precondition refusals rather than recording a bare failure" $
     withIsolatedGh $ \root ->
       withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [theParent]] []) $ \store _ -> do
-        driver <- liveMissionDriver testOptions testResolvedConfig boardRepository store theMission
+        driver <- freshLockDriver testOptions testResolvedConfig boardRepository store theMission
         withFakeGh root (ghBoardWith []) $ do
           -- Unreadable: nothing was established, so the child is unverifiable
           -- and its parent keeps waiting.
@@ -4512,3 +4513,17 @@ missionFixtureIssue =
       issueSubIssues = SubIssuesNotRequested,
       issueDataGaps = []
     }
+
+-- | The live driver under a record lock minted for this one example, which is
+-- what the process that runs it would hold for its whole life.
+freshLockDriver :: Options -> ResolvedConfig -> Repository -> MissionStore -> MissionId -> IO MissionDriver
+freshLockDriver options config repository store mission = do
+  recordLock <- newGhRecordLock
+  liveMissionDriver options config recordLock repository store mission
+
+-- | One precondition reread under a record lock minted for it alone, as the
+-- one reread a persistent worker process takes.
+freshLockPrecondition :: WorkerSpec -> IO (Maybe Text)
+freshLockPrecondition launched = do
+  recordLock <- newGhRecordLock
+  preconditionStillHolds recordLock launched
