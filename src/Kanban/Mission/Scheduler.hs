@@ -59,6 +59,7 @@ module Kanban.Mission.Scheduler
     missionIsRunnable,
     runMissionSchedulerPass,
     advanceMissions,
+    launchWatched,
     liveMissionSchedulerSeams,
     sealMissionSessions,
     runMissionSchedulerMode,
@@ -546,9 +547,10 @@ sealMissionSessions repository store missions = do
 -- advance side by side; a loop that waited for each child before starting the
 -- next would serialize every mission's step behind every other's.
 --
--- Each child is waited for on its own thread, and its mission's place in the
--- rotation is withdrawn the moment that child exits (@settled@), whatever the
--- children launched before it are still doing. A child that finished without
+-- Each child is waited for on its own thread, started as soon as that child
+-- is ('launchWatched'), and its mission's place in the rotation is withdrawn
+-- the moment that child exits (@settled@) — whatever the children launched
+-- before it are still doing, and while later ones are still being launched. A child that finished without
 -- wanting a slot must not go on standing in line in front of one that does
 -- while a slower child ahead of both is still running: that would leave a
 -- free slot idle for nobody. The accounts are still returned in the order the
@@ -559,21 +561,14 @@ sealMissionSessions repository store missions = do
 -- still running would leave that child outside the supervision its wrapper
 -- provides (requirement 11).
 advanceMissions :: FilePath -> Options -> Repository -> FilePath -> [MissionId] -> (MissionId -> IO ()) -> IO [(MissionId, Either Text MissionChildResult)]
-advanceMissions executable options repository scratch admitted settled = do
-  launched <- mapM launch (zip [0 :: Int ..] admitted)
-  waiting <- mapM awaitApart launched
-  mapM (\done -> takeMVar done >>= either throwIO pure) waiting
+advanceMissions executable options repository scratch admitted settled =
+  launchWatched launch watch (zip [0 :: Int ..] admitted)
   where
-    -- The withdrawal runs whatever the wait came to, and an exception from
-    -- either is carried back to be raised here rather than lost on a thread.
-    awaitApart child = do
-      done <- newEmptyMVar
-      _ <-
-        forkIO $ do
-          result <- try @SomeException (await child)
-          withdrawn <- try @SomeException (settled (childMission child))
-          putMVar done (result <* withdrawn)
-      pure done
+    -- The withdrawal runs whatever the wait came to.
+    watch child = do
+      result <- try @SomeException (await child)
+      settled (childMission child)
+      either throwIO pure result
 
     childMission (LaunchedChild mission _ _ _ _ _) = mission
     childMission (LaunchRefused mission _) = mission
@@ -665,6 +660,24 @@ advanceMissions executable options repository scratch admitted settled = do
       releaseCapture outputCapture
       releaseCapture errorCapture
       readChildResult identity invocation mission resultPath exitCode
+
+-- | Starts each item in order, handing each to a watcher of its own the
+-- moment it is started, and returns the watchers' results in order.
+--
+-- The watcher starts before the next item does, and that is the point: a
+-- child that exits while a later child is still being launched has its
+-- place in the rotation withdrawn then, not once every launch is over.
+-- An exception a watcher raised is raised here, once every watcher before
+-- it has answered.
+launchWatched :: (item -> IO started) -> (started -> IO result) -> [item] -> IO [result]
+launchWatched start watch items = do
+  waiting <- mapM (\item -> start item >>= watchApart) items
+  mapM (\done -> takeMVar done >>= either throwIO pure) waiting
+  where
+    watchApart started = do
+      done <- newEmptyMVar
+      _ <- forkIO (try @SomeException (watch started) >>= putMVar done)
+      pure done
 
 -- | Removes whatever occupies a child's result path, and proves it is gone.
 --

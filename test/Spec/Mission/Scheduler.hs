@@ -775,6 +775,20 @@ malformedChildResults =
 
 childExecutionSpec :: Spec
 childExecutionSpec = describe "the child a pass actually launches" $ do
+  -- The watcher of a child starts before the next child is launched: here
+  -- the second launch cannot finish until the first child's watcher has run,
+  -- which it could never do if watching waited for every launch.
+  it "watches each child from the moment it is launched, while later launches are still under way" $ do
+    firstWatched <- newEmptyMVar
+    let start item
+          | item == (1 :: Int) = pure item
+          | otherwise = takeMVar firstWatched >> pure item
+        watch item = do
+          if item == 1 then putMVar firstWatched () else pure ()
+          pure (item * 10)
+    finished <- timeout 5000000 (launchWatched start watch [1, 2])
+    finished `shouldBe` Just [10, 20]
+
   -- A child that has finished must not go on standing in line in front of
   -- the missions behind it while a slower child ahead of it is still
   -- running: each mission's place is withdrawn as its own child exits, and
