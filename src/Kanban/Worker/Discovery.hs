@@ -25,6 +25,7 @@ module Kanban.Worker.Discovery
     collectWorkerCache,
     collectWorkerCacheWith,
     removeWorkerArtifacts,
+    withdrawIssueActionArtifacts,
   )
 where
 
@@ -494,8 +495,27 @@ companionArtifactPaths descriptor =
     -- future kind acquiring a command ledger that nothing collects.
     descriptor.workerDescriptorCommandPath,
     descriptor.workerDescriptorCommandAckPath,
-    descriptor.workerDescriptorHandoffPath
+    descriptor.workerDescriptorHandoffPath,
+    -- Last among the companions: while the specification is still there,
+    -- the claim is what keeps a host from adopting an action on its way out.
+    descriptor.workerDescriptorAdoptionPath
   ]
+
+-- | Removes an issue action its launch withdrew, the @.spec.json@ anchor
+-- /first/.
+--
+-- The reverse of 'removeWorkerArtifacts', and for the reason that function
+-- keeps the anchor last. A withdrawn action must never be adopted, and a host
+-- finds one only through its specification; the withdrawal claim is what
+-- turns a host away meanwhile, so it goes after the anchor rather than
+-- before it. A removal that fails partway leaves companions no scan finds,
+-- which is the lesser cost here: an action run after its launch reported it
+-- refused is an agent nothing counts.
+withdrawIssueActionArtifacts :: WorkerDescriptor -> IO Bool
+withdrawIssueActionArtifacts descriptor = do
+  anchored <- removeArtifact descriptor.workerDescriptorSpecPath
+  when anchored (void (mapM removeArtifact (companionArtifactPaths descriptor)))
+  pure anchored
 
 -- | Removes a collected worker's files, the @.spec.json@ anchor last on
 -- purpose. 'discoverWorkerHistory' reaches a worker only through that file, so

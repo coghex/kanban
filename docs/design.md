@@ -3977,6 +3977,7 @@ Suggested paths:
 ~/.cache/kanban/logs/<owner>-<repo>/<workflow>-<number>-<timestamp>.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
+~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.adoption
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/specification.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/snapshot.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/events.jsonl
@@ -5214,7 +5215,16 @@ The first solve/autosolve-compatible slice is implemented.
   taken its child on, since a host ensured is not a child adopted; ensuring
   never ends that wait, and a wait that ends with no evidence at all is
   reported as a failed launch whose child's records are removed and whose
-  lease is released, rather than as a success nothing is running. A host also
+  lease is released, rather than as a success nothing is running. Giving up is
+  itself a claim, because a host puts a child in memory before it journals the
+  first event that wait looks for: host and launch each try to create the
+  child's one `.adoption` claim file, exclusively and never half-written, and
+  whichever creates it first has the child. A host that finds the launch's
+  withdrawal there never runs the child; a launch that finds a host's claim
+  there reports the launch as adopted and removes nothing; and a withdrawn
+  child's specification is removed before anything else of it, so no later
+  scan finds it. A claim neither side can read or write removes nothing and
+  runs nothing. A host also
   adopts a child whose named host is provably gone —
   never one a live host is serving. A host counts as live unless it is
   disproven: terminal, or recording an identity a successful process snapshot

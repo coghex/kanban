@@ -52,6 +52,11 @@ import Kanban.UI.Review (reviewOutcomePhase)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
+    IssueActionAdoptionRefusal (..),
+    IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    readIssueActionClaim,
     recoverIfWorkerStoppedWith,
     IssueHostProvider (..),
     IssueHostTuning (..),
@@ -1171,6 +1176,25 @@ lifecycleSpec = describe "one running host" $ do
   -- the host's map from that moment and every later scan skips a child it
   -- already holds, so the retry never happened and discovery and the
   -- collection pass went on reading a dead host as the owner.
+  -- The host's half of the adoption claim: a child whose launch withdrew it
+  -- is never begun, while the child published after it is.
+  it "never adopts a child its launch withdrew" $
+    withRunningHost $ \host -> do
+      withdrawn <- childDescriptorFor host "action-withdrawn" 594 IssueRevision
+      createDirectoryIfMissing True (takeDirectory withdrawn.workerDescriptorSpecPath)
+      claimIssueAction withdrawn ClaimedByWithdrawal `shouldReturn` IssueActionClaimWon
+      _ <- publishChild host "action-withdrawn" 594 IssueRevision
+      kept <- publishChild host "action-kept" 595 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      threadDelay 300000
+      calls <- providerCalls host
+      [issue | BeginReview issue <- calls] `shouldBe` [595]
+      readIssueActionClaim withdrawn `shouldReturn` Right (Just ClaimedByWithdrawal)
+      readIssueActionClaim kept `shouldReturn` Right (Just (ClaimedByHost hostIdUnderTest))
+      -- Removed as the launch that withdrew it removes it, which is what the
+      -- teardown's accounting of every discovered child expects.
+      removeFile withdrawn.workerDescriptorSpecPath
+
   it "refuses an adoption whose ownership will not persist, and retries it" $
     withRunningHost $ \host -> do
       descriptor <- childDescriptorNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
@@ -2103,7 +2127,41 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
             (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
         LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
         confirmIssueActionAdoptedWith 5 1000 (pure (Right (WorkerId "host-2"))) testRepository descriptor
-          `shouldReturn` Left "no review host took this action on"
+          `shouldReturn` Left (IssueActionWithdrawn "no review host took this action on")
+
+  -- Issue #746's round-5 race: a host puts a child in memory and journals
+  -- its first event some moments later, so a launch that stopped waiting in
+  -- between used to remove a child the host was about to run — an agent no
+  -- ceiling could count. Paused exactly there: the host has claimed the
+  -- child and journaled nothing.
+  it "leaves a child a host has claimed but not yet journaled to that host" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        claimIssueAction descriptor (ClaimedByHost (WorkerId "host-1")) `shouldReturn` IssueActionClaimWon
+        confirmIssueActionAdoptedWith 3 1000 (pure (Right (WorkerId "host-1"))) testRepository descriptor
+          `shouldReturn` Right ()
+        readIssueActionClaim descriptor `shouldReturn` Right (Just (ClaimedByHost (WorkerId "host-1")))
+
+  -- The other order: a launch that gave up first has the child, and a host
+  -- arriving afterwards is turned away rather than running it.
+  it "turns a host away from a child its launch has withdrawn" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        confirmIssueActionAdoptedWith 2 1000 (pure (Right (WorkerId "host-1"))) testRepository descriptor
+          `shouldReturn` Left (IssueActionWithdrawn "no review host took this action on")
+        claimIssueAction descriptor (ClaimedByHost (WorkerId "host-1")) `shouldReturn` IssueActionClaimHeld ClaimedByWithdrawal
 
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->

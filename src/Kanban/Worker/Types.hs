@@ -487,7 +487,15 @@ data WorkerDescriptor = WorkerDescriptor
     -- against the host's exit rather than leaving the two to race.
     workerDescriptorHandoffPath :: FilePath,
     workerDescriptorCommandPath :: FilePath,
-    workerDescriptorCommandAckPath :: FilePath
+    workerDescriptorCommandAckPath :: FilePath,
+    -- | Who took an issue action: the review host that adopted it, or the
+    -- launch that withdrew it after nothing adopted it in time. Created
+    -- exclusively by whichever of the two gets there first, so a host never
+    -- runs an action its launch has withdrawn and a launch never removes an
+    -- action a host has adopted ('Kanban.Worker.Paths.claimIssueAction').
+    -- Only an issue action ever has one; the path is derived for every
+    -- worker for the collection pass's sake, as the command journals are.
+    workerDescriptorAdoptionPath :: FilePath
   }
   deriving stock (Eq, Show)
 

@@ -41,7 +41,10 @@ import Kanban.Process (ProcessIdentity (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolveOutcome (..))
 import Kanban.Worker
-  ( IssueActionWorkerTask (..),
+  ( IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    IssueActionWorkerTask (..),
+    claimIssueAction,
     IssueHostWorkerTask (..),
     WorkerDescriptor (..),
     WorkerId (..),
@@ -126,6 +129,15 @@ occupancySpec = describe "what the worker cache says is running" $ do
       counted (Right [identity 60, identity 61]) `shouldReturn` 2
       counted (Right [identity 60]) `shouldReturn` 1
       counted (Left "ps would not run") `shouldReturn` 2
+
+  -- A withdrawn action is the one unfinished action no host will ever run,
+  -- so its slot is free even while its records wait to be removed.
+  it "frees an issue action whose launch withdrew it" $
+    withSlotRoots $ \_ -> do
+      descriptor <- writeAgentWorker slotRepository "action-withdrawn" (Just "invocation-withdrawn") (reviewTask 23) (Just WorkerStarting)
+      missionAgentsNow `shouldReturn` 1
+      claimIssueAction descriptor ClaimedByWithdrawal `shouldReturn` IssueActionClaimWon
+      missionAgentsNow `shouldReturn` 0
 
   -- GitHub treats the two spellings as one repository, and a remote or --repo
   -- may use either in different checkouts.

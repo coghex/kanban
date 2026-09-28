@@ -574,7 +574,8 @@ repairWorkerDescriptor task =
       workerDescriptorPendingTerminationPath = "/tmp/pr-900-repair.terminating",
       workerDescriptorHandoffPath = "/tmp/pr-900-repair.handing-off",
       workerDescriptorCommandPath = "/tmp/pr-900-repair.commands.jsonl",
-      workerDescriptorCommandAckPath = "/tmp/pr-900-repair.command-acks.jsonl"
+      workerDescriptorCommandAckPath = "/tmp/pr-900-repair.command-acks.jsonl",
+      workerDescriptorAdoptionPath = "/tmp/pr-900-repair.adoption"
     }
 
 -- | Every route this slice migrated to the roster, with the brand

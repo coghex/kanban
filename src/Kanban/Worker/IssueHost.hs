@@ -128,7 +128,15 @@ import Kanban.Worker.Command
 import Kanban.Worker.Discovery (discoverWorkerHistory)
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
-import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
+import Kanban.Worker.Paths
+  ( IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    descriptorForSpec,
+    readWorkerState,
+    writePrivateJson,
+    writeState,
+  )
 import Kanban.GitHub.Guard (GhRecordLock)
 import Kanban.Worker.Precondition (preconditionStillHolds)
 import Kanban.Worker.Types
@@ -613,17 +621,37 @@ adoptNewChildren host = do
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
         _ -> do
-          owned <- rehomeChild host descriptor task
-          case owned of
-            Left message ->
+          -- Claimed before anything else is done with it: the launch waiting
+          -- on this child gives up after a bound and removes it, and it may
+          -- give up between this scan and the first event this host would
+          -- journal. Whichever of the two claims first has the child ('claimIssueAction'),
+          -- so a child its launch withdrew is never run, and one this host
+          -- claimed is never removed. A claim a host already holds — this
+          -- one on an earlier pass, or one that died — is an adoption to
+          -- continue.
+          claimed <- claimIssueAction descriptor (ClaimedByHost host.hostSpec.workerId)
+          case claimed of
+            IssueActionClaimHeld ClaimedByWithdrawal -> pure ()
+            IssueActionClaimUnsettled message ->
               hostDiagnostic
                 host
-                ( "could not record this host as the owner of "
+                ( "could not settle whether "
                     <> descriptor.workerDescriptorSpec.workerId.unWorkerId
-                    <> ", so it was left for the next pass: "
+                    <> " is this host's to run, so it was left for the next pass: "
                     <> message
                 )
-            Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
+            _ -> do
+              owned <- rehomeChild host descriptor task
+              case owned of
+                Left message ->
+                  hostDiagnostic
+                    host
+                    ( "could not record this host as the owner of "
+                        <> descriptor.workerDescriptorSpec.workerId.unWorkerId
+                        <> ", so it was left for the next pass: "
+                        <> message
+                    )
+                Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
 
 -- | What this host may do with a child, if anything.
 --

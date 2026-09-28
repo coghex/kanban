@@ -49,6 +49,11 @@ module Kanban.Worker
     ensureIssueReviewHost,
     launchIssueAction,
     confirmIssueActionAdoptedWith,
+    IssueActionAdoptionRefusal (..),
+    IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    readIssueActionClaim,
     liveIssueReviewHost,
     issueHostIdleGraceSeconds,
     -- | Re-exported for the suite, which pins the host's rules without
@@ -175,7 +180,7 @@ import Kanban.Worker.Discovery
     collectWorkerCacheWith,
     discoverWorkerHistory,
     discoverWorkers,
-    removeWorkerArtifacts,
+    withdrawIssueActionArtifacts,
     workerHoldingTurn,
   )
 import Kanban.Worker.IssueHost
@@ -204,7 +209,11 @@ import Kanban.Worker.Lease
   )
 import Kanban.Worker.Monitor (monitorWorker, recoverIfWorkerStoppedWith)
 import Kanban.Worker.Paths
-  ( decodeFile,
+  ( IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    readIssueActionClaim,
+    decodeFile,
     descriptorForSpec,
     newWorkerId,
     persistState,
@@ -482,10 +491,17 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
             -- its records go with it: the specification is the only way
             -- discovery reaches a child, so removing it is what stops a host
             -- started later from running an action whose launch was refused.
-            Left message -> do
-              removeWorkerArtifacts descriptor
-              releaseWorkerLease descriptor
+            -- Only a withdrawal this launch won may be removed; one a host got
+            -- to first is adopted, and 'confirmIssueActionAdopted' has said so.
+            Left (IssueActionWithdrawn message) -> do
+              removed <- withdrawIssueActionArtifacts descriptor
+              when removed (releaseWorkerLease descriptor)
               pure (Left (WorkerLaunchFailed message))
+            -- Nobody can say whether a host has it, so it is left exactly as
+            -- it stands, specification and lease and all: an action that may
+            -- be running is not one to remove from under a host, and while its
+            -- specification is there every count of running work includes it.
+            Left (IssueActionUndecided message) -> pure (Left (WorkerLaunchFailed message))
   where
     -- A host whose state has not landed yet leaves the child recording pid 0
     -- and no identity, which the startup grace window in 'discoverWorkers'
@@ -510,7 +526,7 @@ launchIssueAction repository issueNumber stage origin host configPath workflowCo
 -- a host is ensured regardless, so a child is never left with nobody asked.
 --
 -- Fast in the ordinary case: adoption lands within one host poll.
-confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either Text ())
+confirmIssueActionAdopted :: Repository -> WorkerDescriptor -> Maybe FilePath -> WorkflowConfig -> WorkerDeadline -> IO (Either IssueActionAdoptionRefusal ())
 confirmIssueActionAdopted repository descriptor configPath workflowConfig deadline =
   confirmIssueActionAdoptedWith
     issueActionAdoptionAttempts
@@ -524,7 +540,7 @@ confirmIssueActionAdopted repository descriptor configPath workflowConfig deadli
 -- Ensuring a host is what a suite must not do for real — it spawns a
 -- supervisor, and under test that supervisor is the test binary — so the
 -- seam is here rather than in a fixture that reproduces the loop.
-confirmIssueActionAdoptedWith :: Int -> Int -> IO (Either Text WorkerId) -> Repository -> WorkerDescriptor -> IO (Either Text ())
+confirmIssueActionAdoptedWith :: Int -> Int -> IO (Either Text WorkerId) -> Repository -> WorkerDescriptor -> IO (Either IssueActionAdoptionRefusal ())
 confirmIssueActionAdoptedWith attempts delayMicros ensureHost repository descriptor = poll attempts
   where
     poll remaining = do
@@ -533,7 +549,7 @@ confirmIssueActionAdoptedWith attempts delayMicros ensureHost repository descrip
         then pure (Right ())
         else
           if remaining <= (0 :: Int)
-            then pure (Left "no review host took this action on")
+            then withdraw
             else do
               -- Ensuring is not evidence, so it never ends the wait. A host
               -- ensured here still has to start, poll, and adopt, and the one
@@ -545,6 +561,30 @@ confirmIssueActionAdoptedWith attempts delayMicros ensureHost repository descrip
               when (isNothing live) (void ensureHost)
               threadDelay delayMicros
               poll (remaining - 1)
+
+    -- A host can have taken the child without having journaled anything yet:
+    -- it claims the child, puts it in memory, and writes its first event some
+    -- moments later. So the end of the wait is not proof that nothing has it,
+    -- and giving up is itself a claim, made the one way a host's cannot race:
+    -- whichever of the two created the claim first has the child.
+    withdraw = do
+      claimed <- claimIssueAction descriptor ClaimedByWithdrawal
+      pure $ case claimed of
+        IssueActionClaimWon -> Left (IssueActionWithdrawn noHost)
+        IssueActionClaimHeld (ClaimedByHost _) -> Right ()
+        IssueActionClaimHeld ClaimedByWithdrawal -> Left (IssueActionWithdrawn noHost)
+        IssueActionClaimUnsettled detail ->
+          Left (IssueActionUndecided ("no review host journaled this action, and whether one took it could not be settled: " <> detail))
+    noHost = "no review host took this action on"
+
+-- | Why a launch could not confirm its issue action was adopted.
+data IssueActionAdoptionRefusal
+  = -- | Nothing adopted it, and the launch's withdrawal claim now stands: no
+    -- host will run it, and its records are the launch's to remove.
+    IssueActionWithdrawn Text
+  | -- | Whether a host has it could not be settled, so nothing may be removed.
+    IssueActionUndecided Text
+  deriving stock (Eq, Show)
 
 -- | How long a launch waits for a host to take its child on before ensuring
 -- one itself. Long enough to cover several host polls, short enough that a

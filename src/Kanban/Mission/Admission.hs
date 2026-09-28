@@ -97,7 +97,7 @@ import Kanban.Mission.Paths (MissionStore (..))
 import Kanban.Mission.Types (MissionId (..))
 import Kanban.Paths (createPrivateDirectory)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
-import Kanban.Worker.Paths (decodeFile, descriptorForSpec, safePathComponent, workerDirectory)
+import Kanban.Worker.Paths (IssueActionClaim (..), decodeFile, descriptorForSpec, readIssueActionClaim, safePathComponent, workerDirectory)
 import Kanban.Worker.Types
   ( WorkerDescriptor (..),
     WorkerLease (..),
@@ -278,14 +278,14 @@ workerOccupies takeSnapshot descriptor = do
     -- a termination that could not be confirmed can leave one running beside
     -- a terminal state. The host's identity is left out: it outlives every
     -- action by design.
-    IssueActionWorkerTaskKind _ -> case stateRead of
-      StateAbsent -> pure True
-      StateUnreadable -> pure True
-      StateRead state -> case state.workerStateStatus of
-        WorkerTerminal _
-          | null (ownedProcesses state) -> pure False
-          | otherwise -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot (ownedProcesses state)
-        _ -> pure True
+    --
+    -- The one proof that an unfinished action will never run is its launch's
+    -- withdrawal claim: a host turns away every action that carries one.
+    IssueActionWorkerTaskKind _ -> do
+      claim <- readIssueActionClaim descriptor
+      case claim of
+        Right (Just ClaimedByWithdrawal) -> pure False
+        _ -> issueActionLive stateRead
     _ -> case stateRead of
       StateUnreadable -> pure True
       StateRead state -> case state.workerStateStatus of
@@ -303,6 +303,15 @@ workerOccupies takeSnapshot descriptor = do
         acknowledged <- doesFileExist descriptor.workerDescriptorAckPath
         if acknowledged then pure False else launchStillLive
   where
+    issueActionLive stateRead = case stateRead of
+      StateAbsent -> pure True
+      StateUnreadable -> pure True
+      StateRead state -> case state.workerStateStatus of
+        WorkerTerminal _
+          | null (ownedProcesses state) -> pure False
+          | otherwise -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot (ownedProcesses state)
+        _ -> pure True
+
     ownedProcesses state = maybe [] (: []) state.workerStateProviderIdentity <> state.workerStateKnownProcesses
 
     identities state =
