@@ -29,7 +29,7 @@ module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket_)
+import Control.Exception (SomeException, bracket_, throwIO, try)
 import Control.Monad (forM_, join, void)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
@@ -75,7 +75,7 @@ import Kanban.Domain (Issue (..), IssueState (..), NativeSubIssues (..), Reposit
 import Kanban.GitHub (newGhRecordLock)
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
-import Kanban.Process (ProcessIdentity (..))
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
@@ -88,6 +88,7 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    collectWorkerCacheWith,
     descriptorForSpec,
     workerDirectory,
     writePrivateJson,
@@ -106,7 +107,7 @@ import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import Kanban.Preflight (IssueOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolverBrand (..), SolveOutcome (..))
-import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec)
+import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec, writeTerminalMissionWorker)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
@@ -141,6 +142,8 @@ spec = describe "the foreground mission runner" $ do
   failureVocabularySpec
   openEffectRecoverySpec
   directionSpec
+  interruptedSpec
+  sealOnSettleSpec
   registryJudgementSpec
 
 -- ---------------------------------------------------------------------------
@@ -501,7 +504,11 @@ data Stage = Stage
     stageTerminateFailure :: IORef (Maybe Text),
     -- | Run inside the driver's termination, which is the one moment between
     -- the signal and the account of what was signalled.
-    stageOnTerminate :: IORef (IO ())
+    stageOnTerminate :: IORef (IO ()),
+    -- | Every session the controller asked to have its logs sealed.
+    stageSealed :: IORef [MissionSessionId],
+    -- | What a seal request reports it could not seal.
+    stageSealFailures :: IORef [Text]
   }
 
 newStage :: IO Stage
@@ -519,6 +526,8 @@ newStage =
     <*> newIORef []
     <*> newIORef Nothing
     <*> newIORef (pure ())
+    <*> newIORef []
+    <*> newIORef []
 
 endedObservation :: MissionTerminalObservation
 endedObservation =
@@ -582,7 +591,10 @@ stagedDriver stage _ _ =
           refusal <- readIORef stage.stageTerminateFailure
           case refusal of
             Just detail -> pure (Left detail)
-            Nothing -> Right <$> readIORef stage.stageUnreached
+            Nothing -> Right <$> readIORef stage.stageUnreached,
+        missionDriverSealSession = \session -> do
+          atomicModifyIORef' stage.stageSealed (\seen -> (seen <> [session], ()))
+          readIORef stage.stageSealFailures
       }
 
 -- | A store, a specification, and a snapshot, under a state root nothing else
@@ -1026,18 +1038,52 @@ reconciliationSpec = describe "what it makes of live evidence" $ do
       )
       `shouldBe` "external_failure"
 
-  -- Requirement 9's fourth reading, which is requirement 7's unknown outcome:
-  -- an invocation was journaled and nothing conclusive can be found for it.
-  it "reads an unresolved invocation with no worker as an unknown outcome" $
+  -- Requirement 9's fourth reading, narrowed by D-3 (as amended): an
+  -- invocation was journaled and nothing at all can be found behind it, which
+  -- is a step cut off mid-flight rather than an unknown outcome.
+  it "reads an unresolved invocation with nothing behind it as an interrupted step" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
       openInvocation store
       iteration <- oneIteration store stage
       case iteration of
         MissionAdvanced (MissionStepReconciled step lifecycle _) -> do
           step `shouldBe` theStep
-          lifecycle `shouldBe` MissionStepOutcomeUnknown
+          lifecycle `shouldBe` MissionStepInterrupted
         other -> expectationFailure ("unexpected iteration: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
+
+  -- Requirement 7's unknown outcome is what every other open launch still
+  -- reaches: each of these is evidence that something may have happened.
+  it "keeps an unknown outcome for an open launch with any evidence behind it" $
+    forM_
+      [ ("a departed target", \evidence -> evidence {missionEvidenceDeparted = Just "it left the open read"}),
+        ( "an inconclusive worker",
+          \evidence ->
+            evidence
+              { missionEvidenceWorker =
+                  Just
+                    MissionWorkerReading
+                      { missionWorkerSession = MissionSessionId "solve-844-0001",
+                        missionWorkerLive = False,
+                        missionWorkerCompatible = True,
+                        missionWorkerTerminal = Nothing,
+                        missionWorkerProviderSession = Nothing
+                      }
+              }
+        ),
+        ("conflicting live work", \evidence -> evidence {missionEvidenceForeign = Just "somebody else's worker"})
+      ]
+      $ \(label, decorate) ->
+        withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
+          openInvocation store
+          writeIORef stage.stageEvidence decorate
+          iteration <- oneIteration store stage
+          case iteration of
+            MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+              step `shouldBe` theStep
+              Text.unpack detail `shouldSatisfy` isInfixOf "no worker records it"
+            other -> expectationFailure (label <> ": unexpected iteration: " <> show other)
+          readIORef stage.stageDispatches `shouldReturn` []
 
   it "reattaches to a compatible live worker instead of launching another" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
@@ -1293,20 +1339,21 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
         `shouldBe` [Just "dispatched"]
 
   -- The exact window requirement 3 names. The record is on disk, the launch
-  -- never happened or may have, and nothing here may guess which.
-  it "reports an unknown outcome, and never relaunches, after the record was flushed" $
+  -- never happened or may have, and nothing here may guess which — so the
+  -- step is interrupted (D-3) and only the operator replans it.
+  it "marks the step interrupted, and never relaunches, after the record was flushed" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
       openInvocation store
       first <- oneIteration store stage
       case first of
-        MissionAdvanced (MissionStepReconciled _ MissionStepOutcomeUnknown _) -> pure ()
+        MissionAdvanced (MissionStepReconciled _ MissionStepInterrupted _) -> pure ()
         other -> expectationFailure ("unexpected iteration: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
       -- And a second pass does not change its mind either: the mission stops
-      -- for direction rather than retrying.
+      -- for the operator rather than retrying.
       second <- oneIteration store stage
       case second of
-        MissionAdvanced (MissionLifecycleSet MissionWaitingInput _) -> pure ()
+        MissionAdvanced (MissionLifecycleSet MissionInterrupted _) -> pure ()
         other -> expectationFailure ("unexpected second iteration: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
       recorded <- currentInvocations store
@@ -1321,9 +1368,9 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
       openInvocation store
       iteration <- oneIteration store stage
       case iteration of
-        MissionAdvanced (MissionStepReconciled step MissionStepOutcomeUnknown detail) -> do
+        MissionAdvanced (MissionStepReconciled step MissionStepInterrupted detail) -> do
           step `shouldBe` theStep
-          Text.unpack detail `shouldSatisfy` isInfixOf "no worker records it"
+          Text.unpack detail `shouldSatisfy` isInfixOf "before any worker or result was recorded"
         other -> expectationFailure ("a journaled invocation was dispatched again: " <> show other)
       readIORef stage.stageDispatches `shouldReturn` []
 
@@ -1389,9 +1436,10 @@ crashRecoverySpec = describe "the durable state a crash leaves" $ do
       map (.missionSessionId) snapshot.missionSnapshotSessions
         `shouldBe` [MissionSessionId "solve-844-0001"]
 
-  it "falls back to an unknown outcome when no worker records the invocation" $
+  it "falls back to an unknown outcome when no worker records the invocation and its target departed" $
     withMission (snapshotWith MissionRunning [stepRecord MissionStepDispatching []] []) $ \store stage -> do
       openInvocation store
+      writeIORef stage.stageEvidence (\evidence -> evidence {missionEvidenceDeparted = Just "it left the open read"})
       iteration <- oneIteration store stage
       case iteration of
         MissionAdvanced (MissionStepReconciled _ MissionStepOutcomeUnknown detail) ->
@@ -3460,6 +3508,171 @@ openEffectRecoverySpec = describe "an open effect with no step record" $ do
       readIORef stage.stageDispatches `shouldReturn` []
 
 -- ---------------------------------------------------------------------------
+-- Interrupted steps
+-- ---------------------------------------------------------------------------
+
+-- | D-3 (as amended): a step cut off mid-flight is interrupted, stops its
+-- mission for the operator, and is replanned by the operator's override and by
+-- nothing else — not a restart, not a resume, and not evidence that turns up
+-- afterwards.
+interruptedSpec :: Spec
+interruptedSpec = describe "a step cut off mid-flight" $ do
+  -- The window between the two writes: the step says interrupted and the
+  -- lifecycle beside it still says running. Whichever run comes next stops the
+  -- mission rather than carrying on around the step.
+  it "stops the mission even when the lifecycle write was lost behind the step's" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepInterrupted []] []) $ \store stage -> do
+      openInvocation store
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionLifecycleSet MissionInterrupted detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "solve-844"
+        other -> expectationFailure ("an interrupted step was carried on past: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+      outcomeTags store `shouldReturn` [Nothing]
+
+  it "is not replanned by a restart, a resume, or evidence that turns up later" $
+    withMission (snapshotWith MissionInterrupted [stepRecord MissionStepInterrupted []] []) $ \store stage -> do
+      openInvocation store
+      -- A worker naming the launch, and a result that would satisfy the step,
+      -- both turn up after the step was interrupted. Neither is asked about.
+      writeIORef stage.stageAdoptions [(MissionInvocationId "solve-844-1", MissionSessionId "solve-844-0001")]
+      writeIORef stage.stageEvidence (\evidence -> evidence {missionEvidenceSatisfied = Just "PR #900 already links #844"})
+      restarted <- oneIteration store stage
+      case restarted of
+        MissionStopped (MissionHaltBlocked MissionInterrupted _) -> pure ()
+        other -> expectationFailure ("a restart moved an interrupted mission: " <> show other)
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-resume" MissionResumeCommand
+          resumed <- missionControllerIteration controller
+          case resumed of
+            MissionAdvanced (MissionCommandApplied "c-resume" _) -> pure ()
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          -- Resumed, and stopped again at once: a resume is direction, and it
+          -- says nothing about what became of the launch.
+          reinterrupted <- missionControllerIteration controller
+          case reinterrupted of
+            MissionAdvanced (MissionLifecycleSet MissionInterrupted _) -> pure ()
+            other -> expectationFailure ("a resume replanned an interrupted step: " <> show other)
+          halted <- missionControllerIteration controller
+          case halted of
+            MissionStopped (MissionHaltBlocked MissionInterrupted _) -> pure ()
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          stopMissionController controller
+      readIORef stage.stageDispatches `shouldReturn` []
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepInterrupted
+      map (.missionSessionId) snapshot.missionSnapshotSessions `shouldBe` []
+      outcomeTags store `shouldReturn` [Nothing]
+
+  it "is recovered by an override, which releases its launch and replans it" $
+    withMission (snapshotWith MissionInterrupted [stepRecord MissionStepInterrupted []] []) $ \store stage -> do
+      openInvocation store
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          submitConsoleCommand controller "c-free" (MissionUserOverrideCommand theStep "it never ran")
+          freed <- missionControllerIteration controller
+          case freed of
+            MissionAdvanced (MissionCommandApplied "c-free" detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "user override on solve-844"
+            other -> expectationFailure ("unexpected iteration: " <> show other)
+          submitConsoleCommand controller "c-resume" MissionResumeCommand
+          _ <- missionControllerIteration controller
+          replanned <- missionControllerIteration controller
+          case replanned of
+            MissionAdvanced (MissionStepDispatched step _ _) -> step `shouldBe` theStep
+            other -> expectationFailure ("the override did not replan the step: " <> show other)
+          stopMissionController controller
+      -- The launch the step was cut off in is closed on the operator's word,
+      -- and the replanned one is a new launch beside it.
+      outcomeTags store `shouldReturn` [Just "abandoned", Just "dispatched"]
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+
+  -- The crash window the approved issue names, through the production path
+  -- rather than a staged answer: the launch makes its worker durable, naming
+  -- the invocation, and the process dies before the handle comes back. The
+  -- cache collector runs in between and must keep that worker — it is expired
+  -- and terminal, so only the unsealed-logs rule keeps it — and the restarted
+  -- mission finds it through the live driver's own discovery and adopts it
+  -- instead of dispatching again or calling the step interrupted.
+  it "adopts a durable worker its launch created before the crash lost the handle" $
+    withIsolatedGh $ \_ ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+        expired <- addUTCTime (-15 * 24 * 60 * 60) <$> getCurrentTime
+        writeIORef stage.stageOnDispatch $ do
+          dispatched <- readIORef stage.stageDispatches
+          forM_ (take 1 (reverse dispatched)) $ \request ->
+            void
+              ( writeTerminalMissionWorker
+                  boardRepository
+                  (WorkerId "solve-844-0001")
+                  (Just request.missionDispatchInvocation.unMissionInvocationId)
+                  expired
+                  Nothing
+              )
+          throwIO (userError "the mission process was killed")
+        started <- startMissionController store boardRepository theMission (stagedDriver stage)
+        case started of
+          Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+          Right controller -> do
+            crashed <- try @SomeException (missionControllerIteration controller)
+            -- A process that died holds no lease; this one releases it the
+            -- way its death would.
+            stopMissionController controller
+            either (const (pure ())) (\other -> expectationFailure ("the launch did not crash: " <> show other)) crashed
+        outcomeTags store `shouldReturn` [Nothing]
+        collectWorkerCacheWith defaultProcessSnapshot boardRepository
+        writeIORef stage.stageOnDispatch (pure ())
+        let restarted missionStore mission = do
+              live <- freshLockDriver testOptions testResolvedConfig boardRepository missionStore mission
+              staged <- stagedDriver stage missionStore mission
+              pure staged {missionDriverAdoptInvocation = live.missionDriverAdoptInvocation}
+        recovered <- oneIterationOf restarted store
+        recovered `shouldBe` MissionAdvanced (MissionStepAttached theStep (MissionSessionId "solve-844-0001"))
+        length <$> readIORef stage.stageDispatches `shouldReturn` 1
+        outcomeTags store `shouldReturn` [Just "dispatched"]
+
+-- | D-11: a session's logs are sealed at the moment its end is recorded, and a
+-- seal that fails is reported without holding the mission back.
+sealOnSettleSpec :: Spec
+sealOnSettleSpec = describe "sealing a session's logs when it ends" $ do
+  it "asks for the seal once the session's end is recorded" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] sessions) $ \store stage -> do
+      writeIORef stage.stageSessions [MissionSessionId "solve-844-0001"]
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionSessionEnded session _) -> session `shouldBe` MissionSessionId "solve-844-0001"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      readIORef stage.stageSealed `shouldReturn` [MissionSessionId "solve-844-0001"]
+
+  it "journals a seal it could not make, and records the session's end regardless" $ do
+    let sessions = [sessionNode "solve-844-0001" Nothing Nothing]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] sessions) $ \store stage -> do
+      writeIORef stage.stageSessions [MissionSessionId "solve-844-0001"]
+      writeIORef stage.stageSealFailures ["the archive directory could not be written"]
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionSessionEnded session _) -> session `shouldBe` MissionSessionId "solve-844-0001"
+        other -> expectationFailure ("a failed seal changed the iteration: " <> show other)
+      snapshot <- currentSnapshot store
+      map missionSessionDisposition snapshot.missionSnapshotSessions `shouldBe` [MissionSessionSettled]
+      journal <- readMissionJournal store theMission 0
+      case journal of
+        Left message -> expectationFailure (Text.unpack message)
+        Right (lines', _) ->
+          [ (event.missionEventSession, event.missionEventDetail)
+          | MissionJournalEvent event <- lines',
+            event.missionEventKind == "session_seal_failed"
+          ]
+            `shouldBe` [(Just (MissionSessionId "solve-844-0001"), Just "the archive directory could not be written")]
+
+-- ---------------------------------------------------------------------------
 -- Direction
 -- ---------------------------------------------------------------------------
 
@@ -3497,9 +3710,11 @@ directionSpec = describe "directing a run that has blocked" $ do
               >>= putMVar finished
           )
       -- It says what it is stuck on before it waits, which is the whole point:
-      -- an operator cannot answer a question nobody asked.
+      -- an operator cannot answer a question nobody asked. The launch was cut
+      -- off with nothing behind it, so what it is stuck on is an interrupted
+      -- step (D-3), and the override is the one thing that recovers it.
       firstAsk <- awaitConsole asked
-      Text.unpack firstAsk `shouldSatisfy` isInfixOf "waiting for an answer"
+      Text.unpack firstAsk `shouldSatisfy` isInfixOf "interrupted"
       Text.unpack firstAsk `shouldSatisfy` isInfixOf "detach"
       TextIO.hPutStrLn writeEnd "override solve-844 it never ran"
       -- The override resolves the step; the mission is still blocked, so it
@@ -3538,7 +3753,7 @@ directionSpec = describe "directing a run that has blocked" $ do
           Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
           Right run ->
             run.missionRunConclusion
-              `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+              `shouldBe` Right (MissionHaltBlocked MissionInterrupted "it was interrupted and needs an explicit recovery decision")
         readIORef stage.stageDispatches `shouldReturn` []
 
   -- The exclusion that makes the prompt authority rather than a formality. A
@@ -3560,7 +3775,7 @@ directionSpec = describe "directing a run that has blocked" $ do
         Left detail -> expectationFailure (Text.unpack (missionStartRefusalMessage detail))
         Right run ->
           run.missionRunConclusion
-            `shouldBe` Right (MissionHaltIndeterminate MissionWaitingInput "it is waiting for an answer this runner cannot supply")
+            `shouldBe` Right (MissionHaltBlocked MissionInterrupted "it was interrupted and needs an explicit recovery decision")
       readIORef said `shouldReturn` []
       readIORef stage.stageDispatches `shouldReturn` []
 

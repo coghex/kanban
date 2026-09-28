@@ -44,6 +44,7 @@ module Kanban.Mission.Reconcile
     MissionWorkerConclusion (..),
     MissionStepEvidence (..),
     classifyMissionWork,
+    missionDispatchInterrupted,
 
     -- * Where a runner stops
     MissionHalt (..),
@@ -58,6 +59,7 @@ module Kanban.Mission.Reconcile
     nextDispatchableStep,
     settledMissionLifecycle,
     blockedMissionLifecycle,
+    missionInterruptedStep,
     cancelledByDependency,
     MissionOpenDispatch (..),
     missionOpenDispatchIsChild,
@@ -79,7 +81,7 @@ module Kanban.Mission.Reconcile
 where
 
 import Data.List (find)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Action
@@ -401,6 +403,30 @@ classifyMissionWork evidence
         <> state.missionInvocationRecord.missionInvocationId.unMissionInvocationId
         <> " was journaled and nothing conclusive was found for it"
 
+-- | Whether a launch this store never saw the end of was cut off before it
+-- produced anything a later pass can find.
+--
+-- The interrupted step of D-3 (as amended): a @--mission@ process journaled
+-- the launch and died before any worker handle or conclusion was recorded, and
+-- the evidence pass now finds nothing at all behind it — no worker of the
+-- step's own, no result, no departure, and no foreign live work. That is the
+-- one reading 'classifyMissionWork' reaches only through the open invocation
+-- itself, so it is asked of that classification rather than restated.
+--
+-- Everything else an open launch can meet keeps the answer it had: a worker
+-- that ended with nothing conclusive is a worker, a target that left the open
+-- read is a departure, and live work nobody can vouch for is a conflict. Each
+-- of those is still @outcome_unknown@ or a pause, because each is evidence
+-- that something may have happened, and the interrupted step is precisely the
+-- one with none.
+missionDispatchInterrupted :: MissionStepEvidence -> Bool
+missionDispatchInterrupted evidence = case classifyMissionWork evidence of
+  MissionWorkUnresolved _ ->
+    isNothing evidence.missionEvidenceWorker
+      && isNothing evidence.missionEvidenceDeparted
+      && maybe False (not . missionInvocationResolved) evidence.missionEvidenceInvocation
+  _ -> False
+
 -- ---------------------------------------------------------------------------
 -- Where a runner stops
 -- ---------------------------------------------------------------------------
@@ -594,18 +620,42 @@ settledMissionLifecycle snapshot
 -- An unknown outcome is @waiting_input@ rather than @failed@ or @interrupted@,
 -- because requirement 7's repair for it is direction from a person, and
 -- @waiting_input@ is the lifecycle that says so.
+--
+-- An interrupted step comes next and outranks every ordinary wait. It is the
+-- one blocked state no answer, capacity, or barrier ends: only the operator's
+-- @override@ does (D-3), so a mission holding one is reported as interrupted
+-- whatever else it is also waiting for, and the scheduler stops admitting it.
 blockedMissionLifecycle :: MissionSnapshot -> Maybe (MissionLifecycle, Text)
 blockedMissionLifecycle snapshot
   | has MissionStepOutcomeUnknown =
       Just (MissionWaitingInput, "a step's outcome is unknown and only direction or fresh evidence resolves it")
+  | has MissionStepInterrupted = Just (MissionInterrupted, "a step was interrupted")
+  | has MissionStepOrphaned = Just (MissionInterrupted, "a step's processes were orphaned")
   | has MissionStepNeedsInput = Just (MissionWaitingInput, "a step is waiting for an answer")
   | has MissionStepNeedsChanges = Just (MissionWaitingInput, "a step came back with changes requested")
   | has MissionStepWaitingCapacity = Just (MissionWaitingCapacity, "a step is waiting for provider capacity")
-  | has MissionStepInterrupted = Just (MissionInterrupted, "a step was interrupted")
-  | has MissionStepOrphaned = Just (MissionInterrupted, "a step's processes were orphaned")
   | otherwise = Nothing
   where
     has lifecycle = lifecycle `elem` map (.missionStepRecordLifecycle) snapshot.missionSnapshotSteps
+
+-- | The first step cut off mid-flight, if the mission holds one.
+--
+-- Asked before anything else a controller would do next, and answered with
+-- the mission's own @interrupted@ lifecycle. D-3 stops the mission for the
+-- operator the moment one step is interrupted, rather than when nothing else
+-- is left to dispatch: a mission that went on launching its other steps beside
+-- a launch nobody can account for would be doing more of exactly what the
+-- operator has been asked to look at. It is also what closes the window
+-- between the two writes: a step recorded @interrupted@ beside a lifecycle
+-- still reading @running@ is found here by whichever run comes next.
+missionInterruptedStep :: MissionSnapshot -> Maybe MissionStepId
+missionInterruptedStep snapshot =
+  case [ record.missionStepRecordId
+       | record <- snapshot.missionSnapshotSteps,
+         record.missionStepRecordLifecycle == MissionStepInterrupted
+       ] of
+    (step : _) -> Just step
+    [] -> Nothing
 
 -- | A pending step whose plan dependency reached a terminal state other than
 -- success, and can therefore never run.

@@ -9,6 +9,11 @@
 -- files — and is quiet throughout: a cache that cannot be tidied is a
 -- hygiene problem, never a reason to fail the discovery a restart needs.
 --
+-- One rule reaches past the worker layer, and it does so on purpose. A worker
+-- a mission dispatched keeps its records until its mission has sealed its
+-- logs ("Kanban.Mission.Seal"): the cache is the only copy until then, and D-11
+-- promises a mission's history outlives it.
+--
 -- This module is internal — "Kanban.Worker" re-exports the parts of it that
 -- module's public contract promises.
 module Kanban.Worker.Discovery
@@ -31,8 +36,10 @@ import Data.List (find, sortOn)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Time (NominalDiffTime, diffUTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..))
+import Kanban.Mission.Seal (loadMissionSealIndex, missionWorkerLogsReleasable)
 import Kanban.Process (IdentityPresence (..), ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot)
 import Kanban.Worker.Paths
   ( decodeFile,
@@ -216,7 +223,7 @@ collectWorkerCacheWith takeSnapshot repository = ignoreFileOperation $ do
     -- shared, since the terminal pass needs the whole list anyway.
     history <- discoverWorkerHistory repository
     collectRetiredLeases takeSnapshot directory history
-    collectTerminalArtifacts takeSnapshot directory history
+    collectTerminalArtifacts takeSnapshot repository directory history
 
 -- | Removes retired @.stale-*@ lease directories whose recorded processes are
 -- all provably gone.
@@ -299,12 +306,28 @@ recordedIdentities state =
 -- newer durable worker has taken over its workflow step; the newest terminal
 -- worker for an item, which is the session the debugging contract promises,
 -- survives however many passes run. Past 'workerRetentionSeconds' that
--- promise has expired and the rest is collected regardless.
-collectTerminalArtifacts :: IO (Either Text [ProcessIdentity]) -> FilePath -> [WorkerDescriptor] -> IO ()
-collectTerminalArtifacts takeSnapshot directory history = do
+-- promise has expired and the rest is collected regardless — except for a
+-- worker a mission dispatched, whose records stay until its mission has
+-- sealed every log it owes ('missionWorkerLogsReleasable'), however old they
+-- are. Retention bounds how long the cache /promises/ to keep something; it
+-- never licenses removing the only copy of a mission's history.
+collectTerminalArtifacts :: IO (Either Text [ProcessIdentity]) -> Repository -> FilePath -> [WorkerDescriptor] -> IO ()
+collectTerminalArtifacts takeSnapshot repository directory history = do
   now <- getCurrentTime
   candidates <- catMaybes <$> mapM withTerminalState history
-  mapM_ (collect now) candidates
+  -- Read at most once per pass, and only if a mission's worker is actually
+  -- up for collection: the store is somebody else's, and a cache with no
+  -- mission workers in it has no reason to open it.
+  memo <- newIORef Nothing
+  let sealIndex = do
+        cached <- readIORef memo
+        case cached of
+          Just index -> pure index
+          Nothing -> do
+            index <- loadMissionSealIndex repository
+            writeIORef memo (Just index)
+            pure index
+  mapM_ (collect sealIndex now) candidates
   where
     withTerminalState descriptor = do
       stateResult <- readWorkerState descriptor
@@ -312,7 +335,7 @@ collectTerminalArtifacts takeSnapshot directory history = do
         Right state
           | WorkerTerminal _ <- state.workerStateStatus -> Just (descriptor, state)
         _ -> Nothing
-    collect now (descriptor, state) = ignoreFileOperation $ do
+    collect sealIndex now (descriptor, state) = ignoreFileOperation $ do
       -- Measured from the terminal heartbeat rather than 'workerCreatedAt':
       -- retention starts when a worker finished, and a long-running solve's
       -- launch time says nothing about how long its result has been sitting
@@ -327,7 +350,9 @@ collectTerminalArtifacts takeSnapshot directory history = do
       when eligible $ do
         collectable <- artifactsCollectable takeSnapshot directory descriptor state
         held <- heldByHostTopology history descriptor
-        when (collectable && not held) (removeWorkerArtifacts descriptor)
+        when (collectable && not held) $ do
+          released <- missionWorkerLogsReleasable sealIndex descriptor state
+          when released (removeWorkerArtifacts descriptor)
 
 -- | The two host/child rules the collection pass owes on top of every rule it
 -- already applied (SAG-10).

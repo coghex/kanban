@@ -85,7 +85,8 @@ module Spec.Support.Process
     canonicalSessionLogText,
     fakeController,
     fakeApprovalController,
-    fakeMissionRunnerController
+    fakeMissionRunnerController,
+    writeTerminalMissionWorker
   )
 where
 
@@ -175,6 +176,7 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    descriptorForSpec,
     discoverWorkerHistory,
     monitorWorker,
     runWorker
@@ -186,7 +188,7 @@ import Spec.Support.Fixtures (epoch, fixtureReviewThread)
 import Spec.Support.Roster (cellOf)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, hClose)
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
@@ -573,6 +575,28 @@ workerFixtureSpec repository identifier issueNumber =
       workerExpectedTarget = Nothing,
       workerInvocation = Nothing
     }
+
+-- | A finished worker, written where discovery and the cache collector find
+-- one: a specification carrying @invocation@ (the mark a mission launch leaves,
+-- or 'Nothing' for a worker no mission started), a terminal state whose
+-- heartbeat the caller chooses and which records @rawLog@ as the provider's
+-- raw log, and an event stream. No process identity is recorded, so nothing
+-- about a live process keeps it.
+writeTerminalMissionWorker :: Repository -> WorkerId -> Maybe Text -> UTCTime -> Maybe FilePath -> IO WorkerDescriptor
+writeTerminalMissionWorker repository identifier invocation heartbeat rawLog = do
+  let spec = (workerFixtureSpec repository identifier 844) {workerInvocation = invocation}
+      state =
+        (runningWorkerState identifier 999999 Nothing)
+          { workerStateStatus = WorkerTerminal SolveCompleted,
+            workerStateHeartbeatAt = heartbeat,
+            workerStateLogPath = rawLog
+          }
+  descriptor <- descriptorForSpec spec
+  createDirectoryIfMissing True (takeDirectory descriptor.workerDescriptorSpecPath)
+  LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode spec)
+  LazyByteString.writeFile descriptor.workerDescriptorStatePath (encode state)
+  ByteString.writeFile descriptor.workerDescriptorEventPath "{\"event\":\"the whole stream\"}\n"
+  pure descriptor
 
 -- | Like 'workerFixtureSpec', but with an explicit 'workerCreatedAt' and
 -- 'workerMaxRuntimeSeconds' so a deadline test can construct a precise,

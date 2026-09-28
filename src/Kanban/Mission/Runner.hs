@@ -144,6 +144,7 @@ import Kanban.Mission.Reconcile
     missionHaltMessage,
     missionHaltIsIndeterminate,
   )
+import Kanban.Mission.Seal (sealMissionSessionLogs)
 import Kanban.Mission.Store (listMissions, recordMissionEvent)
 import Kanban.Mission.Types
   ( MissionEvent (..),
@@ -476,7 +477,7 @@ runMissionWith console store repository mission buildDriver = do
 -- GitHub read this driver takes goes through it: minting one per read would
 -- forget a read's held-back refusal the moment that read returned.
 liveMissionDriver :: Options -> ResolvedConfig -> GhRecordLock -> Repository -> MissionStore -> MissionId -> IO MissionDriver
-liveMissionDriver options config recordLock repository store _ =
+liveMissionDriver options config recordLock repository store mission =
   pure
     MissionDriver
       { missionDriverInventory = inventory,
@@ -485,9 +486,16 @@ liveMissionDriver options config recordLock repository store _ =
         missionDriverObserveSession = observeSession,
         missionDriverAdoptInvocation = adoptInvocation,
         missionDriverDispatch = dispatch,
-        missionDriverTerminate = terminate
+        missionDriverTerminate = terminate,
+        missionDriverSealSession = sealSession
       }
   where
+    -- This machine's worker records and this mission's archive, and nothing
+    -- else: the worker names its own logs, and the archive is the mission's.
+    sealSession session = do
+      workers <- discoverWorkerHistory repository
+      sealMissionSessionLogs store mission workers session
+
     workflowConfig :: WorkflowConfig
     workflowConfig = config.resolvedWorkflow
 

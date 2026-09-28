@@ -37,7 +37,7 @@ import Data.List (isInfixOf, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, secondsToDiffTime)
 import Kanban.Domain (Repository (..))
 import Kanban.Mission
   ( MissionArchiveState (..),
@@ -114,7 +114,9 @@ import Kanban.Mission
     readMissionSpecification,
     recordMissionEvent,
     releaseMissionLease,
+    missionSealedArchivePath,
     sealMissionLog,
+    sealMissionSessionLogs,
     validateMissionSessionTree,
     verifyMissionSealedArchive,
     sha256Hex,
@@ -141,8 +143,10 @@ import Spec.Support.MissionProbes
     releaseMissionHolder,
     withMissionProbes,
   )
+import Spec.Support.Process (writeTerminalMissionWorker)
+import Kanban.Worker (WorkerDescriptor (..), WorkerId (..), collectWorkerCacheWith, discoverWorkerHistory)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, renameFile)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (dropExtension, takeDirectory, (</>))
 import System.Environment (getEnv)
 import System.Posix.Files (createSymbolicLink, setFileMode)
 import System.Posix.Types (FileMode)
@@ -164,6 +168,7 @@ spec = describe "the durable mission store" $ do
   leaseSpec
   schemaSpec
   sealSpec
+  retentionSpec
   dispositionSpec
   enumerationSpec
   sessionTreeSpec
@@ -1843,6 +1848,244 @@ sealSpec = describe "sealing a child's log" $ do
       stored `shouldBe` []
 
 -- * Archive and delete
+
+-- | D-11 at the worker cache: a worker a mission dispatched keeps its records
+-- until its mission has sealed every log it owes, and a worker no mission
+-- started is collected exactly as before.
+retentionSpec :: Spec
+retentionSpec = describe "keeping a mission worker's logs until they are sealed" $ do
+  -- Including a worker its mission never got as far as registering: the
+  -- invocation in its own specification is what marks it, and that is written
+  -- the moment the worker exists.
+  it "keeps an expired mission worker's records until they are sealed, and still collects a worker no mission started" $
+    withRetention $ \_ _ -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      ordinary <- writeTerminalMissionWorker boardRepository (WorkerId "solve-845-0001") Nothing expired Nothing
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      mapM_ (\path -> doesFileExist path `shouldReturn` True) (recordsOf launched)
+      mapM_ (\path -> doesFileExist path `shouldReturn` False) (recordsOf ordinary)
+
+  it "collects a mission worker once every log it owes verifies, and the archive outlives the source" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      ByteString.writeFile raw "the provider's own log\n"
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      mapM_ (\path -> doesFileExist path `shouldReturn` False) (recordsOf launched)
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      sort (map missionSealedKind sealed) `shouldBe` [MissionEventStreamLog, MissionRawProviderLog]
+      mapM_ (\entry -> verifyMissionSealedArchive store theMission entry `shouldReturn` Right ()) sealed
+
+  it "keeps a mission worker while one of the logs it owes is still unsealed" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      ByteString.writeFile raw "the provider's own log\n"
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      void (expectRight =<< sealMissionLog store theMission theSession MissionEventStreamLog launched.workerDescriptorEventPath)
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` True
+      -- The retry seals only what is still owed, and then the worker goes.
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` False
+
+  -- And a later attempt checks the seal it finds rather than trusting that it
+  -- exists: the archive cannot be replaced, so what it can do is say so on
+  -- every pass until an operator does.
+  it "keeps a mission worker whose sealed copy no longer verifies, or no longer matches its stream, and reports it" $
+    forM_ [tamperArchive, growStream] $ \damage ->
+      withRetention $ \_ store -> do
+        expired <- expiredHeartbeat
+        launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+        sealAll store `shouldReturn` []
+        committed <- expectRight =<< readMissionSealedArchives store theMission
+        damage store launched
+        reported <- sealAll store
+        map Text.unpack reported `shouldSatisfy` \case
+          [failure] -> "cannot be relied on and cannot be replaced" `isInfixOf` failure
+          _ -> False
+        readMissionSealedArchives store theMission `shouldReturn` Right committed
+        collectWorkerCacheWith defaultProcessSnapshot boardRepository
+        doesFileExist launched.workerDescriptorSpecPath `shouldReturn` True
+        doesFileExist launched.workerDescriptorEventPath `shouldReturn` True
+
+  -- A log with no seal and no source is not a log with nothing to lose: the
+  -- records beside it are what associate the worker with its mission, and no
+  -- committed archive stands in for them.
+  it "keeps a mission worker whose owed log was never sealed and is gone, and reports it" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "raw_provider_log" `isInfixOf` failure && "is missing" `isInfixOf` failure
+        _ -> False
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      map missionSealedKind sealed `shouldBe` [MissionEventStreamLog]
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      mapM_ (\path -> doesFileExist path `shouldReturn` True) (recordsOf launched)
+
+  -- An index missing the one seal that would have kept a log is how a last
+  -- copy is removed, so one entry nobody can read keeps every mission worker.
+  it "keeps every mission worker while any seal record cannot be read" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      let elsewhere = MissionId "mission-0002"
+          other = root </> "other.log"
+      ByteString.writeFile other "another mission's session"
+      entry <- expectRight =<< sealMissionLog store elsewhere (MissionSessionId "session-a") MissionEventStreamLog other
+      archivePath <- expectRight =<< missionSealedArchivePath store elsewhere entry
+      ByteString.writeFile (dropExtension archivePath <> ".seal.json") "{"
+      damaged <- readMissionSealedArchives store elsewhere
+      damaged `shouldSatisfy` either (const True) (const False)
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` True
+
+  it "recognizes an existing seal on a later attempt and replaces nothing" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      first <- expectRight =<< readMissionSealedArchives store theMission
+      sealAll store `shouldReturn` []
+      again <- expectRight =<< readMissionSealedArchives store theMission
+      again `shouldBe` first
+
+  it "reports a seal it could not make, and makes it on a later attempt" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      withMode launched.workerDescriptorEventPath 0o000 $ do
+        failures <- sealAll store
+        map Text.unpack failures `shouldSatisfy` \case
+          [failure] -> "could not be sealed and will be tried again" `isInfixOf` failure
+          _ -> False
+      sealAll store `shouldReturn` []
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      map missionSealedSession sealed `shouldBe` [theSession]
+
+  -- A finished session whose worker state will not decode is neither running
+  -- nor known to be finished, and its raw log cannot even be named; a pass
+  -- that read that as owing nothing would retry nothing and say nothing.
+  it "reports a session whose worker state cannot be read, and seals it once it can" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      state <- ByteString.readFile launched.workerDescriptorStatePath
+      ByteString.writeFile launched.workerDescriptorStatePath "{"
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "its worker state could not be read" `isInfixOf` failure
+        _ -> False
+      readMissionSealedArchives store theMission `shouldReturn` Right []
+      ByteString.writeFile launched.workerDescriptorStatePath state
+      sealAll store `shouldReturn` []
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      map missionSealedSession sealed `shouldBe` [theSession]
+
+  -- With no readable worker record the archive is the only evidence left:
+  -- the ordinary end of a sealed session is quiet, and a session nothing
+  -- sealed — its records collected under a policy that did not wait, or a
+  -- specification that no longer decodes — is reported on every pass.
+  it "stays quiet for a session collected after its logs were sealed" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` False
+      sealAll store `shouldReturn` []
+
+  it "reports a session with no readable worker record and nothing sealed" $
+    forM_ [Nothing, Just "{"] $ \specification ->
+      withRetention $ \_ store -> do
+        expired <- expiredHeartbeat
+        forM_ specification $ \bytes -> do
+          launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+          ByteString.writeFile launched.workerDescriptorSpecPath bytes
+        reported <- sealAll store
+        map Text.unpack reported `shouldSatisfy` \case
+          [failure] -> "no readable worker record and no sealed event stream" `isInfixOf` failure
+          _ -> False
+
+  -- Held to the collector's own standard after the source is gone: bytes
+  -- changed without changing their length still fail the digest.
+  it "reports a collected session whose sealed copy no longer verifies, even at the same length" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ sealed $ \entry -> do
+        path <- expectRight =<< missionSealedArchivePath store theMission entry
+        original <- ByteString.readFile path
+        setFileMode path 0o600
+        ByteString.writeFile path (ByteStringChar.map (const 'x') original)
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "does not verify" `isInfixOf` failure && "event_stream" `isInfixOf` failure
+        _ -> False
+
+  -- An intact event stream does not vouch for a raw log whose seal record is
+  -- there and cannot be read.
+  it "reports a collected session's unreadable raw-log seal beside a good event stream" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      ByteString.writeFile raw "the provider's own log\n"
+      _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ [entry | entry <- sealed, entry.missionSealedKind == MissionRawProviderLog] $ \entry -> do
+        path <- expectRight =<< missionSealedArchivePath store theMission entry
+        let record = dropExtension path <> ".seal.json"
+        setFileMode record 0o600
+        ByteString.writeFile record "{"
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "raw_provider_log seal record that cannot be read" `isInfixOf` failure
+        _ -> False
+
+  it "leaves a sealed worker collected once, and an unsealed one kept, under two collectors at once" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      waiting <- writeTerminalMissionWorker boardRepository (WorkerId "solve-846-0001") (Just "solve-846-1") expired Nothing
+      sealAll store `shouldReturn` []
+      finished <- mapM (const newEmptyMVar) [(), ()]
+      forM_ finished $ \done -> forkIO (collectWorkerCacheWith defaultProcessSnapshot boardRepository >> putMVar done ())
+      mapM_ takeMVar finished
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` False
+      doesFileExist waiting.workerDescriptorSpecPath `shouldReturn` True
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      mapM_ (\entry -> verifyMissionSealedArchive store theMission entry `shouldReturn` Right ()) sealed
+  where
+    theSession = MissionSessionId "solve-844-0001"
+    withRetention action = withStore $ \root store ->
+      withEnvironmentValue "XDG_CACHE_HOME" root (action root store)
+    expiredHeartbeat = addUTCTime (-15 * 24 * 60 * 60) <$> getCurrentTime
+    recordsOf descriptor =
+      [descriptor.workerDescriptorSpecPath, descriptor.workerDescriptorStatePath, descriptor.workerDescriptorEventPath]
+    sealAll store = do
+      workers <- discoverWorkerHistory boardRepository
+      sealMissionSessionLogs store theMission workers theSession
+    tamperArchive store _ = do
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ sealed $ \entry -> do
+        path <- expectRight =<< missionSealedArchivePath store theMission entry
+        setFileMode path 0o600
+        ByteString.writeFile path "not what was sealed"
+    growStream _ descriptor =
+      ByteString.appendFile descriptor.workerDescriptorEventPath "{\"event\":\"written after the seal\"}\n"
 
 dispositionSpec :: Spec
 dispositionSpec = describe "archiving and deleting a mission" $ do

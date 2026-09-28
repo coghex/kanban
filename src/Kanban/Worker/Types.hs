@@ -273,7 +273,10 @@ data WorkerSpec = WorkerSpec
     -- invocation it is holding — instead of the mission reading its own
     -- worker as somebody else's.
     --
-    -- Opaque to the worker layer, which never interprets it.
+    -- Opaque to the worker layer, which never interprets its value. Its
+    -- presence is read once: the cache collector keeps a worker that carries
+    -- one until its mission has sealed that worker's logs (D-11), because
+    -- only a mission launch writes it.
     workerInvocation :: Maybe Text
   }
   deriving stock (Eq, Show, Generic)

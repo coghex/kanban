@@ -3929,6 +3929,7 @@ Suggested paths:
 ~/Library/Application Support/kanban/mission-runner/config.json
 ~/Library/Application Support/kanban/mission-runner/dependants/<owner>.<repo>
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/status.json
+~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/pass.json
 ~/Library/Application Support/kanban/mission-runner/runtime/<owner>.<repo>/incidents/<id>.json
 ~/Library/Application Support/kanban/mission-runner/locks/<owner>.<repo>.lock
 ~/Library/Logs/kanban/mission-runner/<owner>.<repo>/service.{out,err}
@@ -4043,6 +4044,34 @@ Defaults:
   succeed. The four beside them — `install`, `uninstall`, `start` and `stop` —
   act on the managed job rather than on this runtime, and are what the
   installer calls rather than spawns.
+- `pass.json` beside the status document records the one scheduler pass a
+  run may have out: its process identifier and start time, and the identifier
+  and start time of every member of its process group the run has seen. A start
+  time is `ps`'s, read in UTC and the C locale so a controller started in
+  another time zone reads the same process the same way, and to the second, so each is recorded only as observed after its
+  start second ended: the process was alive then, so nothing that reuses its
+  identifier later can share its start second, and an identity observed inside
+  that second is refused rather than trusted. A
+  pass leads a session of its own, so a wrapper killed outright runs no
+  cleanup and no service manager reaches the pass either; this record is what
+  does. Each pass starts behind a gate — the pass's own process, waiting for one
+  line on standard input before it becomes the scheduler — and the record is
+  written with the pass's identity before that line is sent, so a wrapper killed
+  anywhere between starting a pass and recording it leaves a gate that reads end
+  of input and runs nothing. The next `run` for the repository reads the record
+  under the run lock and settles what it names before starting a pass of its
+  own: every process verified by identity, and still in the pass's process
+  group when it is signalled, is asked to stop and then killed, and
+  the record is removed only once nothing it names is alive. A process it names
+  only by identifier — a recycled one, or the bare `pass_pid` a release before
+  this record left in its status document, which is copied into a record marked
+  legacy before anything overwrites it — is never signalled on that alone. A
+  survivor that cannot be verified gone blocks the run: the status document
+  says so, an incident names the processes and the record, and the record stays
+  for every later start to read again until the operator ends the processes or
+  confirms they are not the runner's. The detached workers a mission child
+  hands agent work to lead sessions of their own and are never part of this;
+  they own their agents, and the next pass reattaches to them.
 - Beside those runtime documents the service keeps durable records of its
   *installation*. `config.json` in the service root is the discovery record —
   one `repositories` table holding each installed repository's entry, naming the
@@ -4093,7 +4122,26 @@ Defaults:
   its own — a specification written exactly once and never rewritten, a
   snapshot replaced whole by rename, a journal whose every record is one
   append-mode write of the whole line and which is read by byte offset, and sealed archive copies carrying the digest
-  and byte length that verify them after the source is collected. A snapshot's
+  and byte length that verify them after the source is collected. A session's
+  event stream, and the provider's raw log when its worker recorded one, is
+  sealed when the controller records the session's end, and every scheduler
+  pass seals whatever any mission's finished sessions still owe — terminal,
+  blocked, paused and interrupted missions included, none of them made
+  admissible by it. A seal that fails is journaled or carried in the pass's
+  detail and tried again by the next pass; it never fails, blocks or reorders
+  the mission. A seal already there is never replaced, and it is checked on
+  every attempt rather than trusted: one whose archived copy no longer verifies,
+  or no longer matches its source's length, is reported for the operator on
+  every pass, and so is an owed log whose source is gone with no seal. A
+  session whose worker record is gone is judged by its archive alone, to the
+  collector's standard: quiet while its sealed event stream verifies against its
+  digest and length and every other seal record it has reads and verifies too,
+  and reported on every pass otherwise. The
+  worker cache keeps every record of a worker a mission launched — its
+  specification carries the launch's invocation from the moment it exists —
+  until each log it owes has a sealed copy that verifies against its digest and
+  length and still matches its source's length; an index it cannot read keeps
+  them all. Workers no mission launched are collected exactly as before. A snapshot's
   session tree is checked when it is written and again when it is read, since
   only the first covers records this release wrote and a delete decides from
   the second; a snapshot whose sessions are not a tree is reported rather than
@@ -4180,8 +4228,15 @@ Defaults:
   produced instead of launching a second one, and how the crash windows around
   a launch are told apart. Its identity is written into the worker the launch
   creates, so an invocation with no recorded conclusion can still find the
-  worker it became and adopt it; only when no worker names it is the outcome
-  genuinely unknown. The target version it records travels the same way, into
+  worker it became and adopt it; only when no worker names it is its step's
+  evidence consulted. A plan step's launch with nothing at all behind it — no
+  worker, no result, no departed target, no foreign live work — was cut off
+  mid-flight by the process that journaled it, and is `interrupted`: the
+  mission's lifecycle becomes `interrupted` before anything else is dispatched,
+  the scheduler admits it no more, and neither a restart, a resume, nor
+  evidence that turns up later replans the step; the runner's own `override`
+  does, releasing the launch record as it does for an unknown outcome. Every
+  other open launch is still a genuinely unknown outcome. The target version it records travels the same way, into
   that worker's own specification, so the last instant before an agent session
   begins can ask whether it still holds — and a target that moved, or that
   cannot be read at all, stops the turn before anything is mutated. Those two
@@ -4686,9 +4741,18 @@ per canonical GitHub repository in a `mission-runner` namespace of its own,
 writes the discovery record `Kanban.ManagedPaths` resolves, and starts nothing.
 `Kanban.MissionRunnerService` discovers that job, decodes its status document
 and incidents, starts and stops it, and replays a mission's durable events from
-a cursor; rendering any of that, capacity
-arbitration, fair rotation, and descendant-tree termination are not
-implemented. The durable `gh` group record is shared safely by every process
+a cursor. The runner's own chain now survives its own failures: each pass is
+recorded by identity before it may run, and a wrapper settles whatever pass a
+killed predecessor left — the scheduler and its mission children, verified by
+identity, never the detached workers — before starting one, blocking with an
+incident on a survivor it cannot verify gone. A step whose launch was journaled
+and cut off before any worker or result was recorded is `interrupted`, stops
+its mission, is never retried by a later pass or a restarted service, and is
+recovered by the runner's `override`. Every mission session's event stream and
+raw provider log are sealed into the mission archive when the session ends and
+retried on every pass, and the worker cache keeps a mission worker's records
+until those seals verify. Rendering any of that, capacity arbitration, and fair
+rotation are not implemented. The durable `gh` group record is shared safely by every process
 that reads the board: each rewrite takes a cross-process lock, and each entry
 names the process that spawned its `gh`, so a reader skips another process's
 live work, re-verifies a cleanup-pending leftover even while its writer runs,

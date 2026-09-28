@@ -1586,6 +1586,7 @@ reimplement the removal, and `--check` remains read-only.
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
 | `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), the issue approval service's (§2.8), or the mission runner's (§2.12); `/usr/bin/plutil` below only reads the jobs it installs. |
 | `/usr/bin/plutil` | No | Only needed to read those three services' LaunchAgent definitions on macOS. |
+| `/bin/sh` | No | Only needed by the optional mission runner (§2.12), whose every scheduler pass starts as a shell waiting at its gate until the pass is recorded. |
 | `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control any of those optional services' user units. Kanban reads a unit's own file directly, so Linux needs no reader alongside it. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
@@ -2278,8 +2279,11 @@ report did not name.
   bookkeeping `ack`, and the durable status and incident documents), over
   `src/Kanban/Mission/Scheduler.hs` (one bounded repository-wide pass),
   `src/Kanban/Mission/Pass.hs` (the two machine-readable documents a pass is
-  made of), and `src/Kanban/Mission/Notify.hs` (the attention notification and
-  its durable suppression record). The in-app surface is
+  made of), `src/Kanban/Mission/Notify.hs` (the attention notification and
+  its durable suppression record), and `src/Kanban/Mission/Seal.hs` (sealing a
+  finished session's logs into its mission's archive, and the retention rule
+  the worker-cache collector asks before removing a mission worker's records).
+  The in-app surface is
   `src/Kanban/MissionRunnerService.hs`: it resolves this host's discovery
   record through `src/Kanban/ManagedPaths.hs`, reads the installed job's
   command out of the definition that record names on either service manager,
@@ -2322,7 +2326,11 @@ report did not name.
   process running `kanban --mission-scheduler` — resolved from `PATH` unless
   `--kanban` names one, and refused by name when neither is usable — in the
   checkout it was started for, carrying that checkout's canonical `--repo`
-  identity and, when one was given, an absolute `--config`. The environment is
+  identity and, when one was given, an absolute `--config`. It starts as
+  `/bin/sh` waiting at a gate on its standard input and `exec`s the scheduler,
+  with the null device as standard input, only once the controller has recorded
+  its identity; a controller that dies first closes the gate and the pass runs
+  nothing. The environment is
   inherited whole, because `$XDG_DATA_HOME` and `$XDG_STATE_HOME` are what
   decide which mission store a pass advances and which runtime describes it.
   An installed job inherits nothing, so its definition carries those two when
@@ -2362,20 +2370,46 @@ report did not name.
 - **Authority:** none beyond what a mission already had. A pass admits at most
   two runnable missions and advances each through its own `kanban --mission`
   child, which dispatches through the workflow action registry exactly as a
-  board key press does. Neither the scheduler nor the controller merges a pull
+  board key press does. An `interrupted` mission — one whose step was cut off
+  mid-flight, its launch journaled by a `--mission` child that died before any
+  worker or result was recorded — is not runnable: no pass and no restarted
+  service retries it, and only the runner console's `override` replans the
+  step. Neither the scheduler nor the controller merges a pull
   request, applies a verdict label, or reports an indeterminate result as a
   success, and neither performs a GitHub request of its own — a pass with
   nothing runnable makes none at all.
-- **Durable state:** a status document and an incident directory per canonical
-  repository under the runtime root §4's `mission-runner-runtime-dir` rows
-  name; a per-identity run lock under `mission-runner-lock-dir`, beside the
+- **Durable state:** a status document, a pass record, and an incident
+  directory per canonical repository under the runtime root §4's
+  `mission-runner-runtime-dir` rows name. The pass record (`pass.json`) names the
+  one scheduler pass a run may have out, by process identifier and start time,
+  with every member of its process group the run has seen — each identity
+  observed after its start second ended, since `ps` reports start times to the
+  second (read in UTC and the C locale, whatever the controller's environment) and only such an observation rules out a same-second reuse; a pass
+  waits at its gate until its own can be recorded that way. The next `run` for
+  the repository settles what it names under the run lock before starting a
+  pass: verified processes still in the pass's group are stopped and then
+  killed, one that has left it for a session of its own is not the pass's, a
+  process named only by
+  identifier — including the bare `pass_pid` an earlier release left in its
+  status document, adopted into a record marked legacy — is never signalled,
+  and a survivor that cannot be verified gone fails the run with a
+  `mission-runner-unsettled-pass` incident, leaving the record for every later
+  start. It never reaches a detached worker, which leads a session of its own.
+  Beside these, a per-identity run lock under `mission-runner-lock-dir`, beside the
   per-identity transition lock and the per-installation link lock a managed
   transition is performed under; and — inside each mission's own record in the
   mission store — one notification suppression record per attention identity.
   The suppression record is written before the configured command is launched
   and is never retried afterwards, so delivery is at most once per waiting
   episode and a crash between the record and the launch loses that notification
-  by design.
+  by design. Every pass also seals, into each mission's own archive, whatever
+  logs any mission's finished sessions still owe — an event stream, and a raw
+  provider log where the worker recorded one — whatever that mission's
+  lifecycle, without admitting it; a seal that fails is carried in the pass's
+  detail and retried by the next pass, and never fails the pass; an existing
+  seal is verified on every attempt and reported, never replaced, when it no
+  longer holds. The worker cache keeps a mission-launched worker's records until
+  a verified seal covers every log it owes.
 
   Installation adds four more. The discovery record §4's
   `mission-runner-discovery-record` rows name holds one entry per installed
@@ -2803,6 +2837,7 @@ gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;s
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs;tools/mission_runner_service.py | kanban | supported | yes
+posix-shell-cli | executable | /bin/sh | tools/mission_runner_service.py | kanban | supported | no
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
 systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no

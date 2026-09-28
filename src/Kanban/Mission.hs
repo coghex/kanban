@@ -141,6 +141,11 @@ module Kanban.Mission
     sealMissionLog,
     readMissionSealedArchives,
     verifyMissionSealedArchive,
+    missionSessionLogSources,
+    sealMissionSessionLogs,
+    MissionSealIndex,
+    loadMissionSealIndex,
+    missionWorkerLogsReleasable,
 
     -- * Archive and delete
     MissionDispositionRefusal (..),
@@ -207,6 +212,7 @@ module Kanban.Mission
     MissionWorkerConclusion (..),
     MissionStepEvidence (..),
     classifyMissionWork,
+    missionDispatchInterrupted,
     MissionHalt (..),
     missionHaltMessage,
     missionHaltIsIndeterminate,
@@ -217,6 +223,7 @@ module Kanban.Mission
     nextDispatchableStep,
     settledMissionLifecycle,
     blockedMissionLifecycle,
+    missionInterruptedStep,
     cancelledByDependency,
     MissionOpenDispatch (..),
     missionOpenDispatchIsChild,
@@ -281,6 +288,7 @@ module Kanban.Mission
     missionIsRunnable,
     advanceMissions,
     runMissionSchedulerPass,
+    sealMissionSessions,
     runMissionSchedulerMode,
     runMissionSchedulerCommand,
     missionPassSetupRepository,
@@ -389,6 +397,14 @@ import Kanban.Mission.Scheduler
     runMissionSchedulerCommand,
     runMissionSchedulerMode,
     runMissionSchedulerPass,
+    sealMissionSessions,
+  )
+import Kanban.Mission.Seal
+  ( MissionSealIndex,
+    loadMissionSealIndex,
+    missionSessionLogSources,
+    missionWorkerLogsReleasable,
+    sealMissionSessionLogs,
   )
 import Kanban.Mission.Session
   ( MissionSessionTreeError (..),

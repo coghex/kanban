@@ -86,7 +86,7 @@ import Kanban.Mission.Types
     missionInvocationSchemaVersion,
     missionRepositoryMatches,
   )
-import Kanban.Worker (consumeJournalLines)
+import Kanban.Worker.Journal (consumeJournalLines)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFdMode)
 import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd)
