@@ -1990,6 +1990,47 @@ retentionSpec = describe "keeping a mission worker's logs until they are sealed"
       sealed <- expectRight =<< readMissionSealedArchives store theMission
       map missionSealedSession sealed `shouldBe` [theSession]
 
+  -- With no readable worker record the archive is the only evidence left:
+  -- the ordinary end of a sealed session is quiet, and a session nothing
+  -- sealed — its records collected under a policy that did not wait, or a
+  -- specification that no longer decodes — is reported on every pass.
+  it "stays quiet for a session collected after its logs were sealed" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      doesFileExist launched.workerDescriptorSpecPath `shouldReturn` False
+      sealAll store `shouldReturn` []
+
+  it "reports a session with no readable worker record and nothing sealed" $
+    forM_ [Nothing, Just "{"] $ \specification ->
+      withRetention $ \_ store -> do
+        expired <- expiredHeartbeat
+        forM_ specification $ \bytes -> do
+          launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+          ByteString.writeFile launched.workerDescriptorSpecPath bytes
+        reported <- sealAll store
+        map Text.unpack reported `shouldSatisfy` \case
+          [failure] -> "no readable worker record and no sealed event stream" `isInfixOf` failure
+          _ -> False
+
+  it "reports a collected session whose sealed copy is no longer whole" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ sealed $ \entry -> do
+        path <- expectRight =<< missionSealedArchivePath store theMission entry
+        setFileMode path 0o600
+        ByteString.writeFile path "cut"
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "is no longer whole" `isInfixOf` failure && "event_stream" `isInfixOf` failure
+        _ -> False
+
   it "leaves a sealed worker collected once, and an unsealed one kept, under two collectors at once" $
     withRetention $ \_ store -> do
       expired <- expiredHeartbeat

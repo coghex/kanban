@@ -35,6 +35,7 @@ import Kanban.Mission.Store
   ( MissionSealFailure (..),
     listMissionsStrictly,
     missionSealFailureMessage,
+    missionSealedArchivePath,
     readMissionSealedArchives,
     readableMissionSealedArchives,
     sealMissionLog,
@@ -91,7 +92,7 @@ missionSessionLogSources descriptor state =
 sealMissionSessionLogs :: MissionStore -> MissionId -> [WorkerDescriptor] -> MissionSessionId -> IO [Text]
 sealMissionSessionLogs store mission workers session =
   case find ((== session.unMissionSessionId) . workerIdentity) workers of
-    Nothing -> pure []
+    Nothing -> withoutRecord
     Just descriptor -> do
       stateResult <- readWorkerState descriptor
       case stateResult of
@@ -115,6 +116,66 @@ sealMissionSessionLogs store mission workers session =
                 <> ")"
             ]
   where
+    -- No readable worker record: collected after its logs were sealed, which
+    -- is the ordinary end of every mission session, or gone some other way —
+    -- collected under a cache policy that did not wait for a seal, or a
+    -- specification that no longer decodes. The archive is the only evidence
+    -- left, so it decides. An event stream whose sealed copy is still whole is
+    -- a session accounted for, and the raw log is judged the same way when
+    -- one was sealed; anything else is reported on every pass, because no
+    -- later pass can find what was never sealed.
+    --
+    -- Whole rather than rehashed. The collector verified each digest before it
+    -- removed the source, and rehashing every archived log of every finished
+    -- session on every pass would cost more with each mission that ever ran;
+    -- what can still go wrong afterwards is a copy removed or cut short, which
+    -- the recorded length catches.
+    withoutRecord = do
+      existing <- sealedFor
+      verdicts <- mapM (\sealed -> (,) sealed.missionSealedKind <$> archiveWhole sealed) existing
+      let judge kind = case [verdict | (sealedKind, verdict) <- verdicts, sealedKind == kind] of
+            []
+              | kind == MissionEventStreamLog -> Just "no readable worker record and no sealed event stream"
+              | otherwise -> Nothing
+            found
+              | any isRight found -> Nothing
+              | otherwise ->
+                  Just
+                    ( "no readable worker record, and its sealed "
+                        <> missionLogKindTag kind
+                        <> " is no longer whole: "
+                        <> Text.intercalate "; " [detail | Left detail <- found]
+                    )
+      pure [recordless detail | kind <- [minBound .. maxBound], Just detail <- [judge kind]]
+
+    archiveWhole sealed = do
+      resolved <- missionSealedArchivePath store mission sealed
+      case resolved of
+        Left detail -> pure (Left detail)
+        Right path -> do
+          size <- try @IOException (getFileSize path)
+          pure $ case size of
+            Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
+            Right bytes
+              | bytes == sealed.missionSealedByteLength -> Right ()
+              | otherwise ->
+                  Left
+                    ( Text.pack path
+                        <> " is "
+                        <> Text.pack (show bytes)
+                        <> " bytes and its seal records "
+                        <> Text.pack (show sealed.missionSealedByteLength)
+                    )
+
+    recordless detail =
+      "mission "
+        <> mission.unMissionId
+        <> ": session "
+        <> session.unMissionSessionId
+        <> " has "
+        <> detail
+        <> ", so its logs cannot be accounted for and an operator has to resolve it"
+
     sealOne existing (kind, source) = case filter ((== kind) . (.missionSealedKind)) existing of
       [] -> do
         present <- doesFileExist source
