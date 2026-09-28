@@ -19,8 +19,10 @@
 -- /The journal goes first./ Every effect is preceded by an invocation record
 -- that is appended and flushed to disk, and followed by a second record
 -- concluding it. An opening record with no conclusion is the @outcome_unknown@
--- of requirement 7 — something may have happened — and nothing here ever
--- retries one on the strength of the record alone. An operator command is held
+-- of requirement 7 — something may have happened — or, when nothing at all can
+-- be found behind a plan step's launch, the @interrupted@ step of D-3; nothing
+-- here ever retries either on the strength of the record alone, and only the
+-- operator's @override@ replans one. An operator command is held
 -- to the same discipline from the other end: the request file is removed only
 -- once both the transition it asked for and the journal entry describing that
 -- transition have landed, so a fault at either leaves the command queued for a
@@ -129,6 +131,8 @@ import Kanban.Mission.Reconcile
     cancelledByDependency,
     classifyMissionWork,
     dispatchedButUnregistered,
+    missionDispatchInterrupted,
+    missionInterruptedStep,
     missionContinuation,
     missionOpenDispatchIsChild,
     missionRunnerHalt,
@@ -224,10 +228,11 @@ data MissionDispatchAccepted = MissionDispatchAccepted
 
 -- | The controller's whole contact with the outside world.
 --
--- Five operations, each one of them a question the durable record cannot
--- answer: what else exists on this machine, what the live target says, what a
--- step's own worker and session say, how to start registered work, and how to
--- end it. Everything else the controller does is a read or a write of its own
+-- Each operation is a question the durable record cannot answer, or an effect
+-- it cannot perform: what else exists on this machine, what the live target
+-- says, what a step's own worker and session say, how to start registered
+-- work, how to end it, and how to archive what a finished session wrote.
+-- Everything else the controller does is a read or a write of its own
 -- mission's files.
 data MissionDriver = MissionDriver
   { missionDriverInventory :: IO (Either Text MissionInventory),
@@ -267,7 +272,14 @@ data MissionDriver = MissionDriver
     missionDriverDispatch :: MissionDispatchRequest -> IO (Either MissionStepFailure MissionDispatchAccepted),
     -- | Ends exactly the registered sessions named, which the controller has
     -- already journaled and which is already the complete subtree.
-    missionDriverTerminate :: [MissionSessionId] -> IO (Either Text [MissionSessionId])
+    missionDriverTerminate :: [MissionSessionId] -> IO (Either Text [MissionSessionId]),
+    -- | Seals whatever one session's worker still owes the mission archive,
+    -- once that worker is terminal, and says what could not be sealed (D-11).
+    --
+    -- Answered with failures rather than an 'Either' because nothing about
+    -- the mission turns on it: a seal that failed is journaled, and the
+    -- scheduler's next pass tries again.
+    missionDriverSealSession :: MissionSessionId -> IO [Text]
   }
 
 -- ---------------------------------------------------------------------------
@@ -623,12 +635,24 @@ takeConsoleCommand controller =
 
 -- | Reconcile, then dispatch, then settle — the first of the three that has
 -- something to do.
+--
+-- Unless a step was cut off mid-flight, which stops the mission before any of
+-- them ('missionInterruptedStep'). Nothing below may run beside it: observing,
+-- reconciling, and dispatching are all this mission carrying on, and D-3 hands
+-- an interrupted mission to the operator instead.
 advance :: MissionController -> MissionSnapshot -> IO MissionIteration
-advance controller snapshot = do
-  observed <- observeOneSession controller snapshot
-  case observed of
-    Just iteration -> pure iteration
-    Nothing -> advanceSteps controller snapshot
+advance controller snapshot = case missionInterruptedStep snapshot of
+  Just step ->
+    applyMissionLifecycle
+      controller
+      snapshot
+      MissionInterrupted
+      ("step " <> step.unMissionStepId <> " was cut off mid-flight and only an override recovers it")
+  Nothing -> do
+    observed <- observeOneSession controller snapshot
+    case observed of
+      Just iteration -> pure iteration
+      Nothing -> advanceSteps controller snapshot
 
 -- | Reconcile, then dispatch, then settle.
 advanceSteps :: MissionController -> MissionSnapshot -> IO MissionIteration
@@ -661,9 +685,18 @@ advanceSteps controller snapshot = do
 -- Asked of the launch itself rather than guessed at. If a worker's own
 -- specification names this invocation then the effect happened, the worker is
 -- this mission's, and the right answer is to adopt it — which is what the
--- association exists for. Only when no such worker can be found is the outcome
--- genuinely unknown, and requirement 7 is explicit that such a step is
--- resolved by direction or fresh evidence and never by trying again.
+-- association exists for. Adoption is asked first and outranks everything
+-- below, so a worker created before the mission recorded its handle is always
+-- found rather than read as a launch that was cut off.
+--
+-- Only when no such worker exists is the step's own evidence consulted. A plan
+-- step with nothing behind it at all — no worker of its own, no result, no
+-- departure, no foreign live work — was cut off mid-flight by the process that
+-- journaled it, and D-3 (as amended) marks it @interrupted@: the mission stops
+-- for the operator and only an @override@ replans it. Every other open launch
+-- keeps requirement 7's @outcome_unknown@, which the ordinary evidence pass
+-- then reconciles exactly as it did before; and a registered child, which has
+-- no step record to carry either state, keeps its unknown invocation.
 resolveOpenInvocation :: MissionController -> MissionSnapshot -> MissionOpenDispatch -> IO MissionIteration
 resolveOpenInvocation controller snapshot dispatch = do
   adopted <- controller.missionControllerDriver.missionDriverAdoptInvocation invocation
@@ -683,20 +716,30 @@ resolveOpenInvocation controller snapshot dispatch = do
           now <- getCurrentTime
           closing controller invocation (MissionInvocationUnknown unknownDetail) now $
             applyMissionLifecycle controller snapshot MissionWaitingInput unknownDetail
-      | otherwise ->
-          applyStepLifecycle
-            controller
-            snapshot
-            step
-            MissionStepOutcomeUnknown
-            unknownDetail
+      | otherwise -> case (planned, missionStepRecordFor step snapshot) of
+          (Just plannedStep, Just record) -> do
+            gathered <- controller.missionControllerDriver.missionDriverStepEvidence plannedStep record
+            case gathered of
+              Left detail -> pure (MissionControllerFailed detail)
+              Right evidence
+                | missionDispatchInterrupted evidence {missionEvidenceInvocation = Just dispatch.missionOpenDispatchState} ->
+                    applyStepLifecycle controller snapshot step MissionStepInterrupted interruptedDetail
+              Right _ -> unknown
+          _ -> unknown
   where
     invocation = dispatch.missionOpenDispatchInvocation
     step = dispatch.missionOpenDispatchStep
+    planned = find ((== step) . (.missionPlanStepId)) controller.missionControllerSpecification.missionSpecificationPlan
+    unknown = applyStepLifecycle controller snapshot step MissionStepOutcomeUnknown unknownDetail
     unknownDetail =
       "invocation "
         <> invocation.unMissionInvocationId
         <> " was journaled and no worker records it; whether its effect happened is unknown"
+    interruptedDetail =
+      "invocation "
+        <> invocation.unMissionInvocationId
+        <> " was journaled and the process that made it stopped before any worker or result was recorded; "
+        <> "it is not retried, and an override replans it"
 
 -- | What to make of a subtree termination whose record is still open.
 --
@@ -901,7 +944,15 @@ observeOneSession controller snapshot = do
                 }
           [] -> Nothing
 
--- | Writes one session's terminal observation into the snapshot.
+-- | Writes one session's terminal observation into the snapshot, then seals
+-- the session's logs.
+--
+-- The seal is the one effect here that is not a transition, and it is placed
+-- after the transition landed and kept out of its result. A session that ended
+-- is the moment D-11 names for archiving it, but a seal that failed must not
+-- undo, delay, or fail the observation the mission needs to move on: the
+-- failure is journaled for the operator and the scheduler's next pass seals
+-- what this could not.
 recordSessionObservation :: MissionController -> MissionSnapshot -> MissionSessionNode -> MissionTerminalObservation -> IO MissionIteration
 recordSessionObservation controller snapshot node observation = do
   now <- getCurrentTime
@@ -929,6 +980,22 @@ recordSessionObservation controller snapshot node observation = do
             )
               {missionEventSession = Just node.missionSessionId}
           )
+      failures <- controller.missionControllerDriver.missionDriverSealSession node.missionSessionId
+      mapM_
+        ( \failure ->
+            recordMissionEvent
+              controller.missionControllerStore
+              ( ( missionEvent
+                    controller.missionControllerMission
+                    controller.missionControllerStore.missionStoreRepository
+                    now
+                    "session_seal_failed"
+                    (Just failure)
+                )
+                  {missionEventSession = Just node.missionSessionId}
+              )
+        )
+        failures
       pure
         ( MissionAdvanced
             ( MissionSessionEnded

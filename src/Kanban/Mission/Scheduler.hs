@@ -25,7 +25,11 @@
 -- reattachment, termination — is "Kanban.Mission.Controller"'s, unchanged and
 -- unconsulted from here. This module never writes a snapshot, never journals an
 -- event, and never takes an advancement lease: it reads the lease to decide
--- whether launching a child is worth it, and the child takes it.
+-- whether launching a child is worth it, and the child takes it. The one thing
+-- it writes into a mission's store is the session-log archive (D-11), which is
+-- immutable, append-only, and never read by anything deciding what a mission
+-- does next — so every mission's finished sessions are sealed on every pass,
+-- whatever its lifecycle, and none of them becomes admissible for it.
 --
 -- /It adds no authority./ A pass cannot merge a pull request, cannot apply a
 -- verdict label, and cannot report an indeterminate result as a success, for
@@ -46,6 +50,7 @@ module Kanban.Mission.Scheduler
     runMissionSchedulerPass,
     advanceMissions,
     liveMissionSchedulerSeams,
+    sealMissionSessions,
     runMissionSchedulerMode,
     runMissionSchedulerCommand,
     missionPassSetupRepository,
@@ -103,16 +108,19 @@ import Kanban.Mission.Pass
     missionPassUnresolvedRepository,
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), openMissionStore)
+import Kanban.Mission.Seal (sealMissionSessionLogs)
 import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
   ( MissionAttention (..),
     MissionId (..),
     MissionLifecycle (..),
     MissionPause (..),
+    MissionSessionNode (..),
     MissionSnapshot (..),
     missionLifecycleIsTerminal,
   )
 import Kanban.Paths (createPrivateDirectory)
+import Kanban.Worker (discoverWorkerHistory)
 import Kanban.Repository (parseRepositoryName, resolveRepository)
 import System.Directory
   ( XdgDirectory (XdgCache),
@@ -152,20 +160,21 @@ missionAdmissionCeiling = 2
 
 -- | Whether this mission is one a pass may advance.
 --
--- Three exclusions and no more. A terminal mission has stopped for good; a
--- paused one was stopped by a person and resuming it is theirs to ask for; and
--- the three waiting states are all waits on something a pass cannot supply —
--- an operator's answer, another mission's barrier, or capacity that is not
--- there. Everything else, including 'MissionInterrupted' and
--- 'MissionRecovering', is runnable, because reattaching to a live worker and
--- reconciling an interrupted run are exactly the work a child does.
+-- Four exclusions and no more. A terminal mission has stopped for good; a
+-- paused one was stopped by a person and resuming it is theirs to ask for; the
+-- three waiting states are all waits on something a pass cannot supply — an
+-- operator's answer, another mission's barrier, or capacity that is not there;
+-- and an interrupted one had a step cut off mid-flight, which D-3 (as amended)
+-- hands to the operator's @override@ and never to a later pass or a restarted
+-- service. Everything else, including 'MissionRecovering', is runnable,
+-- because reattaching to a live worker is exactly the work a child does.
 missionIsRunnable :: MissionSnapshot -> Bool
 missionIsRunnable snapshot =
   not (missionLifecycleIsTerminal snapshot.missionSnapshotLifecycle)
     && not snapshot.missionSnapshotPause.missionPauseRequested
     && snapshot.missionSnapshotLifecycle `notElem` waiting
   where
-    waiting = [MissionWaitingInput, MissionWaitingBarrier, MissionWaitingCapacity, MissionPaused]
+    waiting = [MissionWaitingInput, MissionWaitingBarrier, MissionWaitingCapacity, MissionPaused, MissionInterrupted]
 
 -- | Everything a pass reaches outside its own arithmetic.
 --
@@ -187,7 +196,14 @@ data MissionSchedulerSeams = MissionSchedulerSeams
     missionSchedulerAdvance :: [MissionId] -> IO [(MissionId, Either Text MissionChildResult)],
     -- | Runs the configured notification command. Reached only for an
     -- attention identity whose suppression record this pass just created.
-    missionSchedulerNotify :: [Text] -> IO MissionNotificationAttempt
+    missionSchedulerNotify :: [Text] -> IO MissionNotificationAttempt,
+    -- | Seals whatever the given missions' finished sessions still owe the
+    -- archive, and says what could not be sealed. Handed every mission this
+    -- pass could read — terminal, blocked, paused, and interrupted ones
+    -- included — because a session's logs are owed whatever became of the
+    -- mission that started it, and the worker cache keeps them until they
+    -- are paid.
+    missionSchedulerSeal :: [(MissionId, MissionSnapshot)] -> IO [Text]
   }
 
 -- | One pass, start to finish.
@@ -216,6 +232,12 @@ runMissionSchedulerPass seams missions store repository = do
       -- the one somebody needs to hear about.
       (outstanding, unreadableAfter) <- readInventory store
       observed <- mapM (observeAttention seams notifications store repository) outstanding
+      -- After the children, so a session one of them just watched end is
+      -- sealed in the same pass. Reported and never counted as a failure: a
+      -- log that could not be archived this time is retried by the next pass,
+      -- and a supervisor that stopped the service over it would be stopping
+      -- every mission's progress for the sake of one mission's history.
+      unsealed <- seams.missionSchedulerSeal outstanding
       finishedAt <- seams.missionSchedulerNow
       let attention = catMaybes (map fst observed)
           indeterminate = nub (unreadable <> unreadableAfter <> catMaybes (map snd observed))
@@ -233,7 +255,7 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassTermination = if failed then MissionPassFailed else MissionPassCompleted,
             missionPassAdmitted = dispositions,
             missionPassAttention = attention,
-            missionPassDetail = summary (length inventory) dispositions attention failures indeterminate
+            missionPassDetail = summary (length inventory) dispositions attention failures indeterminate unsealed
           }
   where
     notifications = missions.missionsNotifications
@@ -252,13 +274,14 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassDetail = "this pass advanced nothing: " <> message
           }
 
-    summary total dispositions attention failures indeterminate =
+    summary total dispositions attention failures indeterminate unsealed =
       Text.intercalate "; " $
         [ Text.pack (show (length dispositions)) <> " of " <> Text.pack (show total) <> " missions admitted",
           Text.pack (show (length attention)) <> " waiting on a person",
           Text.pack (show (length failures)) <> " failed"
         ]
           <> indeterminate
+          <> unsealed
 
 -- | Every mission whose snapshot this store will hand over, and every mission
 -- whose snapshot it would not.
@@ -435,8 +458,24 @@ liveMissionSchedulerSeams options repository store scratch = do
       { missionSchedulerNow = getCurrentTime,
         missionSchedulerLeaseHeld = missionLeaseHeld store,
         missionSchedulerAdvance = advanceMissions executable options repository scratch,
-        missionSchedulerNotify = runMissionNotificationCommand missionNotificationTimeoutMicros
+        missionSchedulerNotify = runMissionNotificationCommand missionNotificationTimeoutMicros,
+        missionSchedulerSeal = sealMissionSessions repository store
       }
+
+-- | Seals every finished session of every mission handed over.
+--
+-- The worker records are read once for the whole pass. What is sealed is
+-- decided per session by 'sealMissionSessionLogs', which leaves a session whose
+-- worker is still running, or whose logs are already sealed, exactly as it is.
+sealMissionSessions :: Repository -> MissionStore -> [(MissionId, MissionSnapshot)] -> IO [Text]
+sealMissionSessions repository store missions = do
+  workers <- discoverWorkerHistory repository
+  concat
+    <$> sequence
+      [ sealMissionSessionLogs store mission workers node.missionSessionId
+      | (mission, snapshot) <- missions,
+        node <- snapshot.missionSnapshotSessions
+      ]
 
 -- | Launches one child per admitted mission, then waits for all of them.
 --

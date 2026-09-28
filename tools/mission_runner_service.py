@@ -41,7 +41,13 @@ scheduler that had stopped working.
 And it leaves nothing of a pass behind. Each pass runs in a new session, a stop
 signals that session's process group, and a group that has not gone within
 `STOP_GRACE_SECONDS` is killed outright — so a stop cannot leave a mission
-child of the active pass running.
+child of the active pass running. A controller that dies without stopping
+cannot do that for itself, so each pass's identity is recorded before the pass
+may run, and the next controller for the repository settles whatever that
+record still names before it starts a pass of its own (`settle_pass`). The
+detached workers a mission child hands agent work to lead sessions of their
+own and are never part of that: they own their agents, and the next pass
+reattaches to them.
 """
 
 from __future__ import annotations
@@ -309,6 +315,43 @@ SLEEP_SLICE_SECONDS = 0.05
 STOP_GRACE_SECONDS = 10.0
 # How much of a failed pass's stderr is kept in its incident.
 CAPTURED_STDERR_LINES = 60
+
+# The durable record of the one scheduler pass this runtime may have running:
+# its process identifier, its start time, and the start time of every member
+# of its process group this controller has seen. Written before the pass is
+# allowed to run anything, removed only once every process it names is
+# verified gone, and read by the next controller for this repository, which
+# settles what it names before starting a pass of its own. A controller killed
+# outright runs no cleanup, and the pass leads a session of its own, so no
+# service manager reaches it either; this record is the only thing that does.
+PASS_RECORD_SCHEMA = "kanban-mission-runner-pass"
+PASS_RECORD_VERSION = 1
+PASS_RECORD_NAME = "pass.json"
+# How long settling a recorded pass asks politely before it kills, and how
+# long it then waits for the kill to be seen. Together they bound how long a
+# new controller can spend on its predecessor before it gives up and reports
+# the survivor instead of starting anything.
+SETTLE_GRACE_SECONDS = STOP_GRACE_SECONDS
+SETTLE_KILL_SECONDS = STOP_GRACE_SECONDS
+SETTLE_POLL_SECONDS = 0.1
+# The incident a pass that cannot be verified gone opens. Its own kind rather
+# than a controller error, because the repair is the operator's and specific:
+# find the process, end it or confirm it is not this runner's, and start again.
+SETTLEMENT_INCIDENT_KIND = "mission-runner-unsettled-pass"
+# Every pass is started behind this gate. The shell it runs is the pass's
+# process from the moment it exists, so its identifier and start time can be
+# recorded; it then waits for one line on its standard input and only on that
+# line becomes the scheduler. A controller that dies before writing the line
+# closes the pipe, the read sees end of input, and the shell exits having run
+# nothing — so a pass can never be running unrecorded, even when its
+# controller is killed between starting it and writing the record. The shell is
+# spelled as a literal where it is spawned, so the external-command inventory
+# in docs/agent-workflow-contract.md sees it.
+PASS_GATE_WORD = "go"
+PASS_GATE_SCRIPT = (
+    f'IFS= read -r gate || exit 0; [ "$gate" = {PASS_GATE_WORD} ] || exit 0; '
+    'exec "$@" </dev/null'
+)
 # The longest escaped slug a runtime directory name may carry before falling
 # back to a digest: the longest every service manager can carry an identifier
 # for, which is the boundary's answer rather than a number restated here. One
@@ -730,6 +773,8 @@ class MissionRunnerJob:
     runtime_dir: Path
     incident_dir: Path
     status_path: Path
+    # The record of the pass this runtime may have running (`PASS_RECORD_NAME`).
+    pass_record_path: Path
     lock_path: Path
     # This repository's own log directory, where the service manager is told to
     # send an installed job's output. Empty and unused by a foreground run,
@@ -757,6 +802,7 @@ def job_for_identity(
         runtime_dir=runtime_dir,
         incident_dir=runtime_dir / "incidents",
         status_path=runtime_dir / "status.json",
+        pass_record_path=runtime_dir / PASS_RECORD_NAME,
         lock_path=run_lock_path(slug),
         log_dir=log_root() / slug,
         config_path=config_path,
@@ -1862,6 +1908,335 @@ def pass_state(document: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Settling a recorded pass
+# ---------------------------------------------------------------------------
+
+
+class SettlementBlocked(ServiceError):
+    """A recorded pass whose processes cannot be verified gone.
+
+    Raised rather than ignored, and never resolved by signalling on a guess:
+    the controller records it as an incident, leaves the record exactly where
+    it is for the next start to read, and starts no pass of its own.
+    """
+
+    def __init__(self, summary: str, detail: str | None = None) -> None:
+        super().__init__(summary)
+        self.summary = summary
+        self.detail = detail
+
+
+def process_table() -> dict[int, tuple[int, str]] | None:
+    """Every process on this host, as its process group and start time.
+
+    The start time is `ps -o lstart=`, the same reading `process_start_identity`
+    takes, so a process recorded through one is recognized through the other.
+    None when the table cannot be read or a line of it cannot be understood:
+    settling a pass decides what to signal from this, and a table with a row
+    missing is a table that could leave a survivor uncounted.
+    """
+    proc = run_command(["ps", "-A", "-o", "pid=,pgid=,lstart="], check=False)
+    if proc.returncode != 0:
+        return None
+    table: dict[int, tuple[int, str]] = {}
+    for line in (proc.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        fields = line.split(None, 2)
+        if len(fields) < 2:
+            return None
+        try:
+            pid, pgid = int(fields[0]), int(fields[1])
+        except ValueError:
+            return None
+        table[pid] = (pgid, fields[2].strip() if len(fields) == 3 else "")
+    return table
+
+
+def _valid_member(member: Any) -> bool:
+    return (
+        isinstance(member, dict)
+        and is_plain_integer(member.get("pid"))
+        and member["pid"] > 0
+        and isinstance(member.get("identity"), str)
+        and bool(member["identity"].strip())
+    )
+
+
+def pass_record_problem(document: Any, job: MissionRunnerJob) -> str | None:
+    """Why a pass record cannot be acted on, or None when it can.
+
+    Every field is checked for shape before anything is signalled on its
+    strength. A recorded identifier is only half an identity, so a record that
+    names a process identifier without its start time is accepted only as the
+    evidence an earlier release left (`legacy`) — which never authorizes a
+    signal, and only ever blocks.
+    """
+    if not isinstance(document, dict):
+        return "it is not a readable JSON object"
+    if document.get("schema") != PASS_RECORD_SCHEMA:
+        return f"its schema is {document.get('schema')!r}, not {PASS_RECORD_SCHEMA!r}"
+    if not pinned_version(document.get("version"), PASS_RECORD_VERSION):
+        return f"its version is {document.get('version')!r}, not {PASS_RECORD_VERSION}"
+    if document.get("repository") != job.identity:
+        return f"it records repository {document.get('repository')!r}, not {job.identity!r}"
+    pid = document.get("pass_pid")
+    identity = document.get("pass_identity")
+    legacy = document.get("legacy", False)
+    if not isinstance(legacy, bool):
+        return f"its legacy marker is {legacy!r}"
+    if pid is not None and not (is_plain_integer(pid) and pid > 0):
+        return f"its pass process identifier is {pid!r}"
+    if identity is not None and not (isinstance(identity, str) and identity.strip()):
+        return f"its pass start time is {identity!r}"
+    if pid is None and identity is not None:
+        return "it records a start time and no process identifier"
+    if pid is not None and identity is None and not legacy:
+        return "it records a process identifier and no start time"
+    members = document.get("members")
+    if not isinstance(members, list) or not all(_valid_member(member) for member in members):
+        return "its recorded group members are not a list of process identities"
+    return None
+
+
+def read_pass_record(job: MissionRunnerJob) -> dict[str, Any] | None:
+    """The recorded pass, None when there is none, or `SettlementBlocked`.
+
+    Anything present and unusable blocks rather than reading as absent: this
+    record is the only evidence that a pass may still be running, and a
+    controller that treated a damaged one as nothing would start a pass beside
+    whatever it described.
+    """
+    path = job.pass_record_path
+    if not os.path.lexists(path):
+        return None
+    document = _read_json_document(path)
+    problem = pass_record_problem(document, job)
+    if problem is not None:
+        raise SettlementBlocked(
+            f"The record of a previous mission scheduler pass at {path} cannot be "
+            f"used ({problem}), so whatever it describes cannot be verified gone.",
+            unsettled_detail(job),
+        )
+    return document
+
+
+def adopt_legacy_status(job: MissionRunnerJob) -> dict[str, Any] | None:
+    """A pass an earlier release left recorded only in the status document.
+
+    A release before the pass record wrote `pass_pid` into the status document
+    and nothing else, and a new status document would overwrite it. So the one
+    piece of evidence it left is copied into a pass record first — marked
+    legacy, with no start time — before anything else is written. A legacy
+    record never authorizes a signal: its process is only ever waited on, and
+    a live one blocks.
+
+    A status document this release wrote carries `pass_record`, which says the
+    pass record is where its pass is described; the absence of that record is
+    then an answer, not an omission.
+    """
+    stored = read_json(job.status_path)
+    if (
+        stored is None
+        or stored.get("schema") != STATUS_SCHEMA
+        or not pinned_version(stored.get("version"), STATUS_VERSION)
+        or stored.get("repository") != job.identity
+        or "pass_record" in stored
+        or stored.get("state") not in LIVE_STATES
+    ):
+        return None
+    pid = stored.get("pass_pid")
+    if not (is_plain_integer(pid) and pid > 0):
+        return None
+    record = {
+        "schema": PASS_RECORD_SCHEMA,
+        "version": PASS_RECORD_VERSION,
+        "repository": job.identity,
+        "pass_pid": pid,
+        "pass_identity": None,
+        "members": [],
+        "legacy": True,
+        "recorded_at": utc_stamp(),
+    }
+    atomic_write_json(job.pass_record_path, record)
+    return record
+
+
+def unsettled_detail(job: MissionRunnerJob) -> str:
+    return (
+        f"The record stays at {job.pass_record_path} and every start reads it "
+        "again. End the processes it names, or confirm they are not this mission "
+        "runner's and remove the record, then start the runner."
+    )
+
+
+def classify_pass_group(
+    table: dict[int, tuple[int, str]],
+    pid: int,
+    identity: str | None,
+    members: set[tuple[int, str]],
+) -> tuple[bool, list[int], list[int]]:
+    """Whether the recorded pass is running, which live processes are verified
+    to be its own, and which are in its process group and cannot be verified.
+
+    Three readings, and the process-group rule POSIX gives is what separates
+    them: an identifier is never reused while a process group of that number
+    still exists.
+
+    * The leader is alive with its recorded start time. Its group is the one it
+      created, so every member of that group is the pass's own.
+    * Something else holds the leader's identifier. The pass's group must have
+      ended before that identifier could be handed out again, so nothing in a
+      group of that number is the pass's; only members recorded by their own
+      identity are.
+    * Nothing holds it. A group of that number is either the pass's, whose
+      leader has exited, or somebody else's whose leader has too. Recorded
+      members are verified by their own identity, and anything else in the
+      group is unverifiable — never signalled, and never assumed gone.
+
+    A legacy record carries no start time, so its leader can be neither
+    verified nor ruled out: it and its group are unverifiable.
+    """
+    own = os.getpid()
+    leader = table.get(pid)
+
+    def recorded(candidate: int) -> bool:
+        return (candidate, table[candidate][1]) in members
+
+    if leader is not None and identity is not None and leader[1] == identity:
+        verified = [
+            candidate
+            for candidate, (group, _started) in table.items()
+            if candidate != own and (group == pid or recorded(candidate))
+        ]
+        return True, verified, []
+    verified = [candidate for candidate in table if candidate != own and recorded(candidate)]
+    if leader is not None and identity is not None:
+        return False, verified, []
+    unverified = [
+        candidate
+        for candidate, (group, _started) in table.items()
+        if candidate != own and group == pid and not recorded(candidate)
+    ]
+    if leader is not None and pid not in unverified:
+        unverified.append(pid)
+    return False, verified, unverified
+
+
+def signal_verified(pid: int, started: str, signum: int) -> None:
+    """Signal one process, having just checked it is still the one recorded.
+
+    The table the caller decided from is a moment old, so the start time is
+    read again immediately before the signal: a process that exited in between
+    and whose identifier was reused is left alone.
+    """
+    if process_start_identity(pid) != started:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.kill(pid, signum)
+
+
+def signal_verified_group(pid: int, started: str, signum: int) -> None:
+    """Signal a recorded pass's whole group, having just rechecked its leader."""
+    if process_start_identity(pid) != started:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, signum)
+
+
+def settle_pass(
+    record: dict[str, Any],
+    *,
+    grace: float,
+    kill_after: float,
+    persist: Callable[[dict[str, Any]], None],
+    path: Path,
+) -> None:
+    """End what a recorded pass left running, or raise `SettlementBlocked`.
+
+    Returns only once nothing the record names is alive: not its leader, not a
+    member of its group, and not a member it recorded by identity. Verified
+    processes are asked to stop, and killed once `grace` has passed; an
+    unverifiable one is never signalled, only waited for, and one still there
+    after `grace + kill_after` blocks.
+
+    Members first seen while the leader is verified are added to the record
+    through `persist` before anything is signalled, so a controller killed in
+    the middle of settling leaves them recognizable to the next one.
+
+    A record with no process identifier describes a pass that was never
+    released through its gate, so there is nothing it can have left running.
+    """
+    pid = record.get("pass_pid")
+    if pid is None:
+        return
+    identity = record.get("pass_identity")
+    members = {(member["pid"], member["identity"]) for member in record.get("members") or []}
+    started = time.monotonic()
+    sent: dict[Any, int] = {}
+    while True:
+        table = process_table()
+        if table is not None:
+            leader_live, verified, unverified = classify_pass_group(table, pid, identity, members)
+            if leader_live:
+                seen = {(candidate, table[candidate][1]) for candidate in verified if table[candidate][1]}
+                if not seen <= members:
+                    members |= seen
+                    record["members"] = [
+                        {"pid": member_pid, "identity": member_identity}
+                        for member_pid, member_identity in sorted(members)
+                    ]
+                    persist(record)
+            if not leader_live and not verified and not unverified:
+                return
+        elapsed = time.monotonic() - started
+        if elapsed >= grace + kill_after:
+            raise SettlementBlocked(
+                describe_unsettled(path, pid, table, verified if table else [], unverified if table else []),
+                None,
+            )
+        if table is not None:
+            signum = signal.SIGTERM if elapsed < grace else signal.SIGKILL
+            if leader_live and sent.get("group") != signum:
+                sent["group"] = signum
+                signal_verified_group(pid, table[pid][1], signum)
+            for candidate in verified:
+                if sent.get(candidate) != signum:
+                    sent[candidate] = signum
+                    signal_verified(candidate, table[candidate][1], signum)
+        time.sleep(SETTLE_POLL_SECONDS)
+
+
+def describe_unsettled(
+    path: Path,
+    pid: int,
+    table: dict[int, tuple[int, str]] | None,
+    verified: list[int],
+    unverified: list[int],
+) -> str:
+    if table is None:
+        return (
+            f"The mission scheduler pass recorded at {path} (PID {pid}) cannot be "
+            "verified gone, because this host's process table could not be read."
+        )
+    parts = []
+    if verified:
+        parts.append(
+            "still running after being killed: PID "
+            + ", ".join(str(candidate) for candidate in sorted(verified))
+        )
+    if unverified:
+        parts.append(
+            "in its process group and not verifiably its own, so not signalled: PID "
+            + ", ".join(str(candidate) for candidate in sorted(unverified))
+        )
+    return (
+        f"The mission scheduler pass recorded at {path} (PID {pid}) cannot be "
+        f"verified gone ({'; '.join(parts)}), so no new pass was started."
+    )
+
+
+# ---------------------------------------------------------------------------
 # The controller
 # ---------------------------------------------------------------------------
 
@@ -1915,6 +2290,9 @@ class Controller:
         # distinguishable. Never written anywhere but the status document.
         self.startup_nonce = os.environ.get(STARTUP_NONCE_ENV) or None
         self._child: subprocess.Popen[str] | None = None
+        # The record of the pass this run currently has out, once its identity
+        # is known. See `PASS_RECORD_SCHEMA`.
+        self._record: dict[str, Any] | None = None
         self._stop_requested = False
         self._signals = 0
         self._passes = 0
@@ -1999,10 +2377,31 @@ class Controller:
             f"Starting the mission runner for {self.job.identity} from "
             f"{self.job.repo_path} using {self.kanban}"
         )
-        self.write_status(STATE_RUNNING, message="Starting a mission scheduler pass.")
+        # Read before this run writes anything, because the first status write
+        # replaces the only evidence an earlier release left of its pass.
         try:
+            predecessor = read_pass_record(self.job) or adopt_legacy_status(self.job)
+        except SettlementBlocked as failure:
+            return self.record_failure(SETTLEMENT_INCIDENT_KIND, failure.summary, failure.detail)
+        self.write_status(
+            STATE_RUNNING,
+            message=(
+                "Starting a mission scheduler pass."
+                if predecessor is None
+                else "Settling the mission scheduler pass a previous run left behind."
+            ),
+        )
+        try:
+            if predecessor is not None:
+                self.settle_predecessor(predecessor)
             while not self._stop_requested and self.passes_remain():
                 self.one_pass()
+        except SettlementBlocked as failure:
+            return self.record_failure(
+                SETTLEMENT_INCIDENT_KIND,
+                failure.summary,
+                failure.detail or unsettled_detail(self.job),
+            )
         except PassFailure as failure:
             return self.record_failure(PASS_INCIDENT_KIND, failure.summary, failure.detail)
         except ServiceError as failure:
@@ -2030,6 +2429,127 @@ class Controller:
         self.write_status(STATE_FAILED, message=summary)
         return 1
 
+    # -- the pass record ----------------------------------------------------
+
+    def settle_predecessor(self, record: dict[str, Any]) -> None:
+        """End what the previous run for this repository left running.
+
+        Under the run lock, before this run starts anything: whatever a pass
+        the previous controller started is still doing, it is settled — or
+        reported as a survivor — before a second pass could begin beside it.
+        The record is removed only once settlement has verified everything it
+        names gone, so a controller killed while settling leaves it for the
+        next one, members learned so far included.
+        """
+        self.log(
+            f"Settling the mission scheduler pass recorded at {self.job.pass_record_path}."
+        )
+        settle_pass(
+            record,
+            grace=SETTLE_GRACE_SECONDS,
+            kill_after=SETTLE_KILL_SECONDS,
+            persist=self.write_pass_record,
+            path=self.job.pass_record_path,
+        )
+        self.remove_pass_record()
+        self.log("The previous mission scheduler pass is verified gone.")
+
+    def write_pass_record(self, record: dict[str, Any]) -> None:
+        atomic_write_json(self.job.pass_record_path, record)
+
+    def remove_pass_record(self) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.job.pass_record_path)
+
+    def new_pass_record(self) -> dict[str, Any]:
+        return {
+            "schema": PASS_RECORD_SCHEMA,
+            "version": PASS_RECORD_VERSION,
+            "repository": self.job.identity,
+            "runner_pid": os.getpid(),
+            "runner_identity": self.runner_identity,
+            "pass_pid": None,
+            "pass_identity": None,
+            "members": [],
+            "recorded_at": utc_stamp(),
+        }
+
+    def publish_pass(self, child: subprocess.Popen[str], identity: str) -> None:
+        """Record the pass's identity, before its gate lets it run."""
+        record = self.new_pass_record()
+        record["pass_pid"] = child.pid
+        record["pass_identity"] = identity
+        self.write_pass_record(record)
+        self._record = record
+
+    def release_pass(self, child: subprocess.Popen[str]) -> None:
+        """Open the pass's gate, which lets it become the scheduler.
+
+        A gate that cannot be written to belongs to a pass that has already
+        gone — a stop that signalled it first — and there is nothing to
+        release.
+        """
+        if child.stdin is None:
+            return
+        with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+            child.stdin.write(PASS_GATE_WORD + "\n")
+            child.stdin.flush()
+        with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+            child.stdin.close()
+        # `communicate` would otherwise try to flush and close it again.
+        child.stdin = None
+
+    def observe_pass_members(self) -> None:
+        """Add every member of the running pass's group to its record.
+
+        Taken while this controller still holds the pass unreaped, so its
+        identifier cannot have been handed to anybody else and its group is
+        provably its own. What this records is what lets the next controller
+        recognize a mission child that outlived both this controller and the
+        scheduler that launched it.
+        """
+        record = self._record
+        if record is None:
+            return
+        table = process_table()
+        if table is None:
+            return
+        pid = record["pass_pid"]
+        known = {(member["pid"], member["identity"]) for member in record["members"]}
+        seen = {
+            (candidate, started)
+            for candidate, (group, started) in table.items()
+            if group == pid and candidate != pid and started
+        }
+        if seen <= known:
+            return
+        record["members"] = [
+            {"pid": member_pid, "identity": member_identity}
+            for member_pid, member_identity in sorted(known | seen)
+        ]
+        self.write_pass_record(record)
+
+    def settle_own_pass(self) -> None:
+        """Verify the pass this run just waited for left nothing behind.
+
+        Its group has already been killed; this is the check that it is gone,
+        and the only thing that retires its record. A member that will not go
+        stops the run with the record in place, rather than letting the next
+        pass start beside it.
+        """
+        record = self._record
+        self._record = None
+        if record is None:
+            return
+        settle_pass(
+            record,
+            grace=0.0,
+            kill_after=SETTLE_KILL_SECONDS,
+            persist=self.write_pass_record,
+            path=self.job.pass_record_path,
+        )
+        self.remove_pass_record()
+
     # -- durable state -----------------------------------------------------
 
     def write_status(
@@ -2055,6 +2575,10 @@ class Controller:
                 "runner_pid": os.getpid(),
                 "runner_identity": self.runner_identity,
                 "pass_pid": pass_pid,
+                # Where this run records the pass it has out. Its presence is
+                # also what tells a later release that this document is not
+                # the only account of a pass (`adopt_legacy_status`).
+                "pass_record": str(self.job.pass_record_path),
                 "message": message,
                 "last_pass": self._last_pass,
                 "passes": self._passes,
@@ -2118,15 +2642,19 @@ class Controller:
         the mission store and this runtime live — so whatever this process
         resolved them to has to reach the pass unchanged, or the pass would
         advance missions in a store the status document does not describe.
+
+        The pass starts behind its gate (`PASS_GATE_SCRIPT`), and runs nothing
+        until `release_pass` opens it: its standard input is the gate, and the
+        scheduler it becomes reads the null device instead.
         """
         if self._stop_requested:
             self.log("A stop arrived before this pass began; nothing was started.")
             return None
         child = subprocess.Popen(
-            argv,
+            ["/bin/sh", "-c", PASS_GATE_SCRIPT, "kanban-mission-pass", *argv],
             cwd=str(self.job.repo_path),
             text=True,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -2172,20 +2700,42 @@ class Controller:
         than interleaved with this controller's.
         """
         argv = self.pass_argv()
+        # Written before the pass exists, so a controller killed at any point
+        # from here on leaves a record for the next one to read. With no
+        # identifier in it, it says only that a pass may have been started and
+        # never released — which the gate makes a pass that ran nothing.
+        self.write_pass_record(self.new_pass_record())
         child = self.start_child(argv)
         if child is None:
+            self.remove_pass_record()
             return None
         try:
+            identity = process_start_identity(child.pid)
+            if identity is None:
+                if self._stop_requested:
+                    self.log("A stop ended this pass before it was released; nothing ran.")
+                    self._child = None
+                    self.abandon_child(child)
+                    self.remove_pass_record()
+                    return None
+                raise ServiceError(
+                    f"The start time of the mission scheduler pass (PID {child.pid}) "
+                    "could not be read, so the pass could not be recorded; it was "
+                    "ended before it ran anything."
+                )
+            self.publish_pass(child, identity)
             self.write_status(
                 STATE_RUNNING,
                 message="A mission scheduler pass is running.",
                 pass_pid=child.pid,
             )
+            self.release_pass(child)
             stdout, stderr = self.wait_for(child)
         except BaseException:
             # Every exceptional exit from here, not only an intentional stop: a
             # status write that fails and a wait that raises both end this run,
-            # and neither may leave the pass running behind it.
+            # and neither may leave the pass running behind it. The record
+            # stays, for the next start to verify.
             self._child = None
             self.abandon_child(child)
             raise
@@ -2197,6 +2747,7 @@ class Controller:
             # that exited leaving a mission child in its session would outlive
             # the intentional stop that follows.
             self.terminate_process_group(child)
+        self.settle_own_pass()
         return PassCommand(argv, stdout or "", stderr or "", child.returncode)
 
     def wait_for(self, child: subprocess.Popen[str]) -> tuple[str, str]:
@@ -2217,6 +2768,7 @@ class Controller:
             try:
                 return child.communicate(timeout=SLEEP_SLICE_SECONDS * 20)
             except subprocess.TimeoutExpired:
+                self.observe_pass_members()
                 if not self._stop_requested:
                     continue
                 if deadline is None:

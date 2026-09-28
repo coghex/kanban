@@ -53,6 +53,8 @@ import Kanban.Mission
 import Spec.Support.Fixtures (testOptions)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.NotifyProbe (withStubbornNotifier)
+import Spec.Support.Process (writeTerminalMissionWorker)
+import Kanban.Worker (WorkerDescriptor (..), WorkerId (..))
 import Spec.Support.SchedulerProbe (SchedulerRun (..), runSchedulerCommand)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
@@ -84,6 +86,7 @@ spec = describe "the repository mission scheduler" $ do
   notificationSpec
   configurationSpec
   setupFailureSpec
+  sealingSpec
 
 -- ---------------------------------------------------------------------------
 -- Admission
@@ -144,8 +147,64 @@ notRunnable =
     MissionPaused,
     MissionWaitingInput,
     MissionWaitingBarrier,
-    MissionWaitingCapacity
+    MissionWaitingCapacity,
+    -- D-3 (as amended): a step was cut off mid-flight, and only the
+    -- operator's override replans it — never a later pass.
+    MissionInterrupted
   ]
+
+-- ---------------------------------------------------------------------------
+-- Sealing finished sessions
+-- ---------------------------------------------------------------------------
+
+-- | D-11 at the scheduler: every pass seals what every mission's finished
+-- sessions still owe the archive, whatever became of the mission, and a seal
+-- that fails is reported without failing the pass.
+sealingSpec :: Spec
+sealingSpec = describe "sealing finished sessions' logs" $ do
+  it "reports a seal it could not make, then seals it on a later pass after the mission finished" $
+    withStore $ \store ->
+      withTemporaryCacheRoot $ \cache ->
+        withEnvironmentValue "XDG_CACHE_HOME" cache $ do
+          now <- getCurrentTime
+          descriptor <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") now Nothing
+          let registered snapshot = snapshot {missionSnapshotSessions = [sessionOf "solve-844-0001"]}
+              sealing seams = seams {missionSchedulerSeal = sealMissionSessions boardRepository store}
+          putMissionWith store "mission-a" MissionRunning registered
+          -- The stream cannot be read, so this pass cannot seal it.
+          setFileMode descriptor.workerDescriptorEventPath 0o000
+          (first, _) <- passWith store defaultMissionsConfig sealing
+          first.missionPassTermination `shouldBe` MissionPassCompleted
+          Text.unpack first.missionPassDetail `shouldSatisfy` isInfixOf "could not be sealed and will be tried again"
+          readMissionSealedArchives store (MissionId "mission-a") `shouldReturn` Right []
+          -- The mission finishes in the meantime, which takes it out of
+          -- admission and not out of sealing.
+          setFileMode descriptor.workerDescriptorEventPath 0o600
+          putMissionWith store "mission-a" MissionCompleted registered
+          (second, advanced) <- passWith store defaultMissionsConfig sealing
+          readIORef advanced `shouldReturn` []
+          second.missionPassTermination `shouldBe` MissionPassCompleted
+          Text.unpack second.missionPassDetail `shouldNotSatisfy` isInfixOf "could not be sealed"
+          sealed <- readMissionSealedArchives store (MissionId "mission-a")
+          case sealed of
+            Right [entry] -> do
+              entry.missionSealedSession `shouldBe` MissionSessionId "solve-844-0001"
+              entry.missionSealedKind `shouldBe` MissionEventStreamLog
+              verifyMissionSealedArchive store (MissionId "mission-a") entry `shouldReturn` Right ()
+            other -> expectationFailure ("expected one seal, got " <> show other)
+  where
+    sessionOf identifier =
+      MissionSessionNode
+        { missionSessionId = MissionSessionId identifier,
+          missionSessionMission = MissionId "mission-a",
+          missionSessionParent = Nothing,
+          missionSessionStep = Just theStep,
+          missionSessionProvider = "claude",
+          missionSessionProviderSessionId = Nothing,
+          missionSessionOwnership = MissionProcessOwnership {missionProcessIdentity = Nothing, missionProcessGroup = Nothing},
+          missionSessionLog = Nothing,
+          missionSessionObservation = Nothing
+        }
 
 -- ---------------------------------------------------------------------------
 -- The advancement lease
@@ -1850,7 +1909,8 @@ inertDriver =
       missionDriverObserveSession = \_ _ -> pure (Right Nothing),
       missionDriverAdoptInvocation = \_ -> pure (Right Nothing),
       missionDriverDispatch = \_ -> fail "this fixture dispatches nothing",
-      missionDriverTerminate = \_ -> pure (Right [])
+      missionDriverTerminate = \_ -> pure (Right []),
+      missionDriverSealSession = \_ -> pure []
     }
 
 putMission :: MissionStore -> String -> MissionLifecycle -> IO ()
@@ -2094,7 +2154,8 @@ passWith store missions adjust = do
           { missionSchedulerNow = getCurrentTime,
             missionSchedulerLeaseHeld = missionLeaseHeld store,
             missionSchedulerAdvance = \admitted -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
-            missionSchedulerNotify = \_ -> fail "this example runs no notification command"
+            missionSchedulerNotify = \_ -> fail "this example runs no notification command",
+            missionSchedulerSeal = \_ -> pure []
           }
       adjusted = adjust base
       -- Wrapped after the example's own adjustment, so what is recorded is
@@ -2122,7 +2183,8 @@ passRecordingNotificationsInto store missions invocations =
       { missionSchedulerNow = getCurrentTime,
         missionSchedulerLeaseHeld = missionLeaseHeld store,
         missionSchedulerAdvance = \admitted -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
-        missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing)
+        missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing),
+        missionSchedulerSeal = \_ -> pure []
       }
     missions
     store
@@ -2157,7 +2219,8 @@ disposedPass store results = do
         { missionSchedulerNow = getCurrentTime,
           missionSchedulerLeaseHeld = missionLeaseHeld store,
           missionSchedulerAdvance = \_ -> pure results,
-          missionSchedulerNotify = \_ -> fail "this example runs no notification command"
+          missionSchedulerNotify = \_ -> fail "this example runs no notification command",
+          missionSchedulerSeal = \_ -> pure []
         }
       defaultMissionsConfig
       store

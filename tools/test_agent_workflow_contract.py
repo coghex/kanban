@@ -3759,16 +3759,18 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
         # already have rows: the whole eligible surface spawns exactly these
-        # seven, and only launchctl was missing before issue #149 — systemctl
-        # joined it with the systemd backend in issue #329, and `ps` with the
+        # eight, and only launchctl was missing before issue #149 — systemctl
+        # joined it with the systemd backend in issue #329, `ps` with the
         # mission runner in issue #666, where the controller reads a recorded
         # runner's start time to tell it from whatever later inherits its
-        # process identifier.
+        # process identifier, and `/bin/sh` in issue #744, as the gate every
+        # scheduler pass waits at until the controller has recorded it.
         found = set()
         for path in tool_surface_files():
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
         self.assertEqual(
-            found, {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps"}
+            found,
+            {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps", "/bin/sh"},
         )
 
     def test_each_service_manager_cli_is_declared_and_load_bearing(self):

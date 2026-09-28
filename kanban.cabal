@@ -218,6 +218,7 @@ library kanban-internal
     Kanban.Mission.Reconcile
     Kanban.Mission.Runner
     Kanban.Mission.Scheduler
+    Kanban.Mission.Seal
     Kanban.Mission.Session
     Kanban.Mission.Store
     Kanban.Mission.Types
