@@ -1588,11 +1588,15 @@ class LifecycleTests(MissionRunnerFixture):
 # own process group that ignores SIGTERM and reports its identifier, and then
 # leaves -- which is the one shape a surviving mission child whose scheduler
 # is gone can have.
+#
+# It lingers until told to go, so a fixture can observe its identity after its
+# start second has ended -- the only observation a pass record accepts.
 LEADERLESS = (
     "import os, subprocess, sys, time\n"
     "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]])\n"
     "while not os.path.exists(sys.argv[1]):\n"
     "    time.sleep(0.01)\n"
+    "sys.stdin.read()\n"
 )
 STUBBORN_CHILD = (
     "import os, signal, sys, time\n"
@@ -1668,6 +1672,36 @@ class SettlementClassificationTests(unittest.TestCase):
             service.pass_record_problem({**document, "legacy": True, "members": [{"pid": True}]}, job),
         )
 
+    # `lstart` has one-second resolution, so an identity observed inside its
+    # own start second could equally be a process that took over the
+    # identifier within that second. Only one observed after it is accepted.
+    def test_an_identity_observed_inside_its_start_second_is_not_accepted(self):
+        job = service.job_for_identity(Path("/tmp/x"), "acme/widgets")
+        started = self.identity
+        epoch = service.started_epoch(started)
+        self.assertIsNotNone(epoch)
+        self.assertFalse(service.identity_confirmed(started, epoch + 0.5))
+        self.assertTrue(service.identity_confirmed(started, epoch + 1))
+        self.assertFalse(service.identity_confirmed("not a start time", epoch + 5))
+        document = {
+            "schema": service.PASS_RECORD_SCHEMA,
+            "version": service.PASS_RECORD_VERSION,
+            "repository": "acme/widgets",
+            "pass_pid": 100,
+            "pass_identity": started,
+            "pass_confirmed_at": epoch + 0.5,
+            "members": [],
+        }
+        self.assertIn("same second", service.pass_record_problem(document, job))
+        self.assertIsNone(service.pass_record_problem({**document, "pass_confirmed_at": epoch + 1}, job))
+        unconfirmed_member = {"pid": 101, "identity": started, "confirmed_at": epoch + 0.2}
+        self.assertIn(
+            "group members",
+            service.pass_record_problem(
+                {**document, "pass_confirmed_at": epoch + 1, "members": [unconfirmed_member]}, job
+            ),
+        )
+
 
 class SettlementTests(MissionRunnerFixture):
     """A controller that died leaves a pass; the next one settles it first."""
@@ -1677,6 +1711,19 @@ class SettlementTests(MissionRunnerFixture):
 
     def pass_record(self):
         return json.loads(self.job().pass_record_path.read_text(encoding="utf-8"))
+
+    def confirmed_identity(self, pid):
+        """A live process's start time, observed after its start second ended,
+        and the moment it was observed -- what a controller records."""
+        identity = wait_until(
+            lambda: (service.process_group_identity(pid) or (None, None))[1],
+            message="the process's start time",
+        )
+        epoch = service.started_epoch(identity)
+        wait_until(lambda: time.time() >= epoch + 1, message="its start second to end")
+        confirmed_at = time.time()
+        self.assertEqual(service.process_group_identity(pid)[1], identity)
+        return identity, confirmed_at
 
     def write_pass_record(self, **fields):
         document = {
@@ -1709,21 +1756,27 @@ class SettlementTests(MissionRunnerFixture):
         return child
 
     def leaderless_child(self):
-        """A mission child whose pass has exited: its identifier and start time,
-        and the pass's."""
+        """A mission child whose pass has exited: the pass's identifier and
+        confirmed start time, and the child's identifier and confirmed member
+        entry."""
         marker = self.root / "leaderless.pid"
         leader = subprocess.Popen(
             [sys.executable, "-c", LEADERLESS, str(marker), STUBBORN_CHILD],
             start_new_session=True,
-        )
-        leader_identity = wait_until(
-            lambda: service.process_start_identity(leader.pid), message="the pass's start time"
+            stdin=subprocess.PIPE,
         )
         wait_until(marker.exists, message="the mission child to report itself")
-        leader.wait(timeout=10)
         child = int(marker.read_text(encoding="utf-8"))
         self.ensure_gone(child)
-        return leader.pid, leader_identity, child, service.process_start_identity(child)
+        leader_identity, leader_confirmed = self.confirmed_identity(leader.pid)
+        child_identity, child_confirmed = self.confirmed_identity(child)
+        leader.communicate(timeout=10)
+        return (
+            leader.pid,
+            {"pass_identity": leader_identity, "pass_confirmed_at": leader_confirmed},
+            child,
+            {"pid": child, "identity": child_identity, "confirmed_at": child_confirmed},
+        )
 
     def settlement_incidents(self):
         return [
@@ -1813,12 +1866,8 @@ class SettlementTests(MissionRunnerFixture):
     # saw that child while the pass was alive recorded it, so the next one can
     # recognize it with no leader to vouch for it.
     def test_a_recorded_mission_child_whose_pass_is_gone_is_settled(self):
-        leader, leader_identity, child, child_identity = self.leaderless_child()
-        self.write_pass_record(
-            pass_pid=leader,
-            pass_identity=leader_identity,
-            members=[{"pid": child, "identity": child_identity}],
-        )
+        leader, leader_fields, child, child_member = self.leaderless_child()
+        self.write_pass_record(pass_pid=leader, members=[child_member], **leader_fields)
         status, _stdout, stderr = self.run_controller(
             "--passes", "1", environment=self.settling_environment()
         )
@@ -1831,8 +1880,8 @@ class SettlementTests(MissionRunnerFixture):
     # neither signalled nor assumed gone: it blocks, and the record that says
     # so survives every restart until the child is gone.
     def test_an_unverifiable_survivor_blocks_every_start_and_is_left_alone(self):
-        leader, leader_identity, child, _identity = self.leaderless_child()
-        written = self.write_pass_record(pass_pid=leader, pass_identity=leader_identity)
+        leader, leader_fields, child, _member = self.leaderless_child()
+        written = self.write_pass_record(pass_pid=leader, **leader_fields)
         for _attempt in range(2):
             status, _stdout, _stderr = self.run_controller(
                 "--passes", "1", environment=self.settling_environment()
@@ -1858,17 +1907,15 @@ class SettlementTests(MissionRunnerFixture):
 
     def test_a_recorded_member_that_became_a_detached_worker_is_left_alone(self):
         worker = self.stranger()
-        worker_identity = wait_until(
-            lambda: service.process_start_identity(worker.pid), message="the worker's start time"
-        )
-        leader, leader_identity, child, child_identity = self.leaderless_child()
+        worker_identity, worker_confirmed = self.confirmed_identity(worker.pid)
+        leader, leader_fields, child, child_member = self.leaderless_child()
         self.write_pass_record(
             pass_pid=leader,
-            pass_identity=leader_identity,
             members=[
-                {"pid": child, "identity": child_identity},
-                {"pid": worker.pid, "identity": worker_identity},
+                child_member,
+                {"pid": worker.pid, "identity": worker_identity, "confirmed_at": worker_confirmed},
             ],
+            **leader_fields,
         )
         status, _stdout, stderr = self.run_controller(
             "--passes", "1", environment=self.settling_environment()
@@ -1880,7 +1927,12 @@ class SettlementTests(MissionRunnerFixture):
 
     def test_a_recorded_identifier_reused_by_another_process_is_not_signalled(self):
         stranger = self.stranger()
-        self.write_pass_record(pass_pid=stranger.pid, pass_identity="Thu Jan  1 00:00:00 1970")
+        long_ago = "Thu Jan  1 00:00:00 1970"
+        self.write_pass_record(
+            pass_pid=stranger.pid,
+            pass_identity=long_ago,
+            pass_confirmed_at=service.started_epoch(long_ago) + 60,
+        )
         status, _stdout, stderr = self.run_controller(
             "--passes", "1", environment=self.settling_environment()
         )
@@ -1888,6 +1940,28 @@ class SettlementTests(MissionRunnerFixture):
         self.assertIsNone(stranger.poll())
         self.assertEqual(len(self.recorded()), 1)
         self.assertFalse(self.job().pass_record_path.exists())
+
+    # The same-second case the start time alone cannot rule out: a record whose
+    # identity matches a live process exactly, but was observed inside that
+    # process's own start second, could describe a pass that exited and a
+    # stranger that took its identifier within that second. It authorizes no
+    # signal; it blocks, and the stranger is left alone.
+    def test_an_identity_recorded_inside_its_start_second_blocks_rather_than_signals(self):
+        stranger = self.stranger()
+        identity, _confirmed = self.confirmed_identity(stranger.pid)
+        written = self.write_pass_record(
+            pass_pid=stranger.pid,
+            pass_identity=identity,
+            pass_confirmed_at=service.started_epoch(identity) + 0.5,
+        )
+        status, _stdout, _stderr = self.run_controller(
+            "--passes", "1", environment=self.settling_environment()
+        )
+        self.assertEqual(status, 1)
+        self.assertIsNone(stranger.poll())
+        self.assertEqual(self.recorded(), [])
+        self.assertEqual(self.pass_record(), written)
+        self.assertIn("same second", self.settlement_incidents()[0]["summary"])
 
     # A release before the pass record left only a process identifier in its
     # status document. That never authorizes a signal: a live process under it

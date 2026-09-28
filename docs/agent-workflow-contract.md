@@ -2382,7 +2382,10 @@ report did not name.
   directory per canonical repository under the runtime root §4's
   `mission-runner-runtime-dir` rows name. The pass record (`pass.json`) names the
   one scheduler pass a run may have out, by process identifier and start time,
-  with every member of its process group the run has seen. The next `run` for
+  with every member of its process group the run has seen — each identity
+  observed after its start second ended, since `ps` reports start times to the
+  second and only such an observation rules out a same-second reuse; a pass
+  waits at its gate until its own can be recorded that way. The next `run` for
   the repository settles what it names under the run lock before starting a
   pass: verified processes still in the pass's group are stopped and then
   killed, one that has left it for a session of its own is not the pass's, a

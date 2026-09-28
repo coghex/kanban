@@ -842,8 +842,10 @@ def require_supported_host() -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_command(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(args, text=True, capture_output=True)
+def run_command(
+    args: list[str], *, check: bool = True, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(args, text=True, capture_output=True, env=env)
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise ServiceError(f"Command failed: {' '.join(args)}\n{detail}")
@@ -1929,13 +1931,14 @@ class SettlementBlocked(ServiceError):
 def process_table() -> dict[int, tuple[int, str]] | None:
     """Every process on this host, as its process group and start time.
 
-    The start time is `ps -o lstart=`, the same reading `process_start_identity`
-    takes, so a process recorded through one is recognized through the other.
-    None when the table cannot be read or a line of it cannot be understood:
-    settling a pass decides what to signal from this, and a table with a row
-    missing is a table that could leave a survivor uncounted.
+    The start time is `ps -o lstart=` in the C locale, the same reading
+    `process_group_identity` takes, so a process recorded through one is
+    recognized through the other and its start second can always be parsed
+    (`started_epoch`). None when the table cannot be read or a line of it
+    cannot be understood: settling a pass decides what to signal from this, and
+    a table with a row missing is a table that could leave a survivor uncounted.
     """
-    proc = run_command(["ps", "-A", "-o", "pid=,pgid=,lstart="], check=False)
+    proc = run_command(["ps", "-A", "-o", "pid=,pgid=,lstart="], check=False, env=c_locale())
     if proc.returncode != 0:
         return None
     table: dict[int, tuple[int, str]] = {}
@@ -1953,6 +1956,43 @@ def process_table() -> dict[int, tuple[int, str]] | None:
     return table
 
 
+def c_locale() -> dict[str, str]:
+    """This environment with `ps` held to the C locale, so the start times it
+    prints are in the one spelling `started_epoch` parses."""
+    return {**os.environ, "LC_ALL": "C"}
+
+
+def started_epoch(started: Any) -> float | None:
+    """The first instant of the second a `ps -o lstart=` start time names, or
+    None when it is not one."""
+    if not isinstance(started, str):
+        return None
+    try:
+        return time.mktime(time.strptime(" ".join(started.split()), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def identity_confirmed(started: Any, confirmed_at: Any) -> bool:
+    """Whether a process identity was observed after its start second ended.
+
+    `lstart` has one-second resolution, so a process identifier and start time
+    alone could name two processes: one that exited, and another handed the
+    same identifier within the same second. Observed after that second has
+    passed, it cannot: the process was demonstrably alive at `confirmed_at`, so
+    anything reusing its identifier started later still, in a later second.
+    Every identity a pass record vouches for carries such an observation.
+    """
+    epoch = started_epoch(started)
+    return (
+        epoch is not None
+        and isinstance(confirmed_at, (int, float))
+        and not isinstance(confirmed_at, bool)
+        and math.isfinite(confirmed_at)
+        and confirmed_at >= epoch + 1
+    )
+
+
 def _valid_member(member: Any) -> bool:
     return (
         isinstance(member, dict)
@@ -1960,6 +2000,7 @@ def _valid_member(member: Any) -> bool:
         and member["pid"] > 0
         and isinstance(member.get("identity"), str)
         and bool(member["identity"].strip())
+        and identity_confirmed(member["identity"], member.get("confirmed_at"))
     )
 
 
@@ -1993,9 +2034,17 @@ def pass_record_problem(document: Any, job: MissionRunnerJob) -> str | None:
         return "it records a start time and no process identifier"
     if pid is not None and identity is None and not legacy:
         return "it records a process identifier and no start time"
+    if identity is not None and not identity_confirmed(identity, document.get("pass_confirmed_at")):
+        return (
+            "its pass start time was never observed after that second ended, so a "
+            "process reusing the identifier within the same second could pass for it"
+        )
     members = document.get("members")
     if not isinstance(members, list) or not all(_valid_member(member) for member in members):
-        return "its recorded group members are not a list of process identities"
+        return (
+            "its recorded group members are not a list of process identities each "
+            "observed after its start second"
+        )
     return None
 
 
@@ -2134,7 +2183,7 @@ def classify_pass_group(
 
 def process_group_identity(pid: int) -> tuple[int, str] | None:
     """One process's group and start time, read together, or None."""
-    proc = run_command(["ps", "-o", "pgid=,lstart=", "-p", str(pid)], check=False)
+    proc = run_command(["ps", "-o", "pgid=,lstart=", "-p", str(pid)], check=False, env=c_locale())
     if proc.returncode != 0:
         return None
     fields = (proc.stdout or "").strip().split(None, 1)
@@ -2163,7 +2212,7 @@ def signal_verified(pid: int, group: int, started: str, signum: int) -> None:
 
 def signal_verified_group(pid: int, started: str, signum: int) -> None:
     """Signal a recorded pass's whole group, having just rechecked its leader."""
-    if process_start_identity(pid) != started:
+    if process_group_identity(pid) != (pid, started):
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(pid, signum)
@@ -2181,9 +2230,10 @@ def settle_pass(
 
     Returns only once nothing the record names is alive: not its leader, not a
     member of its group, and not a member it recorded by identity. Verified
-    processes are asked to stop, and killed once `grace` has passed; an
-    unverifiable one is never signalled, only waited for, and one still there
-    after `grace + kill_after` blocks.
+    processes are asked to stop — a live leader's other members before the
+    leader, which is what vouches for them — and killed once `grace` has
+    passed; an unverifiable one is never signalled, only waited for, and one
+    still there after `grace + kill_after` blocks.
 
     Members first seen while the leader is verified are added to the record
     through `persist` before anything is signalled, so a controller killed in
@@ -2200,18 +2250,17 @@ def settle_pass(
     started = time.monotonic()
     sent: dict[Any, int] = {}
     while True:
+        observed_at = time.time()
         table = process_table()
         if table is not None:
             leader_live, verified, unverified = classify_pass_group(table, pid, identity, members)
-            if leader_live:
-                seen = {(candidate, table[candidate][1]) for candidate in verified if table[candidate][1]}
-                if not seen <= members:
-                    members |= seen
-                    record["members"] = [
-                        {"pid": member_pid, "identity": member_identity}
-                        for member_pid, member_identity in sorted(members)
-                    ]
-                    persist(record)
+            if leader_live and add_confirmed_members(
+                record,
+                {(candidate, table[candidate][1]) for candidate in verified},
+                observed_at,
+            ):
+                members = {(member["pid"], member["identity"]) for member in record["members"]}
+                persist(record)
             if not leader_live and not verified and not unverified:
                 return
         elapsed = time.monotonic() - started
@@ -2221,15 +2270,56 @@ def settle_pass(
                 None,
             )
         if table is not None:
-            signum = signal.SIGTERM if elapsed < grace else signal.SIGKILL
-            if leader_live and sent.get("group") != signum:
-                sent["group"] = signum
-                signal_verified_group(pid, table[pid][1], signum)
-            for candidate in verified:
-                if sent.get(candidate) != signum:
-                    sent[candidate] = signum
-                    signal_verified(candidate, pid, table[candidate][1], signum)
+            late = elapsed >= grace
+            if leader_live:
+                # The leader is what vouches for the rest of its group, so it
+                # is asked last: its other members first, the leader once they
+                # are gone, and the whole group killed together once the grace
+                # is spent. Ending the leader first would leave a member that
+                # ignores the request with nothing to identify it by.
+                others = [candidate for candidate in verified if candidate != pid]
+                if late:
+                    if sent.get("group") != signal.SIGKILL:
+                        sent["group"] = signal.SIGKILL
+                        signal_verified_group(pid, table[pid][1], signal.SIGKILL)
+                elif others:
+                    for candidate in others:
+                        if sent.get(candidate) != signal.SIGTERM:
+                            sent[candidate] = signal.SIGTERM
+                            signal_verified(candidate, pid, table[candidate][1], signal.SIGTERM)
+                elif sent.get("group") != signal.SIGTERM:
+                    sent["group"] = signal.SIGTERM
+                    signal_verified_group(pid, table[pid][1], signal.SIGTERM)
+            else:
+                signum = signal.SIGKILL if late else signal.SIGTERM
+                for candidate in verified:
+                    if sent.get(candidate) != signum:
+                        sent[candidate] = signum
+                        signal_verified(candidate, pid, table[candidate][1], signum)
         time.sleep(SETTLE_POLL_SECONDS)
+
+
+def add_confirmed_members(
+    record: dict[str, Any], seen: set[tuple[int, str]], observed_at: float
+) -> bool:
+    """Add to `record` every member of `seen` whose identity this observation
+    confirms, and say whether any was new.
+
+    One too young to confirm — observed inside its own start second — is left
+    for the next observation rather than recorded ambiguously.
+    """
+    known = {(member["pid"], member["identity"]) for member in record["members"]}
+    fresh = [
+        {"pid": member_pid, "identity": member_identity, "confirmed_at": observed_at}
+        for member_pid, member_identity in sorted(seen - known)
+        if identity_confirmed(member_identity, observed_at)
+    ]
+    if not fresh:
+        return False
+    record["members"] = sorted(
+        [*record["members"], *fresh], key=lambda member: (member["pid"], member["identity"])
+    )
+    return True
 
 
 def describe_unsettled(
@@ -2499,11 +2589,37 @@ class Controller:
             "recorded_at": utc_stamp(),
         }
 
-    def publish_pass(self, child: subprocess.Popen[str], identity: str) -> None:
+    def confirm_pass_identity(self, child: subprocess.Popen[str]) -> tuple[str, float] | None:
+        """The pass's start time, observed once its start second has ended.
+
+        The pass is still waiting at its gate, and this controller has not
+        reaped it, so its identifier cannot have been handed to anybody else in
+        the meantime: waiting out the rest of that second — never more than one
+        — costs a pass that long before it runs, and buys an identity no later
+        process can share (`identity_confirmed`). None when the start time
+        cannot be read, which the caller treats as a pass it cannot record.
+        """
+        first = process_group_identity(child.pid)
+        epoch = started_epoch(first[1]) if first else None
+        if first is None or epoch is None:
+            return None
+        remaining = epoch + 1 - time.time()
+        if remaining > 0:
+            time.sleep(min(remaining + SETTLE_POLL_SECONDS / 10, 1.5))
+        confirmed_at = time.time()
+        again = process_group_identity(child.pid)
+        if again != first or not identity_confirmed(first[1], confirmed_at):
+            return None
+        return first[1], confirmed_at
+
+    def publish_pass(
+        self, child: subprocess.Popen[str], identity: str, confirmed_at: float
+    ) -> None:
         """Record the pass's identity, before its gate lets it run."""
         record = self.new_pass_record()
         record["pass_pid"] = child.pid
         record["pass_identity"] = identity
+        record["pass_confirmed_at"] = confirmed_at
         self.write_pass_record(record)
         self._record = record
 
@@ -2536,23 +2652,18 @@ class Controller:
         record = self._record
         if record is None:
             return
+        observed_at = time.time()
         table = process_table()
         if table is None:
             return
         pid = record["pass_pid"]
-        known = {(member["pid"], member["identity"]) for member in record["members"]}
         seen = {
             (candidate, started)
             for candidate, (group, started) in table.items()
             if group == pid and candidate != pid and started
         }
-        if seen <= known:
-            return
-        record["members"] = [
-            {"pid": member_pid, "identity": member_identity}
-            for member_pid, member_identity in sorted(known | seen)
-        ]
-        self.write_pass_record(record)
+        if add_confirmed_members(record, seen, observed_at):
+            self.write_pass_record(record)
 
     def settle_own_pass(self) -> None:
         """Verify the pass this run just waited for left nothing behind.
@@ -2735,8 +2846,8 @@ class Controller:
             self.remove_pass_record()
             return None
         try:
-            identity = process_start_identity(child.pid)
-            if identity is None:
+            confirmed = self.confirm_pass_identity(child)
+            if confirmed is None:
                 if self._stop_requested:
                     self.log("A stop ended this pass before it was released; nothing ran.")
                     self._child = None
@@ -2745,10 +2856,10 @@ class Controller:
                     return None
                 raise ServiceError(
                     f"The start time of the mission scheduler pass (PID {child.pid}) "
-                    "could not be read, so the pass could not be recorded; it was "
-                    "ended before it ran anything."
+                    "could not be read and confirmed, so the pass could not be "
+                    "recorded; it was ended before it ran anything."
                 )
-            self.publish_pass(child, identity)
+            self.publish_pass(child, *confirmed)
             self.write_status(
                 STATE_RUNNING,
                 message="A mission scheduler pass is running.",
