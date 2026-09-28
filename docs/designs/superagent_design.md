@@ -1161,6 +1161,10 @@ before autonomous batch work that has not started. Work already running is not
 preempted or cancelled, and priority never bypasses dependencies or lower-level
 authority locks. This resolves Q-13.
 
+> Amended for the mission runner, 2026-09-28: implemented by `SAG-5`, not by
+> the runner's RUN-5, since missions record no direct-command origin until the
+> console and batches exist. See `docs/designs/mission_runner_design.md` D-5.
+
 ### D-23. Garbage collection may remove execution debris, not durable history
 
 Terminal sessions cease to be processes but remain durable records. The first
@@ -1902,7 +1906,9 @@ unless their typed contract exposes an override.
   new work without killing live siblings; `all` follows the selected finite or
   finite-membership/live-facts contract; a changed target is reclassified
   against its current state before any effect; equal-priority missions rotate
-  without leaving an otherwise usable slot idle.
+  without leaving an otherwise usable slot idle; a newly dispatched direct
+  command gets the next compatible slot before queued batch work, without
+  preempting running work.
 - **Out of scope:** Planner-generated plans and automatic recommendation
   application.
 - **Open questions:** `None`.

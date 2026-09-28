@@ -23,7 +23,8 @@ concrete precondition
 - [x] RUN-2. Install per-repository mission runner jobs with a dedicated installer and discovery record — [#667]
 - [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
 - [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
-- [ ] RUN-5. Schedule missions fairly and survive capacity limits and upgrades
+- [ ] RUN-5. Admit mission work under a two-agent ceiling with fair rotation
+- [ ] RUN-7. Wait out provider rate limits and drain the runner on stop and upgrade
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
 ## Epic contract
@@ -42,8 +43,9 @@ concrete precondition
   identity; at most two mission-dispatched agents run at once per repository;
   runnable missions rotate without preemption or idle capacity;
   proven capacity limits release their slot and retry while authentication and
-  configuration failures stop; a normal upgrade transfers the runner lease only
-  after drain; and the operator has one accurate document for installing,
+  configuration failures stop; a normal stop or upgrade drains the runner's own
+  chain before handing over, and leaves no mission interrupted; and the
+  operator has one accurate document for installing,
   operating, and recovering it.
 - **Users and operators:** A maintainer running Kanban as the control surface
   for long-running agent work on one repository, who wants that work to
@@ -168,7 +170,8 @@ RUN-2 (#667), and RUN-3 (#668) merged. The original survey was taken at
    and retries. When authentication or configuration is wrong instead, it stops
    and says so.
 7. When Kanban is upgraded, the old runner drains, seals what it owns, and
-   hands the lease over exactly once. What the drain waits for is Q-2.
+   hands the lease over exactly once, without waiting for the detached workers
+   its missions dispatched (D-15). A normal stop drains the same way.
 
 ## Scope
 
@@ -197,10 +200,11 @@ RUN-2 (#667), and RUN-3 (#668) merged. The original survey was taken at
 - Session-log sealing into the mission archive before the worker cache may
   collect the source.
 - Work-conserving round-robin admission across equal-priority autonomous
-  missions, foreground priority for direct operator commands, and the
-  repository's ceiling of two running agents (D-4).
+  missions, and the repository's ceiling of two running agents (D-4). Priority
+  for direct operator commands belongs to Mission Control's `SAG-5` (D-5, as
+  amended).
 - Durable provider-capacity waits that release the slot and retry.
-- Drain-before-handoff on a normal upgrade.
+- Drain-before-handoff on a normal stop or upgrade (D-15).
 - An opt-in, privacy-minimal attention notification through an
   operator-configured command.
 - Operating documentation for installation, control, troubleshooting, and
@@ -367,6 +371,15 @@ compatible repository slot before autonomous batch work that has not started.
 Running work is never preempted, and priority never bypasses dependencies or
 lower-level authority locks.
 
+**Amended, 2026-09-28.** Not implemented by this arc. A mission records no
+distinction between a direct operator command and batch work
+(`MissionAutonomy` is a decision policy, not an origin), and both arrive with
+Mission Control's console and batches. Priority therefore belongs to superagent
+`SAG-5`, which already lists the source decision (`D-22`). RUN-5 does not
+implement it.
+
+**Amendment signed off:** by the user, 2026-09-28.
+
 ### D-6. Desktop attention notifications are opt-in and privacy-minimal
 
 From superagent `D-24`. Each repository may opt into one desktop notification
@@ -421,7 +434,7 @@ runner's authority does not change that.
 
 ### D-13. The runner reuses Kanban's existing service machinery
 
-New to this document, and the reason the arc is six slices rather than a
+New to this document, and the reason the arc is seven slices rather than a
 rewrite. The runner installs through `tools/service_manager.py`'s existing
 `ServiceManagerBackend` boundary, resolves its discovery record through the one
 per-language resolution point, transitions through `Kanban.ServiceProcess`, and
@@ -442,6 +455,25 @@ second repository first exists to contend with. Nothing in this arc's durable
 records or configuration prevents adding one later: a host-wide limiter would
 gate admission above these runners rather than replace their ceilings.
 
+### D-15. A drain waits for the runner's own chain, not for workers
+
+A normal stop and a normal upgrade drain the same way. The runner stops
+starting passes, lets the current pass and its `--mission` children finish
+their step, seals what it owns, records the drain in its status document, and
+releases the runner lock exactly once. It does not wait for the detached
+workers those steps dispatched. They keep running under the binary that
+launched them, and the next runner reconciles against them. A second stop
+signal still escalates, as today. A forced stop or an incompatible handoff can
+still cut a step off, which leaves that mission `interrupted` (D-3).
+
+**Rationale:** a stop that waited for workers could take up to the four-hour
+agent deadline, and workers need nothing from the runner to finish. Today's
+stop sends SIGTERM straight to the pass, so since #744 an ordinary stop can
+leave missions interrupted. Draining the pass is what prevents that. Rejected:
+also waiting for every mission-dispatched worker.
+
+**Signed off:** by the user, 2026-09-28.
+
 ## Open questions
 
 ### Q-1. Does the runner install per repository or once per host?
@@ -457,8 +489,7 @@ hands over without waiting for detached workers, which finish under the binary
 that launched them. (b) It also waits for every mission-dispatched worker to
 finish first.
 
-**Proposal:** (a). Deliberately open: RUN-5 stops and asks here before its
-drain requirement is written. RUN-4 does not depend on the answer.
+Resolved by D-15: option (a).
 
 ## Verification strategy
 
@@ -481,17 +512,17 @@ drain requirement is written. RUN-4 does not depend on the answer.
 - Installer fixtures follow the existing services' suites: install, reinstall,
   relocate, repair a missing or stale discovery record, and uninstall, on both
   service-manager backends.
-- Scheduler fixtures enforce the repository ceiling across concurrent missions,
-  preserve lower serialized locks, show configured and provider limits pause
-  only new admission, give a new direct command the next compatible slot
-  without preempting running work, and preserve a durable round-robin cursor
+- Scheduler fixtures enforce the two-agent ceiling across concurrent missions
+  and passes, preserve lower serialized locks, show configured and provider
+  limits pause only new admission, and preserve a durable round-robin cursor
   across restart.
 - Capacity fixtures distinguish explicit rate-limit and reset evidence from
   authentication and configuration failures, release the slot, persist a known
   reset or bounded backoff, and retry while the TUI is absent without spinning.
-- Upgrade fixtures put the old runner into drain, queue a concurrent command,
-  settle and seal live children, transfer the lease exactly once, and prove a
-  forced or incompatible handoff becomes interrupted.
+- Drain fixtures stop or upgrade the runner mid-step, queue a concurrent
+  command, let the pass and its `--mission` children finish without waiting for
+  detached workers, transfer the lock exactly once, and prove a forced or
+  incompatible handoff leaves the cut-off mission interrupted.
 - Deadline enforcement is the worker's and is already covered by its own
   suite (`worker_deadline_seconds`); this arc's fixtures only prove the runner
   never shortens or bypasses it.
@@ -602,36 +633,52 @@ drain requirement is written. RUN-4 does not depend on the answer.
   (Mission Control's `SAG-4`).
 - **Open questions:** `None`.
 
-### RUN-5. Schedule missions fairly and survive capacity limits and upgrades
+### RUN-5. Admit mission work under a two-agent ceiling with fair rotation
 
-- **Outcome:** Concurrent missions share the repository's capacity by durable
-  round-robin, direct operator commands take the next slot without preempting,
-  proven provider limits release the slot and retry, and a normal upgrade
-  transfers the runner lease only after drain.
-- **Scope:** The repository's ceiling of two running mission-dispatched agents
-  and its configuration (D-4, as amended), replacing RUN-1's compiled
-  two-missions-per-pass limit as the capacity rule;
-  work-conserving round-robin with a durable cursor; foreground priority for
-  direct commands; capacity classification, slot release, reset/backoff, and
-  retry; drain state, queued commands during drain, and single lease handoff.
+- **Outcome:** At most two mission-dispatched agents run at once per
+  repository, counted across missions and passes, and runnable missions share
+  the slots by durable, work-conserving round-robin.
+- **Scope:** Count live mission-dispatched agent workers against a
+  configurable ceiling, default two (D-4, as amended), replacing RUN-1's
+  compiled two-missions-per-pass limit as the capacity rule; a durable rotation
+  cursor that skips blocked missions and lets one mission use capacity no peer
+  can.
 - **Phase:** 5 — scheduling policy.
 - **Depends on:** `RUN-1`, `RUN-4`.
 - **Ordering:** `critical path` for the epic; `not on the critical path` for
   Mission Control's console, which does not depend on it.
-- **Relevant decisions:** `D-4`, `D-5`, `D-8`, `D-9`, `D-10`.
-- **Acceptance signals:** No more than two mission-dispatched agents run at
-  once across missions and across passes, and the ceiling does not weaken
-  lower serialized locks; a new direct command gets the next
-  compatible slot without preempting; the round-robin cursor survives restart,
-  skips blocked missions, and reuses idle capacity; a rate limit releases its
-  slot and retries at reset while an authentication failure stops; a drain
-  settles children, seals state, and hands the lease over exactly once; a forced
-  handoff becomes interrupted rather than two schedulers.
-- **Out of scope:** Cross-repository or host-wide budgets, and batch membership
-  and ordering, which are Mission Control's `SAG-5`.
-- **Open questions:** `Q-2`, deliberately open: before the drain requirement
-  is written, stop and ask what a drain waits for. `D-14` settles
-  per-repository installation.
+- **Relevant decisions:** `D-4`, `D-8`.
+- **Acceptance signals:** Never more than two mission-dispatched agents live at
+  once, and the ceiling does not weaken lower serialized locks; work launched
+  from the board does not count; the rotation cursor survives restart, skips
+  blocked missions, and leaves no usable slot idle.
+- **Out of scope:** Priority for direct operator commands (Mission Control's
+  `SAG-5`, D-5 as amended); capacity waits and drain (RUN-7); cross-repository
+  or host-wide budgets; batch membership and ordering (`SAG-5`).
+- **Open questions:** `None`; `D-14` settles per-repository installation.
+
+### RUN-7. Wait out provider rate limits and drain the runner on stop and upgrade
+
+- **Outcome:** A positively identified rate limit or exhausted quota releases
+  its slot and retries at the provider's reset time or with bounded backoff,
+  while authentication, executable, and configuration failures stop for the
+  operator; a normal stop or upgrade drains per D-15 and leaves no mission
+  interrupted.
+- **Scope:** Waking `waiting_capacity` missions at a durable reset or backoff
+  time; a drain state in the status document; commands accepted during a drain
+  stay queued; the runner lock handed over exactly once.
+- **Phase:** 6 — resilience.
+- **Depends on:** `RUN-5`, whose ceiling is the slot a capacity wait releases.
+- **Ordering:** `critical path` for the epic.
+- **Relevant decisions:** `D-9`, `D-10`, `D-15`.
+- **Acceptance signals:** A rate limit frees its slot and retries at reset
+  while an authentication failure stops; a stop during a step lets that step
+  finish and interrupts no mission; a forced stop mid-step leaves that mission
+  `interrupted`; the lock is handed over exactly once, never to two
+  schedulers.
+- **Out of scope:** The ceiling and rotation themselves (RUN-5); waiting for
+  detached workers during a drain (rejected by D-15).
+- **Open questions:** `None`.
 
 ### RUN-6. Document installing, operating, and recovering the mission runner
 
@@ -641,13 +688,13 @@ drain requirement is written. RUN-4 does not depend on the answer.
 - **Scope:** The operating guide, with recovery and troubleshooting
   procedures. RUN-1 through RUN-3 already added their own contract and
   inventory entries to `docs/design.md` and `docs/agent-workflow-contract.md`;
-  this slice adds the entries RUN-4 and RUN-5 introduce and reconciles the
-  rest with what shipped.
-- **Phase:** 6 — operability.
+  this slice adds the entries RUN-4, RUN-5, and RUN-7 introduce and reconciles
+  the rest with what shipped.
+- **Phase:** 7 — operability.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   stays in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-14`.
+- **Relevant decisions:** `D-1` through `D-15`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record this arc adds has an authority and
   ownership entry; an operator can distinguish stopped, idle, waiting,
