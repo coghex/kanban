@@ -775,6 +775,36 @@ malformedChildResults =
 
 childExecutionSpec :: Spec
 childExecutionSpec = describe "the child a pass actually launches" $ do
+  -- A child that has finished must not go on standing in line in front of
+  -- the missions behind it while a slower child ahead of it is still
+  -- running: each mission's place is withdrawn as its own child exits, and
+  -- the accounts still come back in the order they were handed over.
+  it "withdraws each mission's place as its own child exits, in whatever order that is" $
+    withStore $ \store -> withScratch $ \scratch -> do
+      fake <-
+        writeFakeKanban
+          scratch
+          ( unlines
+              [ "#!/bin/sh",
+                "if [ \"$2\" = mission-a ]; then sleep 1; fi",
+                resultLine "\"$2\"" "coghex/kanban" "advanced",
+                "exit 0"
+              ]
+          )
+      putMission store "mission-a" MissionRunning
+      putMission store "mission-b" MissionRunning
+      withdrawn <- newIORef []
+      results <-
+        advanceMissions
+          fake
+          testOptions
+          (checkoutIn scratch)
+          scratch
+          [MissionId "mission-a", MissionId "mission-b"]
+          (\mission -> atomicModifyIORef' withdrawn (\seen -> (seen <> [mission], ())))
+      map fst results `shouldBe` [MissionId "mission-a", MissionId "mission-b"]
+      readIORef withdrawn `shouldReturn` [MissionId "mission-b", MissionId "mission-a"]
+
   -- Requirement 5, and the review's verification anchor. The checkout has a
   -- space in it and so does the configuration path, and the fake records what
   -- it was handed rather than being asserted about from this side.

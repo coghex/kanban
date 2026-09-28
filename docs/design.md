@@ -290,7 +290,8 @@ What is limited is agents, not missions. At most `[missions] agent_ceiling`
 mission-dispatched agents — two unless configured otherwise (section 16) — may
 be live at once for one repository: a solve worker, a pull-request worker, or
 one issue action on the repository's review host, counted across every mission,
-every pass, and every checkout of that repository (`Kanban.Mission.Admission`).
+every pass, and every checkout of that repository however its owner and name are
+cased (`Kanban.Mission.Admission`).
 The count is read from the worker cache, where a worker whose specification
 names a mission invocation is a mission's agent; the review host itself is
 never one, and a worker launched from the board names no invocation and is
@@ -298,7 +299,9 @@ neither counted nor delayed. A worker is live until its own records prove
 otherwise, by the worker lease's own rules: a terminal state, a recorded
 process identity a snapshot no longer finds, or an acknowledged launch that
 never started. An issue action is live until it is terminal, since a host that
-died leaves its unfinished actions to be re-homed and run by the next one. A
+died leaves its unfinished actions to be re-homed and run by the next one — and
+without a state it is live too — and a terminal one still holds its slot while a
+process it ran, such as a canonical review's subprocess, survives. A
 record that will not decode, and a snapshot that cannot be taken, keep the
 slot. Lowering the ceiling below what is running starts nothing new until
 enough of it finishes, and ends nothing.
@@ -323,11 +326,12 @@ Free slots go to waiting missions in a durable round-robin (the mission runner
 design's D-8, `docs/designs/mission_runner_design.md`): a mission's
 place is the number of its latest successful admission, so the mission admitted
 longest ago — or never — goes first, and a restarted runner resumes the same
-order. Only a launch that produced its own worker moves a mission to the back;
-one that was refused, went stale, or joined a worker somebody else started
-leaves its place alone. A pass enters every mission it is about to advance in
-that order before any child starts, launches and waits for the children in that
-order, and withdraws each mission's place as soon as its child is done. A free
+order. Only a launch that started its own worker moves a mission to the back;
+one that was refused, went stale, failed to start, or joined a worker somebody
+else started leaves its place alone. A pass enters every mission it is about to
+advance in that order before any child starts, launches the children in that
+order, and withdraws each mission's place as soon as that mission's own child
+exits, whatever the children ahead of it are still doing. A free
 slot a mission ahead may still take is left for it, so the rotation rather than
 which child reaches the lock first decides who gets it; a slot nobody ahead can
 take is used, so a lone runnable mission may use every free slot over
@@ -3982,8 +3986,8 @@ Suggested paths:
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
-~/.local/state/kanban/missions/.admission/<owner>/<repo>/state.json
-~/.local/state/kanban/missions/.admission/<owner>/<repo>/lock
+~/.local/state/kanban/missions/.admission/<lowercase-owner>/<lowercase-repo>/state.json
+~/.local/state/kanban/missions/.admission/<lowercase-owner>/<lowercase-repo>/lock
 ~/.local/state/kanban/missions/.deleted/<token>/
 ~/Library/Application Support/kanban/mission-runner/config.json
 ~/Library/Application Support/kanban/mission-runner/dependants/<owner>.<repo>
@@ -4082,7 +4086,8 @@ Defaults:
   version this release does not know, is not read as empty: no slot is granted
   against it, because forgetting a reservation in flight would grant its slot
   twice. It sits beside the repository's mission store rather than in it,
-  because every name inside the store is a mission's.
+  because every name inside the store is a mission's, and its owner and name
+  are folded to lower case, so every spelling of one repository shares it.
 - The mission runner's runtime documents are the unattended supervisor's, not
   Kanban's: `tools/mission_runner_service.py` writes one status document and
   one incident directory per canonical repository, under the account's own

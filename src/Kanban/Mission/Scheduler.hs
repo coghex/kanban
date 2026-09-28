@@ -68,7 +68,8 @@ module Kanban.Mission.Scheduler
   )
 where
 
-import Control.Exception (IOException, bracket, finally, try)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (IOException, SomeException, bracket, finally, throwIO, try)
 import Control.Monad (filterM, forM)
 import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes)
@@ -545,10 +546,13 @@ sealMissionSessions repository store missions = do
 -- advance side by side; a loop that waited for each child before starting the
 -- next would serialize every mission's step behind every other's.
 --
--- Waited for in the order they were handed over, which is the rotation's, and
--- each mission's place in it is withdrawn the moment its child is done
--- (@settled@). A child waits for an agent slot only on missions ahead of it,
--- so every mission it can be waiting on is withdrawn before this reaches it.
+-- Each child is waited for on its own thread, and its mission's place in the
+-- rotation is withdrawn the moment that child exits (@settled@), whatever the
+-- children launched before it are still doing. A child that finished without
+-- wanting a slot must not go on standing in line in front of one that does
+-- while a slower child ahead of both is still running: that would leave a
+-- free slot idle for nobody. The accounts are still returned in the order the
+-- missions were handed over.
 --
 -- Every child is waited for, including the ones started after a launch that
 -- failed, because a pass that returned while a mission child it started was
@@ -557,8 +561,20 @@ sealMissionSessions repository store missions = do
 advanceMissions :: FilePath -> Options -> Repository -> FilePath -> [MissionId] -> (MissionId -> IO ()) -> IO [(MissionId, Either Text MissionChildResult)]
 advanceMissions executable options repository scratch admitted settled = do
   launched <- mapM launch (zip [0 :: Int ..] admitted)
-  mapM (\child -> await child <* settled (childMission child)) launched
+  waiting <- mapM awaitApart launched
+  mapM (\done -> takeMVar done >>= either throwIO pure) waiting
   where
+    -- The withdrawal runs whatever the wait came to, and an exception from
+    -- either is carried back to be raised here rather than lost on a thread.
+    awaitApart child = do
+      done <- newEmptyMVar
+      _ <-
+        forkIO $ do
+          result <- try @SomeException (await child)
+          withdrawn <- try @SomeException (settled (childMission child))
+          putMVar done (result <* withdrawn)
+      pure done
+
     childMission (LaunchedChild mission _ _ _ _ _) = mission
     childMission (LaunchRefused mission _) = mission
 

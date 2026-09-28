@@ -101,6 +101,48 @@ occupancySpec = describe "what the worker cache says is running" $ do
       _ <- writeAgentWorker slotRepository "action-from-the-board" Nothing (reviewTask 15) (Just WorkerRunning)
       missionAgentsNow `shouldReturn` 2
 
+  -- An issue action runs on its host, whose process outlives it, so it is
+  -- judged by what it ran itself: a canonical review's subprocess left
+  -- running beside a terminal state still holds the slot. And an action
+  -- whose state never landed may still be running on its host.
+  it "keeps an issue action's slot while a process it ran survives, or while it has no state" $
+    withSlotRoots $ \_ -> do
+      descriptor <- writeAgentWorker slotRepository "action-ended" (Just "invocation-ended") (reviewTask 21) Nothing
+      LazyByteString.writeFile
+        descriptor.workerDescriptorStatePath
+        ( encode
+            ( (runningWorkerState (WorkerId "action-ended") 999999 (Just (identity 60)))
+                { workerStateStatus = WorkerTerminal SolveCompleted,
+                  workerStateKnownProcesses = [identity 61]
+                }
+            )
+        )
+      _ <- writeAgentWorker slotRepository "action-stateless" (Just "invocation-stateless") (reviewTask 22) Nothing
+      let counted snapshot = do
+            observed <- observeMissionAgentsWith (pure snapshot) slotRepository
+            either (fail . Text.unpack) (pure . missionAgentsLive) observed
+      -- The host (60) being alive is not what keeps it; the review (61) is.
+      counted (Right [identity 60, identity 61]) `shouldReturn` 2
+      counted (Right [identity 60]) `shouldReturn` 1
+      counted (Left "ps would not run") `shouldReturn` 2
+
+  -- GitHub treats the two spellings as one repository, and a remote or --repo
+  -- may use either in different checkouts.
+  it "shares one ceiling between two spellings of one repository" $
+    withSlotRoots $ \store -> do
+      let shouting = Repository {repositoryRoot = "/tmp/a-third-checkout", repositoryOwner = "Coghex", repositoryName = "Kanban"}
+      reopened <- openMissionStore shouting
+      loud <- either (fail . Text.unpack) pure reopened
+      missionAdmissionStatePath loud `shouldBe` missionAdmissionStatePath store
+      _ <- writeAgentWorker shouting "shouted" (Just "invocation-shouted") solveTask (Just WorkerRunning)
+      missionAgentsNow `shouldReturn` 1
+      let brief = slotAdmission {missionAdmissionPolls = 2}
+      held <- claimMissionAgentSlot brief loud 1 (MissionId "loud") "loud-1"
+      held `shouldSatisfy` heldSaying "1 of 1"
+      _ <- claimMissionAgentSlot brief store 2 (MissionId "quiet") "quiet-1"
+      loudly <- claimMissionAgentSlot brief loud 2 (MissionId "loud") "loud-2"
+      loudly `shouldSatisfy` heldSaying "2 of 2"
+
   it "counts the same repository's workers from another checkout, and not another repository's" $
     withSlotRoots $ \_ -> do
       _ <- writeAgentWorker otherCheckout "elsewhere" (Just "invocation-elsewhere") solveTask (Just WorkerRunning)
@@ -198,6 +240,21 @@ claimSpec = describe "a claim for one slot" $ do
       state <- readMissionAdmissionState store
       fmap (.missionAdmissionRotation) state `shouldBe` Right (Map.fromList [("launched", 1)])
       fmap (.missionAdmissionReservations) state `shouldBe` Right []
+
+  -- A launch that failed to start leaves its specification acknowledged and
+  -- no state; it started no agent, so it is no admission either.
+  it "moves a mission back only for a launch that started its worker" $
+    withSlotRoots $ \store -> do
+      claimMissionAgentSlot slotAdmission store 2 (MissionId "stalled") "stalled-1" `shouldReturn` MissionAgentSlotGranted
+      stalled <- writeAgentWorker slotRepository "stalled" (Just "stalled-1") solveTask Nothing
+      writeFile stalled.workerDescriptorAckPath "handled\n"
+      settleMissionAgentSlot slotAdmission store "stalled-1" `shouldReturn` Right ()
+      claimMissionAgentSlot slotAdmission store 2 (MissionId "started") "started-1" `shouldReturn` MissionAgentSlotGranted
+      _ <- writeAgentWorker slotRepository "started" (Just "started-1") solveTask (Just WorkerRunning)
+      settleMissionAgentSlot slotAdmission store "started-1" `shouldReturn` Right ()
+      state <- readMissionAdmissionState store
+      fmap (Map.toList . (.missionAdmissionRotation)) state `shouldBe` Right [("started", 1)]
+      missionAgentsNow `shouldReturn` 1
 
   it "drops a gone holder's reservation, and counts its launch when its worker exists" $
     withSlotRoots $ \store -> do
@@ -557,7 +614,7 @@ quiet occupants =
     }
 
 occupant :: Text -> Bool -> MissionAgentOccupant
-occupant invocation live = MissionAgentOccupant (Text.unpack invocation <> ".spec.json") (Just invocation) live
+occupant invocation live = MissionAgentOccupant (Text.unpack invocation <> ".spec.json") (Just invocation) live True
 
 heldSaying :: Text -> MissionAgentSlotDecision -> Bool
 heldSaying fragment decision = case decision of

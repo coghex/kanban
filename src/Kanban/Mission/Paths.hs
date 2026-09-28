@@ -89,6 +89,7 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Config (asciiLowercase)
 import Kanban.Domain (Repository (..))
 import Kanban.Mission.Types
   ( MissionEnvelope (..),
@@ -162,6 +163,11 @@ data MissionStore = MissionStore
     -- identifier. Beside @.deleted@ at the missions root instead, and for the
     -- same reasons: no legacy root can be named this, since each joins owner
     -- to name with a hyphen, and @repositories@ is a different name.
+    --
+    -- Folded to lower case where the store itself is not. GitHub treats
+    -- @Coghex\/Kanban@ and @coghex\/kanban@ as one repository, and a remote
+    -- or @--repo@ may spell it either way in different checkouts; the ceiling
+    -- is one per repository, so both spellings share one lock and one record.
     missionStoreAdmissionDirectory :: FilePath,
     missionStoreRepository :: MissionRepository
   }
@@ -186,7 +192,7 @@ openMissionStore repository = case missionStoreKey repository of
             { missionStoreDirectory = root,
               missionStoreLegacyDirectory = missions </> legacyMissionStoreKey (missionRepository repository),
               missionStoreHoldingDirectory = missions </> deletedMissionsName,
-              missionStoreAdmissionDirectory = missions </> admissionName </> Text.unpack repository.repositoryOwner </> Text.unpack repository.repositoryName,
+              missionStoreAdmissionDirectory = missions </> admissionName </> Text.unpack (asciiLowercase repository.repositoryOwner) </> Text.unpack (asciiLowercase repository.repositoryName),
               missionStoreRepository = missionRepository repository
             }
     prepared <- ensureMissionDirectory root

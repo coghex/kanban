@@ -107,7 +107,7 @@ import Kanban.Worker.Types
     WorkerTask (..),
   )
 import System.Directory (XdgDirectory (XdgState), doesDirectoryExist, doesFileExist, listDirectory, renameFile)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (setFileMode)
 import System.Posix.IO (OpenFileFlags (..), OpenMode (ReadWrite), closeFd, defaultFileFlags, openFd)
@@ -129,7 +129,10 @@ data MissionAgentOccupant = MissionAgentOccupant
     -- apart from a mission's agent and is therefore counted as one.
     missionOccupantInvocation :: Maybe Text,
     -- | Whether it holds a slot now.
-    missionOccupantLive :: Bool
+    missionOccupantLive :: Bool,
+    -- | Whether its launch got as far as starting it: a state was written.
+    -- Only such a launch is an admission the rotation counts.
+    missionOccupantStarted :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -167,12 +170,16 @@ observeMissionAgentsWith takeFreshSnapshot repository = do
             snapshot <- takeFreshSnapshot
             writeIORef memo (Just snapshot)
             pure snapshot
-  directory <- workerDirectory repository
-  present <- try @IOException (doesDirectoryExist directory)
-  case present of
-    Left exception -> pure (Left (unlistable directory exception))
-    Right False -> pure (Right [])
-    Right True -> do
+  directories <- workerDirectoriesOf repository
+  case directories of
+    Left detail -> pure (Left detail)
+    Right found -> do
+      scanned <- mapM (scan takeSnapshot) found
+      pure (concat <$> sequence scanned)
+  where
+    isSpecification entry = safePathComponent entry && ".spec.json" `Text.isSuffixOf` Text.pack entry
+
+    scan takeSnapshot directory = do
       listed <- try @IOException (listDirectory directory)
       case listed of
         Left exception
@@ -181,11 +188,6 @@ observeMissionAgentsWith takeFreshSnapshot repository = do
         Right entries ->
           Right . catMaybes
             <$> mapM (occupantFrom takeSnapshot directory) [entry | entry <- entries, isSpecification entry]
-  where
-    isSpecification entry = safePathComponent entry && ".spec.json" `Text.isSuffixOf` Text.pack entry
-
-    unlistable directory exception =
-      "the worker cache " <> Text.pack directory <> " could not be read, so the agents live in it could not be counted: " <> Text.pack (show exception)
 
     occupantFrom takeSnapshot directory entry = do
       decoded <- decodeFile (directory </> entry) :: IO (Either Text WorkerSpec)
@@ -196,7 +198,7 @@ observeMissionAgentsWith takeFreshSnapshot repository = do
           stillThere <- doesFileExist (directory </> entry)
           pure $
             if stillThere
-              then Just (MissionAgentOccupant entry Nothing True)
+              then Just (MissionAgentOccupant entry Nothing True False)
               else Nothing
         Right spec
           | not (sameRepository spec.workerRepository) -> pure Nothing
@@ -207,11 +209,48 @@ observeMissionAgentsWith takeFreshSnapshot repository = do
               (Just invocation, _) -> do
                 descriptor <- descriptorForSpec spec
                 live <- workerOccupies takeSnapshot descriptor
-                pure (Just (MissionAgentOccupant entry (Just invocation) live))
+                -- A launch that started wrote a state: a solve or
+                -- pull-request launch waits for its supervisor's state before
+                -- it reports success, and an issue action's is written before
+                -- its specification. A launch that failed to start leaves its
+                -- specification acknowledged and no state beside it.
+                started <- doesFileExist descriptor.workerDescriptorStatePath
+                pure (Just (MissionAgentOccupant entry (Just invocation) live started))
 
     sameRepository other =
       asciiLowercase other.repositoryOwner == asciiLowercase repository.repositoryOwner
         && asciiLowercase other.repositoryName == asciiLowercase repository.repositoryName
+
+-- | Every worker directory that may hold this repository's workers.
+--
+-- The directory is named from the owner and name as a checkout spelled them,
+-- and a remote or @--repo@ may spell one repository @Coghex\/Kanban@ in one
+-- checkout and @coghex\/kanban@ in another. GitHub treats those as one
+-- repository and so does the ceiling, so every sibling whose name folds to
+-- this one's is read; the identity each specification records is what
+-- decides whether a worker in one of them is this repository's.
+workerDirectoriesOf :: Repository -> IO (Either Text [FilePath])
+workerDirectoriesOf repository = do
+  directory <- workerDirectory repository
+  let root = takeDirectory directory
+      wanted = foldName (takeFileName directory)
+  present <- try @IOException (doesDirectoryExist root)
+  case present of
+    Left exception -> pure (Left (unlistable root exception))
+    Right False -> pure (Right [])
+    Right True -> do
+      listed <- try @IOException (listDirectory root)
+      pure $ case listed of
+        Left exception
+          | isDoesNotExistError exception -> Right []
+          | otherwise -> Left (unlistable root exception)
+        Right entries -> Right [root </> entry | entry <- entries, safePathComponent entry, foldName entry == wanted]
+  where
+    foldName = Text.unpack . asciiLowercase . Text.pack
+
+unlistable :: FilePath -> IOException -> Text
+unlistable directory exception =
+  "the worker cache " <> Text.pack directory <> " could not be read, so the agents live in it could not be counted: " <> Text.pack (show exception)
 
 -- | Whether one mission worker still holds a slot.
 --
@@ -223,17 +262,30 @@ workerOccupies :: IO (Either Text [ProcessIdentity]) -> WorkerDescriptor -> IO B
 workerOccupies takeSnapshot descriptor = do
   stateRead <- readState descriptor.workerDescriptorStatePath
   case descriptor.workerDescriptorSpec.workerTask of
-    -- An issue action has no process of its own: the identities its state
-    -- records are its host's, which outlive the action by design, and a host
-    -- that died leaves its unfinished children to be re-homed and run by the
-    -- next one. So an action is live until it is terminal, whatever any
-    -- process says.
-    IssueActionWorkerTaskKind _ -> pure $ case stateRead of
-      StateAbsent -> False
-      StateUnreadable -> True
+    -- An issue action has no supervisor of its own: the worker identity its
+    -- state records is its host's, and a host that died leaves its unfinished
+    -- children to be re-homed and run by the next one. So an unfinished action
+    -- is live whatever its host's process says.
+    --
+    -- Without a state it is live too. Its launch writes the state before the
+    -- specification and does not stop on a state it failed to write, so a
+    -- host can adopt and run an action whose state is missing; a launch
+    -- that really failed removes the specification itself, and then there
+    -- is nothing here to count.
+    --
+    -- Terminal is not the end of it either. What the action ran on the host's
+    -- behalf — a canonical review's subprocess — is recorded as its own, and
+    -- a termination that could not be confirmed can leave one running beside
+    -- a terminal state. The host's identity is left out: it outlives every
+    -- action by design.
+    IssueActionWorkerTaskKind _ -> case stateRead of
+      StateAbsent -> pure True
+      StateUnreadable -> pure True
       StateRead state -> case state.workerStateStatus of
-        WorkerTerminal _ -> False
-        _ -> True
+        WorkerTerminal _
+          | null (ownedProcesses state) -> pure False
+          | otherwise -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot (ownedProcesses state)
+        _ -> pure True
     _ -> case stateRead of
       StateUnreadable -> pure True
       StateRead state -> case state.workerStateStatus of
@@ -251,6 +303,8 @@ workerOccupies takeSnapshot descriptor = do
         acknowledged <- doesFileExist descriptor.workerDescriptorAckPath
         if acknowledged then pure False else launchStillLive
   where
+    ownedProcesses state = maybe [] (: []) state.workerStateProviderIdentity <> state.workerStateKnownProcesses
+
     identities state =
       maybe [] (: []) state.workerStateWorkerIdentity
         <> maybe [] (: []) state.workerStateProviderIdentity
@@ -283,6 +337,12 @@ workerOccupies takeSnapshot descriptor = do
           | otherwise -> case owner.workerLeaseSupervisorIdentity of
               Nothing -> pure True
               Just identity -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot [identity]
+
+-- | The invocations whose launch started a worker, which is what the rotation
+-- counts as an admission.
+startedInvocations :: [MissionAgentOccupant] -> Set.Set Text
+startedInvocations occupants =
+  Set.fromList [invocation | MissionAgentOccupant {missionOccupantInvocation = Just invocation, missionOccupantStarted = True} <- occupants]
 
 -- | How many slots the occupants hold, before any reservation.
 missionAgentsLive :: [MissionAgentOccupant] -> Int
@@ -579,8 +639,7 @@ settleMissionAgentSlot seams store invocation =
         split reservation (matched, others)
           | reservation.missionReservationInvocation == invocation = (reservation : matched, others)
           | otherwise = (matched, reservation : others)
-        visible = Set.fromList (mapMaybe (.missionOccupantInvocation) occupants)
-        launched = [reservation.missionReservationMission | reservation <- settled, Set.member invocation visible]
+        launched = [reservation.missionReservationMission | reservation <- settled, Set.member invocation (startedInvocations occupants)]
     pure
       ( if null settled then Nothing else Just (foldr admitted state {missionAdmissionReservations = kept} launched),
         ()
@@ -665,9 +724,8 @@ prune :: MissionAdmissionSeams -> [MissionAgentOccupant] -> MissionAdmissionStat
 prune seams occupants state = do
   reservations <- mapM (\reservation -> (,) reservation <$> seams.missionAdmissionHolderAlive reservation.missionReservationHolder) state.missionAdmissionReservations
   entrants <- mapM (\entrant -> (,) entrant <$> seams.missionAdmissionHolderAlive entrant.missionEntrantHolder) state.missionAdmissionEntrants
-  let visible = Set.fromList (mapMaybe (.missionOccupantInvocation) occupants)
-      gone = [reservation | (reservation, False) <- reservations]
-      launched = [reservation.missionReservationMission | reservation <- gone, Set.member reservation.missionReservationInvocation visible]
+  let gone = [reservation | (reservation, False) <- reservations]
+      launched = [reservation.missionReservationMission | reservation <- gone, Set.member reservation.missionReservationInvocation (startedInvocations occupants)]
       pruned =
         foldr
           admitted
