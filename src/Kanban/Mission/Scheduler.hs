@@ -2,11 +2,22 @@
 
 -- | One repository-wide scheduler pass: @kanban --mission-scheduler@.
 --
--- A pass looks at every mission this repository's store holds, admits at most
--- two runnable ones, advances each through its own @kanban --mission@ child,
--- waits for every child it launched, observes whatever attention is
--- outstanding anywhere in the repository, and writes exactly one JSON report
--- before exiting. It is not a daemon: repeating passes and deciding how long
+-- A pass looks at every mission this repository's store holds, admits every
+-- runnable one, advances each by at most one transition through its own
+-- @kanban --mission@ child, waits for every child it launched, observes
+-- whatever attention is outstanding anywhere in the repository, and writes
+-- exactly one JSON report before exiting.
+--
+-- What a pass does not limit is how many missions it advances; what the
+-- repository limits is how many agents missions have running
+-- ("Kanban.Mission.Admission", issue #746). A child whose one transition
+-- would start an agent asks for a slot, and a child whose transition only
+-- watches, settles, or records never does — so a mission watching its live
+-- worker is never starved by missions waiting to start one. The pass enters
+-- every mission it is about to advance in the rotation first, and launches
+-- and waits for the children in the rotation's order, which is what makes the
+-- rotation, rather than which child reaches the lock first, decide who gets a
+-- free slot. It is not a daemon: repeating passes and deciding how long
 -- to wait between them belong to @tools\/mission_runner_service.py@, which
 -- supervises this process rather than living inside it.
 --
@@ -45,7 +56,6 @@
 -- module's public contract promises.
 module Kanban.Mission.Scheduler
   ( MissionSchedulerSeams (..),
-    missionAdmissionCeiling,
     missionIsRunnable,
     runMissionSchedulerPass,
     advanceMissions,
@@ -58,7 +68,7 @@ module Kanban.Mission.Scheduler
   )
 where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, finally, try)
 import Control.Monad (filterM, forM)
 import Data.List (nub, sortOn)
 import Data.Maybe (catMaybes)
@@ -74,12 +84,20 @@ import Kanban.Config
     RawConfig (..),
     ResolvedConfig (..),
     loadRawConfig,
+    missionAgentCeilingValue,
     missionNotificationRefusal,
     repositoryIdentity,
     resolveConfig,
     resolveConfigPathOption,
   )
 import Kanban.Domain (Repository (..))
+import Kanban.Mission.Admission
+  ( expectMissionAgents,
+    liveMissionAdmissionSeams,
+    missionAgentsLive,
+    observeMissionAgents,
+    withdrawExpectedMission,
+  )
 import Kanban.Mission.Lease (missionLeaseHeld)
 import Kanban.Mission.Notify
   ( MissionNotificationAttempt (..),
@@ -90,7 +108,8 @@ import Kanban.Mission.Notify
     runMissionNotificationCommand,
   )
 import Kanban.Mission.Pass
-  ( MissionAttentionRecord (..),
+  ( MissionAgentCount (..),
+    MissionAttentionRecord (..),
     MissionChildOutcome (..),
     MissionChildRefusal (..),
     MissionChildResult (..),
@@ -148,16 +167,6 @@ import System.Process
   )
 import qualified Data.ByteString as ByteString
 
--- | How many missions one pass may advance.
---
--- A compiled two, with no configuration surface, exactly as requirement 3
--- asks. It is a starting point rather than a considered capacity: fair
--- rotation, a configurable ceiling, and priority for a direct operator command
--- are RUN-5's, and a setting shipped before any of them would be a setting
--- whose meaning changes when they arrive.
-missionAdmissionCeiling :: Int
-missionAdmissionCeiling = 2
-
 -- | Whether this mission is one a pass may advance.
 --
 -- Four exclusions and no more. A terminal mission has stopped for good; a
@@ -193,7 +202,19 @@ data MissionSchedulerSeams = MissionSchedulerSeams
     -- itself, in the order they were handed over. A pass does not return until
     -- this does, so \"wait for every child launched\" is this function's
     -- promise rather than a rule spread across callers.
-    missionSchedulerAdvance :: [MissionId] -> IO [(MissionId, Either Text MissionChildResult)],
+    --
+    -- The action it is handed is to be run for each mission as soon as that
+    -- mission's child is done, and before the next one is waited for: it
+    -- withdraws the mission's place in the rotation, which a mission behind
+    -- it may be waiting on.
+    missionSchedulerAdvance :: [MissionId] -> (MissionId -> IO ()) -> IO [(MissionId, Either Text MissionChildResult)],
+    -- | Enters the missions about to be advanced in the agent rotation, and
+    -- returns them in the order it serves them ("Kanban.Mission.Admission").
+    missionSchedulerExpect :: [MissionId] -> IO (Either Text [MissionId]),
+    -- | Withdraws what 'missionSchedulerExpect' entered for one mission.
+    missionSchedulerWithdraw :: MissionId -> IO (),
+    -- | How many mission-dispatched agents are live in this repository.
+    missionSchedulerAgents :: IO (Either Text Int),
     -- | Runs the configured notification command. Reached only for an
     -- attention identity whose suppression record this pass just created.
     missionSchedulerNotify :: [Text] -> IO MissionNotificationAttempt,
@@ -213,14 +234,37 @@ runMissionSchedulerPass seams missions store repository = do
   case missionNotificationRefusal notifications of
     -- Ahead of everything, and a refusal rather than a degraded pass: an
     -- operator who asked to be told about waiting missions and cannot be is
-    -- owed that as an answer, not a pass that quietly advanced two missions
-    -- and said nothing about the third that is waiting for them.
+    -- owed that as an answer, not a pass that quietly advanced its missions
+    -- and said nothing about the one that is waiting for them.
     Just message -> refuse startedAt message
-    Nothing -> do
+    -- Refused for the same reason, and by name: a ceiling that is not a
+    -- positive whole number is one no child could start an agent under, and
+    -- a pass that advanced everything else would leave every mission that
+    -- needs an agent looking merely held back.
+    Nothing -> case missionAgentCeilingValue missions of
+      Left message -> refuse startedAt message
+      Right agentCeiling -> pass startedAt agentCeiling
+  where
+    notifications = missions.missionsNotifications
+    identity = repositoryIdentity repository.repositoryOwner repository.repositoryName
+
+    pass startedAt agentCeiling = do
       (inventory, unreadable) <- readInventory store
       candidates <- admissible seams inventory
-      let admitted = take missionAdmissionCeiling candidates
-      advanced <- if null admitted then pure [] else seams.missionSchedulerAdvance admitted
+      -- Every runnable mission nothing else is advancing, in the rotation's
+      -- order. A rotation record nobody can read is not a reason to advance
+      -- nothing — a mission watching its live worker needs no slot — but it
+      -- is state nobody can account for, and it fails the pass.
+      entered <- if null candidates then pure (Right []) else seams.missionSchedulerExpect candidates
+      let (admitted, unordered) = case entered of
+            Right ordered -> (ordered, [])
+            Left detail -> (candidates, ["the agent rotation could not be entered, so missions were advanced in identifier order: " <> detail])
+      advanced <-
+        if null admitted
+          then pure []
+          -- Withdrawn again once every child is done, whatever became of
+          -- them, so a place this pass entered never outlives it.
+          else seams.missionSchedulerAdvance admitted seams.missionSchedulerWithdraw `finally` mapM_ seams.missionSchedulerWithdraw admitted
       dispositions <- forM advanced $ \(mission, outcome) -> do
         -- Re-read after the child, never before: the child is what moved the
         -- mission, and the snapshot it left is the only account of where it
@@ -238,15 +282,20 @@ runMissionSchedulerPass seams missions store repository = do
       -- and a supervisor that stopped the service over it would be stopping
       -- every mission's progress for the sake of one mission's history.
       unsealed <- seams.missionSchedulerSeal outstanding
+      -- Counted after the children, so the count includes whatever they just
+      -- started (requirement 9).
+      agents <- seams.missionSchedulerAgents
       finishedAt <- seams.missionSchedulerNow
       let attention = catMaybes (map fst observed)
-          indeterminate = nub (unreadable <> unreadableAfter <> catMaybes (map snd observed))
+          uncounted = either (\detail -> ["the live agents could not be counted: " <> detail]) (const []) agents
+          indeterminate = nub (unreadable <> unordered <> unreadableAfter <> catMaybes (map snd observed) <> uncounted)
           failures = filter (missionDispositionIsFailure . (.missionDispositionValue)) dispositions
           -- Either kind of trouble fails the pass. A record nobody can read is
           -- not a quieter problem than a child that broke: both leave a
           -- mission whose state this pass cannot account for, and a supervisor
           -- has to hear about it rather than see a healthy idle repository.
           failed = not (null failures) || not (null indeterminate)
+          counted = either (const Nothing) (\live -> Just (MissionAgentCount live agentCeiling)) agents
       pure
         MissionPassReport
           { missionPassRepository = identity,
@@ -255,11 +304,9 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassTermination = if failed then MissionPassFailed else MissionPassCompleted,
             missionPassAdmitted = dispositions,
             missionPassAttention = attention,
-            missionPassDetail = summary (length inventory) dispositions attention failures indeterminate unsealed
+            missionPassAgents = counted,
+            missionPassDetail = summary (length inventory) dispositions attention failures counted indeterminate unsealed
           }
-  where
-    notifications = missions.missionsNotifications
-    identity = repositoryIdentity repository.repositoryOwner repository.repositoryName
 
     refuse startedAt message = do
       finishedAt <- seams.missionSchedulerNow
@@ -271,15 +318,24 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassTermination = MissionPassRefused,
             missionPassAdmitted = [],
             missionPassAttention = [],
+            missionPassAgents = Nothing,
             missionPassDetail = "this pass advanced nothing: " <> message
           }
 
-    summary total dispositions attention failures indeterminate unsealed =
+    summary total dispositions attention failures counted indeterminate unsealed =
       Text.intercalate "; " $
         [ Text.pack (show (length dispositions)) <> " of " <> Text.pack (show total) <> " missions admitted",
           Text.pack (show (length attention)) <> " waiting on a person",
-          Text.pack (show (length failures)) <> " failed"
+          Text.pack (show (length failures)) <> " failed",
+          Text.pack (show (length [() | record <- dispositions, record.missionDispositionValue == MissionDispositionDeferred]))
+            <> " held back by the agent ceiling"
         ]
+          <> [ Text.pack (show count.missionAgentCountLive)
+                 <> " of "
+                 <> Text.pack (show count.missionAgentCountCeiling)
+                 <> " agent slots in use"
+             | Just count <- [counted]
+             ]
           <> indeterminate
           <> unsealed
 
@@ -295,9 +351,8 @@ runMissionSchedulerPass seams missions store repository = do
 -- mission that may well be mid-flight. So they are collected and reported, and
 -- the pass they appear in is a failed one.
 --
--- Sorted by identifier so two passes over one unchanged store admit the same
--- two missions — fair rotation is RUN-5's, and until it exists a stable order
--- is better than an arbitrary one.
+-- Sorted by identifier, which is the order the rotation breaks a tie in and
+-- the order a pass falls back to when the rotation cannot be read.
 readInventory :: MissionStore -> IO ([(MissionId, MissionSnapshot)], [Text])
 readInventory store = do
   -- The strict enumeration, because the ordinary one is built for a caller
@@ -320,10 +375,10 @@ readInventory store = do
 
 -- | The runnable missions nothing else is already advancing, in order.
 --
--- The lease read comes after the runnable test and before the ceiling, which
--- is what makes a skipped mission cost no admission slot: a repository with
--- three runnable missions, one of them already being advanced by a dashboard,
--- admits the other two rather than one of them and a refusal.
+-- The lease read comes after the runnable test, so a mission a dashboard is
+-- already advancing is neither launched nor entered in the rotation: it
+-- could not use a slot this pass, and a place in line it cannot take would
+-- only hold back the missions behind it.
 admissible :: MissionSchedulerSeams -> [(MissionId, MissionSnapshot)] -> IO [MissionId]
 admissible seams inventory =
   filterM free [mission | (mission, snapshot) <- inventory, missionIsRunnable snapshot]
@@ -344,6 +399,8 @@ disposition mission outcome settled = case outcome of
   Left detail -> record MissionDispositionFailed detail
   Right result -> case result.missionChildResultOutcome of
     MissionChildFailed -> record MissionDispositionFailed result.missionChildResultDetail
+    MissionChildAwaiting -> record MissionDispositionAwaiting result.missionChildResultDetail
+    MissionChildDeferred -> record MissionDispositionDeferred result.missionChildResultDetail
     MissionChildRefused -> case result.missionChildResultRefusal of
       Just MissionChildAlreadyAdvancing -> record MissionDispositionLeaseRefused result.missionChildResultDetail
       _ -> record MissionDispositionRefused result.missionChildResultDetail
@@ -458,9 +515,14 @@ liveMissionSchedulerSeams options repository store scratch = do
       { missionSchedulerNow = getCurrentTime,
         missionSchedulerLeaseHeld = missionLeaseHeld store,
         missionSchedulerAdvance = advanceMissions executable options repository scratch,
+        missionSchedulerExpect = expectMissionAgents admission store,
+        missionSchedulerWithdraw = \mission -> () <$ withdrawExpectedMission admission store mission,
+        missionSchedulerAgents = fmap missionAgentsLive <$> observeMissionAgents repository,
         missionSchedulerNotify = runMissionNotificationCommand missionNotificationTimeoutMicros,
         missionSchedulerSeal = sealMissionSessions repository store
       }
+  where
+    admission = liveMissionAdmissionSeams repository
 
 -- | Seals every finished session of every mission handed over.
 --
@@ -479,19 +541,27 @@ sealMissionSessions repository store missions = do
 
 -- | Launches one child per admitted mission, then waits for all of them.
 --
--- Launched first and waited for afterwards, so two admitted missions really do
+-- Launched first and waited for afterwards, so admitted missions really do
 -- advance side by side; a loop that waited for each child before starting the
--- next would make the ceiling of two a ceiling of one with extra steps.
+-- next would serialize every mission's step behind every other's.
+--
+-- Waited for in the order they were handed over, which is the rotation's, and
+-- each mission's place in it is withdrawn the moment its child is done
+-- (@settled@). A child waits for an agent slot only on missions ahead of it,
+-- so every mission it can be waiting on is withdrawn before this reaches it.
 --
 -- Every child is waited for, including the ones started after a launch that
 -- failed, because a pass that returned while a mission child it started was
 -- still running would leave that child outside the supervision its wrapper
 -- provides (requirement 11).
-advanceMissions :: FilePath -> Options -> Repository -> FilePath -> [MissionId] -> IO [(MissionId, Either Text MissionChildResult)]
-advanceMissions executable options repository scratch admitted = do
+advanceMissions :: FilePath -> Options -> Repository -> FilePath -> [MissionId] -> (MissionId -> IO ()) -> IO [(MissionId, Either Text MissionChildResult)]
+advanceMissions executable options repository scratch admitted settled = do
   launched <- mapM launch (zip [0 :: Int ..] admitted)
-  mapM await launched
+  mapM (\child -> await child <* settled (childMission child)) launched
   where
+    childMission (LaunchedChild mission _ _ _ _ _) = mission
+    childMission (LaunchRefused mission _) = mission
+
     identity = repositoryIdentity repository.repositoryOwner repository.repositoryName
 
     launch (index, mission) = do
@@ -694,12 +764,15 @@ readChildResult identity invocation mission resultPath exitCode = do
       ExitSuccess -> "exited successfully"
       ExitFailure code -> "exited with status " <> Text.pack (show code)
 
-    -- @kanban --mission@ exits zero for a run it completed and non-zero for
-    -- everything else, refusals included, and that is the behaviour this
-    -- extension preserves rather than changes.
+    -- @kanban --mission@ exits zero for a step it completed — a wait
+    -- included — and non-zero for everything else, refusals included.
     agreesWithExit result = case (result.missionChildResultOutcome, exitCode) of
       (MissionChildAdvanced, ExitSuccess) -> True
+      (MissionChildAwaiting, ExitSuccess) -> True
+      (MissionChildDeferred, ExitSuccess) -> True
       (MissionChildAdvanced, ExitFailure _) -> False
+      (MissionChildAwaiting, ExitFailure _) -> False
+      (MissionChildDeferred, ExitFailure _) -> False
       (_, ExitSuccess) -> False
       (_, ExitFailure _) -> True
 

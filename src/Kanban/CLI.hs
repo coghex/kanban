@@ -60,8 +60,10 @@ data Options = Options
     -- | @--mission-result FILE@: where a mission run writes the machine-
     -- readable account of what it did. Internal, and the scheduler is its only
     -- caller: a child's disposition has to be derived from a typed document
-    -- rather than from the terminal report, and an invocation that names no
-    -- file writes none and behaves exactly as it always has.
+    -- rather than from the terminal report. Naming a file also makes the run
+    -- a single step — one controller iteration — because a pass advances each
+    -- mission by at most one transition (issue #746); an invocation that names
+    -- no file writes none and behaves exactly as it always has.
     optionMissionResult :: Maybe FilePath,
     -- | @--mission-invocation ID@: the launch a mission result is the account
     -- of. Internal, and written into the result document so the scheduler can

@@ -52,6 +52,7 @@ module Kanban.Mission.Pass
 
     -- * The pass report
     MissionPassReport (..),
+    MissionAgentCount (..),
     MissionDispositionRecord (..),
     MissionDisposition (..),
     missionDispositions,
@@ -121,14 +122,23 @@ data MissionChildResult = MissionChildResult
   }
   deriving stock (Eq, Show)
 
--- | The three things a mission child can have done.
+-- | The five things a mission child can have done.
 --
--- \"Advanced\" covers every run the controller actually performed, including
+-- \"Advanced\" covers every step the controller actually performed, including
 -- one that ended with the mission waiting for somebody: the mission moved, and
 -- where it moved to is a question the durable snapshot answers rather than
 -- this document.
+--
+-- The two waits moved nothing (issue #746). \"Awaiting\" is a mission whose
+-- only eligible work was watching its own live worker; \"deferred\" is one
+-- whose next transition would have started an agent while the repository's
+-- agent ceiling had no slot for it. Both exit zero, since neither is a
+-- failure, and both are told apart from an advance so a scheduler does not
+-- mistake waiting for progress.
 data MissionChildOutcome
   = MissionChildAdvanced
+  | MissionChildAwaiting
+  | MissionChildDeferred
   | MissionChildRefused
   | MissionChildFailed
   deriving stock (Bounded, Enum, Eq, Ord, Show)
@@ -139,6 +149,8 @@ missionChildOutcomes = [minBound .. maxBound]
 missionChildOutcomeTag :: MissionChildOutcome -> Text
 missionChildOutcomeTag outcome = case outcome of
   MissionChildAdvanced -> "advanced"
+  MissionChildAwaiting -> "awaiting"
+  MissionChildDeferred -> "deferred"
   MissionChildRefused -> "refused"
   MissionChildFailed -> "failed"
 
@@ -175,7 +187,7 @@ missionChildResultSchema :: Text
 missionChildResultSchema = "kanban-mission-child-result"
 
 missionChildResultVersion :: Int
-missionChildResultVersion = 1
+missionChildResultVersion = 2
 
 encodeMissionChildResult :: MissionChildResult -> LazyByteString.ByteString
 encodeMissionChildResult result =
@@ -254,7 +266,7 @@ decodeMissionChildResult bytes = case eitherDecodeStrict' bytes of
 
 -- | What one admitted mission's child amounted to.
 --
--- Six dispositions rather than three, because a supervisor reading them has to
+-- Eight dispositions rather than three, because a supervisor reading them has to
 -- be able to tell a pass that is making progress from one that is quietly
 -- doing nothing, and a mission that stopped for a person from one that broke.
 data MissionDisposition
@@ -264,6 +276,15 @@ data MissionDisposition
     MissionDispositionSettled
   | -- | The child ran and the mission is now waiting or paused.
     MissionDispositionBlocked
+  | -- | The child ran and moved nothing: the mission's only eligible work was
+    -- watching its own live worker. Neither progress nor a failure.
+    MissionDispositionAwaiting
+  | -- | The child ran and was held back by the repository's agent ceiling:
+    -- its next transition would have started an agent and no slot was free
+    -- for it (issue #746). The detail says why. Neither progress nor a
+    -- failure, and never attention: the mission stays runnable and the next
+    -- pass asks again.
+    MissionDispositionDeferred
   | -- | Another process held the advancement lease. Ordinary contention
     -- (requirement 6), and never a failed pass.
     MissionDispositionLeaseRefused
@@ -293,6 +314,8 @@ missionDispositionTag disposition = case disposition of
   MissionDispositionAdvanced -> "advanced"
   MissionDispositionSettled -> "settled"
   MissionDispositionBlocked -> "blocked"
+  MissionDispositionAwaiting -> "awaiting"
+  MissionDispositionDeferred -> "deferred"
   MissionDispositionLeaseRefused -> "lease_refused"
   MissionDispositionRefused -> "refused"
   MissionDispositionFailed -> "failed"
@@ -307,7 +330,7 @@ missionDispositionTag disposition = case disposition of
 -- opposite: a record that cannot be read, cannot be attributed, or cannot be
 -- addressed, which is mission state nobody can account for.
 --
--- The three ordinary outcomes are the pass working.
+-- The five ordinary outcomes are the pass working.
 missionDispositionIsFailure :: MissionDisposition -> Bool
 missionDispositionIsFailure disposition = case disposition of
   MissionDispositionFailed -> True
@@ -315,6 +338,8 @@ missionDispositionIsFailure disposition = case disposition of
   MissionDispositionAdvanced -> False
   MissionDispositionSettled -> False
   MissionDispositionBlocked -> False
+  MissionDispositionAwaiting -> False
+  MissionDispositionDeferred -> False
   MissionDispositionLeaseRefused -> False
 
 data MissionDispositionRecord = MissionDispositionRecord
@@ -423,7 +448,7 @@ missionPassSchema :: Text
 missionPassSchema = "kanban-mission-scheduler-pass"
 
 missionPassVersion :: Int
-missionPassVersion = 1
+missionPassVersion = 2
 
 -- | Everything one pass did, as the one document it writes to stdout.
 data MissionPassReport = MissionPassReport
@@ -433,7 +458,20 @@ data MissionPassReport = MissionPassReport
     missionPassTermination :: MissionPassTermination,
     missionPassAdmitted :: [MissionDispositionRecord],
     missionPassAttention :: [MissionAttentionRecord],
+    -- | The mission-dispatched agents this pass saw live once its children
+    -- were done, against the ceiling it applied (issue #746, requirement 9).
+    -- 'Nothing' for a pass that counted none: one refused or ended before it
+    -- began, or one whose worker cache could not be read.
+    missionPassAgents :: Maybe MissionAgentCount,
     missionPassDetail :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | How many of the repository's agent slots were in use, and how many there
+-- are.
+data MissionAgentCount = MissionAgentCount
+  { missionAgentCountLive :: Int,
+    missionAgentCountCeiling :: Int
   }
   deriving stock (Eq, Show)
 
@@ -474,6 +512,7 @@ missionPassSetupFailure repository now detail =
       missionPassTermination = MissionPassFailed,
       missionPassAdmitted = [],
       missionPassAttention = [],
+      missionPassAgents = Nothing,
       missionPassDetail = detail
     }
 
@@ -490,11 +529,18 @@ encodeMissionPassReport report =
           "exit_code" .= missionPassExitCode report.missionPassTermination,
           "admitted" .= map admitted report.missionPassAdmitted,
           "attention" .= map attention report.missionPassAttention,
+          "agents" .= maybe Null agents report.missionPassAgents,
           "detail" .= report.missionPassDetail
         ]
     )
   where
     stamp = Text.pack . iso8601Show
+
+    agents count =
+      object
+        [ "live" .= count.missionAgentCountLive,
+          "ceiling" .= count.missionAgentCountCeiling
+        ]
 
     admitted record =
       object

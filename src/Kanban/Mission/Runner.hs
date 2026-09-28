@@ -4,7 +4,9 @@
 -- requirements 2, 3, and 10).
 --
 -- One named mission, advanced until it is terminal, paused, or blocked, and
--- then the process exits. It selects nothing: the identifier is an input, a
+-- then the process exits — or, for a scheduler's child, advanced by exactly
+-- one step ('runMissionStepMode'), because a pass advances every runnable
+-- mission by at most one transition and waits on none of them. It selects nothing: the identifier is an input, a
 -- missing, malformed, unknown, or repository-mismatched one is refused by
 -- name, and there is no path here that substitutes a different mission for the
 -- one that was asked for. Choosing among a repository's missions is SAG-9's
@@ -38,6 +40,11 @@ module Kanban.Mission.Runner
     missionRunReportLines,
     missionRunSucceeded,
     runMissionMode,
+    MissionStepReport (..),
+    missionStepReportLines,
+    missionStepSucceeded,
+    runMissionStepMode,
+    runMissionStepWith,
     missionChildResultOf,
     writeMissionChildResult,
     MissionConsole (..),
@@ -91,9 +98,10 @@ import Kanban.Action
     decodeWorkflowActionKind,
     dispatchAction,
     settledWorkerFailure,
+    workflowActionStartsAgent,
   )
 import Kanban.CLI (Options (..))
-import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..))
+import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), missionAgentCeilingValue)
 import Kanban.Domain
   ( ItemId (..),
     Issue (..),
@@ -113,6 +121,7 @@ import Kanban.Mission.Controller
     MissionDriver (..),
     MissionInventory (..),
     MissionIteration (..),
+    MissionSlotClaim (..),
     MissionStartRefusal (..),
     MissionTransition,
     missionControllerIteration,
@@ -121,6 +130,12 @@ import Kanban.Mission.Controller
     missionTransitionMessage,
     startMissionController,
     stopMissionController,
+  )
+import Kanban.Mission.Admission
+  ( MissionAgentSlotDecision (..),
+    claimMissionAgentSlot,
+    liveMissionAdmissionSeams,
+    settleMissionAgentSlot,
   )
 import Kanban.Mission.Pass
   ( MissionChildOutcome (..),
@@ -278,8 +293,84 @@ runMissionMode options config repository identifier
             (MissionId (Text.strip identifier))
             (liveMissionDriver options config recordLock repository)
 
--- | The machine-readable account one run leaves for a scheduler that started
--- it, from what that run actually did.
+-- | What one scheduled step of a mission did: the single iteration a
+-- scheduler's @kanban --mission@ child makes (issue #746, requirement 6).
+data MissionStepReport = MissionStepReport
+  { missionStepMission :: MissionId,
+    missionStepIteration :: MissionIteration
+  }
+  deriving stock (Eq, Show)
+
+-- | Whether a step is one its process may exit zero over.
+--
+-- A wait is not a failure: a mission watching its own live worker, or holding
+-- for an agent slot, is doing exactly what it should, and the scheduler asks
+-- again on its next pass. What fails is what fails a run — a controller that
+-- could not establish what it needed, and a halt on an outcome nobody can
+-- establish.
+missionStepSucceeded :: MissionStepReport -> Bool
+missionStepSucceeded report = case report.missionStepIteration of
+  MissionAdvanced _ -> True
+  MissionAwaiting _ -> True
+  MissionHeldForSlot _ -> True
+  MissionStopped halt -> not (missionHaltIsIndeterminate halt)
+  MissionControllerFailed _ -> False
+
+-- | The step, rendered for a terminal.
+missionStepReportLines :: MissionStepReport -> [Text]
+missionStepReportLines report =
+  [ "mission " <> report.missionStepMission.unMissionId,
+    "  " <> missionStepDetail report.missionStepIteration
+  ]
+
+missionStepDetail :: MissionIteration -> Text
+missionStepDetail iteration = case iteration of
+  MissionAdvanced transition -> missionTransitionMessage transition
+  MissionAwaiting detail -> "waiting: " <> detail
+  MissionHeldForSlot detail -> "held back: " <> detail
+  MissionStopped halt -> missionHaltMessage halt
+  MissionControllerFailed detail -> "stopped: " <> detail
+
+-- | @kanban --mission <id> --mission-result FILE@: one step, for a scheduler.
+--
+-- One iteration rather than a run to a halt, because a pass advances every
+-- runnable mission by at most one transition and must not wait on any of
+-- them: a child that stayed to watch the agent it had just launched would
+-- hold its whole pass — and every other mission's next transition — for as
+-- long as that agent ran (requirement 6). The worker it launched is detached
+-- and outlives it; the next pass observes it.
+--
+-- There is no console. A scheduler's child has no operator, and a step that
+-- stops for one leaves the mission blocked for the pass to report.
+runMissionStepMode :: Options -> ResolvedConfig -> Repository -> Text -> IO (Either MissionStartRefusal MissionStepReport)
+runMissionStepMode options config repository identifier
+  | Text.null (Text.strip identifier) =
+      pure (Left (MissionIdentifierUnusable identifier "--mission takes the identifier of exactly one mission"))
+  | otherwise = do
+      opened <- openMissionStore repository
+      recordLock <- newGhRecordLock
+      case opened of
+        Left detail -> pure (Left (MissionStoreUnusable detail))
+        Right store ->
+          runMissionStepWith
+            store
+            repository
+            (MissionId (Text.strip identifier))
+            (liveMissionDriver options config recordLock repository)
+
+-- | One step, with the driver injected.
+runMissionStepWith :: MissionStore -> Repository -> MissionId -> (MissionStore -> MissionId -> IO MissionDriver) -> IO (Either MissionStartRefusal MissionStepReport)
+runMissionStepWith store repository mission buildDriver = do
+  started <- startMissionController store repository mission buildDriver
+  case started of
+    Left refusal -> pure (Left refusal)
+    Right controller -> do
+      iteration <- missionControllerIteration controller
+      stopMissionController controller
+      pure (Right (MissionStepReport mission iteration))
+
+-- | The machine-readable account one step leaves for the scheduler that
+-- started it, from what that step actually did.
 --
 -- The whole reason this document exists is the first case below. A typed
 -- startup refusal and a run that broke are different things, and
@@ -287,14 +378,20 @@ runMissionMode options config repository identifier
 -- for the distinction; a scheduler does, because losing a race for an
 -- advancement lease is ordinary contention and failing is not (requirement 6).
 --
--- A run that /reached/ a halt is reported as having advanced the mission,
+-- A step that /reached/ a halt is reported as having advanced the mission,
 -- including one that stopped for an operator: the mission moved, and saying
 -- where it moved to is the durable snapshot's job rather than this document's.
 -- The one halt that is not is an indeterminate one — a step whose effect
--- nobody can establish — which 'missionRunSucceeded' already refuses to call a
+-- nobody can establish — which 'missionStepSucceeded' refuses to call a
 -- success and which this refuses to call an advance, for the same reason
 -- (requirement 18).
-missionChildResultOf :: Text -> Text -> MissionId -> Either MissionStartRefusal MissionRunReport -> MissionChildResult
+--
+-- The two waits are reported as themselves (issue #746). A mission whose only
+-- eligible work was watching its live worker moved nothing, and one held back
+-- by the agent ceiling moved nothing either; a scheduler that read either as
+-- an advance would start its next pass at once and poll for as long as the
+-- wait lasted.
+missionChildResultOf :: Text -> Text -> MissionId -> Either MissionStartRefusal MissionStepReport -> MissionChildResult
 missionChildResultOf invocation repository mission outcome = case outcome of
   Left refusal ->
     MissionChildResult
@@ -310,14 +407,17 @@ missionChildResultOf invocation repository mission outcome = case outcome of
       { missionChildResultInvocation = invocation,
         missionChildResultRepository = repository,
         missionChildResultMission = mission,
-        missionChildResultOutcome = if missionRunSucceeded report then MissionChildAdvanced else MissionChildFailed,
+        missionChildResultOutcome = stepOutcome report,
         missionChildResultRefusal = Nothing,
-        missionChildResultDetail = conclusion report
+        missionChildResultDetail = missionStepDetail report.missionStepIteration
       }
   where
-    conclusion report = case report.missionRunConclusion of
-      Right halt -> missionHaltMessage halt
-      Left detail -> "stopped: " <> detail
+    stepOutcome report = case report.missionStepIteration of
+      MissionAwaiting _ -> MissionChildAwaiting
+      MissionHeldForSlot _ -> MissionChildDeferred
+      _
+        | missionStepSucceeded report -> MissionChildAdvanced
+        | otherwise -> MissionChildFailed
 
     childRefusal refusal = case refusal of
       MissionAlreadyAdvancing _ _ -> MissionChildAlreadyAdvancing
@@ -407,6 +507,12 @@ runMissionWith console store repository mission buildDriver = do
             MissionAwaiting _ -> do
               threadDelay missionRunnerPollMicros
               loop controller remaining transitions
+            -- Waited out exactly as live work is, and for the same reason: the
+            -- slot it needs is freed by a worker ending, which this process
+            -- does not control and only has to notice.
+            MissionHeldForSlot _ -> do
+              threadDelay missionRunnerPollMicros
+              loop controller remaining transitions
             MissionStopped halt -> stopped controller remaining transitions halt
             MissionControllerFailed detail -> pure (concluded transitions (Left detail))
 
@@ -486,6 +592,8 @@ liveMissionDriver options config recordLock repository store mission =
         missionDriverObserveSession = observeSession,
         missionDriverAdoptInvocation = adoptInvocation,
         missionDriverDispatch = dispatch,
+        missionDriverClaimSlot = claimSlot,
+        missionDriverSettleSlot = settleSlot,
         missionDriverTerminate = terminate,
         missionDriverSealSession = sealSession
       }
@@ -498,6 +606,31 @@ liveMissionDriver options config recordLock repository store mission =
 
     workflowConfig :: WorkflowConfig
     workflowConfig = config.resolvedWorkflow
+
+    -- The repository's agent ceiling (issue #746). Only an action that
+    -- starts an agent asks for a slot; a kind this release cannot decode
+    -- starts nothing, and the dispatch that follows refuses it by name.
+    admission = liveMissionAdmissionSeams repository
+
+    claimSlot step invocation = case decodeWorkflowActionKind step.missionPlanStepAction of
+      Left _ -> pure MissionSlotNotNeeded
+      Right kind
+        | not (workflowActionStartsAgent kind) -> pure MissionSlotNotNeeded
+        | otherwise -> case missionAgentCeilingValue config.resolvedMissions of
+            Left refusal -> pure (MissionSlotUndecided refusal)
+            Right agentCeiling -> do
+              decision <- claimMissionAgentSlot admission store agentCeiling mission invocation.unMissionInvocationId
+              pure $ case decision of
+                MissionAgentSlotGranted -> MissionSlotClaimed
+                MissionAgentSlotHeld reason -> MissionSlotWaiting reason
+                MissionAgentSlotUndecided detail -> MissionSlotUndecided detail
+
+    -- A settlement that could not be recorded leaves the reservation to this
+    -- process's exit, after which it is dropped as a gone holder's; the
+    -- launch it was for is over either way.
+    settleSlot invocation = do
+      _ <- settleMissionAgentSlot admission store invocation.unMissionInvocationId
+      pure ()
 
     identity = repository.repositoryOwner <> "/" <> repository.repositoryName
 

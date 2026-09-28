@@ -47,6 +47,7 @@ module Kanban.Mission.Controller
     MissionInventory (..),
     MissionDispatchRequest (..),
     MissionDispatchAccepted (..),
+    MissionSlotClaim (..),
 
     -- * Starting and attaching
     MissionStartRefusal (..),
@@ -69,6 +70,8 @@ module Kanban.Mission.Controller
   )
 where
 
+import Control.Applicative ((<|>))
+import Control.Exception (finally)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (find)
 import Data.Set (Set)
@@ -270,6 +273,18 @@ data MissionDriver = MissionDriver
     -- conclusion.
     missionDriverAdoptInvocation :: MissionInvocationId -> IO (Either Text (Maybe MissionSessionId)),
     missionDriverDispatch :: MissionDispatchRequest -> IO (Either MissionStepFailure MissionDispatchAccepted),
+    -- | Asks for one of the repository's agent slots for one launch, before
+    -- anything about that launch is journaled (D-4 as amended, issue #746).
+    --
+    -- Asked of every dispatch, a plan step's and a registered child's alike,
+    -- and answered by the caller, which knows which actions start an agent
+    -- and what the ceiling is. Nothing that only observes, reconciles, or
+    -- settles ever reaches it.
+    missionDriverClaimSlot :: MissionPlanStep -> MissionInvocationId -> IO MissionSlotClaim,
+    -- | Gives back a slot 'missionDriverClaimSlot' granted, once the launch it
+    -- was granted for has an outcome — whatever that outcome was, since the
+    -- worker a successful launch created now counts itself.
+    missionDriverSettleSlot :: MissionInvocationId -> IO (),
     -- | Ends exactly the registered sessions named, which the controller has
     -- already journaled and which is already the complete subtree.
     missionDriverTerminate :: [MissionSessionId] -> IO (Either Text [MissionSessionId]),
@@ -281,6 +296,22 @@ data MissionDriver = MissionDriver
     -- scheduler's next pass tries again.
     missionDriverSealSession :: MissionSessionId -> IO [Text]
   }
+
+-- | What the caller said about a slot for one launch.
+data MissionSlotClaim
+  = -- | This action starts no agent, so it takes no slot.
+    MissionSlotNotNeeded
+  | -- | A slot is reserved for this launch until it is settled.
+    MissionSlotClaimed
+  | -- | Every slot is taken, or spoken for by a mission ahead in the
+    -- rotation. Nothing is journaled and nothing fails: the mission waits
+    -- and the same launch is asked for again later.
+    MissionSlotWaiting Text
+  | -- | Whether a slot is free could not be decided — the ceiling is
+    -- misconfigured, or the records it is counted from could not be read.
+    -- Never read as a free slot.
+    MissionSlotUndecided Text
+  deriving stock (Eq, Show)
 
 -- ---------------------------------------------------------------------------
 -- Starting and attaching
@@ -575,6 +606,13 @@ data MissionIteration
     -- and asks again; it does not spin, because the thing it is waiting for is
     -- bounded by that worker's own recorded deadline.
     MissionAwaiting Text
+  | -- | The next eligible transition would start an agent and the
+    -- repository's agent ceiling has no slot for it (issue #746). Not a
+    -- failure and not a lifecycle: nothing is written, the mission stays
+    -- runnable, and the runner asks again — which is what distinguishes
+    -- waiting for a slot from 'MissionWaitingCapacity', a provider's refusal
+    -- that stops the mission.
+    MissionHeldForSlot Text
   | MissionStopped MissionHalt
   | -- | This run could not establish what it needed to decide: a durable
     -- record it could not read or write, or live evidence it could not
@@ -599,23 +637,51 @@ missionControllerIteration controller = do
       -- queue of file commands must not be able to delay it.
       typed <- takeConsoleCommand controller
       case typed of
-        Just command -> applyCommand controller snapshot command
-        Nothing -> do
-          commands <- readMissionCommands controller.missionControllerControl
-          mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
-          case commands.missionCommandsAccepted of
-            (command : _) -> applyCommand controller snapshot command
-            [] -> do
-              recorded <-
-                readMissionInvocations
-                  controller.missionControllerMission
-                  controller.missionControllerStore.missionStoreRepository
-                  controller.missionControllerInvocations
-              case recorded of
-                Left detail -> pure (MissionControllerFailed detail)
-                Right states -> case missionRunnerHalt snapshot states of
-                  Just halt -> pure (MissionStopped halt)
-                  Nothing -> advance controller snapshot
+        Just command -> do
+          applied <- applyCommand controller snapshot command
+          case applied of
+            -- A child request with no slot to launch under. It goes back where
+            -- it came from, unanswered, and this iteration looks for work the
+            -- ceiling does not govern.
+            MissionHeldForSlot reason -> do
+              requeueConsoleCommand controller command
+              fromFiles snapshot (Just reason)
+            other -> pure other
+        Nothing -> fromFiles snapshot Nothing
+  where
+    fromFiles snapshot held = do
+      commands <- readMissionCommands controller.missionControllerControl
+      mapM_ (journalRejectionOnce controller) commands.missionCommandsRejected
+      queued snapshot held commands.missionCommandsAccepted
+
+    -- A held command is skipped rather than waited behind. It stays queued,
+    -- because nothing answered it, and everything after it — another command,
+    -- a session that ended, a step to reconcile — is still this mission's to
+    -- do: requirement 5 of issue #746 is that the ceiling never holds back a
+    -- transition that starts no agent.
+    queued snapshot held commands = case commands of
+      (command : rest) -> do
+        applied <- applyCommand controller snapshot command
+        case applied of
+          MissionHeldForSlot reason -> queued snapshot (held <|> Just reason) rest
+          other -> pure other
+      [] -> do
+        recorded <-
+          readMissionInvocations
+            controller.missionControllerMission
+            controller.missionControllerStore.missionStoreRepository
+            controller.missionControllerInvocations
+        case recorded of
+          Left detail -> pure (MissionControllerFailed detail)
+          Right states -> case missionRunnerHalt snapshot states of
+            Just halt -> pure (MissionStopped halt)
+            Nothing -> do
+              iteration <- advance controller snapshot
+              -- Only a wait is replaced: a mission that moved moved, and the
+              -- held request is simply asked again next time.
+              pure $ case (iteration, held) of
+                (MissionAwaiting _, Just reason) -> MissionHeldForSlot reason
+                _ -> iteration
 
 -- | Queues one command built inside this process, with runner authority.
 --
@@ -632,6 +698,11 @@ takeConsoleCommand controller =
   atomicModifyIORef' controller.missionControllerConsole $ \queued -> case queued of
     [] -> ([], Nothing)
     (command : rest) -> (rest, Just command)
+
+-- | Puts a console command back at the head of the queue it was taken from.
+requeueConsoleCommand :: MissionController -> MissionSubmittedCommand -> IO ()
+requeueConsoleCommand controller command =
+  atomicModifyIORef' controller.missionControllerConsole (\queued -> (command : queued, ()))
 
 -- | Reconcile, then dispatch, then settle — the first of the three that has
 -- something to do.
@@ -1142,18 +1213,22 @@ reconcileOneStep controller snapshot = go candidates
 -- in between leaves an invocation nobody saw the end of; and the precondition
 -- has to be rechecked after the record and before the effect, so nothing is
 -- mutated against a target that moved while the plan was being written down.
+--
+-- The agent slot comes before all of it (issue #746). A launch the ceiling
+-- has no room for journals nothing, marks nothing, and reads nothing from
+-- GitHub: it is not an effect that was attempted, so it leaves no open
+-- invocation to become an unknown outcome or an interrupted step, and the
+-- same dispatch is simply chosen again when the mission is next advanced.
 dispatchStep :: MissionController -> MissionSnapshot -> MissionPlanStep -> IO MissionIteration
 dispatchStep controller snapshot step = do
-  planned <- observePlannedVersion controller step
   recorded <-
     readMissionInvocations
       controller.missionControllerMission
       controller.missionControllerStore.missionStoreRepository
       controller.missionControllerInvocations
-  case (planned, recorded) of
-    (Left detail, _) -> pure (MissionControllerFailed detail)
-    (_, Left detail) -> pure (MissionControllerFailed detail)
-    (Right plannedVersion, Right states) -> do
+  case recorded of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right states -> do
       -- Counted off the durable record rather than off anything this snapshot
       -- happens to hold. The plan's size does not move between one dispatch of
       -- a step and the next, so an identity resting on it rests on the process
@@ -1161,42 +1236,64 @@ dispatchStep controller snapshot step = do
       -- one identity for two effects, which the journal then reads as a single
       -- one.
       invocation <- newMissionInvocationId step.missionPlanStepId (missionInvocationSequence states)
-      now <- getCurrentTime
-      journaled <-
-        recordMissionInvocation
-          controller.missionControllerInvocations
-          MissionInvocation
-            { missionInvocationId = invocation,
-              missionInvocationMission = controller.missionControllerMission,
-              missionInvocationRepository = controller.missionControllerStore.missionStoreRepository,
-              missionInvocationStep = step.missionPlanStepId,
-              missionInvocationAction = step.missionPlanStepAction,
-              missionInvocationTarget = step.missionPlanStepTarget,
-              missionInvocationVersion = plannedVersion,
-              missionInvocationEffect = MissionEffectDispatch step.missionPlanStepAction,
-              -- A plan step is nobody's child.
-              missionInvocationParent = Nothing,
-              missionInvocationAt = now
-            }
-      case journaled of
-        Left detail -> pure (MissionControllerFailed detail)
-        Right () -> do
-          -- The durable marker that says an effect was about to be attempted.
-          -- If it cannot be written the effect must not be attempted either:
-          -- a launch whose step still reads @pending@ is a launch the next run
-          -- would make a second time.
-          marked <- applyStepLifecycleSilently controller snapshot step.missionPlanStepId MissionStepDispatching "journaled before launch"
-          case marked of
-            Left detail -> do
-              now' <- getCurrentTime
-              _ <-
-                concludeMissionInvocation
-                  controller.missionControllerInvocations
-                  invocation
-                  (MissionInvocationAbandoned ("the dispatching state could not be recorded: " <> detail))
-                  now'
-              pure (MissionControllerFailed detail)
-            Right () -> performDispatch controller snapshot step invocation plannedVersion
+      withAgentSlot controller step invocation $ do
+        planned <- observePlannedVersion controller step
+        case planned of
+          Left detail -> pure (MissionControllerFailed detail)
+          Right plannedVersion -> journalDispatch controller snapshot step invocation plannedVersion
+
+-- | Asks for an agent slot for one launch, runs the launch under it, and gives
+-- it back once the launch has an outcome — including an exception, since the
+-- worker a launch created counts itself whatever became of this process.
+withAgentSlot :: MissionController -> MissionPlanStep -> MissionInvocationId -> IO MissionIteration -> IO MissionIteration
+withAgentSlot controller step invocation launch = do
+  claimed <- controller.missionControllerDriver.missionDriverClaimSlot step invocation
+  case claimed of
+    MissionSlotNotNeeded -> launch
+    MissionSlotClaimed -> launch `finally` controller.missionControllerDriver.missionDriverSettleSlot invocation
+    MissionSlotWaiting reason ->
+      pure (MissionHeldForSlot (step.missionPlanStepId.unMissionStepId <> " is waiting for an agent slot: " <> reason))
+    MissionSlotUndecided detail -> pure (MissionControllerFailed detail)
+
+-- | The opening record, the dispatching mark, and the launch, in that order.
+journalDispatch :: MissionController -> MissionSnapshot -> MissionPlanStep -> MissionInvocationId -> Maybe MissionTargetVersion -> IO MissionIteration
+journalDispatch controller snapshot step invocation plannedVersion = do
+  now <- getCurrentTime
+  journaled <-
+    recordMissionInvocation
+      controller.missionControllerInvocations
+      MissionInvocation
+        { missionInvocationId = invocation,
+          missionInvocationMission = controller.missionControllerMission,
+          missionInvocationRepository = controller.missionControllerStore.missionStoreRepository,
+          missionInvocationStep = step.missionPlanStepId,
+          missionInvocationAction = step.missionPlanStepAction,
+          missionInvocationTarget = step.missionPlanStepTarget,
+          missionInvocationVersion = plannedVersion,
+          missionInvocationEffect = MissionEffectDispatch step.missionPlanStepAction,
+          -- A plan step is nobody's child.
+          missionInvocationParent = Nothing,
+          missionInvocationAt = now
+        }
+  case journaled of
+    Left detail -> pure (MissionControllerFailed detail)
+    Right () -> do
+      -- The durable marker that says an effect was about to be attempted.
+      -- If it cannot be written the effect must not be attempted either:
+      -- a launch whose step still reads @pending@ is a launch the next run
+      -- would make a second time.
+      marked <- applyStepLifecycleSilently controller snapshot step.missionPlanStepId MissionStepDispatching "journaled before launch"
+      case marked of
+        Left detail -> do
+          now' <- getCurrentTime
+          _ <-
+            concludeMissionInvocation
+              controller.missionControllerInvocations
+              invocation
+              (MissionInvocationAbandoned ("the dispatching state could not be recorded: " <> detail))
+              now'
+          pure (MissionControllerFailed detail)
+        Right () -> performDispatch controller snapshot step invocation plannedVersion
 
 -- | The precondition read, taken when the plan is made.
 observePlannedVersion :: MissionController -> MissionPlanStep -> IO (Either Text (Maybe MissionTargetVersion))
@@ -2027,16 +2124,26 @@ childInvocationId parent requestId = MissionInvocationId (childStepId parent req
 -- own boundary. Exempting it because the request came from inside the mission
 -- would put the one dispatch a provider can ask for outside the precondition
 -- every other dispatch obeys.
+--
+-- Under an agent slot like every other launch, and asked for before anything
+-- is journaled or read. A request the ceiling has no room for is left exactly
+-- as it arrived — unanswered, still queued, with no invocation behind it — so
+-- nothing about it can be consumed, refused, or found half-launched later.
 launchChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> IO MissionIteration
-launchChild controller snapshot command request invocation = do
-  let step =
-        MissionPlanStep
-          { missionPlanStepId = childStepId request.missionChildRequestParent request.missionChildRequestId,
-            missionPlanStepAction = request.missionChildRequestAction,
-            missionPlanStepSummary = "a registered child of " <> request.missionChildRequestParent.unMissionSessionId,
-            missionPlanStepTarget = request.missionChildRequestTarget,
-            missionPlanStepDependsOn = []
-          }
+launchChild controller snapshot command request invocation =
+  withAgentSlot controller step invocation (observeAndLaunchChild controller snapshot command request invocation step)
+  where
+    step =
+      MissionPlanStep
+        { missionPlanStepId = childStepId request.missionChildRequestParent request.missionChildRequestId,
+          missionPlanStepAction = request.missionChildRequestAction,
+          missionPlanStepSummary = "a registered child of " <> request.missionChildRequestParent.unMissionSessionId,
+          missionPlanStepTarget = request.missionChildRequestTarget,
+          missionPlanStepDependsOn = []
+        }
+
+observeAndLaunchChild :: MissionController -> MissionSnapshot -> MissionSubmittedCommand -> MissionChildRequest -> MissionInvocationId -> MissionPlanStep -> IO MissionIteration
+observeAndLaunchChild controller snapshot command request invocation step = do
   planned <- observePlannedVersion controller step
   case planned of
     Left detail ->

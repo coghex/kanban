@@ -273,38 +273,95 @@ starts and stops it, and replays a mission's own durable events from a cursor
 cadence of its own, so nothing on the board shows it and a job is still watched
 from the command line.
 
-A pass admits at most two missions, and the ceiling is a compiled value with no
-configuration surface; fair rotation, a configurable capacity, and priority for
-a direct operator command are deliberately deferred. A mission is runnable when
-it is nonterminal, unpaused, and not waiting on operator input, a barrier, or
-capacity. A mission whose advancement lease is already held is skipped and does
-not consume an admission slot, and the holder-liveness rule is the acquisition's
-own — an owner that cannot be shown to be gone counts as holding it. Losing that
-lease to somebody else between selection and launch is reported as the ordinary
-contention it is rather than as a failed pass; that is the only refusal treated
-that way. Every other one a child reports — an identifier that cannot address a
-mission, a mission the store does not hold, a record that will not decode, one
-recorded against another repository, a store that will not open — fails the
-pass, because the inventory reads snapshots and not specifications, so a
-child's refusal is the only place such a mission is ever found.
+A pass admits every runnable mission and advances each by at most one
+transition. A mission is runnable when it is nonterminal, unpaused, and not
+waiting on operator input, a barrier, or capacity. A mission whose advancement
+lease is already held is skipped, and the holder-liveness rule is the
+acquisition's own — an owner that cannot be shown to be gone counts as holding
+it. Losing that lease to somebody else between selection and launch is reported
+as the ordinary contention it is rather than as a failed pass; that is the only
+refusal treated that way. Every other one a child reports — an identifier that
+cannot address a mission, a mission the store does not hold, a record that will
+not decode, one recorded against another repository, a store that will not open
+— fails the pass, because the inventory reads snapshots and not specifications,
+so a child's refusal is the only place such a mission is ever found.
+
+What is limited is agents, not missions. At most `[missions] agent_ceiling`
+mission-dispatched agents — two unless configured otherwise (section 16) — may
+be live at once for one repository: a solve worker, a pull-request worker, or
+one issue action on the repository's review host, counted across every mission,
+every pass, and every checkout of that repository (`Kanban.Mission.Admission`).
+The count is read from the worker cache, where a worker whose specification
+names a mission invocation is a mission's agent; the review host itself is
+never one, and a worker launched from the board names no invocation and is
+neither counted nor delayed. A worker is live until its own records prove
+otherwise, by the worker lease's own rules: a terminal state, a recorded
+process identity a snapshot no longer finds, or an acknowledged launch that
+never started. An issue action is live until it is terminal, since a host that
+died leaves its unfinished actions to be re-homed and run by the next one. A
+record that will not decode, and a snapshot that cannot be taken, keep the
+slot. Lowering the ceiling below what is running starts nothing new until
+enough of it finishes, and ends nothing.
+
+A mission step asks for a slot only when it would start an agent — never to
+observe or settle a live worker, record a session ending, or reconcile a step —
+and it asks before anything about the launch is journaled or read from GitHub.
+The claim is decided under one repository-wide lock beside the mission store,
+so two steps that both see a free slot cannot both take it; a reservation covers
+the moment between a grant and the worker writing its specification, is keyed
+by the invocation the worker records, and is dropped once its holding process
+is gone, without releasing anything a surviving worker occupies. A step with no
+slot journals nothing, marks nothing, fails nothing, and is not a lifecycle:
+the mission stays runnable, a registered child request stays queued and
+unanswered, and the same launch is asked for again later. A step that could
+not decide — an unusable ceiling, or a worker cache or admission record it
+could not read — launches nothing. The per-target worker lease and the
+canonical approval lock still apply beneath the ceiling; a launch they refuse
+gives its slot straight back.
+
+Free slots go to waiting missions in a durable round-robin (the mission runner
+design's D-8, `docs/designs/mission_runner_design.md`): a mission's
+place is the number of its latest successful admission, so the mission admitted
+longest ago — or never — goes first, and a restarted runner resumes the same
+order. Only a launch that produced its own worker moves a mission to the back;
+one that was refused, went stale, or joined a worker somebody else started
+leaves its place alone. A pass enters every mission it is about to advance in
+that order before any child starts, launches and waits for the children in that
+order, and withdraws each mission's place as soon as its child is done. A free
+slot a mission ahead may still take is left for it, so the rotation rather than
+which child reaches the lock first decides who gets it; a slot nobody ahead can
+take is used, so a lone runnable mission may use every free slot over
+successive passes. Priority for a direct operator command is not part of this
+rotation; it belongs to Mission Control's `SAG-5`.
 
 Each admitted mission is advanced through its own `kanban --mission` child,
 launched with a non-terminal standard input, its output captured rather than
 inherited, this process's own working directory as the checkout, and the same
-resolved repository and absolute configuration the pass was given. A pass does
-not return while a child it launched is still running, and the children stay in
-the pass's own process group so a signal to that group reaches all of them.
+resolved repository and absolute configuration the pass was given. A child
+launched for a pass makes exactly one controller iteration and exits; it never
+waits on the agent it started, which is a detached worker the next pass
+observes. A pass does not return while a child it launched is still running,
+and the children stay in the pass's own process group so a signal to that group
+reaches all of them.
 
 The pass writes exactly one JSON document to stdout and every word of narration
 to stderr. That document names its schema and version, the repository, each
 admitted mission and its disposition, each outstanding attention identity and
-what became of its notification, and a termination reason of `completed`,
-`refused`, or `failed` — exiting 0, 2, and 1 respectively. Dispositions are
-derived from the child's own machine-readable result, its exit status, and the
-mission's durable snapshot, never from terminal text; to that end `--mission`
-gains an internal `--mission-result FILE`, which writes a typed account of what
-one run did and is written only when a caller asks for one, so an operator's own
-`--mission` run is unchanged. A launch identity minted before the child is
+what became of its notification, the mission agents it saw live once its
+children were done against the ceiling it applied, and a termination reason of
+`completed`, `refused`, or `failed` — exiting 0, 2, and 1 respectively. Beside
+`advanced`, `settled`, and `blocked`, a disposition may be `awaiting` — the
+mission's only eligible work was watching its own live worker — or `deferred`,
+held back by the agent ceiling, with the detail saying why; neither is progress
+for the supervisor's pacing, neither fails the pass, and neither raises
+attention. A ceiling that is not a positive whole number refuses the pass by
+name. Dispositions are derived from the child's own machine-readable result,
+its exit status, and the mission's durable snapshot, never from terminal text;
+to that end `--mission` gains an internal `--mission-result FILE`, which makes
+the run one step and writes a typed account of it, and is written only when a
+caller asks for one, so an operator's own `--mission` run is unchanged — it
+still runs until the mission halts, waiting out a held launch as it waits out
+live work. A launch identity minted before the child is
 created travels with it as an internal `--mission-invocation`, is written into
 that account, and is the first thing checked when it is read — before the
 mission and the repository, because it is the only one of the three that
@@ -3925,6 +3982,8 @@ Suggested paths:
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.log
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/archive/<session>-<kind>.seal.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/notifications/<digest>.json
+~/.local/state/kanban/missions/.admission/<owner>/<repo>/state.json
+~/.local/state/kanban/missions/.admission/<owner>/<repo>/lock
 ~/.local/state/kanban/missions/.deleted/<token>/
 ~/Library/Application Support/kanban/mission-runner/config.json
 ~/Library/Application Support/kanban/mission-runner/dependants/<owner>.<repo>
@@ -4013,6 +4072,17 @@ Defaults:
   mission and a timestamp and is not a path component; the record inside
   carries it in full. It lives inside the mission's own directory so archiving
   or deleting a mission takes its notification history with it.
+- A repository's agent admission record (`missions/.admission/<owner>/<repo>/`)
+  holds the rotation — each mission's latest successful admission — the slots
+  granted for launches whose worker has not yet written its specification, and
+  the missions a pass has entered to wait their turn. It is read and rewritten
+  only under the `lock` beside it, a `flock` the kernel releases for a holder
+  that dies, and every reservation and entrant a gone process left is dropped
+  on the next read. A record that will not decode, or carries a schema or
+  version this release does not know, is not read as empty: no slot is granted
+  against it, because forgetting a reservation in flight would grant its slot
+  twice. It sits beside the repository's mission store rather than in it,
+  because every name inside the store is a mission's.
 - The mission runner's runtime documents are the unattended supervisor's, not
   Kanban's: `tools/mission_runner_service.py` writes one status document and
   one incident directory per canonical repository, under the account's own
@@ -4472,6 +4542,15 @@ Configurable repository semantics include:
   (section 14), a whole percentage from 1 through 100 with no default. It is a
   sibling of that provider's `command` rather than part of it, and like the
   rest of `[usage]` it is global only — a repository table cannot override it.
+- The mission agent ceiling `[missions] agent_ceiling`, default 2: how many
+  mission-dispatched agents may be live at once for one repository (section
+  5's `--mission-scheduler`). Like the rest of `[missions]` it is global only.
+  Every value is read, and one that is not a positive whole number — zero, a
+  negative number, a fraction, text, a boolean — is refused by name where it
+  is applied rather than while the file is read: the scheduler refuses the
+  pass, and a mission step refuses to start an agent. A dashboard and a usage
+  query read the same file and consult nothing here, so a load-time error would
+  take the repository away from them over a setting only missions use.
 
 ## 17. Error presentation
 
@@ -4728,9 +4807,9 @@ advancement lease, reconciles its durable record against live worker and
 GitHub state, journals every effect before attempting it, and makes at most
 one transition per pass through the workflow action registry until the mission
 is terminal, paused, or blocked. Repository-wide selection and unattended
-scheduling are now implemented too: `kanban --mission-scheduler` advances at
-most two runnable missions per bounded pass, skipping any whose advancement
-lease is held, observes whatever attention is outstanding anywhere in the
+scheduling are now implemented too: `kanban --mission-scheduler` advances
+every runnable mission by one transition per bounded pass, skipping any whose
+advancement lease is held, observes whatever attention is outstanding anywhere in the
 repository, notifies about each waiting episode at most once through a command
 the operator configured, and writes one machine-readable pass report;
 `tools/mission_runner_service.py` repeats those passes for one repository,
@@ -4751,8 +4830,13 @@ its mission, is never retried by a later pass or a restarted service, and is
 recovered by the runner's `override`. Every mission session's event stream and
 raw provider log are sealed into the mission archive when the session ends and
 retried on every pass, and the worker cache keeps a mission worker's records
-until those seals verify. Rendering any of that, capacity arbitration, and fair
-rotation are not implemented. The durable `gh` group record is shared safely by every process
+until those seals verify. Mission agents are now capped per repository: at most
+`[missions] agent_ceiling` (default two) mission-dispatched agents are live at
+once, counted from the worker cache across every mission, pass, and checkout,
+claimed atomically before a launch is journaled, and shared among waiting
+missions by a durable round-robin; each pass advances every runnable mission by
+one transition, and a mission held back by the ceiling is reported `deferred`
+and retried rather than failed. Rendering any of that is not implemented. The durable `gh` group record is shared safely by every process
 that reads the board: each rewrite takes a cross-process lock, and each entry
 names the process that spawned its `gh`, so a reader skips another process's
 live work, re-verifies a cleanup-pending leftover even while its writer runs,

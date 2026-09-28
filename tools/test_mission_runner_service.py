@@ -249,6 +249,7 @@ def pass_document(
     termination="completed",
     admitted=(),
     attention=(),
+    agents=None,
     detail="nothing to do",
     exit_code=None,
 ):
@@ -263,6 +264,7 @@ def pass_document(
         "exit_code": service.PASS_EXIT_CODES[termination] if exit_code is None else exit_code,
         "admitted": list(admitted),
         "attention": list(attention),
+        "agents": agents,
         "detail": detail,
     }
 
@@ -427,16 +429,26 @@ class MirroredPassContractTests(unittest.TestCase):
             service.PASS_UNSAFE_MISSION_CHARACTERS,
         )
 
-    def test_the_admission_ceiling_matches(self):
-        # Mirrored like everything else the controller copies: a ceiling raised
-        # in the scheduler and not here would have the controller rejecting
-        # every pass its own scheduler produced.
+    def test_the_agent_count_fields_match(self):
+        # The count is a nested object the report's own encoder spells in its
+        # `where` clause, so it is read from there rather than from the
+        # top-level field list.
+        encoder = re.search(
+            r"^    agents count =\n((?:      .*\n)+)", self.source, re.MULTILINE
+        )
+        self.assertIsNotNone(encoder, "the agent count encoder is not declared")
+        fields = {match.group(1) for match in re.finditer(r'"([a-z_]+)" \.=', encoder.group(1))}
+        self.assertEqual(service.PASS_AGENT_FIELDS, fields)
+
+    def test_no_per_pass_mission_limit_is_declared(self):
+        # Issue #746 retired the compiled two-missions-per-pass limit, and with
+        # it the mirror this controller held reports to. A limit reintroduced
+        # in the scheduler would have to come back here as well, with a test.
         scheduler = (
             REPO_ROOT / "src" / "Kanban" / "Mission" / "Scheduler.hs"
         ).read_text(encoding="utf-8")
-        match = re.search(r"^missionAdmissionCeiling = (\d+)$", scheduler, re.MULTILINE)
-        self.assertIsNotNone(match, "missionAdmissionCeiling is not declared")
-        self.assertEqual(service.PASS_ADMISSION_CEILING, int(match.group(1)))
+        self.assertNotRegex(scheduler, r"^missionAdmissionCeiling ", )
+        self.assertFalse(hasattr(service, "PASS_ADMISSION_CEILING"))
 
     def test_the_timestamp_form_matches_the_writer(self):
         # The writer renders both instants with `iso8601Show`, so the shape the
@@ -508,15 +520,31 @@ class PassProgressTests(unittest.TestCase):
 
     def test_the_progress_and_failing_vocabularies_partition_the_rest(self):
         # Every disposition is accounted for: three are progress, two fail the
-        # pass, and exactly one is neither — losing a race for an advancement
-        # lease, which is two correct processes meeting. A disposition added to
-        # the scheduler and to nothing here would show up as unclassified.
+        # pass, and exactly three are neither — losing a race for an
+        # advancement lease, which is two correct processes meeting; watching
+        # a live worker; and being held back by the agent ceiling. A
+        # disposition added to the scheduler and to nothing here would show up
+        # as unclassified.
         self.assertEqual(
             service.PASS_DISPOSITIONS
             - service.PASS_PROGRESS_DISPOSITIONS
             - service.PASS_FAILING_DISPOSITIONS,
-            {"lease_refused"},
+            {"lease_refused", "awaiting", "deferred"},
         )
+
+    def test_a_pass_of_only_slot_deferrals_is_not_progress(self):
+        # Issue #746: a pass whose every mission was held back by the agent
+        # ceiling moved nothing, so it waits out the interval rather than
+        # polling flat out while the agents holding every slot run -- and it
+        # is a completed pass, which opens no incident.
+        document = self.document("deferred", "deferred", "awaiting")
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+        self.assertFalse(service.pass_advanced(document))
+        self.assertEqual(service.pass_state(document), service.STATE_IDLE)
+        self.assertEqual(document["termination"], service.PASS_COMPLETED)
+
+    def test_a_deferral_beside_an_advance_is_progress(self):
+        self.assertTrue(service.pass_advanced(self.document("deferred", "advanced")))
 
 
 class PollIntervalTests(unittest.TestCase):
@@ -642,7 +670,7 @@ class PassReportTests(unittest.TestCase):
                 json.dumps({**pass_document(), "schema": "something-else"}),
                 0,
             ),
-            "unknown version": (json.dumps({**pass_document(), "version": 2}), 0),
+            "unknown version": (json.dumps({**pass_document(), "version": 3}), 0),
             "string version": (json.dumps({**pass_document(), "version": "1"}), 0),
             "missing field": (
                 json.dumps({k: v for k, v in pass_document().items() if k != "detail"}),
@@ -775,20 +803,32 @@ class PassReportTests(unittest.TestCase):
                 ),
                 0,
             ),
-            # The ceiling is a contract about what a pass may do. Three
-            # otherwise valid admitted missions describe a scheduler this
-            # controller was not built to supervise.
-            "more admitted missions than one pass may admit": (
-                json.dumps(
-                    pass_document(
-                        admitted=[
-                            admitted_entry(mission="mission-a"),
-                            admitted_entry(mission="mission-b"),
-                            admitted_entry(mission="mission-c"),
-                        ]
-                    )
-                ),
+            # The agent count is two plain integers, or null.
+            "an agent count that is not an object": (
+                json.dumps(pass_document(agents=[1, 2])),
                 0,
+            ),
+            "an agent count with the wrong fields": (
+                json.dumps(pass_document(agents={"live": 1})),
+                0,
+            ),
+            "a negative live agent count": (
+                json.dumps(pass_document(agents={"live": -1, "ceiling": 2})),
+                0,
+            ),
+            "a Boolean live agent count": (
+                json.dumps(pass_document(agents={"live": True, "ceiling": 2})),
+                0,
+            ),
+            "a zero agent ceiling": (
+                json.dumps(pass_document(agents={"live": 0, "ceiling": 0})),
+                0,
+            ),
+            "a refused pass that counted agents": (
+                json.dumps(
+                    pass_document(termination="refused", agents={"live": 0, "ceiling": 2})
+                ),
+                2,
             ),
             # `unresolved` means the writer could not say which items an
             # episode is about, which it treats as indeterminate state and
@@ -1145,6 +1185,26 @@ class PassReportTests(unittest.TestCase):
     def test_a_refused_pass_is_accepted_with_nothing_admitted(self):
         document = pass_document(termination="refused", detail="nothing to run")
         self.assertEqual(service.parse_pass_report(json.dumps(document), 2), document)
+
+    def test_a_pass_advancing_more_than_two_missions_is_accepted(self):
+        # Issue #746 retired the per-pass mission limit: every runnable
+        # mission is advanced by one transition, so a report naming more than
+        # two of them is the scheduler working, not a scheduler this
+        # controller cannot supervise.
+        document = pass_document(
+            admitted=[
+                admitted_entry(mission=f"mission-{name}")
+                for name in ("a", "b", "c", "d", "e")
+            ],
+            agents={"live": 2, "ceiling": 2},
+        )
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
+
+    def test_a_live_count_above_a_lowered_ceiling_is_accepted(self):
+        # Lowering the ceiling stops new agents; it does not end running ones,
+        # so a pass may honestly see more live agents than it now allows.
+        document = pass_document(agents={"live": 3, "ceiling": 1})
+        self.assertEqual(service.parse_pass_report(json.dumps(document), 0), document)
 
 
 # ---------------------------------------------------------------------------

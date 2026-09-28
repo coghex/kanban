@@ -134,6 +134,7 @@ spec = describe "the foreground mission runner" $ do
   commandSpec
   durableCommandSpec
   childRequestSpec
+  agentSlotSpec
   consoleSpec
   preconditionBoundarySpec
   deadlineSpec
@@ -508,7 +509,15 @@ data Stage = Stage
     -- | Every session the controller asked to have its logs sealed.
     stageSealed :: IORef [MissionSessionId],
     -- | What a seal request reports it could not seal.
-    stageSealFailures :: IORef [Text]
+    stageSealFailures :: IORef [Text],
+    -- | What the driver answers when a launch asks for an agent slot. No slot
+    -- is needed by default, which is what every example written before the
+    -- ceiling existed assumes.
+    stageSlot :: IORef (MissionPlanStep -> MissionSlotClaim),
+    -- | Every slot asked for, by step and invocation.
+    stageSlotClaims :: IORef [(MissionStepId, MissionInvocationId)],
+    -- | Every slot given back.
+    stageSlotsSettled :: IORef [MissionInvocationId]
   }
 
 newStage :: IO Stage
@@ -526,6 +535,9 @@ newStage =
     <*> newIORef []
     <*> newIORef Nothing
     <*> newIORef (pure ())
+    <*> newIORef []
+    <*> newIORef []
+    <*> newIORef (const MissionSlotNotNeeded)
     <*> newIORef []
     <*> newIORef []
 
@@ -594,7 +606,12 @@ stagedDriver stage _ _ =
             Nothing -> Right <$> readIORef stage.stageUnreached,
         missionDriverSealSession = \session -> do
           atomicModifyIORef' stage.stageSealed (\seen -> (seen <> [session], ()))
-          readIORef stage.stageSealFailures
+          readIORef stage.stageSealFailures,
+        missionDriverClaimSlot = \step invocation -> do
+          atomicModifyIORef' stage.stageSlotClaims (\seen -> (seen <> [(step.missionPlanStepId, invocation)], ()))
+          ($ step) <$> readIORef stage.stageSlot,
+        missionDriverSettleSlot = \invocation ->
+          atomicModifyIORef' stage.stageSlotsSettled (\seen -> (seen <> [invocation], ()))
       }
 
 -- | A store, a specification, and a snapshot, under a state root nothing else
@@ -2518,6 +2535,111 @@ targetedChildRequest requestId mission parent = case childRequest requestId miss
   MissionChildRequestCommand request ->
     MissionChildRequestCommand request {missionChildRequestTarget = Just theTarget}
   other -> other
+
+-- ---------------------------------------------------------------------------
+-- The agent slot (issue #746)
+-- ---------------------------------------------------------------------------
+
+agentSlotSpec :: Spec
+agentSlotSpec = describe "the agent slot a launch runs under" $ do
+  -- Requirement 5 and the clarification on retryable work: a planned
+  -- dispatch with no slot journals nothing and marks nothing, so there is no
+  -- open invocation to become unknown or interrupted, and the step is simply
+  -- dispatched when a slot is there.
+  it "holds a planned dispatch with no slot, recording nothing, and launches it under one later" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      writeIORef stage.stageSlot (const (MissionSlotWaiting "2 of 2 agent slots are in use"))
+      withController store stage $ \controller -> do
+        held <- missionControllerIteration controller
+        held `shouldBe` MissionHeldForSlot "solve-844 is waiting for an agent slot: 2 of 2 agent slots are in use"
+        currentInvocations store `shouldReturn` []
+        stepLifecycle <$> currentSnapshot store `shouldReturn` Just MissionStepPending
+        readIORef stage.stageDispatches `shouldReturn` []
+        readIORef stage.stageSlotsSettled `shouldReturn` []
+        writeIORef stage.stageSlot (const MissionSlotClaimed)
+        launched <- missionControllerIteration controller
+        case launched of
+          MissionAdvanced (MissionStepDispatched step invocation _) -> do
+            step `shouldBe` theStep
+            readIORef stage.stageSlotsSettled `shouldReturn` [invocation]
+            map snd <$> readIORef stage.stageSlotClaims >>= (`shouldSatisfy` ((== invocation) . last))
+          other -> expectationFailure ("unexpected iteration: " <> show other)
+
+  -- The clarification's first dispatch path again: a launch the owning
+  -- authority refused gives its slot back and fails nothing it would not
+  -- have failed anyway.
+  it "gives a slot back after a launch that was refused" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      writeIORef stage.stageSlot (const MissionSlotClaimed)
+      writeIORef stage.stageDispatchResult (const (Left (MissionFailureGeneric "the lease is somebody else's")))
+      withController store stage $ \controller -> do
+        _ <- missionControllerIteration controller
+        settled <- readIORef stage.stageSlotsSettled
+        claimed <- map snd <$> readIORef stage.stageSlotClaims
+        settled `shouldBe` claimed
+        length settled `shouldBe` 1
+
+  -- Never read as a free slot.
+  it "launches nothing when whether a slot is free cannot be decided" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+      writeIORef stage.stageSlot (const (MissionSlotUndecided "missions.agent_ceiling must be a positive whole number"))
+      withController store stage $ \controller -> do
+        iteration <- missionControllerIteration controller
+        iteration `shouldBe` MissionControllerFailed "missions.agent_ceiling must be a positive whole number"
+        currentInvocations store `shouldReturn` []
+        readIORef stage.stageDispatches `shouldReturn` []
+
+  -- The clarification's second dispatch path: a registered child request
+  -- with no slot is neither consumed, refused, nor journaled, and the
+  -- iteration goes on to work the ceiling does not govern.
+  it "holds a child request with no slot unanswered, and launches it once there is one" $
+    withLiveParent $ \store stage controller -> do
+      writeIORef stage.stageSlot (const (MissionSlotWaiting "1 of 1 agent slots are in use"))
+      submitConsoleCommand controller "c-held" (childRequest "r-held" theMission (MissionSessionId "solve-844-0001"))
+      held <- missionControllerIteration controller
+      case held of
+        MissionAdvanced (MissionCommandApplied _ _) -> expectationFailure "a held child request was answered"
+        MissionAdvanced (MissionCommandRefused _ _) -> expectationFailure "a held child request was refused"
+        _ -> pure ()
+      readIORef stage.stageDispatches `shouldReturn` []
+      map ((.missionInvocationEffect) . (.missionInvocationRecord)) <$> currentInvocations store `shouldReturn` []
+      writeIORef stage.stageSlot (const MissionSlotClaimed)
+      launched <- missionControllerIteration controller
+      case launched of
+        MissionAdvanced (MissionCommandApplied "c-held" detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "registered child"
+        other -> expectationFailure ("unexpected iteration: " <> show other)
+      length <$> readIORef stage.stageDispatches `shouldReturn` 1
+      readIORef stage.stageSlotsSettled `shouldReturn` [childInvocationId (MissionSessionId "solve-844-0001") "r-held"]
+
+  -- A held child request is skipped, not waited behind: a session that ended
+  -- is still recorded while every slot is taken.
+  it "records a session ending while a child request waits for a slot" $ do
+    let parent = MissionSessionId "solve-844-0001"
+        sibling = MissionSessionId "solve-844-0002"
+        sessions = [sessionNode "solve-844-0001" Nothing Nothing, sessionNode "solve-844-0002" Nothing Nothing]
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [parent, sibling]] sessions) $ \store stage -> do
+      writeIORef stage.stageSlot (const (MissionSlotWaiting "1 of 1 agent slots are in use"))
+      writeIORef stage.stageSessions [sibling]
+      withController store stage $ \controller -> do
+        submitConsoleCommand controller "c-held" (childRequest "r-held" theMission parent)
+        ended <- missionControllerIteration controller
+        ended `shouldSatisfy` \iteration -> case iteration of
+          MissionAdvanced (MissionSessionEnded session _) -> session == sibling
+          _ -> False
+        -- Asked, held, and put back rather than answered.
+        map fst <$> readIORef stage.stageSlotClaims `shouldReturn` [childStepId parent "r-held"]
+        readIORef stage.stageDispatches `shouldReturn` []
+
+-- | A controller over a staged driver, stopped afterwards.
+withController :: MissionStore -> Stage -> (MissionController -> IO ()) -> IO ()
+withController store stage action = do
+  started <- startMissionController store boardRepository theMission (stagedDriver stage)
+  case started of
+    Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+    Right controller -> do
+      action controller
+      stopMissionController controller
 
 withLiveParent :: (MissionStore -> Stage -> MissionController -> IO ()) -> IO ()
 withLiveParent action = do

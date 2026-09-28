@@ -72,6 +72,7 @@ module Kanban.Action
     workflowActionKinds,
     workflowActionKindTag,
     workflowActionKindTitle,
+    workflowActionStartsAgent,
     workflowActionTargetKind,
     ActionKindDecodeError (..),
     actionKindDecodeErrorMessage,

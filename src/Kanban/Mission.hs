@@ -243,6 +243,7 @@ module Kanban.Mission
     MissionInventory (..),
     MissionDispatchRequest (..),
     MissionDispatchAccepted (..),
+    MissionSlotClaim (..),
     MissionStartRefusal (..),
     missionStartRefusalMessage,
     MissionController (..),
@@ -264,6 +265,11 @@ module Kanban.Mission
     missionRunReportLines,
     missionRunSucceeded,
     runMissionMode,
+    MissionStepReport (..),
+    missionStepReportLines,
+    missionStepSucceeded,
+    runMissionStepMode,
+    runMissionStepWith,
     missionChildResultOf,
     writeMissionChildResult,
     runMissionWith,
@@ -282,9 +288,28 @@ module Kanban.Mission
     missionRunnerPollMicros,
     missionRunnerIterationBudget,
 
+    -- * The agent ceiling and its rotation
+    MissionAgentOccupant (..),
+    observeMissionAgents,
+    observeMissionAgentsWith,
+    missionAgentsLive,
+    MissionAdmissionSeams (..),
+    liveMissionAdmissionSeams,
+    MissionAgentSlotDecision (..),
+    claimMissionAgentSlot,
+    settleMissionAgentSlot,
+    expectMissionAgents,
+    withdrawExpectedMission,
+    MissionAdmissionState (..),
+    MissionAdmissionReservation (..),
+    MissionAdmissionEntrant (..),
+    emptyMissionAdmissionState,
+    readMissionAdmissionState,
+    missionAdmissionStatePath,
+    missionAdmissionSchemaVersion,
+
     -- * The repository scheduler
     MissionSchedulerSeams (..),
-    missionAdmissionCeiling,
     missionIsRunnable,
     advanceMissions,
     runMissionSchedulerPass,
@@ -307,6 +332,7 @@ module Kanban.Mission
     encodeMissionChildResult,
     decodeMissionChildResult,
     MissionPassReport (..),
+    MissionAgentCount (..),
     MissionDispositionRecord (..),
     MissionDisposition (..),
     missionDispositions,
@@ -354,6 +380,7 @@ module Kanban.Mission
   )
 where
 
+import Kanban.Mission.Admission
 import Kanban.Mission.Control
 import Kanban.Mission.Controller
 import Kanban.Mission.Digest (sha256Hex)
@@ -391,7 +418,6 @@ import Kanban.Mission.Scheduler
   ( MissionSchedulerSeams (..),
     advanceMissions,
     emitMissionPassReport,
-    missionAdmissionCeiling,
     missionIsRunnable,
     missionPassSetupRepository,
     runMissionSchedulerCommand,

@@ -101,7 +101,7 @@ except ImportError:  # pragma: no cover - see above
 # `tools/test_mission_runner_service.py` holds each of these equal to the
 # Haskell declaration it mirrors.
 PASS_SCHEMA = "kanban-mission-scheduler-pass"
-PASS_VERSION = 1
+PASS_VERSION = 2
 PASS_FIELDS = frozenset(
     {
         "schema",
@@ -113,6 +113,7 @@ PASS_FIELDS = frozenset(
         "exit_code",
         "admitted",
         "attention",
+        "agents",
         "detail",
     }
 )
@@ -144,7 +145,16 @@ PASS_FAILED = "failed"
 # carry one.
 PASS_UNRESOLVED_REPOSITORY = "\x00unresolved"
 PASS_DISPOSITIONS = frozenset(
-    {"advanced", "settled", "blocked", "lease_refused", "refused", "failed"}
+    {
+        "advanced",
+        "settled",
+        "blocked",
+        "awaiting",
+        "deferred",
+        "lease_refused",
+        "refused",
+        "failed",
+    }
 )
 # The dispositions that make a pass a failed pass, which the scheduler already
 # reflects in its termination. Mirrored so a report whose dispositions and
@@ -156,12 +166,16 @@ PASS_DISPOSITIONS = frozenset(
 # that cannot be read, attributed, or addressed.
 PASS_FAILING_DISPOSITIONS = frozenset({"failed", "refused"})
 # The dispositions under which a child actually ran and moved the mission. The
-# other three did not: both refusals mean the child declined to start, and a
-# failure ends the run. `--interval` is documented as the wait "after a pass
-# that advanced nothing", so it is these — not merely a non-empty admitted
-# list — that earn the immediate next pass. A pass that admitted two missions
-# and was refused the lease for both advanced nothing at all, and treating that
-# as progress spins passes back to back for as long as the contention lasts.
+# other five did not: both refusals mean the child declined to start, a
+# failure ends the run, `awaiting` is a mission whose only work was watching
+# its own live worker, and `deferred` is one the repository's agent ceiling
+# held back. `--interval` is documented as the wait "after a pass that
+# advanced nothing", so it is these — not merely a non-empty admitted list —
+# that earn the immediate next pass. A pass that admitted two missions and was
+# refused the lease for both advanced nothing at all, and neither does a pass
+# of nothing but slot deferrals; treating either as progress spins passes back
+# to back for as long as the contention, or the agents holding every slot,
+# last.
 PASS_PROGRESS_DISPOSITIONS = frozenset({"advanced", "settled", "blocked"})
 PASS_NOTIFICATION_STATES = frozenset(
     {
@@ -177,11 +191,12 @@ PASS_NOTIFICATION_STATES = frozenset(
     }
 )
 PASS_ADMITTED_FIELDS = frozenset({"mission", "disposition", "detail"})
-# The compiled ceiling `Kanban.Mission.Scheduler.missionAdmissionCeiling`
-# declares. Mirrored rather than trusted, because "at most two" is a contract a
-# report can violate: three otherwise well-formed admitted entries would
-# otherwise be published as a healthy pass that quietly ignored the ceiling.
-PASS_ADMISSION_CEILING = 2
+# The agent count a pass reports (`Kanban.Mission.Pass.MissionAgentCount`):
+# how many mission-dispatched agents it saw live, and the ceiling it applied.
+# There is no longer a limit on how many missions one pass admits: every
+# runnable mission is advanced by one transition, and the only ceiling is the
+# one on agents this count reports.
+PASS_AGENT_FIELDS = frozenset({"live", "ceiling"})
 # What `Kanban.Mission.Paths.safeMissionComponent` admits, mirrored: a mission
 # identifier is a single plain path component, so it is non-empty, is neither
 # `.` nor `..`, and contains no separator and no NUL. A scheduler cannot name a
@@ -1576,6 +1591,7 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
         )
     _require_admitted(document["admitted"], termination)
     _require_attention(document["attention"], termination, repository)
+    _require_agents(document["agents"], termination)
     if termination == PASS_REFUSED:
         _require_refused_observed_nothing(document["attention"])
     detail = document["detail"]
@@ -1643,16 +1659,6 @@ def _require_admitted(admitted: Any, termination: str) -> None:
             f"The mission scheduler report's admitted missions are not a list: "
             f"{type(admitted).__name__}."
         )
-    # The ceiling is a contract about what a pass may do, not merely about what
-    # it happens to do, so it is checked here rather than assumed: a report
-    # naming more missions than one pass may admit describes a scheduler this
-    # controller was not built to supervise, and publishing it as healthy would
-    # hide exactly that.
-    if len(admitted) > PASS_ADMISSION_CEILING:
-        raise PassFailure(
-            f"The mission scheduler report names {len(admitted)} admitted missions; "
-            f"one pass admits at most {PASS_ADMISSION_CEILING}."
-        )
     failing = False
     for entry in admitted:
         if not isinstance(entry, dict):
@@ -1709,6 +1715,47 @@ def _require_admitted(admitted: Any, termination: str) -> None:
         raise PassFailure(
             "The mission scheduler report terminated 'refused' while naming admitted "
             "missions."
+        )
+
+
+def _require_agents(agents: Any, termination: str) -> None:
+    """The agent count a pass observed, or `null` when it counted none.
+
+    A refused pass looked at nothing, so it carries `null`. Otherwise the count
+    is two plain integers: a live count, never negative, and the positive
+    ceiling the pass applied. The live count is deliberately not held under
+    the ceiling. The ceiling limits what missions may *start*, and an operator
+    who lowers it below what is already running is owed those agents running
+    to their end, not a supervisor that calls the report reporting them
+    malformed.
+    """
+    if agents is None:
+        return
+    if termination == PASS_REFUSED:
+        raise PassFailure(
+            "The mission scheduler report terminated 'refused' while naming an agent "
+            "count."
+        )
+    if not isinstance(agents, dict):
+        raise PassFailure(
+            f"The mission scheduler report's agent count is not an object: "
+            f"{type(agents).__name__}."
+        )
+    if set(agents) != PASS_AGENT_FIELDS:
+        raise PassFailure(
+            f"The mission scheduler report's agent count has the wrong fields: "
+            f"{sorted(agents)}."
+        )
+    live = agents["live"]
+    ceiling = agents["ceiling"]
+    if not is_plain_integer(live) or live < 0:
+        raise PassFailure(
+            f"The mission scheduler report's live agent count is not a count: {live!r}."
+        )
+    if not is_plain_integer(ceiling) or ceiling < 1:
+        raise PassFailure(
+            f"The mission scheduler report's agent ceiling is not a positive whole "
+            f"number: {ceiling!r}."
         )
 
 

@@ -385,6 +385,9 @@ probeStore plan =
     { missionStoreDirectory = plan.probePlanStore,
       missionStoreLegacyDirectory = plan.probePlanLegacyStore,
       missionStoreHoldingDirectory = plan.probePlanHolding,
+      -- Nothing these probes do reaches the agent ceiling; named beside the
+      -- holding area so a probe that did would still write nowhere shared.
+      missionStoreAdmissionDirectory = plan.probePlanHolding <> ".admission",
       missionStoreRepository = plan.probePlanRepository
     }
 
