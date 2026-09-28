@@ -1971,6 +1971,25 @@ retentionSpec = describe "keeping a mission worker's logs until they are sealed"
       sealed <- expectRight =<< readMissionSealedArchives store theMission
       map missionSealedSession sealed `shouldBe` [theSession]
 
+  -- A finished session whose worker state will not decode is neither running
+  -- nor known to be finished, and its raw log cannot even be named; a pass
+  -- that read that as owing nothing would retry nothing and say nothing.
+  it "reports a session whose worker state cannot be read, and seals it once it can" $
+    withRetention $ \_ store -> do
+      expired <- expiredHeartbeat
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
+      state <- ByteString.readFile launched.workerDescriptorStatePath
+      ByteString.writeFile launched.workerDescriptorStatePath "{"
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "its worker state could not be read" `isInfixOf` failure
+        _ -> False
+      readMissionSealedArchives store theMission `shouldReturn` Right []
+      ByteString.writeFile launched.workerDescriptorStatePath state
+      sealAll store `shouldReturn` []
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      map missionSealedSession sealed `shouldBe` [theSession]
+
   it "leaves a sealed worker collected once, and an unsealed one kept, under two collectors at once" $
     withRetention $ \_ store -> do
       expired <- expiredHeartbeat

@@ -79,7 +79,8 @@ missionSessionLogSources descriptor state =
 -- does not is reported every time this runs, because an archive is immutable
 -- — nothing here may replace it, so the repair is an operator's, and until
 -- then the worker cache keeps the source. A session with no worker record, or
--- one whose worker is still running, owes nothing yet. A log with no seal and
+-- one whose worker is still running, owes nothing yet; one whose worker state
+-- cannot be read is reported, since nothing says which. A log with no seal and
 -- no source is reported too: nothing is left to copy, and the worker cache
 -- keeps the rest of that worker's records rather than treat the loss as
 -- settled.
@@ -98,7 +99,21 @@ sealMissionSessionLogs store mission workers session =
           | WorkerTerminal _ <- state.workerStateStatus -> do
               existing <- sealedFor
               concat <$> mapM (sealOne existing) (missionSessionLogSources descriptor state)
-        _ -> pure []
+          | otherwise -> pure []
+        -- Neither running nor finished as far as anything can tell, and
+        -- nothing names its raw log: whatever it owes cannot even be listed,
+        -- so it is reported every time rather than passed over as a session
+        -- that owes nothing yet.
+        Left detail ->
+          pure
+            [ "mission "
+                <> mission.unMissionId
+                <> ": the logs of session "
+                <> session.unMissionSessionId
+                <> " could not be sealed and will be tried again: its worker state could not be read ("
+                <> detail
+                <> ")"
+            ]
   where
     sealOne existing (kind, source) = case filter ((== kind) . (.missionSealedKind)) existing of
       [] -> do
