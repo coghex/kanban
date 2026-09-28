@@ -1079,6 +1079,11 @@ remain opaque within the parent transcript for the first release, resolving
 Q-7; a follow-on design will explore provider-native tracking when stable
 identity, event, and cancellation protocols exist.
 
+> Amended for the mission runner, 2026-09-28: structured concurrency applies to
+> the runner's own chain and, separately, to each detached worker's agent tree;
+> a worker is not the runner's child. See
+> `docs/designs/mission_runner_design.md` D-2.
+
 ### D-15. Runner or host failure requires manual, contextual recovery
 
 An ordinary TUI exit leaves the live runner alone, but runner crash, logout, or
@@ -1087,6 +1092,10 @@ automatically. The normal action hotkey initiates recovery: settle the old
 descendant tree, reconcile outcome-unknown effects, inspect and preserve any
 existing worktree, and give a fresh process the failure and work-in-progress
 handoff. This resolves Q-8.
+
+> Amended for the mission runner, 2026-09-28: only a mission whose step was cut
+> off mid-flight becomes interrupted; every other mission resumes on the next
+> pass. See `docs/designs/mission_runner_design.md` D-3.
 
 ### D-16. Initial autonomous dispatch is narrow but deliberately extensible
 
@@ -1122,6 +1131,10 @@ provider, host-resource, and conflict pressure. Dependencies and lower-level
 authorities may serialize further; explicit configuration may lower or raise
 the ceiling. This resolves Q-5. A future multi-repository deployment may also
 need a host- or provider-wide budget above the repository controllers.
+
+> Amended for the mission runner, 2026-09-28: the ceiling counts running
+> mission-dispatched agents across passes, not missions per pass. See
+> `docs/designs/mission_runner_design.md` D-4.
 
 ### D-20. Externally inapplicable batch targets are skipped when classification is certain
 

@@ -6,9 +6,9 @@ can advance one mission step and recover it. What it cannot do is keep going
 once the operator closes the dashboard. This design adds the per-repository
 service that owns that progression: a supervisor and scheduler that outlive the
 TUI, install and discover themselves the way Kanban's two existing services do,
-own their descendant processes strictly enough that no verified parent death
-leaves a live agent, and share the repository's capacity fairly across missions
-while surviving provider limits and their own upgrades.
+leave no stray process of their own behind while the detached workers they
+dispatch keep owning their agents, and share the repository's capacity fairly
+across missions while surviving provider limits and their own upgrades.
 
 Design state: `ready for issue processing`
 
@@ -35,10 +35,12 @@ concrete precondition
   present; it installs, discovers, starts, stops, and reports status through
   the same machinery Kanban's drainer and issue-approval services already use;
   two runners cannot advance one mission; waiting for input performs no hidden
-  work; no verified parent death and no timeout leaves a live descendant; a
-  runner crash leaves its missions `interrupted` and starts nothing
+  work; no part of the runner's own chain outlives its parent, and each worker
+  still owns and reaps its agent's processes; a step cut off mid-flight leaves
+  its mission `interrupted` for the operator, and nothing retries it
   automatically; one opt-in generic notification is emitted per new attention
-  identity; runnable missions rotate without preemption or idle capacity;
+  identity; at most two mission-dispatched agents run at once per repository;
+  runnable missions rotate without preemption or idle capacity;
   proven capacity limits release their slot and retry while authentication and
   configuration failures stop; a normal upgrade transfers the runner lease only
   after drain; and the operator has one accurate document for installing,
@@ -58,9 +60,10 @@ and stays open until this arc completes. `SAG-9`'s outcome and acceptance
 signals are the contract this arc must meet; the evidence for the split is
 recorded in that document under "Why the runner became its own arc".
 
-This arc as a whole is blocked by the Mission Control arc's `SAG-1` (#592),
-`SAG-2` (#593), `SAG-10` (#594), and `SAG-3` (#595): it has no records to
-advance, no actions to invoke, and no controller to supervise until those land.
+This arc as a whole was blocked by the Mission Control arc's `SAG-1` (#592),
+`SAG-2` (#593), `SAG-10` (#594), and `SAG-3` (#595): it had no records to
+advance, no actions to invoke, and no controller to supervise until those
+landed. All four have landed.
 Two Mission Control slices depend back into this one — `SAG-4` on `RUN-1`,
 `RUN-3`, and `RUN-4`, and `SAG-5` on `RUN-1` — deliberately naming slices
 rather than the whole arc, so the console is not serialized behind scheduling
@@ -70,66 +73,78 @@ policy, capacity waiting, upgrade drain, or notifications.
 
 ### Verified current state
 
-Measured against master `8983a33`.
+Re-measured against master `5cbcf1ad` on 2026-09-28, after RUN-1 (#666),
+RUN-2 (#667), and RUN-3 (#668) merged. The original survey was taken at
+`8983a33` on 2026-08-31.
 
-- **Kanban has built this shape twice.** The PR drainer
-  (`src/Kanban/Drainer.hs`, 1,394 lines; `tools/drain_prs.py`, 5,875;
-  `tools/install_drainer.py`, 4,491) and the persistent issue-approval service
+- **The runner is now the third instance of the service shape.** The PR
+  drainer (`src/Kanban/Drainer.hs`, 1,710 lines; `tools/drain_prs.py`, 7,133;
+  `tools/install_drainer.py`, 4,511), the persistent issue-approval service
   (`src/Kanban/ApprovalService.hs`, 1,250; `tools/install_issue_approval.py`,
-  973) both run as service-manager jobs with an installer, a discovery record,
-  durable status and incidents, and a dashboard control. This arc is the third,
-  and should consume their machinery rather than build a parallel one.
-- **The service-manager boundary already exists and is already portable.**
-  `tools/service_manager.py` (1,089 lines) defines `ServiceManagerBackend` as
-  an abstract base with exactly two implementations, `LaunchdBackend` and
-  `SystemdBackend`, plus `ServiceNamespace`, `ServiceDefinition`,
-  `UninstallOutcome`, and the definition-file writers. A third managed job adds
-  a namespace, not a backend.
-- **The Haskell side of a service transition is also shared.**
-  `Kanban.ServiceProcess` (264 lines) exposes `runGroupedProcess`,
-  `serviceTransitionCommand`, `InvocationFailure`, and its diagnostic
-  vocabulary, which both existing controls use.
+  973), and now the mission runner (`tools/mission_runner_service.py`, 4,010;
+  `tools/install_mission_runner.py`, 1,137; `src/Kanban/MissionRunnerService.hs`,
+  1,538) all run as service-manager jobs with an installer, a discovery record,
+  and durable status and incidents.
+- **What RUN-1 shipped.** The service job runs `tools/mission_runner_service.py`,
+  a Python wrapper that holds a per-repository advisory lock, publishes status
+  and incident documents, and repeats one-shot `kanban --mission-scheduler`
+  passes. Each pass runs in a new session whose process group the wrapper
+  signals on stop, admits at most two runnable missions (a compiled value,
+  #666 requirements 2–3), advances each through its own `kanban --mission <id>`
+  child, waits for those children, and writes one JSON pass report. Attention
+  notifications go through an opt-in, operator-configured command, at most once
+  per attention identity.
+- **Agent work runs in detached persistent workers, not in the runner's tree.**
+  A `--mission` step hands its work to a worker started by
+  `spawnDetachedSupervisor` (`src/Kanban/Worker.hs`, `new_session = True`), and
+  the handoff returns as soon as the worker's durable handle exists
+  (`Kanban.Action.Dispatch`). Each worker owns its item's lease, its agent's
+  process tree, and its deadline: `watchdogLoop` (`src/Kanban/Worker.hs:1689`)
+  terminates the provider group and every recorded process when the
+  configurable `worker_deadline_seconds` (four hours by default) expires, and
+  the worker refuses to call itself terminal while recorded descendants survive,
+  reporting them orphaned until they exit or are killed.
+- **The service-manager boundary is shared.** `tools/service_manager.py`
+  (1,108 lines) defines `ServiceManagerBackend` with exactly two
+  implementations, `LaunchdBackend` and `SystemdBackend`, and three namespaces:
+  `DRAINER_NAMESPACE`, `ISSUE_APPROVAL_NAMESPACE`, and
+  `MISSION_RUNNER_NAMESPACE`. `Kanban.ServiceProcess` (264 lines) carries the
+  Haskell side of a service transition for all three controls.
 - **Discovery records have one resolution point per language.**
-  `Kanban.ManagedPaths` answers where a managed component's record is —
-  the XDG location first and the `~/Library` location second on both platforms,
-  taking the first that is occupied, and this platform's own write default when
-  neither is — and it is the Haskell counterpart of `tools/kanban_config.py`.
-  `ManagedComponent` currently has exactly two constructors,
-  `IssueReviewComponent` and `DrainerComponent`.
-- **The path convention is settled by precedent.** `docs/design.md` §17 places
-  the drainer's discovery record under `~/Library/Application Support/kanban/pr-drainer`
-  on macOS and `$XDG_DATA_HOME/kanban/pr-drainer` elsewhere, and its
-  per-repository logs under `~/Library/Logs/kanban/pr-drainer` and
-  `$XDG_STATE_HOME/kanban/pr-drainer`. The mission store this arc drives is
-  under `$XDG_STATE_HOME/kanban/missions/<owner>-<repo>/` by #592.
-- **The runner's entry point is #595's, not a new one.** That slice adds a
-  foreground launch mode that runs the controller against one repository,
-  acquires the mission lease, and deliberately does not acquire the
-  one-board-per-repository lease (`acquiresRepositoryLease` is
-  `(== DashboardMode) . launchMode`, `src/Kanban/CLI.hs:143`). This arc
-  installs that same entry point as a service rather than inventing a second.
-- **Per-execution deadline enforcement already exists at the worker.**
-  `watchdogLoop` (`src/Kanban/Worker.hs:1219`) terminates the provider group and
-  every recorded process on expiry, and #595 makes the duration configurable.
-  What this arc adds is enforcing it across a runner-launched *descendant tree*
-  without leaking children.
-- **The worker layer already refuses to declare a parent terminal while
-  recorded descendants survive**, reporting them orphaned until they exit or are
-  killed. The mission session tree generalizes that invariant; it does not
-  invent it.
+  `Kanban.ManagedPaths` resolves a managed component's record, XDG location
+  first and `~/Library` second on both platforms, and is the Haskell
+  counterpart of `tools/kanban_config.py`. `ManagedComponent` has three
+  constructors: `IssueReviewComponent`, `DrainerComponent`, and
+  `MissionRunnerComponent`.
+- **The mission store** lives under
+  `$XDG_STATE_HOME/kanban/missions/<owner>-<repo>/` (#592). It already provides
+  an archive and a seal for session logs — `sealMissionLog` with its digest —
+  but nothing in production calls it yet.
+- **The recovery vocabulary exists but one state is never produced.** A
+  `--mission` process journals a step's intent before attempting it, and on the
+  next pass reconciliation answers live registered work first: a step whose
+  worker is still alive is observed, not redone, and a recorded invocation with
+  no conclusion becomes `outcome_unknown`, which stops the mission for the
+  operator (`Kanban.Mission.Reconcile`). `MissionStepInterrupted` and the
+  `interrupted` mission lifecycle exist and are honoured when present, but no
+  code sets a step interrupted. The `--mission` console's `override <step>`
+  resolves an unknown outcome and replans the step, and `terminate <session>`
+  ends a registered mission-session subtree (#595).
+- **The runner's entry point is #595's.** `kanban --mission` acquires the
+  mission lease and deliberately not the one-board-per-repository lease
+  (`acquiresRepositoryLease` is `(== DashboardMode) . launchMode`,
+  `src/Kanban/CLI.hs:239`).
 - A repository-scoped tracker search on 2026-08-31 found no open or closed
   issue or epic covering a mission runner service. #318 and #122 are the two
   service arcs whose machinery this one reuses, and neither is a duplicate.
 
-### Not yet established
+### Settled since the first survey
 
-- The exact runner discovery-record schema and component-specific path spelling
-  are implementation questions for `RUN-2`. Its ownership is settled: it is a
-  third managed component resolved through `ManagedPaths` and
-  `tools/kanban_config.py`, not a field in the mission store.
-- The exact incident vocabulary. `RUN-1` should follow `ApprovalService`'s
-  `ApprovalIncident`/`ApprovalSeverity` shape rather than invent one, but the
-  specific incident kinds fall out of implementation.
+- The runner's discovery-record schema and path spelling were settled by RUN-2
+  (#667): a third managed component resolved through `ManagedPaths` and
+  `tools/kanban_config.py`.
+- The incident vocabulary was settled by RUN-1 (#666), following the existing
+  services' status and incident documents.
 
 ## Desired experience
 
@@ -142,16 +157,18 @@ Measured against master `8983a33`.
    tree replays, and the display follows the live tail without restarting the
    plan or creating replacement children.
 4. When a mission needs a decision, the runner stops and — if this repository
-   has opted in — one desktop notification says a target needs attention, and
-   nothing more.
-5. When the runner or the host dies, its missions are `interrupted`. Nothing
-   resumes on its own. The ordinary action hotkey starts one contextual
-   recovery that settles the old descendant tree before any fresh agent starts.
+   has opted in — its configured notification command is told once that a
+   target needs attention, and nothing more.
+5. When the runner or the host dies, agents already working keep working under
+   their own workers, and missions resume on the next pass once the service is
+   back. Only a mission whose step was cut off mid-flight is `interrupted`: it
+   waits for the operator, nothing retries it, and the operator recovers it
+   with `override`, which replans the step.
 6. When a provider's quota is exhausted, the mission releases its slot, waits,
    and retries. When authentication or configuration is wrong instead, it stops
    and says so.
-7. When Kanban is upgraded, the old runner drains its live children, seals
-   their state, and hands the lease over exactly once.
+7. When Kanban is upgraded, the old runner drains, seals what it owns, and
+   hands the lease over exactly once. What the drain waits for is Q-2.
 
 ## Scope
 
@@ -171,19 +188,21 @@ Measured against master `8983a33`.
   `tools/service_manager.py`'s existing backend boundary.
 - Kanban-side discovery, status decoding, start/stop control, and event-reader
   reattachment to a running runner's mission events.
-- Structured descendant ownership: every registered child recorded before
-  launch, a parent never terminal while a registered child survives, cascading
-  termination deepest-first, and identity-verified reaping.
-- Deadline enforcement across a runner-launched descendant tree, and
-  interrupted/manual recovery after runner or host failure.
+- Structured ownership of the runner's own chain — wrapper, scheduler pass,
+  and `--mission` children — with identity-verified settlement of anything a
+  crashed layer left behind (D-2). Detached workers keep owning their agents'
+  process trees and deadlines.
+- Marking a step cut off mid-flight `interrupted`, and manual recovery of it
+  (D-3).
 - Session-log sealing into the mission archive before the worker cache may
   collect the source.
 - Work-conserving round-robin admission across equal-priority autonomous
   missions, foreground priority for direct operator commands, and the
-  repository concurrency ceiling.
+  repository's ceiling of two running agents (D-4).
 - Durable provider-capacity waits that release the slot and retry.
 - Drain-before-handoff on a normal upgrade.
-- An opt-in, privacy-minimal desktop notification adapter.
+- An opt-in, privacy-minimal attention notification through an
+  operator-configured command.
 - Operating documentation for installation, control, troubleshooting, and
   recovery.
 
@@ -197,8 +216,10 @@ Measured against master `8983a33`.
   the durable issue workers (#594), and the controller's own reconciliation and
   recovery logic (#595). This arc supervises that controller; it does not
   reimplement it.
-- Automatic resume after a runner crash, logout, or machine restart. Recovery
-  stays manual and operator-initiated.
+- Automatically retrying a step cut off mid-flight. Its recovery stays manual
+  and operator-initiated (D-3).
+- The workers' own process-tree reaping and deadlines, which #594 and #595
+  already ship.
 - Merging pull requests, under any circumstances. The PR drainer remains the
   only component that merges.
 - Cross-repository scheduling or a host-wide budget above the per-repository
@@ -210,15 +231,24 @@ Measured against master `8983a33`.
 ### Ownership layers
 
 Because a process cannot clean up after its own crash, every executable parent
-sits inside a longer-lived ownership boundary. The service manager's job
-provides outer containment; that job launches a small mission supervisor; the
-supervisor launches the scheduler; the scheduler owns session supervisors; and
-session supervisors own agent processes and their descendants. Each layer
-records its children's identities *before* admitting work, and a layer's exit
-is observed by the layer above it, which performs the cascade.
+sits inside a longer-lived ownership boundary. What shipped has two ownership
+domains rather than one tree (D-2, as amended).
+
+The runner's own chain: the service manager's job provides outer containment
+and runs `tools/mission_runner_service.py`; that wrapper runs one-shot
+`kanban --mission-scheduler` passes, each in its own process group; and a pass
+runs one `kanban --mission` child per admitted mission and waits for them. Each
+layer records its children's identities before launching them, and a layer's
+exit is observed by the layer above it, which settles what it left.
+
+The workers: a `--mission` step hands agent work to a detached persistent
+worker and returns once the worker's durable handle exists. The worker, not
+the runner, owns that agent's process tree, its lease, and its deadline, and
+outlives the process that dispatched it. The runner stopping or dying never
+terminates a worker; the next pass reconciles against it.
 
 A host whose service manager cannot supply a trustworthy outer containment and
-refusal boundary is unsupported rather than allowed to leak agents.
+refusal boundary is unsupported rather than allowed to leak runner processes.
 
 ### What the runner does not decide
 
@@ -239,11 +269,14 @@ subscribes to new ones.
 
 ### Recovery boundary
 
-Runner crash, logout, or machine restart marks nonterminal missions
-`interrupted` and starts nothing. Recovery is operator-initiated and performs a
-second identity-verified sweep of the old descendant tree before any
-replacement process starts. This is deliberately asymmetric with ordinary TUI
-exit, which stops nothing.
+A runner crash, logout, or machine restart interrupts only a mission whose
+step was cut off mid-flight: its intent journaled by a `--mission` process that
+died before any worker handle or conclusion was recorded. That step is marked
+`interrupted`, the mission stops for the operator, and nothing retries it; the
+operator recovers it with `override`, which replans the step. Every other
+mission resumes on the next pass once the service is back, reconciling against
+live workers first so no step is dispatched twice (D-3, as amended). Ordinary
+TUI exit stops nothing.
 
 ## Decisions
 
@@ -266,6 +299,22 @@ joins its children before normal completion, and parent failure, timeout,
 cancellation, or kill recursively terminates and reaps the entire descendant
 subtree. No child is reparented or allowed to become a stray agent.
 
+**Amended, 2026-09-28.** What shipped does not form one tree. The service job
+runs `tools/mission_runner_service.py`, which runs one-shot
+`kanban --mission-scheduler` passes in their own process group. Those run
+`kanban --mission` children, which hand agent work to detached persistent
+workers (`spawnDetachedSupervisor`, in their own session). Handing work off
+returns once the worker's durable handle exists (#594, `Kanban.Action.Dispatch`).
+Structured concurrency therefore applies at two levels rather than one. The
+runner owns its own chain — wrapper, pass, and `--mission` children — and
+nothing in it outlives the layer above. Each worker owns its agent's process
+tree, with its own lease, its `worker_deadline_seconds` watchdog, and its orphan
+handling. A worker is not the runner's child, and the runner stopping or dying
+never terminates one. The explicit, recursive `terminate` command for a
+registered mission session stays as #595 built it.
+
+**Amendment signed off:** by the user, 2026-09-28.
+
 ### D-3. Runner or host failure requires manual, contextual recovery
 
 From superagent `D-15`. Ordinary TUI exit leaves the live runner alone, but
@@ -275,12 +324,41 @@ initiates recovery: settle the old descendant tree, reconcile outcome-unknown
 effects, inspect and preserve any existing worktree, and give a fresh process
 the failure and work-in-progress handoff.
 
+**Amended, 2026-09-28.** A runner crash, logout, or restart no longer marks
+every unfinished mission interrupted. Only a mission whose step was cut off
+mid-flight becomes `interrupted`: its intent was journaled by a `--mission`
+process that died before any worker handle or conclusion was recorded. That
+step is marked interrupted rather than `outcome_unknown`, the mission stops for
+the operator, and nothing retries it automatically. A step whose worker is
+still alive, and a mission whose next step never started, resume on the next
+pass, including when the service comes back after a crash. Recovery stays
+manual for an interrupted mission: the operator resolves the step with the
+existing `override` command (#595), which replans it. Reaching that from the
+dashboard's action hotkey is Mission Control's SAG-4. An `outcome_unknown` that
+doesn't come from a dead process, such as a worker that ended with no
+conclusive evidence, keeps its current meaning.
+
+**Amendment signed off:** by the user, 2026-09-28.
+
 ### D-4. Two mutation-capable agent children may run per repository by default
 
 From superagent `D-19`. The initial configurable admission ceiling is two
 simultaneously running mutation-capable agent children across all missions for
 one canonical repository. Dependencies and lower-level authorities may
 serialize further; explicit configuration may lower or raise the ceiling.
+
+**Amended, 2026-09-28.** The ceiling counts running agents, not missions. At
+most two mission-dispatched workers running a provider agent (a solve, a
+pull-request task, or one issue-review host child) may be live at once for one
+canonical repository, across all missions and across passes. A pass starts no
+step that would make a third. The limit stays configurable, as originally
+decided, with two as the default. RUN-1 shipped a fixed limit of two missions
+per pass (#666, requirements 2–3). Because workers are detached and a pass
+doesn't wait for them, successive passes can leave more than two agents
+running, so that limit does not implement this decision. Work launched from
+the board outside a mission does not count.
+
+**Amendment signed off:** by the user, 2026-09-28.
 
 ### D-5. New operator commands outrank queued autonomous children
 
@@ -371,6 +449,17 @@ gate admission above these runners rather than replace their ceilings.
 Resolved by D-14. Per repository, matching both existing services; a host-wide
 admission budget is deferred to the multi-repository arc.
 
+### Q-2. What does an upgrade drain wait for, now that workers are detached?
+
+D-10 assumed the runner owned its running children. (a) The old runner stops
+starting passes, lets its current pass and `--mission` children finish, and
+hands over without waiting for detached workers, which finish under the binary
+that launched them. (b) It also waits for every mission-dispatched worker to
+finish first.
+
+**Proposal:** (a). Deliberately open: RUN-5 stops and asks here before its
+drain requirement is written. RUN-4 does not depend on the answer.
+
 ## Verification strategy
 
 - No-TUI fixtures are the arc's signature test: dispatch a mission, exit the
@@ -379,15 +468,16 @@ admission budget is deferred to the multi-repository arc.
 - Two-process fixtures prove arbitration: a second runner cannot advance a
   mission the first holds, and a dashboard's presence never grants it an
   advancement lease.
-- Structured-concurrency fixtures build multi-level registered process trees.
-  Normal parent completion waits for children; parent kill, timeout, and crash
-  terminate the whole subtree; an unverifiable survivor blocks settlement; no
-  child is reparented or left running after verified parent death.
-- Manual-recovery fixtures crash the runner with committed and uncommitted
-  worktree state, prove no login or TUI restart launches work, activate
-  recovery through the action boundary, and show the fresh agent receives the
-  failure, log, branch, commits, status, diff, untracked paths, and live
-  tracker state without resetting or duplicating the prior effect.
+- Runner-chain fixtures kill the wrapper, a pass, and a `--mission` child in
+  turn, and prove the layer above settles what was left, with identity checks,
+  before anything new starts; an unverifiable survivor blocks settlement. A
+  detached worker survives every one of those deaths and is reconciled, not
+  redone.
+- Interrupted-step fixtures kill a `--mission` process between journaling a
+  step and recording its worker, and prove the mission becomes `interrupted`,
+  is never retried by a later pass or a service restart, and is recovered by
+  `override`; a mission whose worker is healthy through the same crash resumes
+  with no duplicate dispatch.
 - Installer fixtures follow the existing services' suites: install, reinstall,
   relocate, repair a missing or stale discovery record, and uninstall, on both
   service-manager backends.
@@ -402,9 +492,10 @@ admission budget is deferred to the multi-repository arc.
 - Upgrade fixtures put the old runner into drain, queue a concurrent command,
   settle and seal live children, transfer the lease exactly once, and prove a
   forced or incompatible handoff becomes interrupted.
-- Deadline fixtures exercise the configured deadline through an injected clock
-  across a descendant tree, and prove a timeout leaks no descendant.
-- Notification fixtures use a fake desktop adapter, prove one generic notice per
+- Deadline enforcement is the worker's and is already covered by its own
+  suite (`worker_deadline_seconds`); this arc's fixtures only prove the runner
+  never shortens or bypasses it.
+- Notification fixtures use a fake notification command, prove one generic notice per
   attention ID, and reject sensitive content fields.
 - Documentation is verified by following it: the operating guide's commands and
   paths are the ones the tests exercise.
@@ -477,23 +568,31 @@ admission budget is deferred to the multi-repository arc.
 
 ### RUN-4. Own and reap the descendant tree across crash, timeout, and termination
 
-- **Outcome:** No verified parent death, timeout, or explicit termination
-  leaves a live descendant, and a runner crash leaves its missions
-  `interrupted` with an operator-initiated recovery path.
-- **Scope:** Registered-child recording before launch; cascading termination
-  deepest-first with identity verification; parent-not-terminal-while-children-
-  survive; deadline enforcement across a descendant tree; interrupted marking
-  and manual contextual recovery; session-log sealing into the mission archive.
+- **Outcome:** The runner's own chain never leaves a stray process. A step cut
+  off mid-flight marks its mission `interrupted` and waits for the operator.
+  Every mission session's log is sealed into the mission archive.
+- **Scope:** Settle a scheduler pass and its `--mission` children that a
+  crashed wrapper left behind, with identity checks, before the next wrapper
+  starts a pass — whether a killed wrapper really leaves its pass running is to
+  be verified at filing time, since the pass leads its own session and
+  plausibly survives. Mark a cut-off step `interrupted` and recover it through
+  `override` (D-3). Call the existing but unused `sealMissionLog`, so a
+  session's complete log and digest are archived before the worker cache may
+  remove the original (D-11).
 - **Phase:** 4 — ownership and death.
 - **Depends on:** `RUN-1`.
 - **Ordering:** `critical path`.
-- **Relevant decisions:** `D-2`, `D-3`, `D-7`, `D-11`.
-- **Acceptance signals:** A multi-level tree is reaped deepest-first with every
-  recorded identity verified absent; an unverifiable survivor blocks settlement;
-  a timeout leaks no descendant; a runner crash marks missions `interrupted`
-  and starts nothing; recovery settles the old tree before any replacement
-  starts; a sealed log verifies after its source is collected.
-- **Out of scope:** Scheduling fairness, capacity waiting, and upgrade drain.
+- **Relevant decisions:** `D-2`, `D-3`, `D-11`.
+- **Acceptance signals:** A killed wrapper's leftover pass is settled before
+  the next one starts, and no mission advances twice; a `--mission` killed
+  between journaling a step and recording its worker leaves the mission
+  `interrupted`, never retried, and `override` recovers it; a mission whose
+  worker is healthy through a runner crash resumes with no duplicate dispatch;
+  a sealed log verifies after its source is removed.
+- **Out of scope:** The workers' own process-tree cleanup and deadlines, which
+  already ship (D-2, D-7); scheduling fairness, capacity waiting, and upgrade
+  drain (RUN-5); reaching recovery from the dashboard's action hotkey
+  (Mission Control's `SAG-4`).
 - **Open questions:** `None`.
 
 ### RUN-5. Schedule missions fairly and survive capacity limits and upgrades
@@ -502,7 +601,9 @@ admission budget is deferred to the multi-repository arc.
   round-robin, direct operator commands take the next slot without preempting,
   proven provider limits release the slot and retry, and a normal upgrade
   transfers the runner lease only after drain.
-- **Scope:** The repository admission ceiling and its configuration;
+- **Scope:** The repository's ceiling of two running mission-dispatched agents
+  and its configuration (D-4, as amended), replacing RUN-1's compiled
+  two-missions-per-pass limit as the capacity rule;
   work-conserving round-robin with a durable cursor; foreground priority for
   direct commands; capacity classification, slot release, reset/backoff, and
   retry; drain state, queued commands during drain, and single lease handoff.
@@ -511,8 +612,9 @@ admission budget is deferred to the multi-repository arc.
 - **Ordering:** `critical path` for the epic; `not on the critical path` for
   Mission Control's console, which does not depend on it.
 - **Relevant decisions:** `D-4`, `D-5`, `D-8`, `D-9`, `D-10`.
-- **Acceptance signals:** The ceiling holds across concurrent missions and does
-  not weaken lower serialized locks; a new direct command gets the next
+- **Acceptance signals:** No more than two mission-dispatched agents run at
+  once across missions and across passes, and the ceiling does not weaken
+  lower serialized locks; a new direct command gets the next
   compatible slot without preempting; the round-robin cursor survives restart,
   skips blocked missions, and reuses idle capacity; a rate limit releases its
   slot and retries at reset while an authentication failure stops; a drain
@@ -520,17 +622,20 @@ admission budget is deferred to the multi-repository arc.
   handoff becomes interrupted rather than two schedulers.
 - **Out of scope:** Cross-repository or host-wide budgets, and batch membership
   and ordering, which are Mission Control's `SAG-5`.
-- **Open questions:** `None`; `D-14` settles per-repository installation.
+- **Open questions:** `Q-2`, deliberately open: before the drain requirement
+  is written, stop and ask what a drain waits for. `D-14` settles
+  per-repository installation.
 
 ### RUN-6. Document installing, operating, and recovering the mission runner
 
 - **Outcome:** Operators have one accurate document for installing, starting,
   stopping, inspecting, troubleshooting, and recovering the mission runner, and
   the repository's steering documents agree with what shipped.
-- **Scope:** The operating guide; `docs/design.md` and
-  `docs/agent-workflow-contract.md` updates for the new managed component, its
-  authority, and its durable state; dependency and packaging inventory entries;
-  recovery and troubleshooting procedures.
+- **Scope:** The operating guide, with recovery and troubleshooting
+  procedures. RUN-1 through RUN-3 already added their own contract and
+  inventory entries to `docs/design.md` and `docs/agent-workflow-contract.md`;
+  this slice adds the entries RUN-4 and RUN-5 introduce and reconciles the
+  rest with what shipped.
 - **Phase:** 6 — operability.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   stays in this design rather than claiming shipped behavior.
