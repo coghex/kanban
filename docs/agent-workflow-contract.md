@@ -2384,7 +2384,7 @@ report did not name.
   one scheduler pass a run may have out, by process identifier and start time,
   with every member of its process group the run has seen — each identity
   observed after its start second ended, since `ps` reports start times to the
-  second and only such an observation rules out a same-second reuse; a pass
+  second (read in UTC and the C locale, whatever the controller's environment) and only such an observation rules out a same-second reuse; a pass
   waits at its gate until its own can be recorded that way. The next `run` for
   the repository settles what it names under the run lock before starting a
   pass: verified processes still in the pass's group are stopped and then

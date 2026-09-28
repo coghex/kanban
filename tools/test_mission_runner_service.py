@@ -1809,7 +1809,7 @@ class SettlementTests(MissionRunnerFixture):
         record = self.pass_record()
         pass_pid = record["pass_pid"]
         self.ensure_gone(pass_pid)
-        self.assertEqual(record["pass_identity"], service.process_start_identity(pass_pid))
+        self.assertEqual(record["pass_identity"], service.process_group_identity(pass_pid)[1])
         os.kill(first.pid, signal.SIGKILL)
         first.wait(timeout=10)
         # The premise: nothing ran after the wrapper, and both survive it.
@@ -1938,6 +1938,31 @@ class SettlementTests(MissionRunnerFixture):
         )
         self.assertEqual(status, 0, stderr)
         self.assertIsNone(stranger.poll())
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertFalse(self.job().pass_record_path.exists())
+
+    # A start time is rendered in the reader's time zone, and a controller may
+    # be restarted under a different one than the controller that recorded the
+    # pass. The same live process has to read as itself either way, or its
+    # record would be retired as a stranger's and a second pass started beside
+    # it.
+    def test_a_pass_recorded_under_another_time_zone_is_still_recognized(self):
+        leader = self.stranger()
+        # Reaped as soon as it ends, the way a pass whose controller is gone is
+        # reaped by init, so its settlement is not held up by this test's own
+        # unreaped child.
+        threading.Thread(target=leader.wait, daemon=True).start()
+        environment = {**os.environ, "TZ": "America/Los_Angeles"}
+        with mock.patch.dict(os.environ, environment):
+            identity, confirmed_at = self.confirmed_identity(leader.pid)
+        self.write_pass_record(
+            pass_pid=leader.pid, pass_identity=identity, pass_confirmed_at=confirmed_at
+        )
+        status, _stdout, stderr = self.run_controller(
+            "--passes", "1", environment=self.settling_environment(TZ="UTC")
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertIsNotNone(leader.poll())
         self.assertEqual(len(self.recorded()), 1)
         self.assertFalse(self.job().pass_record_path.exists())
 

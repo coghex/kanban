@@ -53,6 +53,7 @@ reattaches to them.
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import datetime
 import hashlib
@@ -1957,18 +1958,24 @@ def process_table() -> dict[int, tuple[int, str]] | None:
 
 
 def c_locale() -> dict[str, str]:
-    """This environment with `ps` held to the C locale, so the start times it
-    prints are in the one spelling `started_epoch` parses."""
-    return {**os.environ, "LC_ALL": "C"}
+    """This environment with `ps` held to the C locale and to UTC.
+
+    A start time is rendered in the reader's own locale and time zone, and a
+    recorded one is compared as text against a later reading, possibly by a
+    controller started with a different environment. Pinning both makes one
+    process read the same way whoever reads it, and makes the text one
+    `started_epoch` parses without guessing at a daylight-saving offset.
+    """
+    return {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
 
 
 def started_epoch(started: Any) -> float | None:
-    """The first instant of the second a `ps -o lstart=` start time names, or
-    None when it is not one."""
+    """The first instant of the second a UTC `ps -o lstart=` start time names,
+    or None when it is not one."""
     if not isinstance(started, str):
         return None
     try:
-        return time.mktime(time.strptime(" ".join(started.split()), "%a %b %d %H:%M:%S %Y"))
+        return float(calendar.timegm(time.strptime(" ".join(started.split()), "%a %b %d %H:%M:%S %Y")))
     except (ValueError, OverflowError):
         return None
 

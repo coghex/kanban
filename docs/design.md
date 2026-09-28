@@ -4047,7 +4047,8 @@ Defaults:
 - `pass.json` beside the status document records the one scheduler pass a
   run may have out: its process identifier and start time, and the identifier
   and start time of every member of its process group the run has seen. A start
-  time is `ps`'s, to the second, so each is recorded only as observed after its
+  time is `ps`'s, read in UTC and the C locale so a controller started in
+  another time zone reads the same process the same way, and to the second, so each is recorded only as observed after its
   start second ended: the process was alive then, so nothing that reuses its
   identifier later can share its start second, and an identity observed inside
   that second is refused rather than trusted. A
