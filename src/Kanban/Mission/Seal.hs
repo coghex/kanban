@@ -17,6 +17,7 @@
 module Kanban.Mission.Seal
   ( missionSessionLogSources,
     sealMissionSessionLogs,
+    missionSealCovers,
     MissionSealIndex,
     loadMissionSealIndex,
     missionWorkerLogsReleasable,
@@ -24,8 +25,10 @@ module Kanban.Mission.Seal
 where
 
 import Control.Exception (IOException, try)
+import Data.Either (isRight)
 import Data.List (find)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Kanban.Domain (Repository)
 import Kanban.Mission.Paths (MissionStore, openMissionStore)
 import Kanban.Mission.Store
@@ -67,14 +70,19 @@ missionSessionLogSources descriptor state =
     : [(MissionRawProviderLog, path) | Just path <- [state.workerStateLogPath]]
 
 -- | Seals whatever one registered session still owes the archive, once its
--- worker has reached a terminal state, and says what could not be sealed.
+-- worker has reached a terminal state, and says what is not sealed.
 --
 -- Safe to call as often as a caller likes, which is what makes it a retry. A
--- log that already has a seal record is left exactly as it is: an archive is
--- immutable, so the way a second attempt recognizes the first is by finding
--- it rather than by writing over it. A session with no worker record, or one
--- whose worker is still running, owes nothing yet; a log whose source is not
--- there has nothing left to copy.
+-- log that already has a seal is checked rather than trusted: its archived
+-- copy has to verify against the recorded digest and length and still match
+-- its source's length ('missionSealCovers'). One that does is done. One that
+-- does not is reported every time this runs, because an archive is immutable
+-- — nothing here may replace it, so the repair is an operator's, and until
+-- then the worker cache keeps the source. A session with no worker record, or
+-- one whose worker is still running, owes nothing yet. A log with no seal and
+-- no source is reported too: nothing is left to copy, and the worker cache
+-- keeps the rest of that worker's records rather than treat the loss as
+-- settled.
 --
 -- The answer is a list of failures for the caller to report and never an
 -- 'Either': a mission does not stop, fail, or wait because one of its
@@ -88,35 +96,50 @@ sealMissionSessionLogs store mission workers session =
       case stateResult of
         Right state
           | WorkerTerminal _ <- state.workerStateStatus -> do
-              sealedKinds <- sealedFor
-              concat <$> mapM (sealOne sealedKinds) (missionSessionLogSources descriptor state)
+              existing <- sealedFor
+              concat <$> mapM (sealOne existing) (missionSessionLogSources descriptor state)
         _ -> pure []
   where
-    sealOne sealedKinds (kind, source) = do
-      let already = kind `elem` sealedKinds
-      present <- doesFileExist source
-      if already || not present
-        then pure []
-        else do
-          sealed <- sealMissionLog store mission session kind source
-          case sealed of
-            Right _ -> pure []
-            -- Somebody else's attempt got there first — another pass, or the
-            -- controller that watched the session end. That is a seal, and
-            -- only a record nobody can read is a failure.
-            Left (MissionSealAlreadySealed _ _) -> do
-              found <- sealedFor
-              pure
-                [ failure kind "a seal record already exists for it and could not be read"
-                | kind `notElem` found
-                ]
-            Left other -> pure [failure kind (missionSealFailureMessage other)]
+    sealOne existing (kind, source) = case filter ((== kind) . (.missionSealedKind)) existing of
+      [] -> do
+        present <- doesFileExist source
+        if not present
+          then pure [failure kind ("its source " <> Text.pack source <> " is missing, so there is nothing to seal")]
+          else do
+            sealed <- sealMissionLog store mission session kind source
+            case sealed of
+              Right _ -> pure []
+              -- Somebody else's attempt got there first — another pass, or the
+              -- controller that watched the session end. That seal is judged
+              -- like any other.
+              Left (MissionSealAlreadySealed _ _) -> do
+                found <- filter ((== kind) . (.missionSealedKind)) <$> sealedFor
+                case found of
+                  [] -> pure [failure kind "a seal record already exists for it and could not be read"]
+                  seals -> judged kind source seals
+              Left other -> pure [failure kind (missionSealFailureMessage other)]
+      seals -> judged kind source seals
 
-    -- The log kinds this session already has a readable seal for, from one
-    -- read of the mission's archive index.
+    judged kind source seals = do
+      verdicts <- mapM (\sealed -> missionSealCovers store mission sealed source) seals
+      pure $ case [() | Right () <- verdicts] of
+        (_ : _) -> []
+        [] ->
+          [ "mission "
+              <> mission.unMissionId
+              <> ": the sealed "
+              <> missionLogKindTag kind
+              <> " of session "
+              <> session.unMissionSessionId
+              <> " cannot be relied on and cannot be replaced, so its source is kept until an operator resolves it: "
+              <> Text.intercalate "; " [detail | Left detail <- verdicts]
+          ]
+
+    -- This session's readable seals, from one read of the mission's archive
+    -- index.
     sealedFor = do
       (sealed, _) <- readableMissionSealedArchives store mission
-      pure [entry.missionSealedKind | entry <- sealed, entry.missionSealedSession == session]
+      pure [entry | entry <- sealed, entry.missionSealedSession == session]
 
     failure kind detail =
       "mission "
@@ -127,6 +150,37 @@ sealMissionSessionLogs store mission workers session =
         <> session.unMissionSessionId
         <> " could not be sealed and will be tried again: "
         <> detail
+
+-- | Whether one seal is a complete, intact copy of the log it names.
+--
+-- Its archived bytes have to verify against the digest and length it
+-- recorded, and — while the source is still there — the source has to be the
+-- length that was sealed, so a copy taken before a stream finished is never
+-- mistaken for the stream. The one statement of "sealed" both halves of this
+-- module use, so the sealer and the collector cannot disagree about it.
+missionSealCovers :: MissionStore -> MissionId -> MissionSealedArchive -> FilePath -> IO (Either Text ())
+missionSealCovers store mission sealed source = do
+  verified <- verifyMissionSealedArchive store mission sealed
+  case verified of
+    Left detail -> pure (Left detail)
+    Right () -> do
+      present <- doesFileExist source
+      if not present
+        then pure (Right ())
+        else do
+          size <- try @IOException (getFileSize source)
+          pure $ case size of
+            Left exception -> Left ("could not measure " <> Text.pack source <> " (" <> Text.pack (show exception) <> ")")
+            Right bytes
+              | bytes == sealed.missionSealedByteLength -> Right ()
+              | otherwise ->
+                  Left
+                    ( Text.pack source
+                        <> " is "
+                        <> Text.pack (show bytes)
+                        <> " bytes and its seal covers "
+                        <> Text.pack (show sealed.missionSealedByteLength)
+                    )
 
 -- | Every seal a repository's mission store holds, read strictly.
 data MissionSealIndex = MissionSealIndex MissionStore [(MissionId, MissionSealedArchive)]
@@ -159,15 +213,13 @@ loadMissionSealIndex repository = do
 -- log 'missionSessionLogSources' names is accounted for, and "accounted for"
 -- is deliberately narrow:
 --
---   * a seal for this session and log kind whose archived copy verifies
---     against its recorded digest and length, and whose length still matches
---     the source when the source is there — so a copy taken before the stream
---     finished is not mistaken for the stream; or
---   * no seal and no source, which leaves nothing for a removal to lose.
+-- a seal for this session and log kind that 'missionSealCovers' accepts, for
+-- every one of them.
 --
--- Everything else keeps the records: no seal beside a source that is still
--- there, a seal that does not verify, an index that could not be read, and
--- one log sealed while the other is not. What is kept is the whole worker,
+-- Everything else keeps the records: no seal, whether or not its source is
+-- still there, a seal that does not verify or no longer matches its source,
+-- an index that could not be read, and one log sealed while the other is not.
+-- What is kept is the whole worker,
 -- specification and state included, because they are what associates the
 -- logs with their mission and names the raw log at all — which is also what
 -- protects a worker created before its mission recorded the handle, since
@@ -186,24 +238,15 @@ missionWorkerLogsReleasable loadIndex descriptor state =
         Right index -> and <$> mapM (accountedFor index) (missionSessionLogSources descriptor state)
   where
     session = MissionSessionId (workerIdentity descriptor)
-    accountedFor (MissionSealIndex store seals) (kind, source) = do
-      present <- doesFileExist source
-      case [ (mission, sealed)
-           | (mission, sealed) <- seals,
-             sealed.missionSealedSession == session,
-             sealed.missionSealedKind == kind
-           ] of
-        [] -> pure (not present)
-        candidates -> or <$> mapM (verifies store present source) candidates
-    verifies store present source (mission, sealed) = do
-      verified <- verifyMissionSealedArchive store mission sealed
-      case verified of
-        Left _ -> pure False
-        Right ()
-          | not present -> pure True
-          | otherwise -> do
-              size <- try @IOException (getFileSize source)
-              pure (either (const False) (== sealed.missionSealedByteLength) size)
+    accountedFor (MissionSealIndex store seals) (kind, source) =
+      or
+        <$> mapM
+          (\(mission, sealed) -> isRight <$> missionSealCovers store mission sealed source)
+          [ (mission, sealed)
+          | (mission, sealed) <- seals,
+            sealed.missionSealedSession == session,
+            sealed.missionSealedKind == kind
+          ]
 
 workerIdentity :: WorkerDescriptor -> Text
 workerIdentity descriptor = descriptor.workerDescriptorSpec.workerId.unWorkerId

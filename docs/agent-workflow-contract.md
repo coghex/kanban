@@ -2384,7 +2384,9 @@ report did not name.
   one scheduler pass a run may have out, by process identifier and start time,
   with every member of its process group the run has seen. The next `run` for
   the repository settles what it names under the run lock before starting a
-  pass: verified processes are stopped and then killed, a process named only by
+  pass: verified processes still in the pass's group are stopped and then
+  killed, one that has left it for a session of its own is not the pass's, a
+  process named only by
   identifier — including the bare `pass_pid` an earlier release left in its
   status document, adopted into a record marked legacy — is never signalled,
   and a survivor that cannot be verified gone fails the run with a
@@ -2401,8 +2403,10 @@ report did not name.
   logs any mission's finished sessions still owe — an event stream, and a raw
   provider log where the worker recorded one — whatever that mission's
   lifecycle, without admitting it; a seal that fails is carried in the pass's
-  detail and retried by the next pass, and never fails the pass. The worker
-  cache keeps a mission-launched worker's records until those seals verify.
+  detail and retried by the next pass, and never fails the pass; an existing
+  seal is verified on every attempt and reported, never replaced, when it no
+  longer holds. The worker cache keeps a mission-launched worker's records until
+  a verified seal covers every log it owes.
 
   Installation adds four more. The discovery record §4's
   `mission-runner-discovery-record` rows name holds one entry per installed

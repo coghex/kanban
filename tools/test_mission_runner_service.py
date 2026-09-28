@@ -1628,6 +1628,22 @@ class SettlementClassificationTests(unittest.TestCase):
             (False, [101], [102]),
         )
 
+    # A recorded member seen in another group since has left the pass's -- a
+    # mission child's descendant caught before its `setsid` and now a detached
+    # worker. It is not the pass's to signal, or to wait for.
+    def test_a_recorded_member_that_left_the_group_is_not_the_passs(self):
+        table = {101: (101, "recorded"), 102: (100, "still here")}
+        members = {(101, "recorded"), (102, "still here")}
+        self.assertEqual(
+            service.classify_pass_group(table, 100, self.identity, members),
+            (False, [102], []),
+        )
+        leader_live = {100: (100, self.identity), **table}
+        self.assertEqual(
+            service.classify_pass_group(leader_live, 100, self.identity, members),
+            (True, [100, 102], []),
+        )
+
     def test_a_legacy_record_verifies_nothing_and_rules_nothing_out(self):
         table = {100: (100, "whoever"), 101: (100, "whoever's child")}
         self.assertEqual(
@@ -1838,6 +1854,28 @@ class SettlementTests(MissionRunnerFixture):
             "--passes", "1", environment=self.settling_environment()
         )
         self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(self.recorded()), 1)
+
+    def test_a_recorded_member_that_became_a_detached_worker_is_left_alone(self):
+        worker = self.stranger()
+        worker_identity = wait_until(
+            lambda: service.process_start_identity(worker.pid), message="the worker's start time"
+        )
+        leader, leader_identity, child, child_identity = self.leaderless_child()
+        self.write_pass_record(
+            pass_pid=leader,
+            pass_identity=leader_identity,
+            members=[
+                {"pid": child, "identity": child_identity},
+                {"pid": worker.pid, "identity": worker_identity},
+            ],
+        )
+        status, _stdout, stderr = self.run_controller(
+            "--passes", "1", environment=self.settling_environment()
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertTrue(process_gone(child))
+        self.assertIsNone(worker.poll())
         self.assertEqual(len(self.recorded()), 1)
 
     def test_a_recorded_identifier_reused_by_another_process_is_not_signalled(self):

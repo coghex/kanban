@@ -2086,13 +2086,18 @@ def classify_pass_group(
     * The leader is alive with its recorded start time. Its group is the one it
       created, so every member of that group is the pass's own.
     * Something else holds the leader's identifier. The pass's group must have
-      ended before that identifier could be handed out again, so nothing in a
-      group of that number is the pass's; only members recorded by their own
-      identity are.
+      ended before that identifier could be handed out again, so nothing is
+      the pass's any more.
     * Nothing holds it. A group of that number is either the pass's, whose
-      leader has exited, or somebody else's whose leader has too. Recorded
-      members are verified by their own identity, and anything else in the
-      group is unverifiable — never signalled, and never assumed gone.
+      leader has exited, or somebody else's whose leader has too. A member
+      recorded by its own identity and still in that group is verified, and
+      anything else in the group is unverifiable — never signalled, and never
+      assumed gone.
+
+    Membership is read now, not remembered. A process recorded while it was in
+    the pass's group and seen in another one since has left it — the one way a
+    mission child's own descendant does that is by becoming a detached worker,
+    which leads a session of its own — and is neither signalled nor waited for.
 
     A legacy record carries no start time, so its leader can be neither
     verified nor ruled out: it and its group are unverifiable.
@@ -2107,12 +2112,16 @@ def classify_pass_group(
         verified = [
             candidate
             for candidate, (group, _started) in table.items()
-            if candidate != own and (group == pid or recorded(candidate))
+            if candidate != own and group == pid
         ]
         return True, verified, []
-    verified = [candidate for candidate in table if candidate != own and recorded(candidate)]
     if leader is not None and identity is not None:
-        return False, verified, []
+        return False, [], []
+    verified = [
+        candidate
+        for candidate, (group, _started) in table.items()
+        if candidate != own and group == pid and recorded(candidate)
+    ]
     unverified = [
         candidate
         for candidate, (group, _started) in table.items()
@@ -2123,14 +2132,30 @@ def classify_pass_group(
     return False, verified, unverified
 
 
-def signal_verified(pid: int, started: str, signum: int) -> None:
-    """Signal one process, having just checked it is still the one recorded.
+def process_group_identity(pid: int) -> tuple[int, str] | None:
+    """One process's group and start time, read together, or None."""
+    proc = run_command(["ps", "-o", "pgid=,lstart=", "-p", str(pid)], check=False)
+    if proc.returncode != 0:
+        return None
+    fields = (proc.stdout or "").strip().split(None, 1)
+    if len(fields) != 2:
+        return None
+    try:
+        return int(fields[0]), fields[1].strip()
+    except ValueError:
+        return None
 
-    The table the caller decided from is a moment old, so the start time is
-    read again immediately before the signal: a process that exited in between
-    and whose identifier was reused is left alone.
+
+def signal_verified(pid: int, group: int, started: str, signum: int) -> None:
+    """Signal one process, having just checked it is still the one recorded
+    and still in the pass's group.
+
+    The table the caller decided from is a moment old, so both are read again
+    immediately before the signal: a process that exited in between and whose
+    identifier was reused is left alone, and so is one that has since left the
+    group for a session of its own.
     """
-    if process_start_identity(pid) != started:
+    if process_group_identity(pid) != (group, started):
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.kill(pid, signum)
@@ -2203,7 +2228,7 @@ def settle_pass(
             for candidate in verified:
                 if sent.get(candidate) != signum:
                     sent[candidate] = signum
-                    signal_verified(candidate, table[candidate][1], signum)
+                    signal_verified(candidate, pid, table[candidate][1], signum)
         time.sleep(SETTLE_POLL_SECONDS)
 
 

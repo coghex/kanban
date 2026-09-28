@@ -1893,16 +1893,42 @@ retentionSpec = describe "keeping a mission worker's logs until they are sealed"
       collectWorkerCacheWith defaultProcessSnapshot boardRepository
       doesFileExist launched.workerDescriptorSpecPath `shouldReturn` False
 
-  it "keeps a mission worker whose sealed copy no longer verifies, or no longer matches its stream" $
+  -- And a later attempt checks the seal it finds rather than trusting that it
+  -- exists: the archive cannot be replaced, so what it can do is say so on
+  -- every pass until an operator does.
+  it "keeps a mission worker whose sealed copy no longer verifies, or no longer matches its stream, and reports it" $
     forM_ [tamperArchive, growStream] $ \damage ->
       withRetention $ \_ store -> do
         expired <- expiredHeartbeat
         launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
         sealAll store `shouldReturn` []
+        committed <- expectRight =<< readMissionSealedArchives store theMission
         damage store launched
+        reported <- sealAll store
+        map Text.unpack reported `shouldSatisfy` \case
+          [failure] -> "cannot be relied on and cannot be replaced" `isInfixOf` failure
+          _ -> False
+        readMissionSealedArchives store theMission `shouldReturn` Right committed
         collectWorkerCacheWith defaultProcessSnapshot boardRepository
         doesFileExist launched.workerDescriptorSpecPath `shouldReturn` True
         doesFileExist launched.workerDescriptorEventPath `shouldReturn` True
+
+  -- A log with no seal and no source is not a log with nothing to lose: the
+  -- records beside it are what associate the worker with its mission, and no
+  -- committed archive stands in for them.
+  it "keeps a mission worker whose owed log was never sealed and is gone, and reports it" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      launched <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "raw_provider_log" `isInfixOf` failure && "is missing" `isInfixOf` failure
+        _ -> False
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      map missionSealedKind sealed `shouldBe` [MissionEventStreamLog]
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      mapM_ (\path -> doesFileExist path `shouldReturn` True) (recordsOf launched)
 
   -- An index missing the one seal that would have kept a log is how a last
   -- copy is removed, so one entry nobody can read keeps every mission worker.

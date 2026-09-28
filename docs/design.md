@@ -4055,7 +4055,8 @@ Defaults:
   anywhere between starting a pass and recording it leaves a gate that reads end
   of input and runs nothing. The next `run` for the repository reads the record
   under the run lock and settles what it names before starting a pass of its
-  own: every process verified by identity is asked to stop and then killed, and
+  own: every process verified by identity, and still in the pass's process
+  group when it is signalled, is asked to stop and then killed, and
   the record is removed only once nothing it names is alive. A process it names
   only by identifier — a recycled one, or the bare `pass_pid` a release before
   this record left in its status document, which is copied into a record marked
@@ -4123,7 +4124,10 @@ Defaults:
   blocked, paused and interrupted missions included, none of them made
   admissible by it. A seal that fails is journaled or carried in the pass's
   detail and tried again by the next pass; it never fails, blocks or reorders
-  the mission. A seal already there is recognized and never replaced. The
+  the mission. A seal already there is never replaced, and it is checked on
+  every attempt rather than trusted: one whose archived copy no longer verifies,
+  or no longer matches its source's length, is reported for the operator on
+  every pass, and so is an owed log whose source is gone with no seal. The
   worker cache keeps every record of a worker a mission launched — its
   specification carries the launch's invocation from the moment it exists —
   until each log it owes has a sealed copy that verifies against its digest and
