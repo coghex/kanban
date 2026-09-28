@@ -32,7 +32,7 @@ concrete precondition
 - [x] PRR-2. Copilot helper discovery rejects valid remote marketplace records — [#698]
 - [x] PRR-3. Autosolve approval handoff contradicts the drainer contract — [#699]
 - [x] PRR-4. External solve workflows duplicate their policy without an authored source — [#715]
-- [ ] PRR-5. Bundle brand is never checked against the model the session runs
+- [x] PRR-5. Bundle brand is never checked against the model the session runs — [#723]
 
 ## 1. Review routing across entry points
 
@@ -275,7 +275,7 @@ finding concerns the natural-language workflow policy.
 
 ## 5. Bundle brand provenance
 
-### PRR-5. Bundle brand is never checked against the model the session runs
+### [#723] PRR-5. Bundle brand is never checked against the model the session runs
 
 > **Captured note:** Nothing enforces at runtime that a bundle's brand matches
 > the model the session is actually running, so a Copilot session running a
