@@ -25,17 +25,17 @@ module Kanban.Mission.Seal
 where
 
 import Control.Exception (IOException, try)
+import Control.Monad (filterM)
 import Data.Either (isRight)
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Kanban.Domain (Repository)
-import Kanban.Mission.Paths (MissionStore, openMissionStore)
+import Kanban.Mission.Paths (MissionStore, missionRoot, missionSealPath, openMissionStore)
 import Kanban.Mission.Store
   ( MissionSealFailure (..),
     listMissionsStrictly,
     missionSealFailureMessage,
-    missionSealedArchivePath,
     readMissionSealedArchives,
     readableMissionSealedArchives,
     sealMissionLog,
@@ -120,21 +120,20 @@ sealMissionSessionLogs store mission workers session =
     -- is the ordinary end of every mission session, or gone some other way —
     -- collected under a cache policy that did not wait for a seal, or a
     -- specification that no longer decodes. The archive is the only evidence
-    -- left, so it decides. An event stream whose sealed copy is still whole is
-    -- a session accounted for, and the raw log is judged the same way when
-    -- one was sealed; anything else is reported on every pass, because no
-    -- later pass can find what was never sealed.
-    --
-    -- Whole rather than rehashed. The collector verified each digest before it
-    -- removed the source, and rehashing every archived log of every finished
-    -- session on every pass would cost more with each mission that ever ran;
-    -- what can still go wrong afterwards is a copy removed or cut short, which
-    -- the recorded length catches.
+    -- left, so it decides, and it is held to the standard the collector held
+    -- it to: an event stream whose sealed copy verifies is a session accounted
+    -- for, and a raw log is judged the same way whenever anything about one
+    -- was sealed. A seal record that is there and will not decode is reported
+    -- rather than read past, so an intact event stream cannot vouch for a raw
+    -- log nobody can read; and anything else is reported on every pass,
+    -- because no later pass can find what was never sealed.
     withoutRecord = do
       existing <- sealedFor
-      verdicts <- mapM (\sealed -> (,) sealed.missionSealedKind <$> archiveWhole sealed) existing
+      verdicts <- mapM (\sealed -> (,) sealed.missionSealedKind <$> verifyMissionSealedArchive store mission sealed) existing
+      unreadable <- filterM (unreadableSeal existing) [minBound .. maxBound]
       let judge kind = case [verdict | (sealedKind, verdict) <- verdicts, sealedKind == kind] of
             []
+              | kind `elem` unreadable -> Just ("a " <> missionLogKindTag kind <> " seal record that cannot be read")
               | kind == MissionEventStreamLog -> Just "no readable worker record and no sealed event stream"
               | otherwise -> Nothing
             found
@@ -143,29 +142,20 @@ sealMissionSessionLogs store mission workers session =
                   Just
                     ( "no readable worker record, and its sealed "
                         <> missionLogKindTag kind
-                        <> " is no longer whole: "
+                        <> " does not verify: "
                         <> Text.intercalate "; " [detail | Left detail <- found]
                     )
       pure [recordless detail | kind <- [minBound .. maxBound], Just detail <- [judge kind]]
 
-    archiveWhole sealed = do
-      resolved <- missionSealedArchivePath store mission sealed
-      case resolved of
-        Left detail -> pure (Left detail)
-        Right path -> do
-          size <- try @IOException (getFileSize path)
-          pure $ case size of
-            Left exception -> Left ("could not read " <> Text.pack path <> " (" <> Text.pack (show exception) <> ")")
-            Right bytes
-              | bytes == sealed.missionSealedByteLength -> Right ()
-              | otherwise ->
-                  Left
-                    ( Text.pack path
-                        <> " is "
-                        <> Text.pack (show bytes)
-                        <> " bytes and its seal records "
-                        <> Text.pack (show sealed.missionSealedByteLength)
-                    )
+    -- A seal record present on disk for this session and log kind that did
+    -- not come back as a readable seal.
+    unreadableSeal existing kind
+      | any ((== kind) . (.missionSealedKind)) existing = pure False
+      | otherwise = do
+          rooted <- missionRoot store mission
+          case rooted >>= \root -> missionSealPath root mission session kind of
+            Left _ -> pure True
+            Right path -> doesFileExist path
 
     recordless detail =
       "mission "

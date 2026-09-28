@@ -2015,7 +2015,9 @@ retentionSpec = describe "keeping a mission worker's logs until they are sealed"
           [failure] -> "no readable worker record and no sealed event stream" `isInfixOf` failure
           _ -> False
 
-  it "reports a collected session whose sealed copy is no longer whole" $
+  -- Held to the collector's own standard after the source is gone: bytes
+  -- changed without changing their length still fail the digest.
+  it "reports a collected session whose sealed copy no longer verifies, even at the same length" $
     withRetention $ \_ store -> do
       expired <- expiredHeartbeat
       _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired Nothing
@@ -2024,11 +2026,33 @@ retentionSpec = describe "keeping a mission worker's logs until they are sealed"
       sealed <- expectRight =<< readMissionSealedArchives store theMission
       forM_ sealed $ \entry -> do
         path <- expectRight =<< missionSealedArchivePath store theMission entry
+        original <- ByteString.readFile path
         setFileMode path 0o600
-        ByteString.writeFile path "cut"
+        ByteString.writeFile path (ByteStringChar.map (const 'x') original)
       reported <- sealAll store
       map Text.unpack reported `shouldSatisfy` \case
-        [failure] -> "is no longer whole" `isInfixOf` failure && "event_stream" `isInfixOf` failure
+        [failure] -> "does not verify" `isInfixOf` failure && "event_stream" `isInfixOf` failure
+        _ -> False
+
+  -- An intact event stream does not vouch for a raw log whose seal record is
+  -- there and cannot be read.
+  it "reports a collected session's unreadable raw-log seal beside a good event stream" $
+    withRetention $ \root store -> do
+      expired <- expiredHeartbeat
+      let raw = root </> "provider.log"
+      ByteString.writeFile raw "the provider's own log\n"
+      _ <- writeTerminalMissionWorker boardRepository (WorkerId "solve-844-0001") (Just "solve-844-1") expired (Just raw)
+      sealAll store `shouldReturn` []
+      collectWorkerCacheWith defaultProcessSnapshot boardRepository
+      sealed <- expectRight =<< readMissionSealedArchives store theMission
+      forM_ [entry | entry <- sealed, entry.missionSealedKind == MissionRawProviderLog] $ \entry -> do
+        path <- expectRight =<< missionSealedArchivePath store theMission entry
+        let record = dropExtension path <> ".seal.json"
+        setFileMode record 0o600
+        ByteString.writeFile record "{"
+      reported <- sealAll store
+      map Text.unpack reported `shouldSatisfy` \case
+        [failure] -> "raw_provider_log seal record that cannot be read" `isInfixOf` failure
         _ -> False
 
   it "leaves a sealed worker collected once, and an unsealed one kept, under two collectors at once" $

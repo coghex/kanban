@@ -4133,10 +4133,10 @@ Defaults:
   every attempt rather than trusted: one whose archived copy no longer verifies,
   or no longer matches its source's length, is reported for the operator on
   every pass, and so is an owed log whose source is gone with no seal. A
-  session whose worker record is gone is judged by its archive alone: quiet
-  while its sealed event stream is still whole — checked by the recorded length,
-  the digest having been verified when the collector removed the source — and
-  reported on every pass otherwise. The
+  session whose worker record is gone is judged by its archive alone, to the
+  collector's standard: quiet while its sealed event stream verifies against its
+  digest and length and every other seal record it has reads and verifies too,
+  and reported on every pass otherwise. The
   worker cache keeps every record of a worker a mission launched — its
   specification carries the launch's invocation from the moment it exists —
   until each log it owes has a sealed copy that verifies against its digest and

@@ -29,7 +29,7 @@ module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket_)
+import Control.Exception (SomeException, bracket_, throwIO, try)
 import Control.Monad (forM_, join, void)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, nub)
@@ -75,7 +75,7 @@ import Kanban.Domain (Issue (..), IssueState (..), NativeSubIssues (..), Reposit
 import Kanban.GitHub (newGhRecordLock)
 import Kanban.Mission
 import Kanban.Ping (resolvePingBrand)
-import Kanban.Process (ProcessIdentity (..))
+import Kanban.Process (ProcessIdentity (..), defaultProcessSnapshot)
 import Kanban.Provider (ProviderError (..), ProviderErrorKind (..))
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
@@ -88,6 +88,7 @@ import Kanban.Worker
     WorkerState (..),
     WorkerStatus (..),
     WorkerTask (..),
+    collectWorkerCacheWith,
     descriptorForSpec,
     workerDirectory,
     writePrivateJson,
@@ -106,7 +107,7 @@ import Spec.Support.Fixtures (testOptions, testResolvedConfig)
 import Kanban.Preflight (IssueOrigin (..))
 import Kanban.Review (ReviewStage (..))
 import Kanban.Solve (SolverBrand (..), SolveOutcome (..))
-import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec)
+import Spec.Support.Process (deadlineFixtureSpec, runningWorkerState, workerFixtureSpec, writeTerminalMissionWorker)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import Kanban.Paths (createPrivateDirectory)
 import System.Directory (XdgDirectory (XdgCache))
@@ -3591,6 +3592,50 @@ interruptedSpec = describe "a step cut off mid-flight" $ do
       -- and the replanned one is a new launch beside it.
       outcomeTags store `shouldReturn` [Just "abandoned", Just "dispatched"]
       length <$> readIORef stage.stageDispatches `shouldReturn` 1
+
+  -- The crash window the approved issue names, through the production path
+  -- rather than a staged answer: the launch makes its worker durable, naming
+  -- the invocation, and the process dies before the handle comes back. The
+  -- cache collector runs in between and must keep that worker — it is expired
+  -- and terminal, so only the unsealed-logs rule keeps it — and the restarted
+  -- mission finds it through the live driver's own discovery and adopts it
+  -- instead of dispatching again or calling the step interrupted.
+  it "adopts a durable worker its launch created before the crash lost the handle" $
+    withIsolatedGh $ \_ ->
+      withMission (snapshotWith MissionRunning [stepRecord MissionStepPending []] []) $ \store stage -> do
+        expired <- addUTCTime (-15 * 24 * 60 * 60) <$> getCurrentTime
+        writeIORef stage.stageOnDispatch $ do
+          dispatched <- readIORef stage.stageDispatches
+          forM_ (take 1 (reverse dispatched)) $ \request ->
+            void
+              ( writeTerminalMissionWorker
+                  boardRepository
+                  (WorkerId "solve-844-0001")
+                  (Just request.missionDispatchInvocation.unMissionInvocationId)
+                  expired
+                  Nothing
+              )
+          throwIO (userError "the mission process was killed")
+        started <- startMissionController store boardRepository theMission (stagedDriver stage)
+        case started of
+          Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+          Right controller -> do
+            crashed <- try @SomeException (missionControllerIteration controller)
+            -- A process that died holds no lease; this one releases it the
+            -- way its death would.
+            stopMissionController controller
+            either (const (pure ())) (\other -> expectationFailure ("the launch did not crash: " <> show other)) crashed
+        outcomeTags store `shouldReturn` [Nothing]
+        collectWorkerCacheWith defaultProcessSnapshot boardRepository
+        writeIORef stage.stageOnDispatch (pure ())
+        let restarted missionStore mission = do
+              live <- freshLockDriver testOptions testResolvedConfig boardRepository missionStore mission
+              staged <- stagedDriver stage missionStore mission
+              pure staged {missionDriverAdoptInvocation = live.missionDriverAdoptInvocation}
+        recovered <- oneIterationOf restarted store
+        recovered `shouldBe` MissionAdvanced (MissionStepAttached theStep (MissionSessionId "solve-844-0001"))
+        length <$> readIORef stage.stageDispatches `shouldReturn` 1
+        outcomeTags store `shouldReturn` [Just "dispatched"]
 
 -- | D-11: a session's logs are sealed at the moment its end is recorded, and a
 -- seal that fails is reported without holding the mission back.
