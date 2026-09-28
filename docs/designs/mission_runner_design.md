@@ -22,7 +22,7 @@ concrete precondition
 - [x] RUN-1. Add the mission runner service and its supervisor/scheduler runtime — [#666]
 - [x] RUN-2. Install per-repository mission runner jobs with a dedicated installer and discovery record — [#667]
 - [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
-- [ ] RUN-4. Own and reap the descendant tree across crash, timeout, and termination
+- [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
 - [ ] RUN-5. Schedule missions fairly and survive capacity limits and upgrades
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
@@ -567,6 +567,13 @@ drain requirement is written. RUN-4 does not depend on the answer.
 - **Open questions:** `None`.
 
 ### RUN-4. Own and reap the descendant tree across crash, timeout, and termination
+
+> Filed as [#744], depending on [#666]. The killed-wrapper premise was verified
+> from the code at filing: only the stop handler signals the pass, the pass
+> leads its own session, and a new wrapper never checks the recorded
+> `pass_pid`. Filing also found the worker-cache collector can remove a mission
+> worker's logs before they are sealed, so #744 keeps unsealed mission logs.
+> Epic #597 was edited in the same step for amended D-2, D-3, and D-4.
 
 - **Outcome:** The runner's own chain never leaves a stray process. A step cut
   off mid-flight marks its mission `interrupted` and waits for the operator.
