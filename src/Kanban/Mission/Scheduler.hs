@@ -130,7 +130,7 @@ import Kanban.Mission.Pass
     missionPassUnresolvedRepository,
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), openMissionStore)
-import Kanban.Mission.Reconcile (MissionCapacityWake (..), missionCapacityWake, missionCapacityWakeMessage, nextDispatchableStep)
+import Kanban.Mission.Reconcile (MissionCapacityWake (..), missionCapacityWake, missionCapacityWakeMessage, missionUndatedCapacityWaits, nextDispatchableStep)
 import Kanban.Mission.Seal (sealMissionSessionLogs)
 import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
@@ -319,12 +319,14 @@ runMissionSchedulerPass seams missions store repository = do
           -- A capacity wait nobody can date is state this pass cannot account
           -- for (issue #752): it is never retried automatically, and the
           -- operator hears why rather than seeing a mission that is merely
-          -- waiting.
+          -- waiting. Every such step, whatever the mission's own lifecycle
+          -- and whatever its other waits say: a due peer that woke the
+          -- mission leaves this one exactly as undated as it was.
           undated =
-            [ "mission " <> mission.unMissionId <> " " <> missionCapacityWakeMessage wake
+            [ "mission " <> mission.unMissionId <> " " <> missionCapacityWakeMessage (MissionCapacityUnreadable step reason)
             | (mission, snapshot) <- outstanding,
-              snapshot.missionSnapshotLifecycle == MissionWaitingCapacity,
-              wake@(MissionCapacityUnreadable _ _) <- [missionCapacityWake finishedAt snapshot]
+              not (missionLifecycleIsTerminal snapshot.missionSnapshotLifecycle),
+              (step, reason) <- missionUndatedCapacityWaits snapshot
             ]
           waitingCapacity = length [() | (_, snapshot) <- outstanding, snapshot.missionSnapshotLifecycle == MissionWaitingCapacity]
           indeterminate = nub (unreadable <> unordered <> unreadableAfter <> catMaybes (map snd observed) <> uncounted <> undated)

@@ -2498,6 +2498,25 @@ capacityWaitSpec = describe "a mission waiting for provider capacity (issue #752
       Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "mission-a"
       Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "is not retried automatically"
 
+  it "reports an undated wait beside a due peer, and after that peer woke the mission" $
+    forM_ [MissionWaitingCapacity, MissionRunning] $ \lifecycle ->
+      withStore $ \store -> do
+        let dueAndUndated snapshot =
+              let due = waitingForCapacity (MissionCapacityRetryAt fixedTime) snapshot
+                  undated = waitingForCapacity (MissionCapacityRetryUnreadable (Aeson.String "after lunch")) snapshot
+               in due
+                    { missionSnapshotSteps =
+                        due.missionSnapshotSteps
+                          <> [(record {missionStepRecordId = MissionStepId "review-844"}) | record <- undated.missionSnapshotSteps]
+                    }
+        putMissionWith store "mission-a" lifecycle dueAndUndated
+        (report, advanced) <- passWith store defaultMissionsConfig (at retryAt)
+        -- The due peer still gets its child: an undated wait holds nothing
+        -- else back.
+        readIORef advanced `shouldReturn` [[MissionId "mission-a"]]
+        (lifecycle, report.missionPassTermination) `shouldBe` (lifecycle, MissionPassFailed)
+        Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "step review-844 is not retried automatically"
+
   it "reports a woken mission's child as an advance, so the next pass follows at once" $
     withStore $ \store -> do
       putMissionWith store "mission-a" MissionWaitingCapacity (waitingForCapacity (MissionCapacityRetryAt retryAt))

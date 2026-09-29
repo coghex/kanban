@@ -62,6 +62,7 @@ module Kanban.Mission.Reconcile
     MissionCapacityWake (..),
     missionCapacityWake,
     missionCapacityWakeMessage,
+    missionUndatedCapacityWaits,
 
     -- * Plan progression
     missionStepRecordFor,
@@ -688,12 +689,28 @@ missionCapacityWake now snapshot =
         [] -> case [(at, step) | (step, Right at) <- waits] of
           pending@(_ : _) -> let (at, step) = minimum pending in MissionCapacityWaiting step at
           [] -> MissionCapacityIdle
-  where
-    retryOf record = case record.missionStepRecordCapacity of
-      Nothing -> Left "no retry time was recorded"
-      Just wait -> case wait.missionCapacityRetryAt of
-        MissionCapacityRetryAt at -> Right at
-        MissionCapacityRetryUnreadable _ -> Left "its recorded retry time will not decode"
+
+-- | Every waiting step whose retry time cannot be read, with why.
+--
+-- Asked of each step on its own rather than read off 'missionCapacityWake',
+-- which answers one question about the whole mission and lets a due peer
+-- speak for it: a mission with one due wait and one undated one wakes the due
+-- step and is running again, and the undated wait beside it is still one
+-- nothing will ever retry.
+missionUndatedCapacityWaits :: MissionSnapshot -> [(MissionStepId, Text)]
+missionUndatedCapacityWaits snapshot =
+  [ (record.missionStepRecordId, reason)
+  | record <- snapshot.missionSnapshotSteps,
+    record.missionStepRecordLifecycle == MissionStepWaitingCapacity,
+    Left reason <- [retryOf record]
+  ]
+
+retryOf :: MissionStepRecord -> Either Text UTCTime
+retryOf record = case record.missionStepRecordCapacity of
+  Nothing -> Left "no retry time was recorded"
+  Just wait -> case wait.missionCapacityRetryAt of
+    MissionCapacityRetryAt at -> Right at
+    MissionCapacityRetryUnreadable _ -> Left "its recorded retry time will not decode"
 
 -- | What a capacity reading says, as a halt's sentence.
 missionCapacityWakeMessage :: MissionCapacityWake -> Text

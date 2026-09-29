@@ -104,7 +104,9 @@ readProviderStream path = do
     Left exception -> Left ("the session log could not be read: " <> Text.pack (show exception))
     Right bytes -> Right (mapMaybe providerLine (latestInvocation (mapMaybe decodeStrict (ByteString.lines bytes))))
   where
-    latestInvocation = foldl' (\kept record -> if invocationStarted record then [] else kept <> [record]) []
+    -- Accumulated newest-first and reversed once, so a long session's log is
+    -- read in one linear pass rather than copied again on every line.
+    latestInvocation = reverse . foldl' (\kept record -> if invocationStarted record then [] else record : kept) []
     invocationStarted record = field "stream" record == Just "kanban" && field "event" record == Just "invocation-started"
     providerLine record
       | field "stream" record == Just "stdout",

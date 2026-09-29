@@ -228,6 +228,7 @@ module Kanban.Mission
     MissionCapacityWake (..),
     missionCapacityWake,
     missionCapacityWakeMessage,
+    missionUndatedCapacityWaits,
     missionStepRecordFor,
     nextDispatchableStep,
     settledMissionLifecycle,
