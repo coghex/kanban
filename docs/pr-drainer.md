@@ -1187,10 +1187,13 @@ head that changed:
 - the pull request could not be read at all, which cannot establish that the
   label is off any more than that it is on.
 
-A genuinely base-only update — one whose push touches none of the pull
-request's own files — still costs no rereview. Its approval carries forward on
-the workflow's own kept label, and the candidate returns to the queue at the
-new head.
+A genuinely base-only update — one whose push touches none of the files the
+pull request changed, either before or after the push — still costs no
+rereview. Its approval carries forward on the workflow's own kept label, and
+the candidate returns to the queue at the new head. The pre-push file set is
+what keeps a push that reverts a reviewed file to its base contents, or
+deletes a file the pull request added, from passing for base-only: neither
+file is in the post-push diff any more.
 
 ### The active candidate
 
