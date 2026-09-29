@@ -314,7 +314,8 @@ stepRecord lifecycle =
       missionStepRecordLifecycle = lifecycle,
       missionStepRecordSessions = [MissionSessionId "session-a"],
       missionStepRecordDetail = Nothing,
-      missionStepRecordUpdatedAt = fixedTime
+      missionStepRecordUpdatedAt = fixedTime,
+      missionStepRecordCapacity = Nothing
     }
 
 sessionNode :: Text -> Maybe MissionSessionId -> Maybe MissionTerminalObservation -> MissionSessionNode

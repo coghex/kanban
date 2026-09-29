@@ -60,6 +60,8 @@ module Kanban.Mission.Types
     -- * The replaceable snapshot
     MissionSnapshot (..),
     MissionStepRecord (..),
+    MissionCapacityWait (..),
+    MissionCapacityRetry (..),
     MissionPause (..),
     MissionAttention (..),
     MissionAttentionId (..),
@@ -106,8 +108,8 @@ module Kanban.Mission.Types
   )
 where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, withText, (.:), (.:!), (.:?), (.=))
-import Data.Aeson.Types (Parser)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (Null), object, withObject, withText, (.:), (.:!), (.:?), (.=))
+import Data.Aeson.Types (Parser, parseMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime)
@@ -326,10 +328,71 @@ data MissionStepRecord = MissionStepRecord
     missionStepRecordLifecycle :: MissionStepLifecycle,
     missionStepRecordSessions :: [MissionSessionId],
     missionStepRecordDetail :: Maybe Text,
-    missionStepRecordUpdatedAt :: UTCTime
+    missionStepRecordUpdatedAt :: UTCTime,
+    -- | The step's standing provider-capacity wait, while one is in force or
+    -- the step is retrying after one (issue #752).
+    --
+    -- Optional on the wire, and 'missionSnapshotSchemaVersion' did not move
+    -- with it, for the reason 'MissionAttention' gives for its identity: a
+    -- version bump would make every snapshot written before it read as
+    -- absent under §16's rule, which is forgetting every mission in flight.
+    -- A record written before the field existed has no wait to carry, and
+    -- decodes to 'Nothing' — which is exactly what it meant.
+    missionStepRecordCapacity :: Maybe MissionCapacityWait
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (FromJSON, ToJSON)
+
+-- | One step's provider-capacity wait (issue #752, design D-9 and D-18).
+--
+-- Everything a later pass needs to honour the wait without re-deriving any of
+-- it: when to retry, how many consecutive waits this step has had, and which
+-- failed attempt this wait was recorded for. All three are written once, when
+-- the wait is recorded, and never recomputed — a pass that reads the same
+-- wait again, a restarted runner, and a scheduler skipping the mission for the
+-- hundredth time all read the same deadline and the same count.
+data MissionCapacityWait = MissionCapacityWait
+  { missionCapacityRetryAt :: MissionCapacityRetry,
+    -- | How many capacity waits in a row this step has had, this one
+    -- included. The backoff doubles with it, and it resets when an attempt
+    -- concludes any other way.
+    missionCapacityConsecutive :: Int,
+    missionCapacityRecordedAt :: UTCTime,
+    -- | The session whose failure this wait was recorded for. Reading that
+    -- same failure again is not a second wait.
+    missionCapacitySession :: Maybe MissionSessionId,
+    missionCapacityDetail :: Text
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | When a capacity wait ends, or why that cannot be read.
+--
+-- Decoded leniently and on its own, and the leniency is the point. A retry
+-- time that will not decode must neither lose the mission — failing the whole
+-- snapshot would make every other step of it unreadable too — nor be read as
+-- a time that has passed, which would retry a wait nobody can date. It
+-- decodes to 'MissionCapacityRetryUnreadable', carrying the value exactly as
+-- it was found so a rewrite of the snapshot around it preserves it, and the
+-- step stays waiting until somebody decides what it meant.
+data MissionCapacityRetry
+  = MissionCapacityRetryAt UTCTime
+  | MissionCapacityRetryUnreadable Value
+  deriving stock (Eq, Show)
+
+instance ToJSON MissionCapacityRetry where
+  toJSON retry = case retry of
+    MissionCapacityRetryAt at -> toJSON at
+    MissionCapacityRetryUnreadable found -> found
+
+instance FromJSON MissionCapacityRetry where
+  parseJSON value = pure $ case parseMaybe parseJSON value of
+    Just at -> MissionCapacityRetryAt at
+    Nothing -> MissionCapacityRetryUnreadable value
+
+  -- A wait whose retry time is missing altogether is the same unreadable
+  -- wait, not a record that fails to decode.
+  omittedField = Just (MissionCapacityRetryUnreadable Null)
 
 data MissionPause = MissionPause
   { missionPauseRequested :: Bool,

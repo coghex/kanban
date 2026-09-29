@@ -173,6 +173,7 @@ import Kanban.Mission.Types
     MissionTerminalObservation (..),
   )
 import Kanban.Models (loadModelRoster)
+import Kanban.ProviderLimit (liveProviderLimitSeams, settledProviderFailure)
 import Kanban.Mission.Paths (MissionStore (..))
 import Kanban.Solve (ResumeProvenance (..), SolveOutcome (..))
 import Kanban.Worker
@@ -607,6 +608,10 @@ liveMissionDriver options config recordLock repository store mission =
     workflowConfig :: WorkflowConfig
     workflowConfig = config.resolvedWorkflow
 
+    -- The account read a Codex session's failure is judged against, bounded
+    -- by the same configured value the usage read is.
+    providerLimits = liveProviderLimitSeams (config.resolvedTimeouts.timeoutsCodexSeconds * 1000 * 1000)
+
     -- The repository's agent ceiling (issue #746). Only an action that
     -- starts an agent asks for a slot; a kind this release cannot decode
     -- starts nothing, and the dispatch that follows refuses it by name.
@@ -753,7 +758,13 @@ liveMissionDriver options config recordLock repository store mission =
               -- The two the registry passes straight through, decided from the
               -- sentence the worker itself wrote.
               WorkerTerminal (SolveNeedsInput detail) -> pure (Just (MissionWorkerNeedsInput detail))
-              WorkerTerminal (SolveFailed detail) -> pure (Just (concludedFrom (settledWorkerFailure detail)))
+              -- Typed with what the provider itself recorded about the
+              -- session (issue #752): a positively identified rate or usage
+              -- limit waits and retries instead of failing the step. Only this
+              -- plan-step reading asks; the board's observation of the same
+              -- worker is unchanged.
+              WorkerTerminal (SolveFailed detail) ->
+                Just . concludedFrom <$> settledProviderFailure providerLimits descriptor recorded detail
               WorkerTerminal SolveCompleted -> judgeCompleted step snapshot kind descriptor
 
     judgeCompleted step snapshot kind descriptor =
@@ -782,6 +793,7 @@ liveMissionDriver options config recordLock repository store mission =
       | actionOutcomeSucceeded outcome = MissionWorkerSucceeded (actionOutcomeMessage outcome)
       | otherwise = case outcome of
           ActionNeedsInput detail -> MissionWorkerNeedsInput detail
+          ActionCapacityLimited resetsAt detail -> MissionWorkerCapacityLimited resetsAt detail
           _ ->
             MissionWorkerFailed
               ( fromMaybe
@@ -985,6 +997,9 @@ liveMissionDriver options config recordLock repository store mission =
       Just (MissionWorkerNeedsInput detail) -> (MissionObservedExit 1, detail)
       Just (MissionWorkerFailed (MissionFailureOutcomeUnknown detail)) -> (MissionObservedUnknown, detail)
       Just (MissionWorkerFailed failure) -> (MissionObservedExit 1, missionStepFailureMessage failure)
+      -- A registered child has no step of its own to wait on, so a limit it
+      -- met is recorded as the end it was; its parent decides what next.
+      Just (MissionWorkerCapacityLimited _ detail) -> (MissionObservedExit 1, "provider capacity: " <> detail)
 
     terminalDetail outcome = case outcome of
       SolveCompleted -> "it completed"

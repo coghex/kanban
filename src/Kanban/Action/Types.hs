@@ -627,6 +627,19 @@ data ActionOutcome
     -- was mutated and nothing failed, so a controller has to be able to tell
     -- it from work that went wrong and replan instead of concluding.
     ActionTargetMoved Text
+  | -- | The provider positively identified a rate limit or an exhausted usage
+    -- quota, from its own structured evidence about the session that failed
+    -- (issue #752, design D-18), with the reset time it named when it named
+    -- one.
+    --
+    -- Its own constructor for the reason the deadline has one: a mission has
+    -- to decide differently about it. Nothing about the work is wrong and
+    -- nobody has to act; the provider will take the same turn again once the
+    -- limit lifts, so the step waits for that and retries rather than stopping
+    -- for the operator. Only the mission runner's reading of a settled worker
+    -- reaches it ("Kanban.ProviderLimit"); the board's own observation of the
+    -- same worker still reports 'ActionFailed', unchanged.
+    ActionCapacityLimited (Maybe UTCTime) Text
   | ActionFailed Text
   | -- | An issue action ran to completion and its owning authority
     -- published what that authority publishes: for a canonical initial
@@ -663,6 +676,7 @@ actionOutcomeSucceeded outcome = case outcome of
   ActionStopped _ -> False
   ActionDeadlineExceeded _ -> False
   ActionTargetMoved _ -> False
+  ActionCapacityLimited _ _ -> False
   ActionFailed _ -> False
   -- A published verdict is a completed review whichever way it went, exactly
   -- as a changes-requested pull-request verdict is. What is /not/ success is
@@ -686,6 +700,7 @@ actionOutcomeMessage outcome = case outcome of
   ActionStopped detail -> "stopped: " <> detail
   ActionDeadlineExceeded detail -> "deadline: " <> detail
   ActionTargetMoved detail -> "stale target: " <> detail
+  ActionCapacityLimited _ detail -> "provider capacity: " <> detail
   ActionFailed detail -> "failed: " <> detail
   ActionIssueReviewed number stage approved ->
     "issue #" <> showNumber number <> " " <> issueStageWord stage <> " " <> issueVerdictWord stage approved

@@ -185,7 +185,8 @@ putAgentMissionSteps store name steps = do
                   missionStepRecordLifecycle = MissionStepPending,
                   missionStepRecordSessions = [],
                   missionStepRecordDetail = Nothing,
-                  missionStepRecordUpdatedAt = fixedTime
+                  missionStepRecordUpdatedAt = fixedTime,
+                  missionStepRecordCapacity = Nothing
                 }
             | (step, _) <- steps
             ],

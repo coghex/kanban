@@ -141,8 +141,8 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   `UI.AutoSolve.decideAutoSolve`'s.
 - `Worker` with `Worker.*`, `Solve` with `Solve.*`, `Review` with `Review.*`,
   `PullRequestFlow`, `ProviderAdapter`, `Codex`, `Claude`, `Process`, `Transcript`,
-  `Preflight` with `Preflight.*`, `Provider`, `StreamReader`, `CommandCapture` —
-  the agent execution layer. `ProviderAdapter` is the one place a provider's
+  `Preflight` with `Preflight.*`, `Provider`, `ProviderLimit`, `StreamReader`,
+  `CommandCapture` — the agent execution layer. `ProviderAdapter` is the one place a provider's
   agent-session processes are built: `Solve`, `PullRequestFlow`, `Review`, and
   `Review.Tools` read the executable, the process spec, the embedded-review
   backend, and the registered review tools off one compiled record per provider
@@ -150,6 +150,9 @@ Modules live in `src/Kanban/`; search the group that matches the change.
   `tools/test_agent_workflow_contract.py`'s `ProviderAdapterBoundaryTests` holds
   that boundary against the whole of `src/`. `Ping`, `Codex`, `Claude`, and
   `Preflight.Environment` stay outside it: none is an agent session.
+  `ProviderLimit` reads a failed session's recorded stream, and the Codex
+  account snapshot, for the structured evidence of a provider limit a mission
+  step waits out instead of failing.
   `Review` itself is the Codex app-server client and the
   compatibility facade every consumer imports; its seams live beside it —
   `Review.Connection` (one provider connection, the pool of them a client holds,

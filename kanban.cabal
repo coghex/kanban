@@ -145,6 +145,7 @@ library kanban-internal
     Kanban.Preflight
     Kanban.Process
     Kanban.Provider
+    Kanban.ProviderLimit
     Kanban.PullRequestFlow
     Kanban.Repository
     Kanban.Repository.Authority
@@ -335,6 +336,7 @@ test-suite kanban-test
     Spec.Mission.Scheduler
     Spec.MissionRunnerService
     Spec.OperatingMode
+    Spec.ProviderLimit
     Spec.Repository.Authority
     Spec.Repository.Identity
     Spec.Repository.Lease

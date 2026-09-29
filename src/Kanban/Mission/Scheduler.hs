@@ -57,6 +57,7 @@
 module Kanban.Mission.Scheduler
   ( MissionSchedulerSeams (..),
     missionIsRunnable,
+    missionIsRunnableAt,
     runMissionSchedulerPass,
     advanceMissions,
     launchWatched,
@@ -129,7 +130,7 @@ import Kanban.Mission.Pass
     missionPassUnresolvedRepository,
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), openMissionStore)
-import Kanban.Mission.Reconcile (nextDispatchableStep)
+import Kanban.Mission.Reconcile (MissionCapacityWake (..), missionCapacityWake, missionCapacityWakeMessage, nextDispatchableStep)
 import Kanban.Mission.Seal (sealMissionSessionLogs)
 import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
@@ -187,6 +188,27 @@ missionIsRunnable snapshot =
     && snapshot.missionSnapshotLifecycle `notElem` waiting
   where
     waiting = [MissionWaitingInput, MissionWaitingBarrier, MissionWaitingCapacity, MissionPaused, MissionInterrupted]
+
+-- | 'missionIsRunnable' at a moment, which is the one a pass asks (issue
+-- #752).
+--
+-- The single difference is the capacity wait, and it is the difference
+-- between a wait that ends and one that does not. A mission waiting for
+-- provider capacity becomes runnable once one of its steps' recorded retry
+-- times has passed — 'missionCapacityWake', the same reading its own
+-- controller advances from — and not a moment before: until then the pass
+-- neither launches a child for it nor enters it in the rotation, so it spins
+-- nothing and holds no agent slot. A pause still wins, and so does a wait
+-- whose retry time nobody can read.
+missionIsRunnableAt :: UTCTime -> MissionSnapshot -> Bool
+missionIsRunnableAt now snapshot
+  | snapshot.missionSnapshotLifecycle == MissionWaitingCapacity =
+      not snapshot.missionSnapshotPause.missionPauseRequested && capacityDue
+  | otherwise = missionIsRunnable snapshot
+  where
+    capacityDue = case missionCapacityWake now snapshot of
+      MissionCapacityDue _ -> True
+      _ -> False
 
 -- | Everything a pass reaches outside its own arithmetic.
 --
@@ -254,7 +276,7 @@ runMissionSchedulerPass seams missions store repository = do
 
     pass startedAt agentCeiling = do
       (inventory, unreadable) <- readInventory store
-      candidates <- admissible seams inventory
+      candidates <- admissible seams startedAt inventory
       claimants <- filterM (mayClaimSlot store inventory) candidates
       -- Every runnable mission nothing else is advancing, in the rotation's
       -- order. A rotation record nobody can read is not a reason to advance
@@ -275,7 +297,8 @@ runMissionSchedulerPass seams missions store repository = do
         -- mission, and the snapshot it left is the only account of where it
         -- got to that this process did not have to infer.
         settled <- readMissionSnapshot store mission
-        pure (disposition mission outcome settled)
+        settledAt <- seams.missionSchedulerNow
+        pure (disposition settledAt mission outcome settled)
       -- Every mission, not only the admitted ones (requirement 13): a mission
       -- that is waiting is precisely the one nobody is advancing, and it is
       -- the one somebody needs to hear about.
@@ -293,7 +316,18 @@ runMissionSchedulerPass seams missions store repository = do
       finishedAt <- seams.missionSchedulerNow
       let attention = catMaybes (map fst observed)
           uncounted = either (\detail -> ["the live agents could not be counted: " <> detail]) (const []) agents
-          indeterminate = nub (unreadable <> unordered <> unreadableAfter <> catMaybes (map snd observed) <> uncounted)
+          -- A capacity wait nobody can date is state this pass cannot account
+          -- for (issue #752): it is never retried automatically, and the
+          -- operator hears why rather than seeing a mission that is merely
+          -- waiting.
+          undated =
+            [ "mission " <> mission.unMissionId <> " " <> missionCapacityWakeMessage wake
+            | (mission, snapshot) <- outstanding,
+              snapshot.missionSnapshotLifecycle == MissionWaitingCapacity,
+              wake@(MissionCapacityUnreadable _ _) <- [missionCapacityWake finishedAt snapshot]
+            ]
+          waitingCapacity = length [() | (_, snapshot) <- outstanding, snapshot.missionSnapshotLifecycle == MissionWaitingCapacity]
+          indeterminate = nub (unreadable <> unordered <> unreadableAfter <> catMaybes (map snd observed) <> uncounted <> undated)
           failures = filter (missionDispositionIsFailure . (.missionDispositionValue)) dispositions
           -- Either kind of trouble fails the pass. A record nobody can read is
           -- not a quieter problem than a child that broke: both leave a
@@ -310,7 +344,7 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassAdmitted = dispositions,
             missionPassAttention = attention,
             missionPassAgents = counted,
-            missionPassDetail = summary (length inventory) dispositions attention failures counted indeterminate unsealed
+            missionPassDetail = summary (length inventory) dispositions attention failures waitingCapacity counted indeterminate unsealed
           }
 
     refuse startedAt message = do
@@ -327,7 +361,7 @@ runMissionSchedulerPass seams missions store repository = do
             missionPassDetail = "this pass advanced nothing: " <> message
           }
 
-    summary total dispositions attention failures counted indeterminate unsealed =
+    summary total dispositions attention failures waitingCapacity counted indeterminate unsealed =
       Text.intercalate "; " $
         [ Text.pack (show (length dispositions)) <> " of " <> Text.pack (show total) <> " missions admitted",
           Text.pack (show (length attention)) <> " waiting on a person",
@@ -335,6 +369,7 @@ runMissionSchedulerPass seams missions store repository = do
           Text.pack (show (length [() | record <- dispositions, record.missionDispositionValue == MissionDispositionDeferred]))
             <> " held back by the agent ceiling"
         ]
+          <> [Text.pack (show waitingCapacity) <> " waiting for provider capacity" | waitingCapacity > 0]
           <> [ Text.pack (show count.missionAgentCountLive)
                  <> " of "
                  <> Text.pack (show count.missionAgentCountCeiling)
@@ -384,9 +419,9 @@ readInventory store = do
 -- already advancing is neither launched nor entered in the rotation: it
 -- could not use a slot this pass, and a place in line it cannot take would
 -- only hold back the missions behind it.
-admissible :: MissionSchedulerSeams -> [(MissionId, MissionSnapshot)] -> IO [MissionId]
-admissible seams inventory =
-  filterM free [mission | (mission, snapshot) <- inventory, missionIsRunnable snapshot]
+admissible :: MissionSchedulerSeams -> UTCTime -> [(MissionId, MissionSnapshot)] -> IO [MissionId]
+admissible seams now inventory =
+  filterM free [mission | (mission, snapshot) <- inventory, missionIsRunnableAt now snapshot]
   where
     free mission = null <$> seams.missionSchedulerLeaseHeld mission
 
@@ -417,8 +452,8 @@ mayClaimSlot store inventory mission = case lookup mission inventory of
 -- rather than a failure (requirement 6). Only a child that reports having
 -- advanced is then classified from the durable snapshot it left, because where
 -- a mission got to is the snapshot's answer and not the child's.
-disposition :: MissionId -> Either Text MissionChildResult -> MissionRead MissionSnapshot -> MissionDispositionRecord
-disposition mission outcome settled = case outcome of
+disposition :: UTCTime -> MissionId -> Either Text MissionChildResult -> MissionRead MissionSnapshot -> MissionDispositionRecord
+disposition now mission outcome settled = case outcome of
   Left detail -> record MissionDispositionFailed detail
   Right result -> case result.missionChildResultOutcome of
     MissionChildFailed -> record MissionDispositionFailed result.missionChildResultDetail
@@ -431,7 +466,7 @@ disposition mission outcome settled = case outcome of
       MissionPresent snapshot
         | missionLifecycleIsTerminal snapshot.missionSnapshotLifecycle ->
             record MissionDispositionSettled result.missionChildResultDetail
-        | not (missionIsRunnable snapshot) ->
+        | not (missionIsRunnableAt now snapshot) ->
             record MissionDispositionBlocked result.missionChildResultDetail
         | otherwise -> record MissionDispositionAdvanced result.missionChildResultDetail
       -- The child says it advanced the mission and the store will not say

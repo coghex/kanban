@@ -245,7 +245,10 @@ The run ends when the mission becomes terminal, paused, or blocked —
 `waiting_input`, `waiting_barrier`, `waiting_capacity`, `paused`, or
 `interrupted` — and reports the transitions it made. Reaching one of those is
 not an error: it is the runner saying the mission needs something it cannot
-supply. While registered work is live the runner waits on that worker's own
+supply. The one exception is a capacity wait whose recorded retry time has
+passed, which the runner ends itself by waking the waiting step (below); a
+capacity wait still in force ends the run like any other blocked state, and its
+halt names the time it retries at. While registered work is live the runner waits on that worker's own
 durable state and on this mission's records, never on a timed GitHub refresh
 (section 3); GitHub is read when a step is planned, immediately before an
 effect, and when a settled worker's result has to be validated. The runner
@@ -275,7 +278,9 @@ from the command line.
 
 A pass admits every runnable mission and advances each by at most one
 transition. A mission is runnable when it is nonterminal, unpaused, and not
-waiting on operator input, a barrier, or capacity. A mission whose advancement
+waiting on operator input or a barrier; a mission waiting for provider capacity
+is runnable once a waiting step's recorded retry time has arrived, read against
+the pass's own clock, and not before. A mission whose advancement
 lease is already held is skipped, and the holder-liveness rule is the
 acquisition's own — an owner that cannot be shown to be gone counts as holding
 it. Losing that lease to somebody else between selection and launch is reported
@@ -339,6 +344,53 @@ not decide — an unusable ceiling, or a worker cache or admission record it
 could not read — launches nothing. The per-target worker lease and the
 canonical approval lock still apply beneath the ceiling; a launch they refuse
 gives its slot straight back.
+
+A mission-dispatched agent session that fails at a provider limit waits for the
+limit to lift instead of failing its step (the mission runner design's D-9 and
+D-18, `Kanban.ProviderLimit`). The limit is identified only from the provider's
+own structured evidence about that session, never from error text. For Claude,
+the session log's final `result` reports `is_error`, and either its latest
+`rate_limit_event` is `rejected` without overage covering it (`overageStatus`
+neither `allowed` nor `allowed_warning`), or it recorded no such event and
+`api_error_status` is 429. For Codex, the session's turn failed and the
+account's rate-limit snapshot — the `codex` bucket of the same
+`account/rateLimits/read` the usage sidebar makes, read after the failure —
+names `rate_limit_reached` or a workspace owner or member usage limit; a turn
+run on the app server may instead name `usageLimitExceeded` or
+`rateLimitExceeded` as its `codexErrorInfo`, which counts without the snapshot.
+`allowed_warning` never counts. Depleted credits — Codex's
+`workspace_owner_credits_depleted` or `workspace_member_credits_depleted`, or a
+Claude rejection whose overage is disabled `out_of_credits` — fail the step
+with a detail saying credits are depleted, whatever else the evidence says.
+Every other failure concludes exactly as before: a deadline, a moved or
+unreadable target, a session that never reached the provider or was cancelled
+before its turn failed, a snapshot that cannot be read, and a value this
+release does not recognise. Only the runner's reading of a plan step's settled
+worker applies the rule, so a worker launched from the board is observed
+exactly as before, and a registered child's limit is recorded as the end it was
+for its parent to decide about.
+
+Such a step becomes `waiting_capacity`, carrying a wait recorded once and never
+recomputed (section 16): the retry time, the number of consecutive waits the
+step has had, and the failed session the wait was recorded for. The retry time
+is the provider's reset — the rejected event's `resetsAt` for Claude, the latest
+reset among the exhausted windows for Codex — even one already past, which is
+due at once; evidence with no usable reset backs off one minute, doubling with
+each consecutive wait of the same step, to at most one hour. Reading the same
+failure again, a restarted runner, and passes that skip the waiting mission
+change neither the count nor the deadline. Once nothing else in the mission can
+move, the mission is `waiting_capacity` too. The failed worker is terminal, so
+the wait holds none of the agent slots above; a waiting mission gets no child
+and no place in the rotation until its retry time, so it neither spins nor
+holds a slot idle. From then on it is runnable again: its child wakes the step
+back to `pending` and the mission to `running` in one write, and the next
+iteration dispatches the step afresh — a new invocation, a new session, and the
+same pause, lease, precondition, and ceiling checks any dispatch takes. A retry
+that meets a limit again continues the count; any other conclusion ends the
+sequence, and the next limit starts again from one minute. A wait whose retry
+time is missing or will not decode is never retried automatically: the mission
+stays waiting, its halt says why, and every pass reports it and fails, as it
+does for any other record it cannot account for.
 
 Free slots go to waiting missions in a durable round-robin (the mission runner
 design's D-8, `docs/designs/mission_runner_design.md`): a mission's
@@ -4267,6 +4319,22 @@ Defaults:
   included; and no write ever treats that silence as permission, so
   "is one already there?" is always a question for the filesystem rather than
   for a successful decode.
+- A step record in a mission's snapshot may carry a provider-capacity wait
+  (`missionStepRecordCapacity`, section 5): the retry time, how many
+  consecutive capacity waits the step has had, when the wait was recorded, the
+  failed session it was recorded for, and the evidence's own detail. The field
+  is optional and the snapshot's `schemaVersion` did not move with it, for the
+  reason the attention identity's did not: a version bump would make every
+  snapshot written before it read as absent, which for a mission store is
+  forgetting every mission in flight. A step record written before the field
+  existed decodes with no wait, which is what it meant. The retry time alone is
+  decoded leniently: one that is missing or will not decode leaves the snapshot
+  readable and the wait standing with nothing to end it, and is carried exactly
+  as it was found so a later rewrite of the snapshot preserves it — it is never
+  read as a time that has passed. The wait survives the retry it is waiting for
+  (`pending` after a wake, `dispatching`, `running`, `recovering`) and is
+  cleared by any other step write, so a retry that meets the limit again
+  continues the count and one that concludes otherwise ends it.
 - A repository's mission root spells the owner and the name as separate path
   components under `repositories/`, and that spelling is **injective**: each
   component is refused unless it is a single plain name, so it carries no
@@ -4883,7 +4951,13 @@ once, counted from the worker cache across every mission, pass, and checkout,
 claimed atomically before a launch is journaled, and shared among waiting
 missions by a durable round-robin; each pass advances every runnable mission by
 one transition, and a mission held back by the ceiling is reported `deferred`
-and retried rather than failed. Rendering any of that is not implemented. The durable `gh` group record is shared safely by every process
+and retried rather than failed. A mission step whose agent session fails at a
+positively identified provider rate or usage limit — read from Claude's
+recorded stream or from the Codex account snapshot after the failure, never
+from error text — now waits for the provider's reset time, or a bounded
+backoff, in `waiting_capacity` without holding a slot, and is dispatched again
+once that time passes, surviving a runner restart; depleted credits and every
+other failure still stop the mission. Rendering any of that is not implemented. The durable `gh` group record is shared safely by every process
 that reads the board: each rewrite takes a cross-process lock, and each entry
 names the process that spawned its `gh`, so a reader skips another process's
 live work, re-verifies a cleanup-pending leftover even while its writer runs,

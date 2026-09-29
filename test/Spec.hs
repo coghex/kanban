@@ -59,6 +59,7 @@ import qualified Spec.Mission.Admission as MissionAdmission
 import qualified Spec.Mission.Runner as MissionRunner
 import qualified Spec.Mission.Scheduler as MissionScheduler
 import qualified Spec.MissionRunnerService as MissionRunnerService
+import qualified Spec.ProviderLimit as ProviderLimit
 import qualified Spec.OperatingMode as OperatingMode
 import qualified Spec.Repository.Authority as RepositoryAuthority
 import qualified Spec.Repository.Identity as RepositoryIdentity
@@ -218,6 +219,10 @@ suiteGroups =
     SuiteGroup "Spec.Agent.ClaudeReview" SupervisionLane ClaudeReview.spec, -- 21.9s
     SuiteGroup "Spec.Agent.ToolReentry" LifecycleLane ToolReentry.spec,
     SuiteGroup "Spec.Agent.Solve" LifecycleLane Solve.spec, -- 2.8s
+    -- Beside the solve group it borrows its machinery from: every mechanism
+    -- example runs a fake provider through the real solve reader, and some
+    -- answer an app-server account read as well.
+    SuiteGroup "Spec.ProviderLimit" LifecycleLane ProviderLimit.spec,
     SuiteGroup "Spec.Agent.Adapter" LifecycleLane Adapter.spec,
     SuiteGroup "Spec.Config.Settings" PingLane Settings.spec,
     SuiteGroup "Spec.Config.Models" PingLane Models.spec,

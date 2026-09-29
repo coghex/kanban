@@ -79,6 +79,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Kanban.Domain (Repository (..))
 import Kanban.Mission.Control
   ( MissionChildRequest (..),
@@ -138,7 +139,10 @@ import Kanban.Mission.Reconcile
     missionInterruptedStep,
     missionContinuation,
     missionOpenDispatchIsChild,
-    missionRunnerHalt,
+    MissionCapacityWake (..),
+    missionCapacityWaitFor,
+    missionCapacityWake,
+    missionRunnerHaltAt,
     missionSessionSubtree,
     missionStepFailureLifecycle,
     missionStepFailureMessage,
@@ -153,6 +157,8 @@ import Kanban.Mission.Reconcile
 import Kanban.Mission.Store (readMissionSnapshot, readMissionSpecification, recordMissionEvent, writeMissionSnapshot)
 import Kanban.Mission.Types
   ( MissionAttention (..),
+    MissionCapacityRetry (..),
+    MissionCapacityWait (..),
     MissionEvent (..),
     MissionId (..),
     MissionLifecycle (..),
@@ -673,15 +679,17 @@ missionControllerIteration controller = do
             controller.missionControllerInvocations
         case recorded of
           Left detail -> pure (MissionControllerFailed detail)
-          Right states -> case missionRunnerHalt snapshot states of
-            Just halt -> pure (MissionStopped halt)
-            Nothing -> do
-              iteration <- advance controller snapshot
-              -- Only a wait is replaced: a mission that moved moved, and the
-              -- held request is simply asked again next time.
-              pure $ case (iteration, held) of
-                (MissionAwaiting _, Just reason) -> MissionHeldForSlot reason
-                _ -> iteration
+          Right states -> do
+            now <- getCurrentTime
+            case missionRunnerHaltAt now snapshot states of
+              Just halt -> pure (MissionStopped halt)
+              Nothing -> do
+                iteration <- advance controller snapshot
+                -- Only a wait is replaced: a mission that moved moved, and the
+                -- held request is simply asked again next time.
+                pure $ case (iteration, held) of
+                  (MissionAwaiting _, Just reason) -> MissionHeldForSlot reason
+                  _ -> iteration
 
 -- | Queues one command built inside this process, with runner authority.
 --
@@ -939,11 +947,15 @@ advanceReconciled controller snapshot = do
           step.missionPlanStepId
           MissionStepCancelled
           ("its dependency " <> dependency.unMissionStepId <> " did not succeed")
-      Nothing -> case nextDispatchableStep controller.missionControllerSpecification snapshot of
-        Just step -> dispatchStep controller snapshot step
-        Nothing
-          | anyLive snapshot -> pure (MissionAwaiting "registered work is live")
-          | otherwise -> settle controller snapshot
+      Nothing -> do
+        now <- getCurrentTime
+        case missionCapacityWake now snapshot of
+          MissionCapacityDue step -> wakeCapacityWait controller snapshot step
+          _ -> case nextDispatchableStep controller.missionControllerSpecification snapshot of
+            Just step -> dispatchStep controller snapshot step
+            Nothing
+              | anyLive snapshot -> pure (MissionAwaiting "registered work is live")
+              | otherwise -> settle controller snapshot
 
 -- | Records the end of the first registered session that has one.
 --
@@ -1170,6 +1182,20 @@ reconcileOneStep controller snapshot = go candidates
                   step.missionPlanStepId
                   (missionStepFailureLifecycle failure)
                   (missionStepFailureMessage failure)
+            -- A provider limit (issue #752). The wait is computed here, once,
+            -- from the step's standing wait, and written with the lifecycle in
+            -- one snapshot replacement: there is no moment a reader can see the
+            -- step waiting without the time it waits until.
+            MissionWorkCapacityLimited session resetsAt detail -> do
+              now <- getCurrentTime
+              let wait = missionCapacityWaitFor now record.missionStepRecordCapacity session resetsAt detail
+              Just
+                <$> applyCapacityWait
+                  controller
+                  snapshot
+                  gatheredEvidence
+                  step.missionPlanStepId
+                  wait
             MissionWorkNeedsInput detail
               | record.missionStepRecordLifecycle == MissionStepNeedsInput -> go rest
               | otherwise ->
@@ -1410,12 +1436,18 @@ missionConclusionLifecycle conclusion = case conclusion of
   MissionWorkerSucceeded _ -> MissionStepSucceeded
   MissionWorkerNeedsInput _ -> MissionStepNeedsInput
   MissionWorkerFailed failure -> missionStepFailureLifecycle failure
+  -- Answered synchronously, with no worker session a wait could be recorded
+  -- against, so no retry time is written either: the step waits and is never
+  -- retried automatically, which is the fail-closed reading of a limit
+  -- nobody can date.
+  MissionWorkerCapacityLimited _ _ -> MissionStepWaitingCapacity
 
 missionConclusionDetail :: MissionWorkerConclusion -> Text
 missionConclusionDetail conclusion = case conclusion of
   MissionWorkerSucceeded detail -> detail
   MissionWorkerNeedsInput detail -> detail
   MissionWorkerFailed failure -> missionStepFailureMessage failure
+  MissionWorkerCapacityLimited _ detail -> "waiting for provider capacity: " <> detail
 
 -- | An invocation whose effect was never attempted, because the precondition
 -- could not be reread.
@@ -2301,6 +2333,60 @@ applyStepOutcome controller snapshot evidence step lifecycle detail = do
     Left message -> MissionControllerFailed message
     Right () -> MissionAdvanced (MissionStepReconciled step lifecycle detail)
 
+-- | Records one provider-capacity wait on its step (issue #752).
+--
+-- The step moves to @waiting_capacity@ carrying the wait, and its worker slot
+-- is not this write's to release: the attempt's worker is already terminal —
+-- that is how its failure was read — and a terminal worker holds no slot. The
+-- mission's own lifecycle follows on a later iteration, through 'settle',
+-- once nothing else is left to do; that is where every other blocked state
+-- comes from too.
+applyCapacityWait :: MissionController -> MissionSnapshot -> MissionStepEvidence -> MissionStepId -> MissionCapacityWait -> IO MissionIteration
+applyCapacityWait controller snapshot evidence step wait = do
+  written <- writeStepWith controller snapshot step MissionStepWaitingCapacity detail (learnedSession evidence) (const (Just wait))
+  pure $ case written of
+    Left message -> MissionControllerFailed message
+    Right () -> MissionAdvanced (MissionStepReconciled step MissionStepWaitingCapacity detail)
+  where
+    detail = "waiting for provider capacity until " <> retryText <> ": " <> wait.missionCapacityDetail
+    retryText = case wait.missionCapacityRetryAt of
+      MissionCapacityRetryAt at -> Text.pack (iso8601Show at)
+      MissionCapacityRetryUnreadable _ -> "an unreadable time"
+
+-- | Ends one step's capacity wait once its retry time has passed.
+--
+-- The step goes back to @pending@ — the one lifecycle a dispatch is chosen
+-- from — and keeps its wait, so the count continues if the retry meets the
+-- limit again; the mission, if the wait was what it was blocked on, is
+-- running again. One snapshot replacement does both. Nothing is dispatched
+-- here: the dispatch is the next iteration's, through exactly the path any
+-- pending step takes, so the pause, the leases, the precondition recheck, and
+-- the agent ceiling all apply to a retry as they do to a first attempt.
+wakeCapacityWait :: MissionController -> MissionSnapshot -> MissionStepId -> IO MissionIteration
+wakeCapacityWait controller snapshot step = do
+  written <- writeStepWith controller resumed step MissionStepPending detail Nothing id
+  case written of
+    Left message -> pure (MissionControllerFailed message)
+    Right () -> do
+      -- The lifecycle moved in the same write, and the journal says so the
+      -- way it says so for every other lifecycle change.
+      if resumed.missionSnapshotLifecycle /= snapshot.missionSnapshotLifecycle
+        then do
+          now <- getCurrentTime
+          _ <-
+            recordMissionEvent
+              controller.missionControllerStore
+              (missionEvent controller.missionControllerMission controller.missionControllerStore.missionStoreRepository now (missionLifecycleTag MissionRunning) (Just detail))
+          pure ()
+        else pure ()
+      pure (MissionAdvanced (MissionStepReconciled step MissionStepPending detail))
+  where
+    detail = "its provider-capacity retry time has passed; it is dispatched again"
+    resumed
+      | snapshot.missionSnapshotLifecycle == MissionWaitingCapacity =
+          snapshot {missionSnapshotLifecycle = MissionRunning, missionSnapshotAttention = Nothing}
+      | otherwise = snapshot
+
 -- | The session identity a piece of evidence can teach the snapshot.
 --
 -- No parent: this is a session the mission already registered, and its lineage
@@ -2454,7 +2540,30 @@ registerSession controller step (Just (identity, parent, providerSession)) nodes
 -- what the next iteration decides from and the journal is what a reader
 -- replays: a crash between them loses a line of narration rather than a state.
 writeStep :: MissionController -> MissionSnapshot -> MissionStepId -> MissionStepLifecycle -> Text -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text) -> IO (Either Text ())
-writeStep controller snapshot step lifecycle detail registration = do
+writeStep controller snapshot step lifecycle detail registration =
+  writeStepWith controller snapshot step lifecycle detail registration (retainedCapacity lifecycle)
+
+-- | What an ordinary step write does with the step's capacity wait.
+--
+-- It survives the retry it is waiting for — @dispatching@, @running@, and
+-- @recovering@ are that retry under way — so a retry that meets the limit
+-- again continues the count. Every other lifecycle is the sequence ending: an
+-- attempt concluded some other way, or the operator replanned the step, and
+-- the next limit it meets starts again from one minute.
+--
+-- @waiting_capacity@ itself is among the ones that clear, deliberately. The
+-- one writer that records a wait supplies it ('applyCapacityWait'); any other
+-- path to that lifecycle has no retry time to give, and a wait with none is
+-- one nothing retries automatically — which is the right answer for a limit
+-- nobody can date, and the wrong one to reach by inheriting a stale time.
+retainedCapacity :: MissionStepLifecycle -> Maybe MissionCapacityWait -> Maybe MissionCapacityWait
+retainedCapacity lifecycle standing
+  | lifecycle `elem` [MissionStepDispatching, MissionStepRunning, MissionStepRecovering] = standing
+  | otherwise = Nothing
+
+-- | 'writeStep', with the step's capacity wait decided by the caller.
+writeStepWith :: MissionController -> MissionSnapshot -> MissionStepId -> MissionStepLifecycle -> Text -> Maybe (MissionSessionId, Maybe MissionSessionId, Maybe Text) -> (Maybe MissionCapacityWait -> Maybe MissionCapacityWait) -> IO (Either Text ())
+writeStepWith controller snapshot step lifecycle detail registration capacity = do
   now <- getCurrentTime
   let session = (\(identity, _, _) -> identity) <$> registration
       updated =
@@ -2483,7 +2592,8 @@ writeStep controller snapshot step lifecycle detail registration = do
                     Just identity
                       | identity `elem` record.missionStepRecordSessions -> record.missionStepRecordSessions
                       | otherwise -> record.missionStepRecordSessions <> [identity],
-                missionStepRecordUpdatedAt = now
+                missionStepRecordUpdatedAt = now,
+                missionStepRecordCapacity = capacity record.missionStepRecordCapacity
               }
   written <- writeMissionSnapshot controller.missionControllerStore updated
   case written of
