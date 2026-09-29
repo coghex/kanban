@@ -793,6 +793,18 @@ A repository can change or disable those check names with `.drain-prs.json`:
 
 A value of `null` disables that status-check requirement. It does not remove the approval-label requirement.
 
+### Which instance of a check counts
+
+One head can carry several instances of a required check: each label event
+starts its own `review-approved` run, for one, and a rerun adds another. The
+drainer judges the most recent. An instance still queued or running outranks
+every completed one, so a check is `pending` while any evaluation of it on the
+head has not answered, and the drainer waits for it rather than merging on an
+earlier instance's success. A queued job carries no start time, so it is never
+ranked by one. Completed instances rank among themselves by time. The same rule
+selects the instance the post-merge audit reads, the failed attempt a CI rerun
+is decided from, and the stale-approval run a branch update waits on.
+
 ### Which review verdict wins
 
 The labels are not the whole verdict. Every review the pipeline runs also
