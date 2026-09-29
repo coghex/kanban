@@ -197,6 +197,19 @@ codexSpec = describe "a Codex session" $ do
       `shouldSatisfy` isReached (Just resetTime)
     codexSessionLimit (appServerFailure "unauthorized") (Left "unreadable") `shouldBe` ProviderLimitUnidentified
 
+  it "reads only the final turn, never an earlier turn's limit" $ do
+    -- An earlier turn met a limit; the final one failed for another reason.
+    let laterFailure = appServerFailure "rateLimitExceeded" <> appServerFailure "unauthorized"
+    codexSessionLimit laterFailure (Left "unreadable") `shouldBe` ProviderLimitUnidentified
+    codexSessionLimit laterFailure (Right (CodexAccountLimit Nothing (Just resetTime))) `shouldBe` ProviderLimitUnidentified
+    -- And the other way round: the final turn's limit is the one that counts.
+    codexSessionLimit (appServerFailure "unauthorized" <> appServerFailure "usageLimitExceeded") (Left "unreadable")
+      `shouldSatisfy` isReached Nothing
+    -- A failed turn followed by one that completed is not a failed session.
+    let recovered = execFailure <> events ["{\"type\":\"turn.completed\",\"usage\":{}}"]
+    codexTurnFailed recovered `shouldBe` False
+    codexSessionLimit recovered (reached "rate_limit_reached" (Just resetTime)) `shouldBe` ProviderLimitUnidentified
+
 -- ---------------------------------------------------------------------------
 -- The account snapshot
 -- ---------------------------------------------------------------------------

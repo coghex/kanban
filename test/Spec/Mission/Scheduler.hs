@@ -2517,6 +2517,15 @@ capacityWaitSpec = describe "a mission waiting for provider capacity (issue #752
         (lifecycle, report.missionPassTermination) `shouldBe` (lifecycle, MissionPassFailed)
         Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "step review-844 is not retried automatically"
 
+  it "reports an undated wait left standing in a mission a failed peer ended" $
+    withStore $ \store -> do
+      putMissionWith store "mission-a" MissionFailed (waitingForCapacity (MissionCapacityRetryUnreadable (Aeson.String "after lunch")))
+      (report, advanced) <- passWith store defaultMissionsConfig (at retryAt)
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "mission mission-a"
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "is not retried automatically"
+
   it "reports a woken mission's child as an advance, so the next pass follows at once" $
     withStore $ \store -> do
       putMissionWith store "mission-a" MissionWaitingCapacity (waitingForCapacity (MissionCapacityRetryAt retryAt))

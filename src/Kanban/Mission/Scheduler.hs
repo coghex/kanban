@@ -321,11 +321,11 @@ runMissionSchedulerPass seams missions store repository = do
           -- operator hears why rather than seeing a mission that is merely
           -- waiting. Every such step, whatever the mission's own lifecycle
           -- and whatever its other waits say: a due peer that woke the
-          -- mission leaves this one exactly as undated as it was.
+          -- mission leaves this one exactly as undated as it was, and a peer
+          -- that failed and so ended the mission leaves it standing too.
           undated =
             [ "mission " <> mission.unMissionId <> " " <> missionCapacityWakeMessage (MissionCapacityUnreadable step reason)
             | (mission, snapshot) <- outstanding,
-              not (missionLifecycleIsTerminal snapshot.missionSnapshotLifecycle),
               (step, reason) <- missionUndatedCapacityWaits snapshot
             ]
           waitingCapacity = length [() | (_, snapshot) <- outstanding, snapshot.missionSnapshotLifecycle == MissionWaitingCapacity]

@@ -2401,10 +2401,10 @@ report did not name.
   the mission runner design's D-18), is `waiting_capacity` rather than failed:
   Claude's recorded stream, where the final `result` reports `is_error` and the
   latest `rate_limit_event` is `rejected` without overage covering it, or a 429
-  `api_error_status` with no such event; or, for Codex, a failed turn beside an
-  account snapshot naming `rate_limit_reached` or a workspace usage limit, or an
-  app-server turn whose `codexErrorInfo` is `usageLimitExceeded` or
-  `rateLimitExceeded`. Error text is never matched. Depleted credits, and every
+  `api_error_status` with no such event; or, for Codex, a failed final turn
+  beside an account snapshot naming `rate_limit_reached` or a workspace usage
+  limit, or a final app-server turn whose `codexErrorInfo` is
+  `usageLimitExceeded` or `rateLimitExceeded`. Error text is never matched. Depleted credits, and every
   failure that evidence does not identify as a limit, still stop the mission as
   failures. The wait records its retry time — the provider's reset, or a backoff
   from one minute doubling to an hour per consecutive wait of the step — on the

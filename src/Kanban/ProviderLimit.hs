@@ -165,7 +165,7 @@ claudeSessionLimit events = case lastOf "result" of
 -- Codex
 -- ---------------------------------------------------------------------------
 
--- | Whether a Codex session's recorded stream shows its turn failing.
+-- | Whether a Codex session's recorded stream shows its final turn failing.
 --
 -- The precondition for asking the account at all. The snapshot describes the
 -- account, not the session: read after a launch that never reached the
@@ -174,10 +174,7 @@ claudeSessionLimit events = case lastOf "result" of
 -- @codex exec@ turn that failed says @turn.failed@; an app-server turn says so
 -- in its completed turn's status.
 codexTurnFailed :: [Value] -> Bool
-codexTurnFailed events = any execFailed events || not (null (appServerFailures events))
-  where
-    execFailed (Object event) = textField "type" event == Just "turn.failed"
-    execFailed _ = False
+codexTurnFailed events = maybe False fst (finalTurn events)
 
 -- | A Codex session's evidence: its stream, and the account snapshot read
 -- after it failed.
@@ -194,33 +191,41 @@ codexSessionLimit events snapshot
       ProviderCreditsDepleted ("the codex account reports " <> depleted)
   | Just limit <- reached, limit `elem` limitsReached =
       ProviderLimitReached resetsAt ("the codex account reports " <> limit)
-  | (info : _) <- directEvidence =
+  | Just (True, Just info) <- finalTurn events,
+    info `elem` ["usageLimitExceeded", "rateLimitExceeded"] =
       ProviderLimitReached resetsAt ("the codex turn failed with " <> info)
   | otherwise = ProviderLimitUnidentified
   where
     readable = either (const Nothing) Just snapshot
     reached = readable >>= (.codexLimitReachedType)
     resetsAt = readable >>= (.codexLimitResetsAt)
-    directEvidence = filter (`elem` ["usageLimitExceeded", "rateLimitExceeded"]) (appServerFailures events)
     limitsReached = ["rate_limit_reached", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached"]
     creditsDepleted = ["workspace_owner_credits_depleted", "workspace_member_credits_depleted"]
 
--- | Every failed app-server turn in a stream, by the @codexErrorInfo@ it
--- carried — the empty string for a failed turn that named none, so a failure
--- is still counted as one.
-appServerFailures :: [Value] -> [Text]
-appServerFailures events =
-  [ maybe "" id (errorInfo turn)
-  | Object event <- events,
-    textField "method" event == Just "turn/completed",
-    Just params <- [objectField "params" event],
-    Just turn <- [objectField "turn" params],
-    textField "status" turn == Just "failed"
-  ]
+-- | How the invocation's final turn ended: whether it failed, and the
+-- @codexErrorInfo@ it named when it was an app-server turn that named one.
+--
+-- The final turn only. An invocation can hold more than one, and an earlier
+-- turn's limit is a statement about that turn: a session that met a limit,
+-- carried on, and then failed for some other reason failed for that other
+-- reason, and reading the earlier limit as this failure's cause would retry a
+-- failure that has to stop.
+finalTurn :: [Value] -> Maybe (Bool, Maybe Text)
+finalTurn events = case mapMaybe turnEnd events of
+  [] -> Nothing
+  ends -> Just (last ends)
   where
-    -- Only the bare-string variants: every structured one carries an HTTP
-    -- failure, and none of those is a limit this rule identifies.
-    errorInfo turn = objectField "error" turn >>= textField "codexErrorInfo"
+    turnEnd (Object event)
+      | textField "type" event == Just "turn.failed" = Just (True, Nothing)
+      | textField "type" event == Just "turn.completed" = Just (False, Nothing)
+      | textField "method" event == Just "turn/completed",
+        Just params <- objectField "params" event,
+        Just turn <- objectField "turn" params =
+          -- Only the bare-string variants of @codexErrorInfo@: every
+          -- structured one carries an HTTP failure, and none of those is a
+          -- limit this rule identifies.
+          Just (textField "status" turn == Just "failed", objectField "error" turn >>= textField "codexErrorInfo")
+    turnEnd _ = Nothing
 
 -- ---------------------------------------------------------------------------
 -- A settled worker

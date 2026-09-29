@@ -352,12 +352,14 @@ own structured evidence about that session, never from error text. For Claude,
 the session log's final `result` reports `is_error`, and either its latest
 `rate_limit_event` is `rejected` without overage covering it (`overageStatus`
 neither `allowed` nor `allowed_warning`), or it recorded no such event and
-`api_error_status` is 429. For Codex, the session's turn failed and the
+`api_error_status` is 429. For Codex, the session's final turn failed and the
 account's rate-limit snapshot — the `codex` bucket of the same
 `account/rateLimits/read` the usage sidebar makes, read after the failure —
-names `rate_limit_reached` or a workspace owner or member usage limit; a turn
-run on the app server may instead name `usageLimitExceeded` or
+names `rate_limit_reached` or a workspace owner or member usage limit; a final
+turn run on the app server may instead name `usageLimitExceeded` or
 `rateLimitExceeded` as its `codexErrorInfo`, which counts without the snapshot.
+Only the invocation's final turn is evidence: an earlier turn's limit says
+nothing about why the session finally failed.
 `allowed_warning` never counts. Depleted credits — Codex's
 `workspace_owner_credits_depleted` or `workspace_member_credits_depleted`, or a
 Claude rejection whose overage is disabled `out_of_credits` — fail the step
@@ -390,7 +392,8 @@ that meets a limit again continues the count; any other conclusion ends the
 sequence, and the next limit starts again from one minute. A wait whose retry
 time is missing or will not decode is never retried automatically: the mission
 stays waiting, its halt says why, and every pass reports it and fails, as it
-does for any other record it cannot account for.
+does for any other record it cannot account for — whatever the mission's own
+lifecycle, including one a peer's failure has since ended.
 
 Free slots go to waiting missions in a durable round-robin (the mission runner
 design's D-8, `docs/designs/mission_runner_design.md`): a mission's
