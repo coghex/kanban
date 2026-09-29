@@ -1878,12 +1878,26 @@ def parse_check_name(item: dict[str, Any]) -> str | None:
     return item.get("name") or item.get("context")
 
 
-def parse_check_sort_key(item: dict[str, Any]) -> str:
+def parse_check_sort_key(item: dict[str, Any]) -> tuple[bool, str]:
+    """How recent one instance of a check is, for picking the one that speaks.
+
+    An instance that has not completed -- queued or running -- outranks every
+    completed one, whatever its timestamps. It is an evaluation of this head
+    that has not answered yet, and it can only have been created after the
+    completed ones it would otherwise be compared against, or alongside them:
+    a queued job has no `startedAt` (see `ci_attempt_identity`), and the
+    rollup carries no `createdAt` for a check run, so ranking it by time would
+    put it below every finished instance. That is how a gate once merged past
+    a duplicate `review-approved` job still queued behind a finished one, and
+    the post-merge audit then found it running. Completed instances rank by
+    time among themselves.
+    """
     return (
+        item.get("status") != "COMPLETED",
         item.get("startedAt")
         or item.get("completedAt")
         or item.get("createdAt")
-        or ""
+        or "",
     )
 
 

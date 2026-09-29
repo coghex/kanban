@@ -123,6 +123,23 @@ the Claude command, `$issue-rereview` from the Codex skill — rather than
 rerunning an unchanged spec. That repair loop is **packaged** in both bundles;
 what stays separate is the responsibility, not the distribution.
 
+The gate reviews an issue as the contract for exactly one delivery unit, in
+both its `initial` and `rereview` modes. The default unit is one pull request.
+The only other is one direct documentation landing through the target
+repository's own direct-publication lane, followed by closing the issue — the
+disposition `autosolve`'s documentation-only step (step 3) delivers — and an
+issue qualifies for it only when all three of that step's conditions hold: the
+effective spec states the change is documentation-only, it names the
+repository's direct-publication path instead of a pull request, and the
+repository's own required reading (`CLAUDE.md` or `AGENTS.md`) confirms that
+lane exists and applies to the issue's actual changes. The reviewer verifies
+the last condition in the checked-out repository and does not request changes
+or raise an open decision merely because a qualifying issue forbids a pull
+request or closes after the landing. Every other issue — one touching code,
+tests, configuration, or generated output, naming no lane, or naming a lane the
+repository does not confirm — remains a one-pull-request contract, and every
+other readiness criterion applies to both units unchanged.
+
 ### 3.5 Not a candidate-hunting workflow: arc decomposition
 
 Arc decomposition plans a **user-specified feature arc** into an epic plus
