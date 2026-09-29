@@ -4170,6 +4170,20 @@ Defaults:
   confirms they are not the runner's. The detached workers a mission child
   hands agent work to lead sessions of their own and are never part of this;
   they own their agents, and the next pass reattaches to them.
+- Nor does the service manager end them. A new session leaves the process
+  group but not a systemd unit's cgroup, so the mission runner's unit alone is
+  rendered with `KillMode=process`: systemd signals only the wrapper, on a stop
+  as on any other, and kills nothing else once it is gone. A stop, a restart,
+  or a crash of the runner on Linux therefore leaves every mission-dispatched
+  worker and its agent running, as launchd already did by killing only the
+  job's own process group, and the runner's own leftovers are settled by the
+  rule above on the next start. The PR drainer's and the issue approval
+  service's units keep `KillMode=mixed`, because their children are their own.
+  An installation made before this needs no migration: a `start` rewrites and
+  reloads the definition before it kicks the job, so the next start of a
+  stopped runner carries the new kill mode. A start that finds the runner
+  already running refreshes nothing, so that run's stop is still governed by
+  the definition it was started from until it is stopped and started again.
 - Beside those runtime documents the service keeps durable records of its
   *installation*. `config.json` in the service root is the discovery record —
   one `repositories` table holding each installed repository's entry, naming the
@@ -4852,7 +4866,12 @@ a cursor. The runner's own chain now survives its own failures: each pass is
 recorded by identity before it may run, and a wrapper settles whatever pass a
 killed predecessor left — the scheduler and its mission children, verified by
 identity, never the detached workers — before starting one, blocking with an
-incident on a survivor it cannot verify gone. A step whose launch was journaled
+incident on a survivor it cannot verify gone. On Linux the mission runner's
+systemd unit now signals only its wrapper (`KillMode=process`), so a stop,
+restart, or crash of the runner leaves every mission-dispatched worker and its
+agent running, as launchd already did, and the runner's own leftovers are
+settled on the next start; an existing installation takes the new unit on the
+next start of a stopped runner. A step whose launch was journaled
 and cut off before any worker or result was recorded is `interrupted`, stops
 its mission, is never retried by a later pass or a restarted service, and is
 recovered by the runner's `override`. Every mission session's event stream and

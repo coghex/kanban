@@ -10,6 +10,7 @@ drives the probes rather than the machine — so this suite answers the same on
 a macOS laptop, a Linux CI runner, and a container with no user session.
 """
 
+import dataclasses
 import plistlib
 import subprocess
 import tempfile
@@ -541,6 +542,9 @@ class SystemdDefinitionTests(SystemdBackendTestCase):
         self.assertFalse(any(line.startswith("WantedBy=") for line in directives))
         # Only the main process is signalled, so the runner performs its own
         # shutdown and forwards to its child exactly as it does under launchd.
+        # This backend is the drainer's, whose stop also kills whatever the
+        # unit's cgroup still holds; `NamespaceTests` covers the one namespace
+        # that renders otherwise.
         self.assertIn("KillSignal=SIGTERM", directives)
         self.assertIn("KillMode=mixed", directives)
 
@@ -889,7 +893,7 @@ class RecordEntryTests(SystemdBackendTestCase):
 
 
 class NamespaceTests(unittest.TestCase):
-    """Two services share this boundary, and neither may name the other's job.
+    """Three services share this boundary, and none may name another's job.
 
     Every case is asserted against both backends, because a namespace that
     partitioned launchd's identifiers but not systemd's would let one host
@@ -1030,6 +1034,87 @@ class NamespaceTests(unittest.TestCase):
         )
         self.assertIn("Description=Kanban issue approval", unit)
         self.assertNotIn("PR drainer", unit)
+
+
+    def kill_modes(self, namespace):
+        """Every `KillMode=` directive the namespace's unit carries."""
+        rendered = (
+            service_manager.SystemdBackend(self.runner, namespace)
+            .render_definition(self.definition())
+            .decode("utf-8")
+        )
+        return [line for line in rendered.splitlines() if line.startswith("KillMode=")]
+
+    def definition(self):
+        return service_manager.ServiceDefinition(
+            identifier="com.coghex.example.acme.widgets.service",
+            program_arguments=["/usr/bin/python3", "/install/controller.py", "run"],
+            working_directory="/checkout",
+            environment={},
+            stdout_path="/logs/out",
+            stderr_path="/logs/err",
+        )
+
+    def test_only_the_mission_runners_stop_leaves_its_descendants_running(self):
+        # The workers a mission dispatches lead sessions of their own but stay
+        # in the runner unit's cgroup, so under `mixed` a runner stop, restart
+        # or crash SIGKILLs every one of them (design D-17). The drainer's and
+        # the approval service's children are their own, and keep `mixed`.
+        self.assertEqual(
+            self.kill_modes(service_manager.MISSION_RUNNER_NAMESPACE),
+            ["KillMode=process"],
+        )
+        for namespace in (
+            service_manager.DRAINER_NAMESPACE,
+            service_manager.ISSUE_APPROVAL_NAMESPACE,
+        ):
+            with self.subTest(namespace=namespace.name):
+                self.assertEqual(self.kill_modes(namespace), ["KillMode=mixed"])
+
+    def test_the_namespaces_do_not_all_render_one_kill_mode(self):
+        # The negative control: a renderer that ignored the namespace and wrote
+        # one mode for every unit fails here whichever mode it chose.
+        rendered = {
+            tuple(self.kill_modes(namespace))
+            for namespace in (
+                service_manager.DRAINER_NAMESPACE,
+                service_manager.ISSUE_APPROVAL_NAMESPACE,
+                service_manager.MISSION_RUNNER_NAMESPACE,
+            )
+        }
+        self.assertGreater(len(rendered), 1, rendered)
+
+    def test_the_kill_mode_is_the_namespaces_declaration_not_its_name(self):
+        # Swapping only the declaration swaps what is rendered, so nothing at
+        # render time reads the mode off the namespace's name or prefix.
+        for namespace, swapped in (
+            (
+                service_manager.MISSION_RUNNER_NAMESPACE,
+                service_manager.KILL_MODE_MIXED,
+            ),
+            (service_manager.DRAINER_NAMESPACE, service_manager.KILL_MODE_PROCESS),
+        ):
+            with self.subTest(namespace=namespace.name):
+                self.assertEqual(
+                    self.kill_modes(dataclasses.replace(namespace, kill_mode=swapped)),
+                    [f"KillMode={swapped}"],
+                )
+
+    def test_a_launchd_definition_is_the_same_for_every_namespace(self):
+        # launchd has no kill mode to declare: it kills only the job's own
+        # process group, which a worker in a new session has already left. So
+        # the namespace changes nothing in a plist rendered from one definition.
+        rendered = {
+            service_manager.LaunchdBackend(self.runner, namespace).render_definition(
+                self.definition()
+            )
+            for namespace in (
+                service_manager.DRAINER_NAMESPACE,
+                service_manager.ISSUE_APPROVAL_NAMESPACE,
+                service_manager.MISSION_RUNNER_NAMESPACE,
+            )
+        }
+        self.assertEqual(len(rendered), 1)
 
 
 class BackendSelectionTests(unittest.TestCase):

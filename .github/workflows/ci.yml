@@ -190,7 +190,8 @@ jobs:
   # lifecycle runs — install, start (which is what exercises the backend's
   # kick), status, stop, uninstall — and each step is checked against durable
   # state in both the user manager and the discovery record. Only `gh` and the
-  # provider executables are faked.
+  # provider executables are faked. The same booted image then runs the
+  # mission runner's worker survival check, whose only fake is `kanban`.
   systemd-drainer-lifecycle:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -231,6 +232,16 @@ jobs:
       - name: Lifecycle output
         if: always()
         run: docker exec kanban-systemd journalctl --unit=lifecycle-check.service --no-pager --output=cat || true
+
+      - name: Run the mission runner worker survival check
+        # The mission runner's unit under the same user manager: a worker a
+        # mission dispatched, and its agent, have to outlive both a
+        # `systemctl --user stop` and a SIGKILLed wrapper (design D-17).
+        run: docker exec kanban-systemd systemctl start mission-runner-check.service
+
+      - name: Mission runner check output
+        if: always()
+        run: docker exec kanban-systemd journalctl --unit=mission-runner-check.service --no-pager --output=cat || true
 
       - name: Stop systemd
         if: always()

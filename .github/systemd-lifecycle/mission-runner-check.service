@@ -1,0 +1,20 @@
+[Unit]
+# The mission runner's counterpart of lifecycle-check.service, run in the same
+# booted image against the same user manager, and ordered after it for the
+# same reason. No [Install] section: CI starts it explicitly so that
+# `systemctl start` reports the check's own verdict.
+Description=Kanban mission runner systemd worker survival check
+After=user@1001.service
+Requires=user@1001.service
+
+[Service]
+Type=oneshot
+User=drainer
+WorkingDirectory=/workspace
+Environment=HOME=/home/drainer
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /workspace/.github/systemd-lifecycle/mission_runner_check.py
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes

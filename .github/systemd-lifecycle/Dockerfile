@@ -1,5 +1,6 @@
-# A container that boots systemd as PID 1, so the drainer's Linux lifecycle can
-# be exercised against a real user manager rather than against generated files.
+# A container that boots systemd as PID 1, so the drainer's Linux lifecycle, and
+# the mission runner's promise that its missions' workers outlive it, can be
+# exercised against a real user manager rather than against generated files.
 #
 # `docs/designs/linux_portability_design.md` decision D-1 fixes that standard: no Linux
 # host is known to exist for this project, so the Linux claim is
@@ -12,11 +13,14 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# `procps` because the mission runner reads process start times and groups from
+# `ps`, which the base image does not carry.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
         dbus-user-session \
         git \
+        procps \
         python3 \
         systemd \
         systemd-sysv \
@@ -39,11 +43,12 @@ RUN useradd --create-home --uid 1001 --shell /bin/bash drainer \
 COPY . /workspace
 RUN chown -R drainer:drainer /workspace
 
-# The check is a unit rather than the container command, so it can be ordered
+# Each check is a unit rather than the container command, so it can be ordered
 # after the user manager it drives and so its exit status survives in a form
-# `systemctl start` reports back. It carries no [Install] section, so booting
-# this image runs nothing on its own.
+# `systemctl start` reports back. Neither carries an [Install] section, so
+# booting this image runs nothing on its own.
 COPY .github/systemd-lifecycle/lifecycle-check.service /etc/systemd/system/lifecycle-check.service
+COPY .github/systemd-lifecycle/mission-runner-check.service /etc/systemd/system/mission-runner-check.service
 
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/usr/lib/systemd/systemd"]
