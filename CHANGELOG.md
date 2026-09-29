@@ -15,6 +15,15 @@ created above it.
 
 ### Unreleased
 
+- The canonical issue reviewer can now approve a documentation-only issue that
+  lands directly through the repository's own documentation lane and then
+  closes, instead of through a pull request. Its prompt used to frame every
+  review as a one-pull-request contract, so such an issue always came back
+  changes-requested and `autosolve`'s direct-landing step was unreachable. An
+  issue qualifies only when its spec says it is documentation-only, names the
+  direct-publication path, and the repository's `CLAUDE.md` or `AGENTS.md`
+  confirms that lane covers its changes; every other issue is still reviewed as
+  one pull request.
 - A Copilot CLI session running a Claude model has a Kanban bundle of its own:
   `claude-copilot-plugin/`, a Copilot marketplace named `kanban-claude` whose
   `/solve` and `/autosolve` stamp `pr-origin:claude` and drive a Codex review.

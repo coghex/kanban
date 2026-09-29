@@ -83,6 +83,62 @@ class ReviewPromptContractTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIn("Must be empty for APPROVE", properties[field]["description"])
 
+    def test_both_modes_accept_a_qualifying_direct_documentation_landing(self):
+        # Issue #747: autosolve's documentation-only step lands a qualifying
+        # issue directly, so the gate in front of it must be able to approve one.
+        for mode in ("initial", "rereview"):
+            with self.subTest(mode=mode):
+                prompt = approve_issues.review_prompt(
+                    approve_issues.CODEX_REVIEWER, {}, mode=mode
+                )
+                self.assertIn("implementation contract for one delivery unit", prompt)
+                self.assertIn(
+                    "one direct documentation landing through the target "
+                    "repository's own direct-publication lane, followed by "
+                    "closing the issue",
+                    prompt,
+                )
+                for condition in (
+                    "states the change is documentation-only",
+                    "names the repository's direct-publication path instead of "
+                    "a pull request",
+                    "(its `CLAUDE.md` or `AGENTS.md`) confirms that lane exists",
+                    "Verify the third condition in the checked-out repository",
+                    "confirm the lane applies to the issue's actual changes",
+                ):
+                    self.assertIn(condition, prompt)
+                self.assertIn(
+                    "Do not return CHANGES_REQUESTED, and do not raise an open "
+                    "decision, merely because a qualifying issue forbids a pull "
+                    "request or requires closing the issue after the landing.",
+                    prompt,
+                )
+                self.assertIn(
+                    "A non-qualifying issue remains a one-pull-request contract "
+                    "exactly as before",
+                    prompt,
+                )
+                self.assertIn(
+                    "including CHANGES_REQUESTED for a requirement not to open "
+                    "a pull request",
+                    prompt,
+                )
+                self.assertIn(
+                    "Every other readiness criterion below applies unchanged to "
+                    "a qualifying issue.",
+                    prompt,
+                )
+                # The dependency policy and APPROVE rule share the exception.
+                self.assertIn("own single-delivery-unit scope and acceptance", prompt)
+                self.assertIn(
+                    "testable spec for one delivery unit: one pull request, or, "
+                    "for a qualifying issue, one direct documentation landing "
+                    "followed by closing the issue.",
+                    prompt,
+                )
+                # No unconditional one-PR constraint survives anywhere in it.
+                self.assertNotIn("one-PR", prompt)
+
 
 class PortableDefaultPathTests(unittest.TestCase):
     """The managed locations this backend freezes into module constants.
