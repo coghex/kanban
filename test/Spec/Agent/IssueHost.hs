@@ -55,6 +55,7 @@ import Kanban.Worker
     IssueActionAdoptionRefusal (..),
     AdoptionDecision (..),
     claimForAdoption,
+    settledChildState,
     IssueActionClaim (..),
     IssueActionClaimOutcome (..),
     claimIssueAction,
@@ -2202,6 +2203,22 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
         claimForAdoption (WorkerId "host-1") descriptor `shouldReturn` AdoptionClaimed
         claimForAdoption (WorkerId "host-2") descriptor `shouldReturn` AdoptionClaimed
         readIssueActionClaim descriptor `shouldReturn` Right (Just (ClaimedByHost (WorkerId "host-1")))
+
+  -- Issue #746's round-7 blocker: a settle that cannot show its gate's tree
+  -- ended must not wipe the only record of it. An inconclusive termination
+  -- keeps the provider record, and so does a gate whose identity the census
+  -- never captured; only a verified end clears it.
+  it "keeps the provider record of a settle it could not verify" $ do
+    now <- getCurrentTime
+    descriptor <- descriptorForSpec (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 InitialReview (WorkerId "host-1") IssueOriginClaude)))
+    let gate = ProcessIdentity 4242 1 4242 "Mon Sep 28 12:00:00 2026" "approve_issues.py"
+        running = (runningChildState descriptor now) {workerStateProviderPid = Just 4242, workerStateProviderIdentity = Nothing}
+        identified = running {workerStateProviderIdentity = Just gate}
+        provider state = (state.workerStateProviderPid, state.workerStateProviderIdentity)
+    provider (settledChildState True SolveCompleted identified) `shouldBe` (Nothing, Nothing)
+    provider (settledChildState False SolveCompleted identified) `shouldBe` (Just 4242, Just gate)
+    provider (settledChildState True SolveCompleted running) `shouldBe` (Just 4242, Nothing)
+    (settledChildState False SolveCompleted running).workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
 
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->

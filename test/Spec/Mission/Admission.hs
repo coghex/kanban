@@ -130,6 +130,28 @@ occupancySpec = describe "what the worker cache says is running" $ do
       counted (Right [identity 60]) `shouldReturn` 1
       counted (Left "ps would not run") `shouldReturn` 2
 
+  -- A settle that could not show its gate ended leaves the gate's pid on the
+  -- terminal state; with no identity beside it nothing can ever show it gone.
+  it "keeps a terminal issue action's slot while its gate was never identified" $
+    withSlotRoots $ \_ -> do
+      unidentified <- writeAgentWorker slotRepository "action-unidentified" (Just "invocation-unidentified") (reviewTask 24) Nothing
+      LazyByteString.writeFile
+        unidentified.workerDescriptorStatePath
+        (encode ((runningWorkerState (WorkerId "action-unidentified") 999999 Nothing) {workerStateStatus = WorkerTerminal SolveCompleted, workerStateProviderPid = Just 4242}))
+      identified <- writeAgentWorker slotRepository "action-identified" (Just "invocation-identified") (reviewTask 25) Nothing
+      LazyByteString.writeFile
+        identified.workerDescriptorStatePath
+        ( encode
+            ( (runningWorkerState (WorkerId "action-identified") 999999 Nothing)
+                { workerStateStatus = WorkerTerminal SolveCompleted,
+                  workerStateProviderPid = Just 4343,
+                  workerStateProviderIdentity = Just (identity 4343)
+                }
+            )
+        )
+      counted <- observeMissionAgentsWith (pure (Right [])) slotRepository
+      fmap missionAgentsLive counted `shouldBe` Right 1
+
   -- A withdrawn action is the one unfinished action no host will ever run,
   -- so its slot is free even while its records wait to be removed.
   it "frees an issue action whose launch withdrew it" $
@@ -268,6 +290,29 @@ claimSpec = describe "a claim for one slot" $ do
       state <- readMissionAdmissionState store
       fmap (Map.toList . (.missionAdmissionRotation)) state `shouldBe` Right [("started", 1)]
       missionAgentsNow `shouldReturn` 1
+
+  -- Round 7: a launcher that died after spawning its supervisor and before the
+  -- supervisor's first state leaves a worker that is still starting. Its
+  -- reservation outlives the launcher until the start is either counted or
+  -- shown not to have happened.
+  it "keeps a gone holder's reservation while its worker is still starting, and counts the start" $
+    withSlotRoots $ \store -> do
+      let departed = slotAdmission {missionAdmissionSelf = pure 424242}
+          survivor = slotAdmission {missionAdmissionHolderAlive = pure . (/= 424242)}
+      claimMissionAgentSlot departed store 3 (MissionId "slow-start") "slow-1" `shouldReturn` MissionAgentSlotGranted
+      starting <- writeAgentWorker slotRepository "slow-start" (Just "slow-1") solveTask Nothing
+      createDirectory starting.workerDescriptorLeasePath
+      writeLeaseOwner starting "slow-start"
+      claimMissionAgentSlot survivor store 3 (MissionId "other") "other-1" `shouldReturn` MissionAgentSlotGranted
+      earlier <- readMissionAdmissionState store
+      fmap (map (.missionReservationInvocation) . (.missionAdmissionReservations)) earlier `shouldBe` Right ["slow-1", "other-1"]
+      fmap (.missionAdmissionRotation) earlier `shouldBe` Right Map.empty
+      -- The supervisor writes its first state: the start happened.
+      LazyByteString.writeFile starting.workerDescriptorStatePath (encode (runningWorkerState (WorkerId "slow-start") 999999 Nothing))
+      claimMissionAgentSlot survivor store 3 (MissionId "third") "third-1" `shouldReturn` MissionAgentSlotGranted
+      later <- readMissionAdmissionState store
+      fmap (Map.toList . (.missionAdmissionRotation)) later `shouldBe` Right [("slow-start", 1)]
+      fmap (map (.missionReservationInvocation) . (.missionAdmissionReservations)) later `shouldBe` Right ["other-1", "third-1"]
 
   it "drops a gone holder's reservation, and counts its launch when its worker exists" $
     withSlotRoots $ \store -> do

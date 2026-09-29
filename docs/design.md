@@ -301,7 +301,10 @@ process identity a snapshot no longer finds, or an acknowledged launch that
 never started. An issue action is live until it is terminal, since a host that
 died leaves its unfinished actions to be re-homed and run by the next one — and
 without a state it is live too — and a terminal one still holds its slot while a
-process it ran, such as a canonical review's subprocess, survives. A
+process it ran, such as a canonical review's subprocess, survives. A settle that
+cannot show that tree ended keeps the gate's recorded pid and identity on the
+terminal state, and a gate whose identity the census never captured holds its
+slot for good, since nothing could ever show it gone. A
 record that will not decode, and a snapshot that cannot be taken, keep the
 slot. Lowering the ceiling below what is running starts nothing new until
 enough of it finishes, and ends nothing.
@@ -313,7 +316,9 @@ The claim is decided under one repository-wide lock beside the mission store,
 so two steps that both see a free slot cannot both take it; a reservation covers
 the moment between a grant and the worker writing its specification, is keyed
 by the invocation the worker records, and is dropped once its holding process
-is gone, without releasing anything a surviving worker occupies. A step with no
+is gone, without releasing anything a surviving worker occupies — unless that
+worker is there and live but has not yet written its first state, in which case
+it is kept until the worker starts, so the start still reaches the rotation. A step with no
 slot journals nothing, marks nothing, fails nothing, and is not a lifecycle:
 the mission stays runnable, a registered child request stays queued and
 unanswered, and the same launch is asked for again later. A step that could

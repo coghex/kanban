@@ -53,6 +53,7 @@ module Kanban.Worker.IssueHost
     childCommandOutcome,
     canonicalStageOutcome,
     issueHostGone,
+    settledChildState,
     AdoptionDecision (..),
     claimForAdoption,
     neverAdopted,
@@ -72,7 +73,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
@@ -83,7 +84,7 @@ import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
 import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
 import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus)
-import Kanban.Worker.Termination (terminateRecordedProcesses)
+import Kanban.Worker.Termination (terminateRecordedStateProcesses)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     ConnectionId,
@@ -1693,7 +1694,7 @@ settleSettledChild host child outcome = do
     -- The canonical subprocess's own descendants, verified against this
     -- child's recorded census. A @gh@ or @python3@ the gate started outlives
     -- the process that spawned it otherwise.
-    terminateRecordedProcesses child.hostChildState
+    verified <- withMVar child.hostChildState terminateRecordedStateProcesses
     -- The envelope before the state, because these are two writes and a host
     -- dying between them leaves whichever prefix landed. This order's prefix
     -- is a closed journal over a state that still reads as running, which
@@ -1703,19 +1704,7 @@ settleSettledChild host child outcome = do
     -- a reattaching dashboard replays an action that never ends, and the
     -- journal stays open to the appends the envelope exists to stop.
     journalChildTerminal child (WorkerFinished outcome)
-    updateChildState child $ \current ->
-      current
-        { workerStateStatus = WorkerTerminal outcome,
-          workerStateProviderPid = Nothing,
-          workerStateProviderIdentity = Nothing,
-          -- The thread goes with the turn. A settled child holding a thread
-          -- still reads as addressable to every thread-scoped check, which is
-          -- what let a command queued behind a termination pass one.
-          workerStateReviewThread = Nothing,
-          workerStateReviewTurn = Nothing,
-          workerStateReviewRequest = Nothing,
-          workerStateLastActivity = terminalActivity outcome
-        }
+    updateChildState child (settledChildState verified outcome)
     releaseWorkerLease child.hostChildDescriptor
     -- Retired first, live entry removed second. The two maps are separate
     -- cells, so a lookup landing between the updates sees whichever order
@@ -1731,6 +1720,33 @@ settleSettledChild host child outcome = do
     -- reached here itself would otherwise kill itself before its own journal
     -- write landed.
     void . forkIO $ readIORef child.hostChildStageThread >>= mapM_ killThread
+
+-- | The state a settled child is written with.
+--
+-- Its provider record goes only when the settle could show the process tree
+-- it spawned has ended. A termination that was inconclusive, and a gate whose
+-- identity was never recorded because the census snapshot failed, both leave
+-- a process nothing has shown gone; clearing the record would leave a terminal
+-- action whose running descendant no count of running agents could find. So
+-- the pid and whatever identity was recorded stay on the terminal state,
+-- which is what "Kanban.Mission.Admission" reads before it frees the slot.
+settledChildState :: Bool -> SolveOutcome -> WorkerState -> WorkerState
+settledChildState verified outcome current =
+  current
+    { workerStateStatus = WorkerTerminal outcome,
+      workerStateProviderPid = if ended then Nothing else current.workerStateProviderPid,
+      workerStateProviderIdentity = if ended then Nothing else current.workerStateProviderIdentity,
+      -- The thread goes with the turn. A settled child holding a thread
+      -- still reads as addressable to every thread-scoped check, which is
+      -- what let a command queued behind a termination pass one.
+      workerStateReviewThread = Nothing,
+      workerStateReviewTurn = Nothing,
+      workerStateReviewRequest = Nothing,
+      workerStateLastActivity = terminalActivity outcome
+    }
+  where
+    unidentified = isJust current.workerStateProviderPid && isNothing current.workerStateProviderIdentity
+    ended = verified && not unidentified
 
 terminalActivity :: SolveOutcome -> Text
 terminalActivity SolveCompleted = "completed"

@@ -83,7 +83,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (nub, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, isJust, isNothing, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -307,7 +307,11 @@ workerOccupies takeSnapshot descriptor = do
       StateAbsent -> pure True
       StateUnreadable -> pure True
       StateRead state -> case state.workerStateStatus of
+        -- A settle that could not show its gate's tree ended keeps the
+        -- gate's pid on the terminal state; one with no identity beside it
+        -- is a process nothing can ever check, so its slot stays taken.
         WorkerTerminal _
+          | isJust state.workerStateProviderPid && isNothing state.workerStateProviderIdentity -> pure True
           | null (ownedProcesses state) -> pure False
           | otherwise -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot (ownedProcesses state)
         _ -> pure True
@@ -733,13 +737,26 @@ prune :: MissionAdmissionSeams -> [MissionAgentOccupant] -> MissionAdmissionStat
 prune seams occupants state = do
   reservations <- mapM (\reservation -> (,) reservation <$> seams.missionAdmissionHolderAlive reservation.missionReservationHolder) state.missionAdmissionReservations
   entrants <- mapM (\entrant -> (,) entrant <$> seams.missionAdmissionHolderAlive entrant.missionEntrantHolder) state.missionAdmissionEntrants
-  let gone = [reservation | (reservation, False) <- reservations]
-      launched = [reservation.missionReservationMission | reservation <- gone, Set.member reservation.missionReservationInvocation (startedInvocations occupants)]
+  let started = startedInvocations occupants
+      -- A launch whose worker is there and live but has not yet written its
+      -- state is still starting: its launcher died, and its supervisor may
+      -- not have. Dropping it would forget an admission that is still to
+      -- happen, so it is kept, holder gone, until the worker either starts —
+      -- and is counted — or is shown not to be running.
+      starting =
+        Set.fromList
+          [ invocation
+          | MissionAgentOccupant {missionOccupantInvocation = Just invocation, missionOccupantLive = True, missionOccupantStarted = False} <- occupants
+          ]
+      kept (reservation, alive) =
+        alive || Set.member reservation.missionReservationInvocation starting
+      gone = [reservation | (reservation, False) <- reservations, not (Set.member reservation.missionReservationInvocation starting)]
+      launched = [reservation.missionReservationMission | reservation <- gone, Set.member reservation.missionReservationInvocation started]
       pruned =
         foldr
           admitted
           state
-            { missionAdmissionReservations = [reservation | (reservation, True) <- reservations],
+            { missionAdmissionReservations = [reservation | entry@(reservation, _) <- reservations, kept entry],
               missionAdmissionEntrants = [entrant | (entrant, True) <- entrants]
             }
           launched
