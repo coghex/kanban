@@ -205,6 +205,30 @@ its scope did not name, and the second contradicts D-2 and D-15 on Linux.
   unaffected by this path (documented behaviour, not re-measured). The drainer
   and issue-approval units share the same rendering.
 
+### Found while processing RUN-8
+
+Measured against master `8d59b0ab` on 2026-09-29. These findings left the
+drain's duration undecided, which D-19 settles.
+
+- **A step is short but not bounded by anything a stop waits for.** A pass's
+  mission child runs one controller iteration and exits
+  (`runMissionStepMode`, `src/Kanban/Mission/Runner.hs`), so it never waits on
+  an agent. Its length is bounded only by its GitHub calls, each allowed
+  `timeouts.github_seconds` (30 s by default), and a pass waits for all of its
+  children.
+- **Every stop path has a shorter patience than that.** `stop` sends SIGTERM
+  (`launchctl kill`, or `systemctl --user --no-block stop`) and gives up after
+  `STOP_TIMEOUT_SECONDS` (30 s) in `tools/mission_runner_service.py`; the
+  dashboard's transition allows `missionRunnerTransitionTimeoutSeconds` (45 s);
+  systemd SIGKILLs the unit after its default `TimeoutStopSec` (90 s). launchd's
+  `kill` has no timeout.
+- **An upgrade is stop, then install, then start.** Install refuses while a
+  run holds the run lock (`exclusive_of_runs`), so the lock cannot reach two
+  schedulers, and the drain happens entirely inside the stop.
+- **The dashboard decodes six states.** `Kanban.MissionRunnerService` maps
+  exactly `running`, `idle`, `waiting`, `stopped`, `failed`, and `unknown`; a
+  `draining` state needs its own decoding.
+
 ## Desired experience
 
 1. The operator turns the mission runner on for a repository the same way they
@@ -609,6 +633,31 @@ billing, so backing off would only repeat a failure.
 **Signed off:** by the user, 2026-09-29; amendment signed off by the user,
 2026-09-29.
 
+### D-19. A stop returns once draining starts, and the drain is bounded
+
+`stop`, from the controller or the dashboard, sends its signal and waits only
+until the status document reports `draining`, then returns. The dashboard
+shows the runner as draining until it is stopped. Install and uninstall
+already refuse while a run holds the run lock, so a stop followed by an
+upgrade simply waits for the drain to end.
+
+The drain is bounded by a five-minute grace, about ten default GitHub
+timeouts. If the pass has not finished by then, the wrapper escalates exactly
+as a forced stop does: a mission whose step it cuts off becomes `interrupted`
+(D-3), and the escalation is reported. The mission runner's systemd unit
+carries an explicit stop timeout longer than that grace, so systemd never
+SIGKILLs a drain the wrapper is still inside. A second stop signal still
+escalates at once (D-15).
+
+**Rationale:** none of the existing stop budgets (30 s, 45 s, systemd's 90 s)
+can be relied on to cover one step, and raising all of them would make a
+dashboard control block for minutes. Returning at `draining` needs none of
+them to cover a step, and the bound keeps a wedged step from holding a stop
+open forever. Rejected: a stop that blocks until the drain ends, and an
+unbounded drain with `TimeoutStopSec=infinity`.
+
+**Signed off:** by the user, 2026-09-29.
+
 ## Open questions
 
 ### Q-1. Does the runner install per repository or once per host?
@@ -915,17 +964,21 @@ doubling to a one-hour cap, with depleted credits stopping for the operator.
 - **Scope:** Replacing the wrapper's first-signal SIGTERM to the pass group
   (`tools/mission_runner_service.py`, `handle_stop`) with a drain: no new pass
   starts, the current pass completes, and a second signal still escalates; a
-  drain state in the status document the dashboard decodes; commands accepted
-  during a drain stay queued for the next runner; the lock released exactly
-  once after the pass settles.
+  `draining` state in the status document the dashboard decodes; `stop`
+  returning once `draining` is recorded; the five-minute drain grace and its
+  escalation, with the runner unit's systemd stop timeout above it (D-19);
+  commands accepted during a drain stay queued for the next runner; the lock
+  released exactly once after the pass settles.
 - **Phase:** 6 — resilience.
 - **Depends on:** `RUN-4`, whose settlement and `interrupted` marking a forced
   stop still relies on; `RUN-9`, without which a drain on systemd ends by
   killing the workers it deliberately did not wait for.
 - **Ordering:** `critical path` for the epic; independent of RUN-7.
-- **Relevant decisions:** `D-10`, `D-15`, `D-3`.
+- **Relevant decisions:** `D-10`, `D-15`, `D-19`, `D-3`.
 - **Acceptance signals:** A stop during a step lets that step finish and
-  interrupts no mission; a command queued during the drain is honoured by the
+  interrupts no mission; `stop` returns once `draining` is recorded, and the
+  dashboard shows it; a step outlasting the grace is escalated and its mission
+  left `interrupted`; a command queued during the drain is honoured by the
   next runner; a forced stop mid-step leaves that mission `interrupted`; the
   lock is handed over exactly once, never to two schedulers; the drain never
   waits for a detached worker.
@@ -947,7 +1000,7 @@ doubling to a one-hour cap, with depleted credits stopping for the operator.
 - **Depends on:** every implemented slice; documentation for a deferred slice
   stays in this design rather than claiming shipped behavior.
 - **Ordering:** `critical path` for epic completion.
-- **Relevant decisions:** `D-1` through `D-15`.
+- **Relevant decisions:** `D-1` through `D-19`.
 - **Acceptance signals:** Documented commands and paths match tested behavior;
   every executable and durable record this arc adds has an authority and
   ownership entry; an operator can distinguish stopped, idle, waiting,
