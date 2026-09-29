@@ -24,7 +24,9 @@ concrete precondition
 - [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
 - [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
 - [x] RUN-5. Admit mission work under a two-agent ceiling with fair rotation — [#746]
-- [ ] RUN-7. Wait out provider rate limits and drain the runner on stop and upgrade
+- [ ] RUN-9. Keep mission workers alive when the runner's systemd unit stops
+- [ ] RUN-7. Wait out provider rate limits without holding a slot
+- [ ] RUN-8. Drain the runner on stop and upgrade
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
 ## Epic contract
@@ -147,6 +149,44 @@ RUN-2 (#667), and RUN-3 (#668) merged. The original survey was taken at
   `tools/kanban_config.py`.
 - The incident vocabulary was settled by RUN-1 (#666), following the existing
   services' status and incident documents.
+
+### Found while processing RUN-7
+
+Measured against master `d8206d98` on 2026-09-29, after RUN-5 (#746, PR #749)
+merged. These findings sent the original RUN-7 back for design: they add work
+its scope did not name, and the second contradicts D-2 and D-15 on Linux.
+
+- **Nothing produces a capacity wait yet.** `MissionStepWaitingCapacity` and
+  `MissionWaitingCapacity` are defined (`src/Kanban/Mission/Types.hs`) and
+  honoured (`Kanban.Mission.Reconcile` stops a mission on the step state;
+  `Kanban.Mission.Scheduler.missionIsRunnable` excludes it), but no code writes
+  either. `ActionOutcome` (`src/Kanban/Action/Types.hs`) has no capacity
+  constructor, so a throttled agent concludes as the generic `ActionFailed`.
+  No mission or step record carries a reset, retry, or backoff time, and no
+  worker, provider-adapter, or stream-reader module classifies a provider
+  limit.
+- **The providers already stream structured limit evidence into the worker's
+  session log.** A Claude session log carries `rate_limit_event` records with
+  `rate_limit_info.status`, `resetsAt` (epoch seconds), and `rateLimitType`;
+  a Codex app-server session log carries `account/rateLimits/updated`
+  notifications with per-window `resetsAt` and `rateLimitReachedType`. Only
+  the non-limited spellings (`status: "allowed"`, `rateLimitReachedType: null`)
+  were observed in the local worker cache; the limited spellings, and Codex
+  `exec`'s own form, are not yet verified.
+- **On systemd, stopping or exiting the runner kills every detached worker.**
+  The rendered unit sets `KillMode=mixed` (`tools/service_manager.py`,
+  `SystemdBackend.render_definition`), which SIGKILLs every process left in
+  the unit's cgroup once the main process is gone. `spawnDetachedSupervisor`
+  (`src/Kanban/Worker.hs`) only starts a new session, which does not leave the
+  cgroup, and nothing in `src/` or `tools/` moves a worker out of it.
+  Reproduced on 2026-09-29 in a Lima VM (Ubuntu 25.10, systemd 257) with a fake
+  wrapper → pass → mission child → detached worker → agent chain under the
+  unit `render_definition` produces: `systemctl --user stop` and a wrapper
+  exiting by itself both left the worker and its agent dead. The identical unit
+  with only `KillMode=process` left both alive in both cases. launchd kills
+  only the job's own process group, which a worker has left, so macOS is
+  unaffected by this path (documented behaviour, not re-measured). The drainer
+  and issue-approval units share the same rendering.
 
 ## Desired experience
 
@@ -434,7 +474,7 @@ runner's authority does not change that.
 
 ### D-13. The runner reuses Kanban's existing service machinery
 
-New to this document, and the reason the arc is seven slices rather than a
+New to this document, and the reason the arc is nine slices rather than a
 rewrite. The runner installs through `tools/service_manager.py`'s existing
 `ServiceManagerBackend` boundary, resolves its discovery record through the one
 per-language resolution point, transitions through `Kanban.ServiceProcess`, and
@@ -474,6 +514,61 @@ also waiting for every mission-dispatched worker.
 
 **Signed off:** by the user, 2026-09-28.
 
+### D-16. Provider-capacity waits and the stop/upgrade drain are separate slices
+
+The original RUN-7 carried two independent mechanisms. Recognising a provider
+limit needs a new action outcome, per-provider evidence classification, and a
+durable wake time (see "Found while processing RUN-7"); the drain changes the
+wrapper's stop path, the status document, and the lock handover. Neither needs
+the other. RUN-7 keeps the capacity half and RUN-8 takes the drain.
+
+**Rationale:** RUN-5, a single mechanism, took eleven review rounds; two
+unrelated mechanisms in one pull request would give a reviewer two surfaces to
+mine at once.
+
+**Signed off:** by the user, 2026-09-29.
+
+### D-17. The runner's systemd unit signals only the wrapper
+
+The mission runner's unit, and only that namespace's, is rendered with
+`KillMode=process`, so a stop, a self-exit, or a crash of the runner leaves the
+workers its missions dispatched running, as launchd already does. The runner's
+own chain is then settled by RUN-4's identity-checked settlement on the next
+start rather than by systemd. The drainer and issue-approval units keep
+`KillMode=mixed`. The fix is its own slice, RUN-9, placed ahead of RUN-7 and
+RUN-8 and able to land first: it repairs shipped behaviour — a runner crash on
+Linux already kills workers — and needs neither of them.
+
+**Rationale:** the smallest change that makes Linux match the ownership model
+D-2 and D-15 already assume. Rejected: starting each worker in its own
+transient user scope (`systemd-run --user --scope`), which keeps systemd's
+backstop over the runner chain but adds a Linux-only branch to the worker
+spawn, a user-bus dependency at dispatch time, and a failure mode of its own.
+Accepted cost: systemd no longer kills a runner-chain process a crash left
+behind; RUN-4's settlement does that on the next start. Also rejected: folding
+the fix into RUN-8.
+
+**Signed off:** by the user, 2026-09-29.
+
+### D-18. A provider limit is identified only from the provider's structured event
+
+A limit is identified only from the provider's own structured event in the
+session that concluded — Claude's `rate_limit_event` with a non-`allowed`
+status, or Codex's `account/rateLimits/updated` with a non-null
+`rateLimitReachedType` — never from matching error text. The retry time is that
+event's `resetsAt`; an event without one retries through bounded exponential
+backoff, one minute doubling to a one-hour cap. Anything else, including an
+unrecognised provider or an event in an unknown spelling, concludes as today's
+`ActionFailed` and stops the mission. The limited spellings, and Codex
+`exec`'s form if it differs from the app server's, are verified with a captured
+fixture when RUN-7 is filed.
+
+**Rationale:** D-9 retries only a positively identified limit; text matching is
+the fail-open path that would retry an authentication or configuration failure
+indefinitely.
+
+**Signed off:** by the user, 2026-09-29.
+
 ## Open questions
 
 ### Q-1. Does the runner install per repository or once per host?
@@ -490,6 +585,42 @@ that launched them. (b) It also waits for every mission-dispatched worker to
 finish first.
 
 Resolved by D-15: option (a).
+
+### Q-3. How do detached workers survive the runner's systemd unit stopping?
+
+D-2 and D-15 rest on a worker outliving the runner, and on systemd it does not
+(see "Found while processing RUN-7"). Every drain RUN-8 performs on Linux
+would end by killing the workers it deliberately did not wait for.
+
+- (a) Render the mission runner's unit, and only that namespace's, with
+  `KillMode=process`. systemd then signals only the wrapper and leaves the rest
+  of the cgroup alone, so Linux behaves as launchd already does: a runner chain
+  left behind by a crash is settled by RUN-4's identity-checked settlement on
+  the next start rather than by systemd. Smallest change. Costs: systemd no
+  longer backstops a leaked runner-chain process, and systemd's documentation
+  discourages `process` mode.
+- (b) Start each worker a mission dispatches in its own transient user scope
+  (`systemd-run --user --scope`) when the dispatcher runs inside a systemd
+  unit, so the unit's cgroup holds only the runner's chain and `KillMode=mixed`
+  keeps backstopping it. Costs: a Linux-only branch in the worker spawn, a
+  dependency on the user bus at dispatch time, and a failure mode to decide
+  (refuse the dispatch, or fall back).
+
+A second choice rides on the first: whether the fix is its own slice — it
+repairs shipped behaviour, needs neither RUN-7 nor RUN-8, and could land
+first — or part of RUN-8, whose drain is what makes the defect routine.
+
+Resolved by D-17: option (a), as its own slice, RUN-9, placed before RUN-7 and
+RUN-8 and marked `can land first`.
+
+### Q-4. What positively identifies a provider limit?
+
+D-9 retries only a "positively identified" limit and stops on everything else.
+The evidence available is structured, but only its non-limited spellings have
+been observed.
+
+Resolved by D-18: structured provider events only, retrying at `resetsAt` or
+through backoff from one minute doubling to a one-hour cap.
 
 ## Verification strategy
 
@@ -523,6 +654,11 @@ Resolved by D-15: option (a).
   command, let the pass and its `--mission` children finish without waiting for
   detached workers, transfer the lock exactly once, and prove a forced or
   incompatible handoff leaves the cut-off mission interrupted.
+- Worker-survival checks stop and crash the runner under the unit each backend
+  actually renders and prove a mission-dispatched worker and its agent are
+  still alive afterwards. The systemd half needs a real user manager, which the
+  2026-09-29 Lima reproduction supplied; rendering tests alone cannot show what
+  systemd kills.
 - Deadline enforcement is the worker's and is already covered by its own
   suite (`worker_deadline_seconds`); this arc's fixtures only prove the runner
   never shortens or bypasses it.
@@ -659,31 +795,87 @@ Resolved by D-15: option (a).
   from the board does not count; the rotation cursor survives restart, skips
   blocked missions, and leaves no usable slot idle.
 - **Out of scope:** Priority for direct operator commands (Mission Control's
-  `SAG-5`, D-5 as amended); capacity waits and drain (RUN-7); cross-repository
+  `SAG-5`, D-5 as amended); capacity waits (RUN-7) and drain (RUN-8); cross-repository
   or host-wide budgets; batch membership and ordering (`SAG-5`).
 - **Open questions:** `None`; `D-14` settles per-repository installation.
 
-### RUN-7. Wait out provider rate limits and drain the runner on stop and upgrade
+### RUN-9. Keep mission workers alive when the runner's systemd unit stops
+
+- **Outcome:** On systemd, stopping the runner, the runner exiting by itself,
+  and the runner crashing each leave every mission-dispatched worker and its
+  agent running, as they already are on launchd.
+- **Scope:** Render the mission runner namespace's unit with `KillMode=process`
+  (D-17), leaving the drainer's and issue-approval's units unchanged. An
+  existing installation picks the new definition up on its next `start`, which
+  already writes a fresh definition (it carries the startup nonce); record
+  that, rather than adding a migration.
+- **Phase:** 6 — resilience.
+- **Depends on:** `RUN-4`, whose settlement is what now cleans up a runner chain
+  a crash left behind on Linux.
+- **Ordering:** `can land first` — ahead of RUN-7, which does not need it,
+  and RUN-8, which depends on it; `critical path` for the epic.
+- **Relevant decisions:** `D-17`, `D-2`, `D-15`.
+- **Acceptance signals:** The rendered mission runner unit carries
+  `KillMode=process` and the other two namespaces' units still carry
+  `KillMode=mixed`; on a real systemd user manager, a mission-dispatched worker
+  and its agent survive `systemctl --user stop` and a wrapper exit; a runner
+  chain left by a killed wrapper is settled on the next start by RUN-4's
+  settlement.
+- **Out of scope:** The drain (RUN-8); capacity waits (RUN-7); changing the
+  drainer's or issue-approval service's kill mode; moving workers into their
+  own systemd scopes (rejected by D-17).
+- **Open questions:** `None`.
+
+### RUN-7. Wait out provider rate limits without holding a slot
 
 - **Outcome:** A positively identified rate limit or exhausted quota releases
   its slot and retries at the provider's reset time or with bounded backoff,
   while authentication, executable, and configuration failures stop for the
-  operator; a normal stop or upgrade drains per D-15 and leaves no mission
-  interrupted.
-- **Scope:** Waking `waiting_capacity` missions at a durable reset or backoff
-  time; a drain state in the status document; commands accepted during a drain
-  stay queued; the runner lock handed over exactly once.
+  operator as they do today.
+- **Scope:** Classifying a concluded agent session's structured provider
+  limit evidence into a distinct action outcome (Q-4); recording the step and
+  mission `waiting_capacity` — states that exist but nothing writes — with a
+  durable wake time; the scheduler treating such a mission as runnable again
+  once its wake time passes, and not before, so a waiting mission neither
+  spins nor holds one of RUN-5's slots.
 - **Phase:** 6 — resilience.
 - **Depends on:** `RUN-5`, whose ceiling is the slot a capacity wait releases.
-- **Ordering:** `critical path` for the epic.
-- **Relevant decisions:** `D-9`, `D-10`, `D-15`.
-- **Acceptance signals:** A rate limit frees its slot and retries at reset
-  while an authentication failure stops; a stop during a step lets that step
-  finish and interrupts no mission; a forced stop mid-step leaves that mission
-  `interrupted`; the lock is handed over exactly once, never to two
-  schedulers.
-- **Out of scope:** The ceiling and rotation themselves (RUN-5); waiting for
-  detached workers during a drain (rejected by D-15).
+- **Ordering:** `critical path` for the epic; independent of RUN-8.
+- **Relevant decisions:** `D-9`, `D-18`, `D-4`.
+- **Acceptance signals:** A captured limited-provider fixture frees its slot,
+  records the provider's reset time, and is retried at that time with the TUI
+  absent; one without a reset time backs off within the bound; the wake time
+  survives a runner restart; an authentication, executable, or configuration
+  failure, and a limit event in an unrecognised spelling, still stop the
+  mission.
+- **Out of scope:** The ceiling and rotation themselves (RUN-5); the drain
+  (RUN-8); a host-wide or cross-repository budget (D-14).
+- **Open questions:** `None`; `D-18` settles the evidence rule.
+
+### RUN-8. Drain the runner on stop and upgrade
+
+- **Outcome:** A normal stop or upgrade drains per D-15 — the current pass and
+  its `--mission` children finish their step — and hands the runner lock over
+  exactly once, leaving no mission interrupted.
+- **Scope:** Replacing the wrapper's first-signal SIGTERM to the pass group
+  (`tools/mission_runner_service.py`, `handle_stop`) with a drain: no new pass
+  starts, the current pass completes, and a second signal still escalates; a
+  drain state in the status document the dashboard decodes; commands accepted
+  during a drain stay queued for the next runner; the lock released exactly
+  once after the pass settles.
+- **Phase:** 6 — resilience.
+- **Depends on:** `RUN-4`, whose settlement and `interrupted` marking a forced
+  stop still relies on; `RUN-9`, without which a drain on systemd ends by
+  killing the workers it deliberately did not wait for.
+- **Ordering:** `critical path` for the epic; independent of RUN-7.
+- **Relevant decisions:** `D-10`, `D-15`, `D-3`.
+- **Acceptance signals:** A stop during a step lets that step finish and
+  interrupts no mission; a command queued during the drain is honoured by the
+  next runner; a forced stop mid-step leaves that mission `interrupted`; the
+  lock is handed over exactly once, never to two schedulers; the drain never
+  waits for a detached worker.
+- **Out of scope:** Waiting for detached workers (rejected by D-15); keeping
+  those workers alive on systemd (RUN-9); capacity waits (RUN-7).
 - **Open questions:** `None`.
 
 ### RUN-6. Document installing, operating, and recovering the mission runner
@@ -694,7 +886,7 @@ Resolved by D-15: option (a).
 - **Scope:** The operating guide, with recovery and troubleshooting
   procedures. RUN-1 through RUN-3 already added their own contract and
   inventory entries to `docs/design.md` and `docs/agent-workflow-contract.md`;
-  this slice adds the entries RUN-4, RUN-5, and RUN-7 introduce and reconciles
+  this slice adds the entries RUN-4, RUN-5, RUN-9, RUN-7, and RUN-8 introduce and reconciles
   the rest with what shipped.
 - **Phase:** 7 — operability.
 - **Depends on:** every implemented slice; documentation for a deferred slice
