@@ -25,7 +25,7 @@ concrete precondition
 - [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
 - [x] RUN-5. Admit mission work under a two-agent ceiling with fair rotation — [#746]
 - [x] RUN-9. Keep mission workers alive when the runner's systemd unit stops — [#751]
-- [ ] RUN-7. Wait out provider rate limits without holding a slot
+- [x] RUN-7. Wait out provider rate limits without holding a slot — [#752]
 - [ ] RUN-8. Drain the runner on stop and upgrade
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
@@ -873,6 +873,12 @@ doubling to a one-hour cap, with depleted credits stopping for the operator.
 - **Open questions:** `None`.
 
 ### RUN-7. Wait out provider rate limits without holding a slot
+
+> Filed as [#752], depending on [#746]. Filing read the providers' schemas and
+> amended D-18 before drafting: Claude's `allowed_warning` never counts, a bare
+> 429 backs off, Codex `exec` limits are read from the account snapshot, and
+> depleted credits stop. The draft also left the canonical review scripts'
+> own provider failures out of scope.
 
 - **Outcome:** A positively identified rate limit or exhausted quota releases
   its slot and retries at the provider's reset time or with bounded backoff,
