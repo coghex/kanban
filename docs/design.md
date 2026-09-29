@@ -4247,7 +4247,8 @@ Defaults:
 - A normal stop, and therefore a normal upgrade, which is a stop, an install,
   and a start, *drains* the runner rather than cutting its current step off
   (the mission runner design's D-15 and D-19). On the first stop signal the
-  wrapper starts no further pass. With none in flight it stops at once. With
+  wrapper starts no further pass. With none in flight it stops at once, and a
+  pass still waiting at its gate is ended there, having run nothing. With
   one in flight it signals nothing, publishes `draining`, and lets that pass
   and its `--mission` children finish their step. A step waits on GitHub calls,
   never on an agent. The run then records `stopped` and exits, releasing its

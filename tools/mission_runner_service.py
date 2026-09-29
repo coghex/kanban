@@ -2500,6 +2500,12 @@ class Controller:
         # is nothing to cut off otherwise.
         self._escalation: str | None = None
         self._escalation_reported = False
+        # Whether the current pass's gate has been opened. Before it has, the
+        # pass has run nothing, so a stop ends it rather than draining it.
+        self._released = False
+        # Whether a stop ended the current pass at its gate, so what it left
+        # is no pass at all rather than a pass that failed.
+        self._ended_at_gate = False
         self._passes = 0
         self._last_pass: dict[str, Any] | None = None
 
@@ -2518,6 +2524,14 @@ class Controller:
         its worker, which leaves that mission `interrupted`. With no pass in
         flight the run simply ends, as it always has.
 
+        A pass whose gate has not been opened yet has run nothing, and a drain
+        starts no new pass, so the first signal ends that one here. Decided in
+        the handler rather than by a check before the gate is opened, because
+        a check leaves a window between itself and the release that a stop can
+        land in; the handler runs between two of the main thread's steps, so
+        `release_pass` has either already marked the gate open or will find it
+        closed.
+
         A second signal escalates at once, exactly as the grace running out
         does: the pass's group is asked to stop and then killed. A third kills
         it outright, so an operator who keeps asking is obeyed.
@@ -2531,12 +2545,16 @@ class Controller:
         self._signals += 1
         if self._drain_deadline is None:
             self._drain_deadline = time.monotonic() + DRAIN_GRACE_SECONDS
+        if self._child is not None and not self._released:
+            self._ended_at_gate = True
+            self.signal_child_group(self._child, signal.SIGTERM)
+            return
         if self._signals == 1:
             return
         if self._escalation is None:
             self.escalate("a second stop arrived while the pass was draining")
-        else:
-            self.signal_child_group(self._child, signal.SIGKILL)
+        elif self._child is not None:
+            self.signal_pass_group(self._child, signal.SIGKILL)
 
     def escalate(self, reason: str) -> None:
         """Cut the draining pass off, as a forced stop does.
@@ -2544,13 +2562,32 @@ class Controller:
         Asks the pass's group to stop; `wait_for` kills it once
         `STOP_GRACE_SECONDS` have passed. A mission whose step this cuts off is
         left `interrupted` for the next runner's controller iteration to
-        reconcile (#744). Nothing to do with no pass in flight.
+        reconcile (#744). Nothing to do with no released pass in flight.
+
+        In flight means its output is still being collected, not that its
+        leader is alive: a scheduler that has exited leaves a mission child
+        still holding its streams, and that child is what the drain is waiting
+        on and what the escalation has to reach.
         """
         child = self._child
-        if child is None or child.poll() is not None or self._escalation is not None:
+        if child is None or not self._released or self._escalation is not None:
             return
         self._escalation = reason
-        self.signal_child_group(child, signal.SIGTERM)
+        self.signal_pass_group(child, signal.SIGTERM)
+
+    def signal_pass_group(self, child: subprocess.Popen[str], forwarded: int) -> None:
+        """Signal a released pass's group while its output is still being
+        collected, whether or not its leader is still alive.
+
+        Unlike `signal_child_group`, this does not refuse a leader already
+        reaped. While `wait_for` is still collecting, some member of the group
+        still holds the pass's streams, so the group still exists — and an
+        identifier is never handed out again while a process group of that
+        number does. A group whose last member is already gone raises
+        ProcessLookupError, which is the ordinary case rather than a failure.
+        """
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(child.pid, forwarded)
 
     def report_escalation(self, pass_pid: int | None = None) -> None:
         """Log and record an escalation once, and say so while it is draining.
@@ -2795,9 +2832,15 @@ class Controller:
         """
         if child.stdin is None:
             return
-        with contextlib.suppress(BrokenPipeError, OSError, ValueError):
-            child.stdin.write(PASS_GATE_WORD + "\n")
-            child.stdin.flush()
+        # Marked open before the word is written, so a stop landing either
+        # side of this line is decided by `handle_stop` one way or the other:
+        # before it, the gate is ended and the write finds nobody; after it,
+        # the pass is released and drained.
+        self._released = True
+        if not self._ended_at_gate:
+            with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+                child.stdin.write(PASS_GATE_WORD + "\n")
+                child.stdin.flush()
         with contextlib.suppress(BrokenPipeError, OSError, ValueError):
             child.stdin.close()
         # `communicate` would otherwise try to flush and close it again.
@@ -2916,11 +2959,10 @@ class Controller:
 
         * the read here, before the spawn, means an already-requested stop
           starts nothing at all;
-        * the read in `spawn`, after the pass's identity is recorded and before
-          its gate is opened, means a stop that arrived in between ends a pass
-          that has run nothing;
-        * a stop arriving after that read finds a released pass, which it
-          drains (`handle_stop`).
+        * from the registration below until `release_pass` marks the gate
+          open, the handler itself ends the pass at its gate, which has run
+          nothing (`handle_stop`), and `spawn` reports no pass;
+        * a stop arriving after that finds a released pass, which it drains.
 
         Nothing is masked to achieve that, deliberately. A signal mask held
         across `Popen` is inherited by the child and survives its `exec`, which
@@ -2960,8 +3002,10 @@ class Controller:
             start_new_session=True,
         )
         try:
-            # Registered before the flag is read again, so an escalation that
-            # arrives before the gate opens can still reach the gate.
+            # Registered with its gate closed, so a stop from here until
+            # `release_pass` ends the pass at its gate (`handle_stop`).
+            self._released = False
+            self._ended_at_gate = False
             self._child = child
         except BaseException:
             self._child = None
@@ -3022,8 +3066,9 @@ class Controller:
                 )
             self.publish_pass(child, *confirmed)
             if self._stop_requested:
-                # Behind its gate still, so ending it cuts off no step: a
-                # drain starts no new pass, and this one has not started.
+                # Behind its gate still, and already ended there by the stop
+                # (`handle_stop`): a drain starts no new pass, and this one has
+                # not started, so there is nothing to release or to report.
                 self.log("A stop arrived before this pass was released; nothing ran.")
                 self._child = None
                 self.abandon_child(child)
@@ -3053,6 +3098,9 @@ class Controller:
             # the intentional stop that follows.
             self.terminate_process_group(child)
         self.settle_own_pass()
+        if self._ended_at_gate:
+            self.log("A stop arrived before this pass was released; nothing ran.")
+            return None
         return PassCommand(argv, stdout or "", stderr or "", child.returncode)
 
     def wait_for(self, child: subprocess.Popen[str]) -> tuple[str, str]:
@@ -3080,7 +3128,7 @@ class Controller:
                 self.observe_pass_members()
                 if not self._stop_requested:
                     continue
-                if not self._drained:
+                if not self._drained and not self._ended_at_gate:
                     self._drained = True
                     self.log(
                         "A stop arrived during a mission scheduler pass; letting it "

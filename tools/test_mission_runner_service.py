@@ -52,7 +52,9 @@ PASS_MODULE = REPO_ROOT / "src" / "Kanban" / "Mission" / "Pass.hs"
 # same for how long a stop lets a pass finish its step and how long an
 # escalation waits before it kills. `FIXTURE_DIE_AT` names a `Controller`
 # method that kills the controller outright instead of running -- the death no
-# cleanup runs after.
+# cleanup runs after. `FIXTURE_STOP_AT` names one that the controller's own
+# stop signal is delivered on entry to, before it does anything: a stop landing
+# at exactly that step.
 CONTROLLER_WRAPPER = '''#!/usr/bin/env python3
 import os
 import signal
@@ -81,6 +83,13 @@ if die_at:
     def die(*_arguments, **_keywords):
         os.kill(os.getpid(), signal.SIGKILL)
     setattr(service.Controller, die_at, die)
+stop_at = os.environ.get("FIXTURE_STOP_AT")
+if stop_at:
+    original = getattr(service.Controller, stop_at)
+    def stop_then(self, *arguments, **keywords):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return original(self, *arguments, **keywords)
+    setattr(service.Controller, stop_at, stop_then)
 raise SystemExit(service.main())
 '''
 
@@ -1845,6 +1854,59 @@ class DrainTests(MissionRunnerFixture):
         self.assertIn("second stop", snapshot["message"])
         self.assertEqual(self.incident_kinds(), [service.DRAIN_ESCALATION_INCIDENT_KIND])
 
+    def test_a_stop_just_before_the_gate_opens_runs_no_pass(self):
+        # After the pass's identity is recorded and its running status
+        # written, and before its gate is opened: a stop landing there is
+        # decided by the handler, not by a check it could land just after.
+        status, _stdout, stderr = self.run_controller(
+            environment=self.environment(FIXTURE_STOP_AT="release_pass")
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(self.recorded(), [], "a pass ran after the stop")
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["message"], "Stopped intentionally.")
+        self.assertEqual(snapshot["open_incidents"], [])
+        self.assertFalse(self.job().pass_record_path.exists())
+
+    def test_an_escalation_reaches_a_mission_child_its_scheduler_left(self):
+        # The scheduler reports and exits, and a mission child that ignores
+        # SIGTERM keeps its streams open, so the pass is still in flight with
+        # no leader alive. Both escalations have to reach that child.
+        for how in ("grace", "second stop"):
+            with self.subTest(how=how):
+                self.setUp()
+                stubborn = self.root / "stubborn.pid"
+                self.write_plan(
+                    {"mission_child": str(stubborn), "report": {"document": pass_document()}}
+                )
+                grace = "1" if how == "grace" else "300"
+                child = self.start_controller(
+                    environment=self.environment(
+                        FIXTURE_DRAIN_GRACE_SECONDS=grace, FIXTURE_STOP_GRACE_SECONDS="1"
+                    )
+                )
+                wait_until(stubborn.exists, message="the mission child to register itself")
+                stubborn_pid = int(wait_until(lambda: stubborn.read_text(encoding="utf-8")))
+                self.ensure_gone(stubborn_pid)
+                wait_until(lambda: self.recorded(), message="the scheduler to run")
+                time.sleep(1.5)
+                self.stop(child)
+                self.wait_for_state(service.STATE_DRAINING)
+                if how == "second stop":
+                    self.stop(child)
+                child.wait(timeout=30)
+                self.assertEqual(child.returncode, 0)
+                wait_until(
+                    lambda: process_gone(stubborn_pid), message="the mission child to be killed"
+                )
+                snapshot = self.status()
+                self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+                self.assertIn(how, snapshot["message"])
+                self.assertEqual(
+                    self.incident_kinds(), [service.DRAIN_ESCALATION_INCIDENT_KIND]
+                )
+
     def test_a_stop_between_passes_exits_without_waiting(self):
         child = self.start_controller("--interval", "60")
         wait_until(
@@ -1982,6 +2044,7 @@ class DrainClockTests(unittest.TestCase):
             fake_child = mock.Mock()
             fake_child.poll.return_value = None
             controller._child = fake_child
+            controller._released = True
             with mock.patch.object(service.os, "killpg") as killpg:
                 controller.handle_stop(signal.SIGTERM, None)
                 killpg.assert_not_called()
@@ -1991,6 +2054,35 @@ class DrainClockTests(unittest.TestCase):
                 self.assertIn("second stop", controller._escalation)
                 controller.handle_stop(signal.SIGTERM, None)
                 killpg.assert_called_with(fake_child.pid, signal.SIGKILL)
+
+    def test_a_first_stop_ends_a_pass_still_behind_its_gate(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            fake_child = mock.Mock()
+            fake_child.poll.return_value = None
+            fake_child.stdin = mock.Mock()
+            controller._child = fake_child
+            with mock.patch.object(service.os, "killpg") as killpg:
+                controller.handle_stop(signal.SIGTERM, None)
+                killpg.assert_called_once_with(fake_child.pid, signal.SIGTERM)
+            self.assertTrue(controller._ended_at_gate)
+            self.assertIsNone(controller._escalation)
+            # The release that follows opens nothing.
+            gate = fake_child.stdin
+            controller.release_pass(fake_child)
+            gate.write.assert_not_called()
+
+    def test_an_escalation_reaches_a_group_whose_leader_has_exited(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            fake_child = mock.Mock()
+            fake_child.poll.return_value = 0
+            controller._child = fake_child
+            controller._released = True
+            with mock.patch.object(service.os, "killpg") as killpg:
+                controller.escalate("the grace ran out")
+                killpg.assert_called_once_with(fake_child.pid, signal.SIGTERM)
+            self.assertEqual(controller._escalation, "the grace ran out")
 
     def test_the_drain_grace_is_five_minutes_and_the_unit_outlasts_it(self):
         # D-19: a five-minute grace, and a systemd stop timeout that covers it,

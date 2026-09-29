@@ -2520,7 +2520,8 @@ report did not name.
   document it cannot believe. `draining` is live, held to the runner's
   identity like the other three, and decoded by `Kanban.MissionRunnerService`
   as an activity of its own. On the first stop signal the wrapper starts no
-  further pass. With none in flight it stops at once. With one in flight it
+  further pass. With none in flight it stops at once, and a pass still
+  waiting at its gate is ended there, having run nothing. With one in flight it
   signals nothing, publishes `draining`, and lets that pass and its `--mission`
   children finish their step. It records `stopped` and exits, releasing the
   run lock exactly once, when the pass has finished. A pass that fails on its
@@ -2531,7 +2532,8 @@ report did not name.
   next runner. The drain's grace is five minutes from the first stop, never
   reset. When it runs out, or a second stop signal arrives, the wrapper
   escalates exactly as a forced stop: the pass's process group is signalled,
-  then killed ten seconds later. A mission whose step that cuts off is left
+  then killed ten seconds later, reaching a mission child that still holds the
+  pass's output after the scheduler itself has exited. A mission whose step that cuts off is left
   `interrupted` by the next runner's reconciliation (§2.12's Authority
   bullet), and a `mission-runner-drain-escalated` incident and the terminal
   status message both report the escalation. A `stop` issued while the status
