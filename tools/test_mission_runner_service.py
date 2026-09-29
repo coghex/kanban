@@ -2072,6 +2072,61 @@ class DrainClockTests(unittest.TestCase):
             controller.release_pass(fake_child)
             gate.write.assert_not_called()
 
+    def with_stop_handler(self, controller):
+        previous = signal.signal(signal.SIGTERM, controller.handle_stop)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+
+    def test_a_stop_during_the_gate_write_is_handled_once_the_pass_is_released(self):
+        # The window between deciding to release and writing the word: a stop
+        # arriving there is held until the write is done, then drains the
+        # pass it finds released. Unblocked, the handler would run inside the
+        # write, after the decision and before the word -- the stop recorded
+        # and a new pass started anyway.
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            self.with_stop_handler(controller)
+            fake_child = mock.Mock()
+            fake_child.poll.return_value = None
+            gate = fake_child.stdin
+            seen = []
+
+            def write(_word):
+                os.kill(os.getpid(), signal.SIGTERM)
+                seen.append(controller._stop_requested)
+
+            gate.write.side_effect = write
+            controller._child = fake_child
+            with mock.patch.object(service.os, "killpg") as killpg:
+                controller.release_pass(fake_child)
+                killpg.assert_not_called()
+            self.assertEqual(seen, [False], "the stop was handled inside the release")
+            gate.write.assert_called_once_with(service.PASS_GATE_WORD + "\n")
+            self.assertTrue(controller._stop_requested)
+            self.assertTrue(controller._released)
+            self.assertFalse(controller._ended_at_gate)
+            self.assertEqual(
+                signal.pthread_sigmask(signal.SIG_BLOCK, set()) & service.STOP_SIGNALS,
+                set(),
+                "the stop signals were left blocked",
+            )
+
+    def test_a_stop_already_caught_when_the_release_begins_opens_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            fake_child = mock.Mock()
+            fake_child.poll.return_value = None
+            gate = fake_child.stdin
+            controller._child = fake_child
+            # Recorded, but with the gate not yet ended -- the state a stop
+            # handled before the child was registered leaves.
+            controller._stop_requested = True
+            with mock.patch.object(service.os, "killpg") as killpg:
+                controller.release_pass(fake_child)
+                killpg.assert_called_once_with(fake_child.pid, signal.SIGTERM)
+            gate.write.assert_not_called()
+            self.assertFalse(controller._released)
+            self.assertTrue(controller._ended_at_gate)
+
     def test_an_escalation_reaches_a_group_whose_leader_has_exited(self):
         with tempfile.TemporaryDirectory() as root:
             controller = self.controller(root)

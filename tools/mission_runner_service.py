@@ -347,6 +347,8 @@ STOP_GRACE_SECONDS = 10.0
 # (`service_manager.MISSION_RUNNER_NAMESPACE.stop_timeout_seconds`), so systemd
 # never kills a drain the wrapper is still inside.
 DRAIN_GRACE_SECONDS = 300.0
+# The signals a run treats as a request to stop (`Controller.handle_stop`).
+STOP_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT})
 # How much of a failed pass's stderr is kept in its incident.
 CAPTURED_STDERR_LINES = 60
 
@@ -2666,7 +2668,7 @@ class Controller:
     def run(self) -> int:
         previous = [
             (number, signal.signal(number, self.handle_stop))
-            for number in (signal.SIGTERM, signal.SIGINT)
+            for number in sorted(STOP_SIGNALS)
         ]
         try:
             return self._run()
@@ -2829,18 +2831,33 @@ class Controller:
         A gate that cannot be written to belongs to a pass that has already
         gone — a stop that signalled it first — and there is nothing to
         release.
+
+        Deciding to release and writing the word are one step as far as a stop
+        is concerned. The stop signals are blocked across both, and blocking
+        them first runs the handler for any stop already caught (CPython's
+        `pthread_sigmask` checks for pending signals on its way out). So a stop
+        is handled either before the decision, which then ends the pass at its
+        gate, or once the word is written, when `handle_stop` finds a released
+        pass and drains it — never between the two, where it would record a
+        stop and then watch a new pass start. Blocked on this thread only,
+        which is every thread this controller has; the pass it would matter to
+        is already spawned, so no child inherits the mask.
         """
         if child.stdin is None:
             return
-        # Marked open before the word is written, so a stop landing either
-        # side of this line is decided by `handle_stop` one way or the other:
-        # before it, the gate is ended and the write finds nobody; after it,
-        # the pass is released and drained.
-        self._released = True
-        if not self._ended_at_gate:
-            with contextlib.suppress(BrokenPipeError, OSError, ValueError):
-                child.stdin.write(PASS_GATE_WORD + "\n")
-                child.stdin.flush()
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            if self._stop_requested:
+                if not self._ended_at_gate:
+                    self._ended_at_gate = True
+                    self.signal_child_group(child, signal.SIGTERM)
+            else:
+                self._released = True
+                with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+                    child.stdin.write(PASS_GATE_WORD + "\n")
+                    child.stdin.flush()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
         with contextlib.suppress(BrokenPipeError, OSError, ValueError):
             child.stdin.close()
         # `communicate` would otherwise try to flush and close it again.
