@@ -28,6 +28,7 @@
 module Spec.Mission.Runner (spec) where
 
 import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket_, throwIO, try)
 import Control.Monad (forM_, join, void)
@@ -60,6 +61,8 @@ import Kanban.Action
   )
 import Kanban.CLI (LaunchMode (..), Options (..), launchMode)
 import Data.Aeson (eitherDecode, encode)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Kanban.Config
   ( RawConfig (..),
     ResolvedConfig (..),
@@ -138,6 +141,7 @@ spec = describe "the foreground mission runner" $ do
   consoleSpec
   preconditionBoundarySpec
   deadlineSpec
+  capacityWaitSpec
   workerPreconditionSpec
   preconditionDeadlineSpec
   failureVocabularySpec
@@ -396,7 +400,8 @@ stepRecord lifecycle sessions =
       missionStepRecordLifecycle = lifecycle,
       missionStepRecordSessions = sessions,
       missionStepRecordDetail = Nothing,
-      missionStepRecordUpdatedAt = fixedTime
+      missionStepRecordUpdatedAt = fixedTime,
+      missionStepRecordCapacity = Nothing
     }
 
 sessionNode :: Text -> Maybe MissionSessionId -> Maybe MissionTerminalObservation -> MissionSessionNode
@@ -4864,3 +4869,300 @@ freshLockPrecondition :: WorkerSpec -> IO (Maybe Text)
 freshLockPrecondition launched = do
   recordLock <- newGhRecordLock
   preconditionStillHolds recordLock launched
+
+-- ---------------------------------------------------------------------------
+-- Provider-capacity waits (issue #752)
+-- ---------------------------------------------------------------------------
+
+-- | A step's own attempt, ended at a provider limit.
+limitedReading :: MissionSessionId -> Maybe UTCTime -> MissionWorkerReading
+limitedReading session resetsAt =
+  MissionWorkerReading
+    { missionWorkerSession = session,
+      missionWorkerLive = False,
+      missionWorkerCompatible = True,
+      missionWorkerTerminal = Just (MissionWorkerCapacityLimited resetsAt "claude rejected the turn at its five_hour rate limit"),
+      missionWorkerProviderSession = Nothing
+    }
+
+-- | The staged driver, with every running step's latest registered session
+-- ending at a provider limit that resets at the given time, and every
+-- dispatch registering a session named after its own invocation — so each
+-- attempt is a session of its own, as a real launch's is.
+capacityDriver :: IORef (Maybe UTCTime) -> Stage -> MissionStore -> MissionId -> IO MissionDriver
+capacityDriver resets stage store mission = do
+  base <- stagedDriver stage store mission
+  pure
+    base
+      { missionDriverStepEvidence = \step record -> do
+          gathered <- base.missionDriverStepEvidence step record
+          resetsAt <- readIORef resets
+          pure $ case (gathered, record.missionStepRecordLifecycle, reverse record.missionStepRecordSessions) of
+            (Right evidence, MissionStepRunning, latest : _) ->
+              Right evidence {missionEvidenceWorker = Just (limitedReading latest resetsAt)}
+            _ -> gathered,
+        missionDriverDispatch = \request -> do
+          atomicModifyIORef' stage.stageDispatches (\seen -> (seen <> [request], ()))
+          let session = request.missionDispatchInvocation.unMissionInvocationId
+          pure
+            ( Right
+                (acceptedDispatch request)
+                  { missionAcceptedSession = MissionSessionId session,
+                    missionAcceptedWorker = session
+                  }
+            )
+      }
+
+capacityWait :: MissionCapacityRetry -> Int -> Maybe MissionSessionId -> MissionCapacityWait
+capacityWait retry consecutive session =
+  MissionCapacityWait
+    { missionCapacityRetryAt = retry,
+      missionCapacityConsecutive = consecutive,
+      missionCapacityRecordedAt = fixedTime,
+      missionCapacitySession = session,
+      missionCapacityDetail = "a limit"
+    }
+
+waitingStep :: MissionCapacityRetry -> MissionStepRecord
+waitingStep retry =
+  (stepRecord MissionStepWaitingCapacity [MissionSessionId "solve-844-0001"])
+    { missionStepRecordCapacity = Just (capacityWait retry 1 (Just (MissionSessionId "solve-844-0001")))
+    }
+
+-- | Long after any clock these examples run under.
+farFuture :: UTCTime
+farFuture = UTCTime (fromGregorian 2100 1 1) 0
+
+stepCapacity :: MissionSnapshot -> Maybe MissionCapacityWait
+stepCapacity snapshot = missionStepRecordFor theStep snapshot >>= (.missionStepRecordCapacity)
+
+retryTimeOf :: MissionCapacityWait -> Maybe UTCTime
+retryTimeOf wait = case wait.missionCapacityRetryAt of
+  MissionCapacityRetryAt at -> Just at
+  MissionCapacityRetryUnreadable _ -> Nothing
+
+-- | Moves a recorded wait's retry time into the past, which is all the passage
+-- of time does to it: nothing else about the wait changes.
+elapseCapacityWait :: MissionStore -> IO ()
+elapseCapacityWait store = do
+  snapshot <- currentSnapshot store
+  let elapsed record = record {missionStepRecordCapacity = (\wait -> wait {missionCapacityRetryAt = MissionCapacityRetryAt fixedTime}) <$> record.missionStepRecordCapacity}
+  written <- writeMissionSnapshot store snapshot {missionSnapshotSteps = map elapsed snapshot.missionSnapshotSteps}
+  written `shouldBe` Right ()
+
+capacityWaitSpec :: Spec
+capacityWaitSpec = describe "a step that meets a provider limit (issue #752)" $ do
+  it "waits until the provider's reset time, and the mission stops for it without spinning" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
+      resets <- newIORef (Just farFuture)
+      let driver = capacityDriver resets stage
+      recorded <- oneIterationOf driver store
+      case recorded of
+        MissionAdvanced (MissionStepReconciled step MissionStepWaitingCapacity detail) -> do
+          step `shouldBe` theStep
+          Text.unpack detail `shouldSatisfy` isInfixOf "2100-01-01"
+        other -> expectationFailure ("the limit was not recorded as a wait: " <> show other)
+      snapshot <- currentSnapshot store
+      stepLifecycle snapshot `shouldBe` Just MissionStepWaitingCapacity
+      (retryTimeOf =<< stepCapacity snapshot) `shouldBe` Just farFuture
+      ((.missionCapacityConsecutive) <$> stepCapacity snapshot) `shouldBe` Just 1
+      ((.missionCapacitySession) =<< stepCapacity snapshot) `shouldBe` Just (MissionSessionId "solve-844-0001")
+      -- The mission follows, and then halts on the wait: a blocked stop that
+      -- names the time, not a run that keeps asking.
+      oneIterationOf driver store >>= \settled -> case settled of
+        MissionAdvanced (MissionLifecycleSet MissionWaitingCapacity _) -> pure ()
+        other -> expectationFailure ("the mission did not stop for capacity: " <> show other)
+      halted <- oneIterationOf driver store
+      case halted of
+        MissionStopped (MissionHaltBlocked MissionWaitingCapacity detail) ->
+          Text.unpack detail `shouldSatisfy` isInfixOf "retries at 2100-01-01"
+        other -> expectationFailure ("a waiting mission was advanced: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+      readIORef stage.stageSlotClaims `shouldReturn` []
+      -- Waiting is not a failed run: the scheduler's child exits zero over it.
+      missionStepSucceeded (MissionStepReport theMission halted) `shouldBe` True
+
+  it "backs off one minute, then two, for consecutive limits that name no reset, and dispatches each retry once" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
+      resets <- newIORef Nothing
+      let driver = capacityDriver resets stage
+      void (oneIterationOf driver store)
+      first <- stepCapacity <$> currentSnapshot store
+      ((.missionCapacityConsecutive) <$> first) `shouldBe` Just 1
+      (backoffOf =<< first) `shouldBe` Just 60
+      -- The minute passes. The retry is woken, then dispatched as a fresh
+      -- invocation with a session of its own, exactly once.
+      elapseCapacityWait store
+      oneIterationOf driver store >>= \woken -> case woken of
+        MissionAdvanced (MissionStepReconciled _ MissionStepPending _) -> pure ()
+        other -> expectationFailure ("a due wait was not woken: " <> show other)
+      (stepCapacity <$> currentSnapshot store) >>= (`shouldSatisfy` isJust)
+      oneIterationOf driver store >>= \dispatched -> case dispatched of
+        MissionAdvanced (MissionStepDispatched _ _ _) -> pure ()
+        other -> expectationFailure ("the retry was not dispatched: " <> show other)
+      readIORef stage.stageDispatches >>= (`shouldBe` 1) . length
+      -- The retry meets the limit again: the count continues and the backoff
+      -- doubles.
+      void (oneIterationOf driver store)
+      second <- currentSnapshot store
+      stepLifecycle second `shouldBe` Just MissionStepWaitingCapacity
+      ((.missionCapacityConsecutive) <$> stepCapacity second) `shouldBe` Just 2
+      (backoffOf =<< stepCapacity second) `shouldBe` Just 120
+      ((.missionCapacitySession) =<< stepCapacity second) `shouldNotBe` Just (MissionSessionId "solve-844-0001")
+      readIORef stage.stageDispatches >>= (`shouldBe` 1) . length
+
+  it "caps the backoff at one hour and retries a reset already past at once" $ do
+    map missionCapacityBackoff [1, 2, 3, 6, 7, 8, 100] `shouldBe` [60, 120, 240, 1920, 3600, 3600, 3600]
+    missionCapacityBackoffCap `shouldBe` 3600
+    let past = missionCapacityWaitFor fixedTime Nothing (MissionSessionId "s") (Just (addUTCTime (-600) fixedTime)) "a limit"
+    retryTimeOf past `shouldBe` Just (addUTCTime (-600) fixedTime)
+    missionCapacityWake fixedTime (snapshotWith MissionWaitingCapacity [(stepRecord MissionStepWaitingCapacity []) {missionStepRecordCapacity = Just past}] [])
+      `shouldBe` MissionCapacityDue theStep
+
+  it "neither counts nor re-dates the same failed attempt read a second time" $ do
+    let standing = capacityWait (MissionCapacityRetryAt farFuture) 3 (Just (MissionSessionId "s"))
+    missionCapacityWaitFor fixedTime (Just standing) (MissionSessionId "s") Nothing "again" `shouldBe` standing
+    (.missionCapacityConsecutive) (missionCapacityWaitFor fixedTime (Just standing) (MissionSessionId "t") Nothing "next") `shouldBe` 4
+    -- And through the controller: a step still reading as running beside the
+    -- wait its own attempt already recorded keeps that wait as it was.
+    withMission
+      ( snapshotWith
+          MissionRunning
+          [(stepRecord MissionStepRunning [MissionSessionId "s"]) {missionStepRecordCapacity = Just standing}]
+          []
+      )
+      $ \store stage -> do
+        resets <- newIORef (Just fixedTime)
+        void (oneIterationOf (capacityDriver resets stage) store)
+        (stepCapacity <$> currentSnapshot store) `shouldReturn` Just standing
+
+  it "keeps the wait and its deadline across a restart, and dispatches nothing before it" $
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning [MissionSessionId "solve-844-0001"]] []) $ \store stage -> do
+      resets <- newIORef Nothing
+      let driver = capacityDriver resets stage
+      void (oneIterationOf driver store)
+      recorded <- stepCapacity <$> currentSnapshot store
+      -- Three fresh controllers, as three runner restarts would start: the
+      -- first settles the mission, and none of them moves the deadline or the
+      -- count, or dispatches.
+      forM_ [1 :: Int, 2, 3] $ \_ -> void (oneIterationOf driver store)
+      restarted <- currentSnapshot store
+      restarted.missionSnapshotLifecycle `shouldBe` MissionWaitingCapacity
+      stepCapacity restarted `shouldBe` recorded
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "wakes a due wait into the ordinary dispatch path, through the agent slot" $
+    withMission (snapshotWith MissionWaitingCapacity [waitingStep (MissionCapacityRetryAt fixedTime)] []) $ \store stage -> do
+      woken <- oneIteration store stage
+      case woken of
+        MissionAdvanced (MissionStepReconciled step MissionStepPending _) -> step `shouldBe` theStep
+        other -> expectationFailure ("a due wait was not woken: " <> show other)
+      snapshot <- currentSnapshot store
+      snapshot.missionSnapshotLifecycle `shouldBe` MissionRunning
+      stepLifecycle snapshot `shouldBe` Just MissionStepPending
+      readIORef stage.stageSlotClaims `shouldReturn` []
+      writeIORef stage.stageSlot (const MissionSlotClaimed)
+      dispatched <- oneIteration store stage
+      case dispatched of
+        MissionAdvanced (MissionStepDispatched step _ _) -> step `shouldBe` theStep
+        other -> expectationFailure ("the woken step was not dispatched: " <> show other)
+      readIORef stage.stageDispatches >>= (`shouldBe` 1) . length
+      readIORef stage.stageSlotClaims >>= (`shouldBe` 1) . length
+      readIORef stage.stageSlotsSettled >>= (`shouldBe` 1) . length
+
+  it "is held by a full agent ceiling after waking, rather than dispatched past it" $
+    withMission (snapshotWith MissionRunning [(waitingStep (MissionCapacityRetryAt fixedTime)) {missionStepRecordLifecycle = MissionStepPending}] []) $ \store stage -> do
+      writeIORef stage.stageSlot (const (MissionSlotWaiting "every slot is taken"))
+      held <- oneIteration store stage
+      case held of
+        MissionHeldForSlot _ -> pure ()
+        other -> expectationFailure ("a woken retry went past the ceiling: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "does not wake a paused mission, however long ago its wait ended" $
+    withMission
+      ( (snapshotWith MissionPaused [waitingStep (MissionCapacityRetryAt fixedTime)] [])
+          {missionSnapshotPause = MissionPause {missionPauseRequested = True, missionPauseReason = Just "by hand", missionPauseAt = Nothing}}
+      )
+      $ \store stage -> do
+        halted <- oneIteration store stage
+        case halted of
+          MissionStopped (MissionHaltBlocked MissionPaused _) -> pure ()
+          other -> expectationFailure ("a paused mission was woken: " <> show other)
+        stepLifecycle <$> currentSnapshot store `shouldReturn` Just MissionStepWaitingCapacity
+
+  it "never retries a wait whose retry time cannot be read, and says why" $
+    forM_ [Just (capacityWait (MissionCapacityRetryUnreadable (Aeson.String "after lunch")) 1 Nothing), Nothing] $ \wait ->
+      withMission
+        (snapshotWith MissionWaitingCapacity [(stepRecord MissionStepWaitingCapacity []) {missionStepRecordCapacity = wait}] [])
+        $ \store stage -> do
+          -- Read back through the store, so the unreadable value survived the
+          -- round trip rather than being repaired on the way in.
+          stepCapacity <$> currentSnapshot store `shouldReturn` wait
+          halted <- oneIteration store stage
+          case halted of
+            MissionStopped (MissionHaltBlocked MissionWaitingCapacity detail) ->
+              Text.unpack detail `shouldSatisfy` isInfixOf "is not retried automatically"
+            other -> expectationFailure ("an undated wait was retried: " <> show other)
+          readIORef stage.stageDispatches `shouldReturn` []
+
+  it "does not launch a woken retry a second time when its first launch was cut off" $
+    withMission (snapshotWith MissionRunning [(waitingStep (MissionCapacityRetryAt fixedTime)) {missionStepRecordLifecycle = MissionStepDispatching}] []) $ \store stage -> do
+      openInvocation store
+      iteration <- oneIteration store stage
+      case iteration of
+        MissionAdvanced (MissionStepReconciled _ MissionStepInterrupted _) -> pure ()
+        other -> expectationFailure ("a cut-off retry was not stopped for the operator: " <> show other)
+      readIORef stage.stageDispatches `shouldReturn` []
+
+  it "lets exactly one controller wake a wait" $
+    withMission (snapshotWith MissionWaitingCapacity [waitingStep (MissionCapacityRetryAt fixedTime)] []) $ \store stage -> do
+      started <- startMissionController store boardRepository theMission (stagedDriver stage)
+      case started of
+        Left refusal -> expectationFailure (Text.unpack (missionStartRefusalMessage refusal))
+        Right controller -> do
+          rival <- startMissionController store boardRepository theMission (stagedDriver stage)
+          case rival of
+            Left (MissionAlreadyAdvancing _ _) -> pure ()
+            Left other -> expectationFailure ("unexpected refusal: " <> Text.unpack (missionStartRefusalMessage other))
+            Right second -> stopMissionController second >> expectationFailure "two controllers held one mission"
+          void (missionControllerIteration controller)
+          stopMissionController controller
+      stepLifecycle <$> currentSnapshot store `shouldReturn` Just MissionStepPending
+
+  it "reads a step record written before the wait existed" $ do
+    -- Today's encoding with the new key taken out, which is exactly what a
+    -- release before it wrote.
+    let legacy = case Aeson.toJSON (stepRecord MissionStepRunning []) of
+          Aeson.Object fields -> Aeson.Object (KeyMap.delete "missionStepRecordCapacity" fields)
+          other -> other
+    case legacy of
+      Aeson.Object fields -> KeyMap.member "missionStepRecordCapacity" fields `shouldBe` False
+      _ -> expectationFailure "a step record did not encode as an object"
+    Aeson.fromJSON legacy `shouldBe` Aeson.Success (stepRecord MissionStepRunning [])
+    -- And a whole snapshot written that way reads through the store, under the
+    -- same schema version, as a mission with no wait anywhere.
+    withMission (snapshotWith MissionRunning [stepRecord MissionStepRunning []] []) $ \store _ ->
+      case missionDirectory store.missionStoreDirectory theMission of
+        Left message -> expectationFailure (Text.unpack message)
+        Right directory -> do
+          let path = directory </> "snapshot.json"
+          written <- eitherDecode <$> LazyByteString.readFile path
+          case written of
+            Left message -> expectationFailure message
+            Right document -> LazyByteString.writeFile path (encode (withoutCapacity document))
+          ByteString.readFile path >>= (`shouldNotSatisfy` ByteString.isInfixOf "missionStepRecordCapacity")
+          readBack <- currentSnapshot store
+          readBack.missionSnapshotSteps `shouldBe` [stepRecord MissionStepRunning []]
+    -- A wait whose retry time is missing altogether is an unreadable one,
+    -- not a record that fails to decode.
+    let undated = "{\"missionCapacityConsecutive\":2,\"missionCapacityRecordedAt\":\"2026-09-04T00:02:00Z\",\"missionCapacitySession\":null,\"missionCapacityDetail\":\"a limit\"}"
+    ((.missionCapacityRetryAt) <$> (eitherDecode undated :: Either String MissionCapacityWait))
+      `shouldBe` Right (MissionCapacityRetryUnreadable Aeson.Null)
+  where
+    backoffOf wait = (`diffUTCTime` wait.missionCapacityRecordedAt) <$> retryTimeOf wait
+    withoutCapacity :: Aeson.Value -> Aeson.Value
+    withoutCapacity value = case value of
+      Aeson.Object fields -> Aeson.Object (withoutCapacity <$> KeyMap.delete "missionStepRecordCapacity" fields)
+      Aeson.Array items -> Aeson.Array (withoutCapacity <$> items)
+      other -> other

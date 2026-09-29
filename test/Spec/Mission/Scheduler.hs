@@ -35,7 +35,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf, isPrefixOf, nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time (UTCTime (..), fromGregorian, getCurrentTime, secondsToDiffTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime, secondsToDiffTime)
 import Kanban.Config
   ( MissionNotificationCommand (..),
     MissionNotificationConfig (..),
@@ -87,6 +87,7 @@ spec = describe "the repository mission scheduler" $ do
   configurationSpec
   setupFailureSpec
   sealingSpec
+  capacityWaitSpec
 
 -- ---------------------------------------------------------------------------
 -- Admission
@@ -2426,3 +2427,107 @@ awaitGone processId = go (600 :: Int)
       case alive of
         Left _ -> pure ()
         Right () -> threadDelay 20000 >> go (remaining - 1)
+
+-- ---------------------------------------------------------------------------
+-- Provider-capacity waits (issue #752)
+-- ---------------------------------------------------------------------------
+
+-- | One step waiting for provider capacity until the given retry time.
+waitingForCapacity :: MissionCapacityRetry -> MissionSnapshot -> MissionSnapshot
+waitingForCapacity retry snapshot =
+  snapshot
+    { missionSnapshotSteps =
+        [ MissionStepRecord
+            { missionStepRecordId = theStep,
+              missionStepRecordLifecycle = MissionStepWaitingCapacity,
+              missionStepRecordSessions = [MissionSessionId "solve-844-0001"],
+              missionStepRecordDetail = Just "waiting for provider capacity",
+              missionStepRecordUpdatedAt = fixedTime,
+              missionStepRecordCapacity =
+                Just
+                  MissionCapacityWait
+                    { missionCapacityRetryAt = retry,
+                      missionCapacityConsecutive = 1,
+                      missionCapacityRecordedAt = fixedTime,
+                      missionCapacitySession = Just (MissionSessionId "solve-844-0001"),
+                      missionCapacityDetail = "claude rejected the turn at its five_hour rate limit"
+                    }
+            }
+        ]
+    }
+
+capacityWaitSpec :: Spec
+capacityWaitSpec = describe "a mission waiting for provider capacity (issue #752)" $ do
+  let retryAt = addUTCTime 3600 fixedTime
+      at clock seams = seams {missionSchedulerNow = pure clock}
+
+  it "is runnable from its retry time and not a moment before, and never while paused" $ do
+    let waiting = waitingForCapacity (MissionCapacityRetryAt retryAt) (snapshotFor (MissionId "mission-a") MissionWaitingCapacity)
+        paused = waiting {missionSnapshotPause = MissionPause {missionPauseRequested = True, missionPauseReason = Just "by hand", missionPauseAt = Nothing}}
+    missionIsRunnableAt (addUTCTime (-1) retryAt) waiting `shouldBe` False
+    missionIsRunnableAt retryAt waiting `shouldBe` True
+    missionIsRunnableAt (addUTCTime 86400 retryAt) paused `shouldBe` False
+    -- The clockless reading is unchanged: it never admits a capacity wait.
+    missionIsRunnable waiting `shouldBe` False
+
+  it "is skipped without a child or a place in the rotation before its retry time, and admitted after it" $
+    withStore $ \store -> do
+      putMissionWith store "mission-a" MissionWaitingCapacity (waitingForCapacity (MissionCapacityRetryAt retryAt))
+      putMission store "mission-b" MissionRunning
+      entered <- newIORef []
+      let recordingRotation clock seams =
+            (at clock seams)
+              { missionSchedulerExpect = \candidates claimants -> do
+                  atomicModifyIORef' entered (\seen -> (seen <> [(candidates, claimants)], ()))
+                  seams.missionSchedulerExpect candidates claimants
+              }
+      (early, advancedEarly) <- passWith store defaultMissionsConfig (recordingRotation (addUTCTime (-1) retryAt))
+      readIORef advancedEarly `shouldReturn` [[MissionId "mission-b"]]
+      readIORef entered `shouldReturn` [([MissionId "mission-b"], [])]
+      early.missionPassTermination `shouldBe` MissionPassCompleted
+      Text.unpack early.missionPassDetail `shouldSatisfy` isInfixOf "1 waiting for provider capacity"
+      (_, advancedLate) <- passWith store defaultMissionsConfig (recordingRotation retryAt)
+      map sort <$> readIORef advancedLate `shouldReturn` [[MissionId "mission-a", MissionId "mission-b"]]
+
+  it "stays waiting and fails the pass saying why when its retry time cannot be read" $
+    withStore $ \store -> do
+      putMissionWith store "mission-a" MissionWaitingCapacity (waitingForCapacity (MissionCapacityRetryUnreadable (Aeson.String "after lunch")))
+      (report, advanced) <- passWith store defaultMissionsConfig (at (addUTCTime 86400 retryAt))
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "mission-a"
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "is not retried automatically"
+
+  it "reports an undated wait beside a due peer, and after that peer woke the mission" $
+    forM_ [MissionWaitingCapacity, MissionRunning] $ \lifecycle ->
+      withStore $ \store -> do
+        let dueAndUndated snapshot =
+              let due = waitingForCapacity (MissionCapacityRetryAt fixedTime) snapshot
+                  undated = waitingForCapacity (MissionCapacityRetryUnreadable (Aeson.String "after lunch")) snapshot
+               in due
+                    { missionSnapshotSteps =
+                        due.missionSnapshotSteps
+                          <> [(record {missionStepRecordId = MissionStepId "review-844"}) | record <- undated.missionSnapshotSteps]
+                    }
+        putMissionWith store "mission-a" lifecycle dueAndUndated
+        (report, advanced) <- passWith store defaultMissionsConfig (at retryAt)
+        -- The due peer still gets its child: an undated wait holds nothing
+        -- else back.
+        readIORef advanced `shouldReturn` [[MissionId "mission-a"]]
+        (lifecycle, report.missionPassTermination) `shouldBe` (lifecycle, MissionPassFailed)
+        Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "step review-844 is not retried automatically"
+
+  it "reports an undated wait left standing in a mission a failed peer ended" $
+    withStore $ \store -> do
+      putMissionWith store "mission-a" MissionFailed (waitingForCapacity (MissionCapacityRetryUnreadable (Aeson.String "after lunch")))
+      (report, advanced) <- passWith store defaultMissionsConfig (at retryAt)
+      readIORef advanced `shouldReturn` []
+      report.missionPassTermination `shouldBe` MissionPassFailed
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "mission mission-a"
+      Text.unpack report.missionPassDetail `shouldSatisfy` isInfixOf "is not retried automatically"
+
+  it "reports a woken mission's child as an advance, so the next pass follows at once" $
+    withStore $ \store -> do
+      putMissionWith store "mission-a" MissionWaitingCapacity (waitingForCapacity (MissionCapacityRetryAt retryAt))
+      (report, _) <- passWith store defaultMissionsConfig (at retryAt)
+      map (.missionDispositionValue) report.missionPassAdmitted `shouldBe` [MissionDispositionAdvanced]

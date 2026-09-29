@@ -52,7 +52,17 @@ module Kanban.Mission.Reconcile
     missionLifecycleAdvances,
     missionLifecycleBlocks,
     missionRunnerHalt,
+    missionRunnerHaltAt,
     missionHaltIsIndeterminate,
+
+    -- * Provider-capacity waits
+    missionCapacityBackoff,
+    missionCapacityBackoffCap,
+    missionCapacityWaitFor,
+    MissionCapacityWake (..),
+    missionCapacityWake,
+    missionCapacityWakeMessage,
+    missionUndatedCapacityWaits,
 
     -- * Plan progression
     missionStepRecordFor,
@@ -84,6 +94,8 @@ import Data.List (find)
 import Data.Maybe (isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Kanban.Action
   ( ActionOutcome (..),
     ActionRefusal (..),
@@ -101,7 +113,9 @@ import Kanban.Mission.Invocation
     missionStaleVersionMessage,
   )
 import Kanban.Mission.Types
-  ( MissionLifecycle (..),
+  ( MissionCapacityRetry (..),
+    MissionCapacityWait (..),
+    MissionLifecycle (..),
     MissionPlanStep (..),
     MissionObservedOutcome (..),
     MissionSessionDisposition (..),
@@ -219,10 +233,16 @@ missionStepFailureLifecycle _ = MissionStepFailed
 -- 'Nothing' for the outcomes that are not failures. The deadline is the one
 -- constructor the registry now names in its own right, which is what lets this
 -- classification be exact instead of a search through a sentence.
+--
+-- A provider-capacity limit is not a failure either (issue #752): nothing
+-- about the work was wrong, and the step waits and retries rather than
+-- concluding. The caller that reads the registry's result turns it into
+-- 'MissionWorkerCapacityLimited' instead.
 missionFailureFromOutcome :: ActionOutcome -> Maybe MissionStepFailure
 missionFailureFromOutcome outcome = case outcome of
   ActionDeadlineExceeded detail -> Just (MissionFailureDeadline detail)
   ActionTargetMoved detail -> Just (MissionFailureStaleVersion detail)
+  ActionCapacityLimited _ _ -> Nothing
   ActionFailed detail -> Just (MissionFailureGeneric detail)
   ActionStopped detail -> Just (MissionFailureOutcomeUnknown detail)
   ActionNeedsInput _ -> Nothing
@@ -275,13 +295,17 @@ missionFailureFromProviderError failure = case failure.providerErrorKind of
 
 -- | How a registered worker ended.
 --
--- Three, because a provider that stopped to ask a question neither succeeded
+-- Four, because a provider that stopped to ask a question neither succeeded
 -- nor failed, and folding it into either is how a mission would answer its own
--- question or report a working step as broken.
+-- question or report a working step as broken — and a provider that refused
+-- the turn at a positively identified rate or usage limit (issue #752) did not
+-- fail the work either: the same turn is taken again once the limit lifts,
+-- at the reset time the provider named when it named one.
 data MissionWorkerConclusion
   = MissionWorkerSucceeded Text
   | MissionWorkerNeedsInput Text
   | MissionWorkerFailed MissionStepFailure
+  | MissionWorkerCapacityLimited (Maybe UTCTime) Text
   deriving stock (Eq, Show)
 
 -- | What a live registered worker looks like from the durable record plus one
@@ -338,6 +362,9 @@ data MissionExternalWork
   | -- | An invocation was recorded and nothing conclusive can be found for it.
     MissionWorkUnresolved Text
   | MissionWorkFailedExternally MissionStepFailure
+  | -- | This step's own attempt, the named session, ended at a provider
+    -- limit: wait for it to lift and retry (issue #752).
+    MissionWorkCapacityLimited MissionSessionId (Maybe UTCTime) Text
   | -- | The owning authority stopped to ask something.
     MissionWorkNeedsInput Text
   | -- | Nothing outside this mission has anything to say about this step.
@@ -351,6 +378,7 @@ missionExternalWorkTag work = case work of
   MissionWorkConflicting _ -> "conflicting"
   MissionWorkUnresolved _ -> "outcome_unknown"
   MissionWorkFailedExternally _ -> "external_failure"
+  MissionWorkCapacityLimited _ _ _ -> "capacity_wait"
   MissionWorkNeedsInput _ -> "needs_input"
   MissionWorkUnobserved -> "unobserved"
 
@@ -377,6 +405,9 @@ classifyMissionWork evidence
   | Just reading <- evidence.missionEvidenceWorker,
     Just (MissionWorkerFailed failure) <- reading.missionWorkerTerminal =
       MissionWorkFailedExternally failure
+  | Just reading <- evidence.missionEvidenceWorker,
+    Just (MissionWorkerCapacityLimited resetsAt detail) <- reading.missionWorkerTerminal =
+      MissionWorkCapacityLimited reading.missionWorkerSession resetsAt detail
   | Just reading <- evidence.missionEvidenceWorker,
     Just (MissionWorkerNeedsInput detail) <- reading.missionWorkerTerminal =
       MissionWorkNeedsInput detail
@@ -503,7 +534,21 @@ missionLifecycleBlocks lifecycle =
 -- in, so a mission that reaches an answerable state ends the process instead
 -- of waiting beside it (§3's non-goal).
 missionRunnerHalt :: MissionSnapshot -> [MissionInvocationState] -> Maybe MissionHalt
-missionRunnerHalt snapshot states
+missionRunnerHalt snapshot states = haltOn Nothing snapshot states
+
+-- | 'missionRunnerHalt' at a moment, which is what lets a capacity wait end
+-- (issue #752).
+--
+-- A mission waiting for provider capacity is blocked until one of its waits
+-- is due and then it is not: the controller takes the next transition, which
+-- wakes that step, instead of halting on a lifecycle nothing else will move.
+-- Every other answer is the one 'missionRunnerHalt' gives, and a wait that is
+-- not yet due — or whose retry time cannot be read — says so in its halt.
+missionRunnerHaltAt :: UTCTime -> MissionSnapshot -> [MissionInvocationState] -> Maybe MissionHalt
+missionRunnerHaltAt now = haltOn (Just now)
+
+haltOn :: Maybe UTCTime -> MissionSnapshot -> [MissionInvocationState] -> Maybe MissionHalt
+haltOn clock snapshot states
   -- An invocation recorded as unknown outranks every other reading of this
   -- snapshot, a terminal one included, and this guard is first because that is
   -- the only way to say so.
@@ -523,6 +568,11 @@ missionRunnerHalt snapshot states
   -- nothing revisits.
   | unknownInvocation = Just (MissionHaltIndeterminate lifecycle unaccountedDetail)
   | missionLifecycleIsTerminal lifecycle = Just (MissionHaltTerminal lifecycle)
+  -- A due capacity wait is the one blocked state this runner can end on its
+  -- own, and it does so only once the provider's reset time has passed.
+  | lifecycle == MissionWaitingCapacity,
+    Just (MissionCapacityDue _) <- wake =
+      Nothing
   -- Read off the record rather than off the lifecycle, because
   -- @waiting_input@ is written for several reasons and only one of them is
   -- indeterminate: a mission waiting for an answer to a question is not the
@@ -541,6 +591,7 @@ missionRunnerHalt snapshot states
   | otherwise = Nothing
   where
     lifecycle = snapshot.missionSnapshotLifecycle
+    wake = (`missionCapacityWake` snapshot) <$> clock
     unknownStep = any ((== MissionStepOutcomeUnknown) . (.missionStepRecordLifecycle)) snapshot.missionSnapshotSteps
     unknownInvocation = any unknownOutcome states
     unknownOutcome state = case state.missionInvocationOutcome of
@@ -558,10 +609,121 @@ missionRunnerHalt snapshot states
     blockedDetail = case lifecycle of
       MissionWaitingInput -> "it is waiting for an answer this runner cannot supply"
       MissionWaitingBarrier -> "it is waiting on a barrier outside this runner"
-      MissionWaitingCapacity -> "it is waiting for provider capacity"
+      MissionWaitingCapacity -> maybe "it is waiting for provider capacity" missionCapacityWakeMessage wake
       MissionPaused -> "it is paused and only an explicit resume restarts it"
       MissionInterrupted -> "it was interrupted and needs an explicit recovery decision"
       _ -> "it cannot be advanced from here"
+
+-- ---------------------------------------------------------------------------
+-- Provider-capacity waits
+-- ---------------------------------------------------------------------------
+
+-- | How long the @n@th consecutive capacity wait of one step backs off when
+-- the provider named no reset time (design D-18): one minute, doubling with
+-- every wait in a row, never more than 'missionCapacityBackoffCap'.
+missionCapacityBackoff :: Int -> NominalDiffTime
+missionCapacityBackoff consecutive = min missionCapacityBackoffCap (60 * 2 ^ (max 1 (min 16 consecutive) - 1))
+
+-- | The longest a backoff waits: one hour.
+missionCapacityBackoffCap :: NominalDiffTime
+missionCapacityBackoffCap = 60 * 60
+
+-- | The wait one failed attempt records.
+--
+-- Computed once, at the moment the failure is recorded, and never again. The
+-- count continues the step's standing wait when it has one — the attempt that
+-- just failed was the retry of that wait — and starts at one otherwise. The
+-- retry time is the provider's own reset when it named one, even one already
+-- past (which is due at once), and the backoff for this count when it did not.
+--
+-- A wait already recorded /for this very session/ is returned unchanged. That
+-- is the same failure read a second time — by a pass that repeated, or a
+-- runner that restarted before the step moved on — and neither the count nor
+-- the deadline may move for it.
+missionCapacityWaitFor :: UTCTime -> Maybe MissionCapacityWait -> MissionSessionId -> Maybe UTCTime -> Text -> MissionCapacityWait
+missionCapacityWaitFor now standing session resetsAt detail = case standing of
+  Just recorded
+    | recorded.missionCapacitySession == Just session -> recorded
+  _ ->
+    MissionCapacityWait
+      { missionCapacityRetryAt = MissionCapacityRetryAt (maybe (addUTCTime (missionCapacityBackoff consecutive) now) id resetsAt),
+        missionCapacityConsecutive = consecutive,
+        missionCapacityRecordedAt = now,
+        missionCapacitySession = Just session,
+        missionCapacityDetail = detail
+      }
+  where
+    consecutive = maybe 1 ((+ 1) . (.missionCapacityConsecutive)) standing
+
+-- | What a mission's capacity waits say at one moment.
+data MissionCapacityWake
+  = -- | No step is waiting for capacity.
+    MissionCapacityIdle
+  | -- | This step's wait has ended: it may be woken and dispatched again.
+    MissionCapacityDue MissionStepId
+  | -- | Every wait is still in force; the earliest ends then.
+    MissionCapacityWaiting MissionStepId UTCTime
+  | -- | This step is waiting and nothing records when it may retry, so it is
+    -- never retried automatically.
+    MissionCapacityUnreadable MissionStepId Text
+  deriving stock (Eq, Show)
+
+-- | The one reading of a mission's capacity waits, shared by the scheduler's
+-- admission and the controller's own advancement so the two can never
+-- disagree about whether a wait has ended.
+--
+-- A due wait wins, in plan order: one step's wait ending is reason enough to
+-- advance the mission, and a peer whose retry time cannot be read stays
+-- waiting beside it rather than holding it back. Only when nothing is due is
+-- an unreadable wait the answer, because then it is the reason the mission is
+-- not moving; and only when every wait is readable and in force is the
+-- earliest retry time.
+missionCapacityWake :: UTCTime -> MissionSnapshot -> MissionCapacityWake
+missionCapacityWake now snapshot =
+  case [(record.missionStepRecordId, retryOf record) | record <- snapshot.missionSnapshotSteps, record.missionStepRecordLifecycle == MissionStepWaitingCapacity] of
+    [] -> MissionCapacityIdle
+    waits -> case [step | (step, Right at) <- waits, at <= now] of
+      (step : _) -> MissionCapacityDue step
+      [] -> case [(step, reason) | (step, Left reason) <- waits] of
+        ((step, reason) : _) -> MissionCapacityUnreadable step reason
+        [] -> case [(at, step) | (step, Right at) <- waits] of
+          pending@(_ : _) -> let (at, step) = minimum pending in MissionCapacityWaiting step at
+          [] -> MissionCapacityIdle
+
+-- | Every waiting step whose retry time cannot be read, with why.
+--
+-- Asked of each step on its own rather than read off 'missionCapacityWake',
+-- which answers one question about the whole mission and lets a due peer
+-- speak for it: a mission with one due wait and one undated one wakes the due
+-- step and is running again, and the undated wait beside it is still one
+-- nothing will ever retry.
+missionUndatedCapacityWaits :: MissionSnapshot -> [(MissionStepId, Text)]
+missionUndatedCapacityWaits snapshot =
+  [ (record.missionStepRecordId, reason)
+  | record <- snapshot.missionSnapshotSteps,
+    record.missionStepRecordLifecycle == MissionStepWaitingCapacity,
+    Left reason <- [retryOf record]
+  ]
+
+retryOf :: MissionStepRecord -> Either Text UTCTime
+retryOf record = case record.missionStepRecordCapacity of
+  Nothing -> Left "no retry time was recorded"
+  Just wait -> case wait.missionCapacityRetryAt of
+    MissionCapacityRetryAt at -> Right at
+    MissionCapacityRetryUnreadable _ -> Left "its recorded retry time will not decode"
+
+-- | What a capacity reading says, as a halt's sentence.
+missionCapacityWakeMessage :: MissionCapacityWake -> Text
+missionCapacityWakeMessage wake = case wake of
+  MissionCapacityIdle -> "it is waiting for provider capacity"
+  MissionCapacityDue step -> "step " <> step.unMissionStepId <> "'s provider-capacity wait has ended"
+  MissionCapacityWaiting step at ->
+    "it is waiting for provider capacity; step " <> step.unMissionStepId <> " retries at " <> Text.pack (iso8601Show at)
+  MissionCapacityUnreadable step reason ->
+    "it is waiting for provider capacity and step "
+      <> step.unMissionStepId
+      <> " is not retried automatically: "
+      <> reason
 
 -- ---------------------------------------------------------------------------
 -- Plan progression

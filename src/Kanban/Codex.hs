@@ -1,6 +1,9 @@
 module Kanban.Codex
   ( decodeCodexUsageResponse,
     fetchCodexUsage,
+    CodexAccountLimit (..),
+    decodeCodexAccountLimit,
+    fetchCodexAccountLimit,
   )
 where
 
@@ -34,8 +37,21 @@ import System.Process
 import System.Timeout (timeout)
 
 fetchCodexUsage :: Int -> IO (Either ProviderError UsageSnapshot)
-fetchCodexUsage timeoutMicros = do
-  result <- try @IOException (withCreateProcess codexProcess (runProcess timeoutMicros))
+fetchCodexUsage timeoutMicros = fetchRateLimitsWith timeoutMicros decodeCodexUsageResponse
+
+-- | The account's rate-limit snapshot, read for what it says about a limit
+-- rather than for the sidebar's percentages (issue #752, design D-18).
+--
+-- The same app-server exchange as 'fetchCodexUsage' — the same process, the
+-- same request, the same bound — decoded into the two facts a mission's
+-- capacity decision needs. Reading it twice through two exchanges would be
+-- two answers to one question.
+fetchCodexAccountLimit :: Int -> IO (Either ProviderError CodexAccountLimit)
+fetchCodexAccountLimit timeoutMicros = fetchRateLimitsWith timeoutMicros (const decodeCodexAccountLimit)
+
+fetchRateLimitsWith :: Int -> (UTCTime -> LazyByteString.ByteString -> Either ProviderError result) -> IO (Either ProviderError result)
+fetchRateLimitsWith timeoutMicros decode = do
+  result <- try @IOException (withCreateProcess codexProcess (runProcess timeoutMicros decode))
   pure $ case result of
     Left exception
       | isDoesNotExistError exception -> Left (ProviderError ExecutableMissing "codex executable was not found")
@@ -50,22 +66,22 @@ codexProcess =
       std_err = NoStream
     }
 
-runProcess :: Int -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError UsageSnapshot)
-runProcess timeoutMicros (Just input) (Just output) _ processHandle = do
+runProcess :: Int -> (UTCTime -> LazyByteString.ByteString -> Either ProviderError result) -> Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO (Either ProviderError result)
+runProcess timeoutMicros decode (Just input) (Just output) _ processHandle = do
   hSetEncoding input utf8
   hSetEncoding output utf8
   hSetBuffering input LineBuffering
-  timedResult <- timeout timeoutMicros (exchange input output)
+  timedResult <- timeout timeoutMicros (exchange decode input output)
   _ <- terminateAndWait processHandle
   pure $ case timedResult of
     Nothing -> Left (ProviderError RequestTimedOut ("Codex usage refresh timed out after " <> Text.pack (show (timeoutMicros `div` 1000000)) <> " seconds"))
     Just result -> result
-runProcess _ _ _ _ processHandle = do
+runProcess _ _ _ _ _ processHandle = do
   _ <- terminateAndWait processHandle
   pure (Left (ProviderError RequestFailed "could not open Codex app-server pipes"))
 
-exchange :: Handle -> Handle -> IO (Either ProviderError UsageSnapshot)
-exchange input output = do
+exchange :: (UTCTime -> LazyByteString.ByteString -> Either ProviderError result) -> Handle -> Handle -> IO (Either ProviderError result)
+exchange decode input output = do
   sendLine input initializeRequest
   initializeResponse <- awaitResponse 0 output
   case initializeResponse >>= validateInitializeResponse of
@@ -75,7 +91,7 @@ exchange input output = do
       sendLine input rateLimitsRequest
       response <- awaitResponse 1 output
       now <- getCurrentTime
-      pure (response >>= decodeCodexUsageResponse now)
+      pure (response >>= decode now)
 
 sendLine :: Handle -> Text -> IO ()
 sendLine handle message = do
@@ -158,6 +174,72 @@ parseWindow (Just value) = Just <$> withObject "rate-limit window" parseFields v
               usageResetsAt = posixSecondsToUTCTime (fromInteger resetSeconds)
             }
         )
+
+-- | What the account snapshot says about a limit, and nothing else.
+--
+-- The reached type is carried as the provider spelled it, 'Nothing' when the
+-- snapshot names none: which values count, which mean depleted credits, and
+-- what an unrecognised one means is "Kanban.ProviderLimit"'s decision, and a
+-- decoder that folded an unknown spelling into a known one would be making it
+-- for them.
+data CodexAccountLimit = CodexAccountLimit
+  { codexLimitReachedType :: Maybe Text,
+    -- | The latest reset among the windows that are exhausted, when any
+    -- exhausted window names one. A window with room left is not limiting,
+    -- so its reset says nothing about when work can resume.
+    codexLimitResetsAt :: Maybe UTCTime
+  }
+  deriving stock (Eq, Show)
+
+-- | The @account/rateLimits/read@ response, decoded for 'CodexAccountLimit'.
+--
+-- The bucket is 'selectRateLimits'' — the @codex@ entry of
+-- @rateLimitsByLimitId@ when there is one, the top-level snapshot otherwise —
+-- so the limit read here and the usage the sidebar shows come from one
+-- bucket. A response this cannot decode is an error rather than an empty
+-- limit: an unreadable snapshot is not evidence that no limit was reached.
+decodeCodexAccountLimit :: LazyByteString.ByteString -> Either ProviderError CodexAccountLimit
+decodeCodexAccountLimit bytes = do
+  value <- case eitherDecode bytes of
+    Left message -> Left (ProviderError InvalidResponse ("Codex returned invalid JSON: " <> Text.pack message))
+    Right decoded -> Right decoded
+  case parseMaybe parseRpcError value of
+    Just errorMessage -> Left (ProviderError (classifyRpcError errorMessage) errorMessage)
+    Nothing -> case parseEither parseAccountLimit value of
+      Left message -> Left (ProviderError UnsupportedVersion ("unsupported Codex rate-limit response: " <> Text.pack message))
+      Right limit -> Right limit
+
+parseAccountLimit :: Value -> Parser CodexAccountLimit
+parseAccountLimit = withObject "Codex RPC response" $ \response -> do
+  result <- response .: "result"
+  rateLimits <- selectRateLimits result
+  withObject "rate-limit snapshot" limitOf rateLimits
+  where
+    limitOf snapshot = do
+      reached <- snapshot .:? "rateLimitReachedType"
+      primary <- snapshot .:? "primary"
+      secondary <- snapshot .:? "secondary"
+      let limiting = catMaybes (map windowReset (catMaybes [primary, secondary]))
+      pure
+        CodexAccountLimit
+          { codexLimitReachedType = reached,
+            -- The latest reset among the windows blocking execution, and only
+            -- when every one of them names a usable one: a blocking window
+            -- that cannot be dated may be the one that ends last, so the
+            -- limit is undated and backs off.
+            codexLimitResetsAt = case sequence limiting of
+              Just resets@(_ : _) -> Just (maximum resets)
+              _ -> Nothing
+          }
+    -- One window, read leniently. The reached type is what identifies a
+    -- limit; a window only dates it, so a window this cannot read never takes
+    -- the identified limit down with it. 'Nothing' is a window with room
+    -- left, which blocks nothing and dates nothing; @Just Nothing@ is one that
+    -- blocks — or may, when its usage cannot be read — with no usable reset.
+    windowReset :: Value -> Maybe (Maybe UTCTime)
+    windowReset value = case parseMaybe (withObject "rate-limit window" (.: "usedPercent")) value of
+      Just usedPercent | (usedPercent :: Integer) < 100 -> Nothing
+      _ -> Just (posixSecondsToUTCTime . fromInteger <$> (parseMaybe (withObject "rate-limit window" (.: "resetsAt")) value :: Maybe Integer))
 
 durationLabel :: Integer -> Text
 durationLabel 300 = "5 hour"

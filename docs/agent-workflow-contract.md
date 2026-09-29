@@ -214,7 +214,14 @@ everything else.
 - **Failure semantics:** a missing executable surfaces
   `SolveFailed "<name> was not found on PATH"`; a session may pause with a
   trailing `KANBAN_NEEDS_INPUT: <question>` line and resumes with the same
-  session id once the user answers.
+  session id once the user answers. A failed session a mission dispatched is
+  read once more before its step concludes: a provider rate or usage limit its
+  own structured evidence identifies is the action outcome
+  `ActionCapacityLimited` rather than `ActionFailed`, and the step waits for the
+  limit to lift and is dispatched again (§2.12). The session log above is that
+  evidence for Claude; for Codex it is the account's rate-limit snapshot read
+  after the failure. A solve launched from the board is observed exactly as
+  before.
 - **Required authority:** the user's existing `gh auth login` (issue
   assignment, branch push, PR creation); local filesystem access to create a
   worktree.
@@ -380,7 +387,8 @@ that a particular comment should not.
   and serial isolation; the existing review contract and parity tests hold
   the unchanged authority boundaries.
 - **Failure semantics:** the same missing-executable and
-  `KANBAN_NEEDS_INPUT` handoff pattern as solve.
+  `KANBAN_NEEDS_INPUT` handoff pattern as solve, and the same provider-limit
+  reading of a failed session a mission dispatched (§2.1, §2.12).
 - **Issue-gate override:** the coordinator refuses to review a pull request
   whose linked issue lacks a current canonical approval, and clearing that is
   the issue's own review workflow's job. `--override-issue-gate`, paired with a
@@ -2354,7 +2362,8 @@ report did not name.
   reasons of its own as well as for a mission's: a snapshot that will not
   decode, one recorded against another repository, a store or legacy root it
   cannot enumerate, a specification that cannot be read behind a waiting
-  mission, an agent rotation it cannot enter or live agents it cannot count, a
+  mission, a provider-capacity wait whose retry time cannot be read, an agent
+  rotation it cannot enter or live agents it cannot count, a
   child that refused for any reason other than losing the advancement lease,
   and a scratch directory it could not prepare each produce a `failed` pass. That last child
   case is the only place a mission whose *specification* is unreadable or
@@ -2386,7 +2395,24 @@ report did not name.
   `missions/.admission/<owner>/<repo>/` before a launch is journaled, with free
   slots shared by a durable round-robin (`docs/design.md` §5). The ceiling adds
   no authority and removes none: the per-target worker lease and the canonical
-  approval lock still decide beneath it whether a granted launch may happen. An `interrupted` mission — one whose step was cut off
+  approval lock still decide beneath it whether a granted launch may happen.
+  A step whose agent session failed at a provider rate or usage limit, as
+  that provider's own structured evidence identifies it (`Kanban.ProviderLimit`,
+  the mission runner design's D-18), is `waiting_capacity` rather than failed:
+  Claude's recorded stream, where the final `result` reports `is_error` and the
+  latest `rate_limit_event` is `rejected` without overage covering it, or a 429
+  `api_error_status` with no such event; or, for Codex, a failed final turn
+  beside an account snapshot naming `rate_limit_reached` or a workspace usage
+  limit, or a final app-server turn whose `codexErrorInfo` is
+  `usageLimitExceeded` or `rateLimitExceeded`. Error text is never matched. Depleted credits, and every
+  failure that evidence does not identify as a limit, still stop the mission as
+  failures. The wait records its retry time — the provider's reset, or a backoff
+  from one minute doubling to an hour per consecutive wait of the step — on the
+  step, holds no agent slot, and admits the mission to no pass before that time;
+  from it, the mission is runnable again and the step is dispatched afresh
+  through every check above. A wait whose retry time cannot be read is never
+  retried automatically, and every pass reports it and fails (`docs/design.md`
+  §5, §16). An `interrupted` mission — one whose step was cut off
   mid-flight, its launch journaled by a `--mission` child that died before any
   worker or result was recorded — is not runnable: no pass and no restarted
   service retries it, and only the runner console's `override` replans the
