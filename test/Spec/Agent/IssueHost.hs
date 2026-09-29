@@ -61,6 +61,7 @@ import Kanban.Worker
     IssueActionClaimOutcome (..),
     claimIssueAction,
     readIssueActionClaim,
+    readWorkerState,
     recoverIfWorkerStoppedWith,
     IssueHostProvider (..),
     IssueHostTuning (..),
@@ -1951,6 +1952,28 @@ collectionSpec = describe "collecting host and child records" $ do
       acknowledgeWorker host
       collectWorkerCache testRepository
       doesFileExist child.workerDescriptorSpecPath `shouldReturn` False
+
+  -- Issue #746: an action whose gate's process tree could not be accounted
+  -- for keeps its agent slot, and the records that say so must not be the
+  -- thing retention removes — collecting them would free that slot while a
+  -- process nothing recorded may still be running.
+  it "keeps a finished child whose gate's process tree was never accounted for" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      writeFile child.workerDescriptorCensusGapPath "census-gap\n"
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
+      doesFileExist child.workerDescriptorCensusGapPath `shouldReturn` True
+
+  it "keeps a finished child whose settle kept an unidentified gate pid" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      settled <- either (fail . show) pure =<< readWorkerState child
+      writeChildState child settled {workerStateProviderPid = Just 4242, workerStateProviderIdentity = Nothing}
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
 
   -- The mirror image. A child records its host's id and reattaches only to
   -- the host it names, so a host record collected out from under a live child

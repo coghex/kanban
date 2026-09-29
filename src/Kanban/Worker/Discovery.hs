@@ -34,7 +34,7 @@ import Control.Monad (filterM, unless, void, when)
 import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -351,9 +351,25 @@ collectTerminalArtifacts takeSnapshot repository directory history = do
       when eligible $ do
         collectable <- artifactsCollectable takeSnapshot directory descriptor state
         held <- heldByHostTopology history descriptor
-        when (collectable && not held) $ do
+        unaccounted <- processTreeUnaccounted descriptor state
+        when (collectable && not held && not unaccounted) $ do
           released <- missionWorkerLogsReleasable sealIndex descriptor state
           when released (removeWorkerArtifacts descriptor)
+
+-- | Whether an issue action may have left a process nothing recorded.
+--
+-- Two records say so, and both are what "Kanban.Mission.Admission" reads to
+-- keep the action's agent slot taken: a census of its canonical gate that
+-- failed ('workerDescriptorCensusGapPath'), and a gate pid its settle kept
+-- with no identity beside it. Neither can ever be shown resolved, so
+-- collecting the records that carry them would free a slot a surviving
+-- process may still be using — whatever the retention window says.
+processTreeUnaccounted :: WorkerDescriptor -> WorkerState -> IO Bool
+processTreeUnaccounted descriptor state = case descriptor.workerDescriptorSpec.workerTask of
+  IssueActionWorkerTaskKind _
+    | isJust state.workerStateProviderPid && isNothing state.workerStateProviderIdentity -> pure True
+    | otherwise -> doesFileExist descriptor.workerDescriptorCensusGapPath
+  _ -> pure False
 
 -- | The two host/child rules the collection pass owes on top of every rule it
 -- already applied (SAG-10).

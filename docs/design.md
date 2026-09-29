@@ -311,8 +311,10 @@ recorded pid and identity on the terminal state; a gate whose identity was
 never captured, or any of whose censuses could not be taken, keeps its pid with
 no identity and so holds its slot for good, since nothing could ever show its
 tree gone. A failed census also leaves a `.census-gap` marker beside the action's
-records, which nothing but collection removes, so the slot stays taken after a
-successor host or a stale recovery has rewritten the action's state. The
+records, so the slot stays taken after a successor host or a stale recovery
+has rewritten the action's state; collection keeps such an action's records,
+and one whose settle kept an unidentified gate pid, past any retention window,
+since removing them would free the slot. The
 canonical gate's process group is swept on every exit, a clean one included,
 because a descendant that stayed in the group outlives a gate that exited
 normally. A
