@@ -295,24 +295,33 @@ STATUS_VERSION = 1
 INCIDENT_SCHEMA = "kanban-mission-runner-incident"
 INCIDENT_VERSION = 1
 
-# The states a status document distinguishes (requirement 10). The first three
+# The states a status document distinguishes (requirement 10). The first four
 # describe a live run; the last two are terminal and outlive the process that
 # wrote them.
 STATE_RUNNING = "running"
 STATE_IDLE = "idle"
 STATE_WAITING = "waiting"
+# A stop has been asked for while a pass was in flight: no further pass starts,
+# and the one out is being let finish its step (`Controller.wait_for`). Live,
+# because the runner is still there and still holds its run lock -- which is
+# what keeps an install or an uninstall out until the drain has ended.
+STATE_DRAINING = "draining"
 STATE_STOPPED = "stopped"
 STATE_FAILED = "failed"
 # Never written: synthesized by `status_snapshot` for a document that is
 # absent, unreadable, of another schema or version, another repository's, or
 # stale -- one whose live state names a runner that is not running.
 STATE_UNKNOWN = "unknown"
-LIVE_STATES = frozenset({STATE_RUNNING, STATE_IDLE, STATE_WAITING})
+LIVE_STATES = frozenset({STATE_RUNNING, STATE_IDLE, STATE_WAITING, STATE_DRAINING})
 TERMINAL_STATES = frozenset({STATE_STOPPED, STATE_FAILED})
 STATUS_STATES = LIVE_STATES | TERMINAL_STATES
 
 PASS_INCIDENT_KIND = "mission-pass-failed"
 CONTROLLER_INCIDENT_KIND = "mission-runner-error"
+# A drain that had to cut its pass off: the grace ran out, or a second stop
+# arrived. Its own kind, because what it asks of the operator is specific -- a
+# mission whose step was cut off is `interrupted` and waits for recovery.
+DRAIN_ESCALATION_INCIDENT_KIND = "mission-runner-drain-escalated"
 SEVERITY_ERROR = "error"
 
 DEFAULT_INTERVAL_SECONDS = 60.0
@@ -325,10 +334,19 @@ ADVANCE_DELAY_SECONDS = 0.0
 # not raise (PEP 475), so a wait has to be built from slices to be
 # interruptible.
 SLEEP_SLICE_SECONDS = 0.05
-# How long an intentional stop waits for the pass's process group to go away
-# before escalating to SIGKILL. The escalation is what makes requirement 11's
-# promise keepable against a mission child that ignores SIGTERM.
+# How long an escalated stop waits for the pass's process group to go away
+# before killing it. The escalation is what makes requirement 11's promise
+# keepable against a mission child that ignores SIGTERM.
 STOP_GRACE_SECONDS = 10.0
+# How long an ordinary stop lets the pass in flight finish its step before
+# escalating as a forced stop does (design D-15 and D-19). A step waits on
+# GitHub calls, each bounded by `timeouts.github_seconds` (30 s by default),
+# never on an agent, so five minutes is about ten of them. Measured from the
+# first stop and never reset. The mission runner's systemd unit declares a stop
+# timeout longer than this plus the escalation that follows it
+# (`service_manager.MISSION_RUNNER_NAMESPACE.stop_timeout_seconds`), so systemd
+# never kills a drain the wrapper is still inside.
+DRAIN_GRACE_SECONDS = 300.0
 # How much of a failed pass's stderr is kept in its incident.
 CAPTURED_STDERR_LINES = 60
 
@@ -2472,6 +2490,16 @@ class Controller:
         self._record: dict[str, Any] | None = None
         self._stop_requested = False
         self._signals = 0
+        # When the drain's grace runs out: set by the first stop, never reset.
+        self._drain_deadline: float | None = None
+        # Whether a pass was still in flight when the stop arrived, so the drain
+        # was really waited on and `draining` published.
+        self._drained = False
+        # Why the drain was cut short, once it has been: the grace ran out or a
+        # second stop arrived. Set only while a pass is in flight, since there
+        # is nothing to cut off otherwise.
+        self._escalation: str | None = None
+        self._escalation_reported = False
         self._passes = 0
         self._last_pass: dict[str, Any] | None = None
 
@@ -2481,18 +2509,80 @@ class Controller:
         service_log(self.job, message)
 
     def handle_stop(self, _signum: int, _frame: Any) -> None:
-        """Record the stop and pass it straight to the pass's process group.
+        """Record the stop, and drain rather than cut off.
 
-        Forwarded to the group rather than to the child alone: the scheduler
-        spawns a `kanban --mission` child per admitted mission, and signalling
+        The first signal only records it: no further pass starts, and the one
+        in flight -- with its `kanban --mission` children -- is let finish its
+        step (design D-15), which `wait_for` bounds by `DRAIN_GRACE_SECONDS`.
+        Signalling it would cut a step off between journaling it and recording
+        its worker, which leaves that mission `interrupted`. With no pass in
+        flight the run simply ends, as it always has.
+
+        A second signal escalates at once, exactly as the grace running out
+        does: the pass's group is asked to stop and then killed. A third kills
+        it outright, so an operator who keeps asking is obeyed.
+
+        The escalation goes to the group rather than to the child alone: the
+        scheduler spawns a mission child per admitted mission, and signalling
         only the process this controller knows about is what leaves those
-        orphaned (requirement 11). A second signal escalates, so an operator
-        who asks twice is obeyed twice.
+        orphaned (requirement 11).
         """
         self._stop_requested = True
         self._signals += 1
-        forwarded = signal.SIGTERM if self._signals == 1 else signal.SIGKILL
-        self.signal_child_group(self._child, forwarded)
+        if self._drain_deadline is None:
+            self._drain_deadline = time.monotonic() + DRAIN_GRACE_SECONDS
+        if self._signals == 1:
+            return
+        if self._escalation is None:
+            self.escalate("a second stop arrived while the pass was draining")
+        else:
+            self.signal_child_group(self._child, signal.SIGKILL)
+
+    def escalate(self, reason: str) -> None:
+        """Cut the draining pass off, as a forced stop does.
+
+        Asks the pass's group to stop; `wait_for` kills it once
+        `STOP_GRACE_SECONDS` have passed. A mission whose step this cuts off is
+        left `interrupted` for the next runner's controller iteration to
+        reconcile (#744). Nothing to do with no pass in flight.
+        """
+        child = self._child
+        if child is None or child.poll() is not None or self._escalation is not None:
+            return
+        self._escalation = reason
+        self.signal_child_group(child, signal.SIGTERM)
+
+    def report_escalation(self, pass_pid: int | None = None) -> None:
+        """Log and record an escalation once, and say so while it is draining.
+
+        Never from the signal handler, which may interrupt a write this
+        controller is making; from the loop that noticed it instead.
+        """
+        if self._escalation is None or self._escalation_reported:
+            return
+        self._escalation_reported = True
+        summary = (
+            f"The mission runner's drain was escalated: {self._escalation}, so "
+            "the scheduler pass in flight was cut off."
+        )
+        self.log(summary)
+        try:
+            incident = record_incident(
+                self.job,
+                kind=DRAIN_ESCALATION_INCIDENT_KIND,
+                summary=summary,
+                detail=(
+                    "A mission whose step the pass had journaled and not finished is "
+                    "left interrupted; the next runner's controller iteration marks it "
+                    "so, and it waits for recovery. Workers already dispatched keep "
+                    "running and are reconciled rather than dispatched again."
+                ),
+            )
+            self.log(f"Recorded incident {incident['incident_id']} at {incident['path']}")
+        except OSError as exc:
+            self.log(f"Additionally failed to record the incident: {exc}")
+        if pass_pid is not None:
+            self.write_status(STATE_DRAINING, message=summary, pass_pid=pass_pid)
 
     def signal_child_group(
         self, child: subprocess.Popen[str] | None, forwarded: int
@@ -2589,14 +2679,25 @@ class Controller:
                 "The mission runner failed unexpectedly.",
                 traceback.format_exc(),
             )
-        self.log("The mission runner stopped intentionally.")
-        self.write_status(STATE_STOPPED, message="Stopped intentionally.")
+        self.report_escalation()
+        if self._escalation is not None:
+            message = (
+                f"Stopped after escalating the drain: {self._escalation}; the pass in "
+                "flight was cut off."
+            )
+        elif self._drained:
+            message = "Stopped intentionally, after the pass in flight finished its step."
+        else:
+            message = "Stopped intentionally."
+        self.log(f"The mission runner stopped: {message}")
+        self.write_status(STATE_STOPPED, message=message)
         return 0
 
     def passes_remain(self) -> bool:
         return self.remaining is None or self._passes < self.remaining
 
     def record_failure(self, kind: str, summary: str, detail: str | None) -> int:
+        self.report_escalation()
         self.log(f"The mission runner stopped: {summary}")
         try:
             incident = record_incident(self.job, kind=kind, summary=summary, detail=detail)
@@ -2807,18 +2908,19 @@ class Controller:
         """Spawn one scheduler pass, or nothing at all when a stop is already
         pending.
 
-        A stop must never leave a live pass — mission children, model calls and
-        GitHub mutations and all — running behind a controller that has already
-        recorded an intentional stop. Two reads of the flag around the spawn are
-        what guarantee that, and between them they leave no window:
+        A stop must never start a pass, and must never leave one — mission
+        children, model calls and GitHub mutations and all — running behind a
+        controller that has already recorded an intentional stop. Two reads of
+        the flag around the spawn are what guarantee that, and between them
+        they leave no window:
 
-        * the read before the spawn means an already-requested stop starts
-          nothing at all;
-        * a stop arriving from there until the child is registered finds
-          `_child` unset, so the handler signals nothing -- and the read after
-          the registration sees the flag and signals the group itself;
-        * a stop arriving after that read finds `_child` set, so the handler
-          signals the group.
+        * the read here, before the spawn, means an already-requested stop
+          starts nothing at all;
+        * the read in `spawn`, after the pass's identity is recorded and before
+          its gate is opened, means a stop that arrived in between ends a pass
+          that has run nothing;
+        * a stop arriving after that read finds a released pass, which it
+          drains (`handle_stop`).
 
         Nothing is masked to achieve that, deliberately. A signal mask held
         across `Popen` is inherited by the child and survives its `exec`, which
@@ -2858,12 +2960,9 @@ class Controller:
             start_new_session=True,
         )
         try:
-            # Registered before the flag is read again, so the two reads
-            # overlap rather than leaving a gap between them.
+            # Registered before the flag is read again, so an escalation that
+            # arrives before the gate opens can still reach the gate.
             self._child = child
-            if self._stop_requested:
-                self.log("A stop raced this pass's start; signalling the pass it spawned.")
-                self.signal_child_group(child, signal.SIGTERM)
         except BaseException:
             self._child = None
             self.abandon_child(child)
@@ -2922,6 +3021,14 @@ class Controller:
                     "recorded; it was ended before it ran anything."
                 )
             self.publish_pass(child, *confirmed)
+            if self._stop_requested:
+                # Behind its gate still, so ending it cuts off no step: a
+                # drain starts no new pass, and this one has not started.
+                self.log("A stop arrived before this pass was released; nothing ran.")
+                self._child = None
+                self.abandon_child(child)
+                self.settle_own_pass()
+                return None
             self.write_status(
                 STATE_RUNNING,
                 message="A mission scheduler pass is running.",
@@ -2949,17 +3056,21 @@ class Controller:
         return PassCommand(argv, stdout or "", stderr or "", child.returncode)
 
     def wait_for(self, child: subprocess.Popen[str]) -> tuple[str, str]:
-        """Collect the pass's output, escalating a stop it does not obey.
+        """Collect the pass's output, draining it through a stop.
 
         Waited for in bounded slices rather than in one unbounded call, because
         a signal handler that does not raise leaves the wait to resume (PEP
-        475): once a stop has been requested, this needs to come back and decide
-        whether the group is taking too long. Retrying `communicate` after a
-        timeout is the documented way to do that and loses no output.
+        475): once a stop has been requested, this needs to come back, publish
+        the drain, and decide whether it has taken too long. Retrying
+        `communicate` after a timeout is the documented way to do that and
+        loses no output.
 
-        The escalation is what makes requirement 11 keepable against a mission
-        child that ignores SIGTERM: the handler asks the group politely, and a
-        group that has not gone in `STOP_GRACE_SECONDS` is killed outright.
+        A stop publishes `draining` and leaves the pass alone until the grace
+        the first stop set runs out; from then on, or from a second stop, it is
+        a forced stop. That escalation is what makes requirement 11 keepable
+        against a mission child that ignores SIGTERM: the group is asked
+        politely, and a group that has not gone in `STOP_GRACE_SECONDS` is
+        killed outright.
         """
         deadline: float | None = None
         while True:
@@ -2969,6 +3080,32 @@ class Controller:
                 self.observe_pass_members()
                 if not self._stop_requested:
                     continue
+                if not self._drained:
+                    self._drained = True
+                    self.log(
+                        "A stop arrived during a mission scheduler pass; letting it "
+                        f"finish its step, for up to {DRAIN_GRACE_SECONDS:g}s."
+                    )
+                    self.write_status(
+                        STATE_DRAINING,
+                        message=(
+                            "Draining: the mission scheduler pass in flight is finishing "
+                            "its step, and no further pass will start."
+                        ),
+                        pass_pid=child.pid,
+                    )
+                if (
+                    self._escalation is None
+                    and self._drain_deadline is not None
+                    and time.monotonic() >= self._drain_deadline
+                ):
+                    self.escalate(
+                        f"the pass had not finished when the {DRAIN_GRACE_SECONDS:g}s "
+                        "drain grace ran out"
+                    )
+                if self._escalation is None:
+                    continue
+                self.report_escalation(child.pid)
                 if deadline is None:
                     deadline = time.monotonic() + STOP_GRACE_SECONDS
                 elif time.monotonic() >= deadline:
@@ -2993,11 +3130,16 @@ class Controller:
             # attention list is unbounded — so a stop can land after a nonempty
             # prefix and leave exactly this, output that parses as nothing.
             #
+            # Only a pass the stop really *cut off*, though. A drain signals
+            # nothing, so a pass it merely waited for ran to its own end, and
+            # whatever that pass wrote is its own verdict: a stop being pending
+            # must not hide a pass that failed on its own.
+            #
             # A pass that *completed* is never suppressed, which is why this
             # sits after the parse rather than before it: a whole, valid report
             # is acted on however the run ended, because work that really
             # happened must not be reported as work that did not.
-            if self._stop_requested:
+            if self._escalation is not None:
                 self.log(
                     "A pass was interrupted by the stop and left no readable result; "
                     "recording no verdict for it."
@@ -3038,8 +3180,12 @@ class Controller:
                 tail(command.stderr),
             )
         state = pass_state(document)
-        self.write_status(state, message=document["detail"])
         self.log(f"Pass {self._passes}: {document['detail']}")
+        if self._stop_requested:
+            # A drain stays visible until the run's terminal write: the pass
+            # it waited for has finished, and nothing is running or idle.
+            return
+        self.write_status(state, message=document["detail"])
         if not self.passes_remain():
             return
         self.sleep(ADVANCE_DELAY_SECONDS if pass_advanced(document) else self.interval)
@@ -4384,6 +4530,18 @@ def _start_locked(job: MissionRunnerJob, install_dir: Path) -> dict[str, Any]:
             f"{conflict}, which is another checkout of the same repository as "
             f"{job.repo_path}. One repository runs one mission runner at a time."
         )
+    # Still there, but on its way out: starting it would be a no-op that
+    # claimed a run the drain is about to end. The next start, once it has,
+    # is the one that means it.
+    if snapshot["state"] == STATE_DRAINING:
+        return {
+            **snapshot,
+            "started": False,
+            "message": (
+                "The runner is draining: it is finishing its current pass before it "
+                "stops. Start it again once it has stopped."
+            ),
+        }
     # A no-op rather than a refusal, unlike the destructive transitions:
     # starting something already started is nothing to do. All three signals
     # count, so a run that has taken its lock but not yet written a status — or
@@ -4493,17 +4651,25 @@ def startup_timeout_message(
 
 
 def stop_service(job: MissionRunnerJob) -> dict[str, Any]:
-    """Ask this repository's job to stop, and wait for it to really be gone.
+    """Ask this repository's job to stop, and wait until it is draining or gone.
 
     The manager's own polite stop, so the controller runs its intentional
-    shutdown — finishing or terminating the pass it is in and recording that it
-    stopped on purpose. The job stays installed and loaded: stopping is not
-    uninstalling, and a stopped job is exactly what the next start needs to
-    find.
+    shutdown: it starts no further pass, lets the one in flight finish its step,
+    and records that it stopped on purpose (design D-15). This returns as soon
+    as the status document reports that drain, or once the run is gone when
+    there was nothing to drain -- never when a drain ends, which can take
+    `DRAIN_GRACE_SECONDS` (D-19). `draining` in the result says which. The
+    run keeps its lock until the drain ends, so an install or uninstall that
+    follows is refused until then.
 
-    Under the same transition lock as the rest, held until the exit is
-    confirmed, so an uninstall that follows a stop cannot begin while the run is
-    still on its way out.
+    A stop asked for while the runner is already draining is the second stop,
+    and escalates: the wrapper cuts its pass off as a forced stop does, and
+    this waits for the run to be gone.
+
+    The job stays installed and loaded: stopping is not uninstalling, and a
+    stopped job is exactly what the next start needs to find.
+
+    Under the same transition lock as the rest, held until this returns.
     """
     with transition_lock(job):
         return _stop_locked(job)
@@ -4515,18 +4681,32 @@ def _stop_locked(job: MissionRunnerJob) -> dict[str, Any]:
     # or damaged is still a run, and reporting it as already stopped would leave
     # it going while claiming otherwise.
     if snapshot["state"] not in LIVE_STATES and not job_is_running(job):
-        return {"stopped": False, "message": "Already stopped.", **snapshot}
+        return {"stopped": False, "draining": False, "message": "Already stopped.", **snapshot}
     label = service_label(job)
-    service_backend().request_stop(label)
+    escalating = snapshot["state"] == STATE_DRAINING
+    if escalating:
+        # Delivered to the running wrapper itself rather than as a second stop
+        # request: systemd folds a stop asked of a unit already stopping into
+        # the one in progress, and signals nothing.
+        service_backend().repeat_stop_signal(label)
+    else:
+        service_backend().request_stop(label)
     deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(STOP_POLL_SECONDS)
         current = status_snapshot(job)
         # Confirmed by the manager as well as by the document, so a stop only
-        # reports success once there is really no process left — which is what
-        # makes the uninstall that may follow it safe.
+        # reports the run gone once there is really no process left — which is
+        # what makes the uninstall that may follow it safe.
         if current["state"] not in LIVE_STATES and not job_is_running(job):
-            return {"stopped": True, "label": label, **current}
+            return {"stopped": True, "draining": False, "label": label, **current}
+        if not escalating and current["state"] == STATE_DRAINING:
+            return {
+                "stopped": False,
+                "draining": True,
+                "label": label,
+                **current,
+            }
     raise ServiceError("Timed out waiting for the mission runner to stop.")
 
 

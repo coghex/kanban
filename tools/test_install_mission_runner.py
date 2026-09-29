@@ -67,13 +67,23 @@ SHAPES = ("launchd", "systemd")
 FAKE_KANBAN = '''#!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
+import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mission-scheduler", action="store_true")
 parser.add_argument("--repo", default="acme/widgets")
 parser.add_argument("--config", default=None)
 args = parser.parse_args()
+
+# A pass part-way through its step for as long as `hold` sits beside this
+# script, announced by `held` -- what a stop has to land on to drain anything.
+here = os.path.dirname(os.path.abspath(__file__))
+if os.path.exists(os.path.join(here, "hold")):
+    open(os.path.join(here, "held"), "w").write(str(os.getpid()))
+    while os.path.exists(os.path.join(here, "hold")):
+        time.sleep(0.02)
 
 print(
     json.dumps(
@@ -438,6 +448,21 @@ class FakeServiceManager(service_manager.ServiceManagerBackend):
 
     def request_stop(self, identifier):
         self._record("request_stop", identifier)
+        pid = self.started_pid(identifier)
+        if pid is None or not pid_alive(pid):
+            return
+        # systemd folds a stop asked of a unit that is already stopping into
+        # the stop job in progress, and signals nothing; launchd's `kill`
+        # signals every time. Modelled, so a second stop that relied on a
+        # second `request_stop` would escalate nothing here, as it would there.
+        stopping = self.root / f"{identifier}.stopping-{pid}"
+        if self.shape == "systemd" and stopping.exists():
+            return
+        stopping.write_text("", encoding="utf-8")
+        os.kill(pid, signal.SIGTERM)
+
+    def repeat_stop_signal(self, identifier):
+        self._record("repeat_stop_signal", identifier)
         pid = self.started_pid(identifier)
         if pid is not None and pid_alive(pid):
             os.kill(pid, signal.SIGTERM)
@@ -1134,6 +1159,101 @@ class LifecycleTests(InstallerFixture):
         self.assertIn(self.identity, self.entries())
         for name in installer.LINKED_MODULES:
             self.assertTrue((self.install_dir / name).is_symlink())
+
+
+class DrainTests(InstallerFixture):
+    """RUN-8's `stop`, through the controller command: it returns once the run
+    is draining, and a second one escalates by reaching the draining wrapper
+    itself on either backend (design D-15, D-19)."""
+
+    def start_mid_pass(self):
+        """A started run whose pass is part-way through its step, and the
+        run's and the pass's identifiers."""
+        self.install()
+        hold = self.kanban.with_name("hold")
+        held = self.kanban.with_name("held")
+        hold.touch()
+        self.addCleanup(lambda: hold.unlink(missing_ok=True))
+        service.start_service(self.job(), self.install_dir)
+        wait_until(held.exists, message="the pass to reach its step")
+        runner_pid = service.status_snapshot(self.job())["runner_pid"]
+        pass_pid = int(wait_until(lambda: held.read_text(encoding="utf-8")))
+        return hold, runner_pid, pass_pid
+
+    def test_a_stop_returns_at_draining_and_the_run_hands_over_its_lock_once_drained(self):
+        hold, runner_pid, pass_pid = self.start_mid_pass()
+        result = service.stop_service(self.job())
+        self.assertTrue(result["draining"])
+        self.assertFalse(result["stopped"])
+        self.assertEqual(result["state"], service.STATE_DRAINING)
+        # Returned while the pass is still running, and still draining after.
+        self.assertTrue(pid_alive(runner_pid))
+        self.assertTrue(pid_alive(pass_pid))
+        self.assertEqual(
+            service.status_snapshot(self.job())["state"], service.STATE_DRAINING
+        )
+        self.assertEqual(self.manager.call_names().count("request_stop"), 1)
+        # An upgrade's install waits: the draining run still holds its lock.
+        with self.assertRaises(installer.InstallError):
+            self.install()
+        # A start is no claim the run is staying.
+        again = service.start_service(self.job(), self.install_dir)
+        self.assertFalse(again["started"])
+        self.assertIn("Start it again once it has stopped", again["message"])
+        self.assertEqual(again["state"], service.STATE_DRAINING)
+        hold.unlink()
+        wait_until(lambda: not pid_alive(runner_pid), message="the drain to end")
+        snapshot = service.status_snapshot(self.job())
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["open_incidents"], [])
+        # The lock is handed over exactly once: install and start now succeed.
+        self.install()
+        started = service.start_service(self.job(), self.install_dir)
+        self.assertTrue(started["started"])
+        self.assertNotEqual(started["runner_pid"], runner_pid)
+        service.stop_service(self.job())
+
+    def test_a_stop_while_draining_escalates_the_same_wrapper(self):
+        _hold, runner_pid, pass_pid = self.start_mid_pass()
+        first = service.stop_service(self.job())
+        self.assertTrue(first["draining"])
+        second = service.stop_service(self.job())
+        self.assertTrue(second["stopped"])
+        self.assertFalse(second["draining"])
+        self.assertEqual(second["state"], service.STATE_STOPPED)
+        self.assertFalse(pid_alive(runner_pid))
+        wait_until(lambda: not pid_alive(pass_pid), message="the pass to be cut off")
+        # Delivered to the running wrapper rather than asked of the manager
+        # again, which a systemd-shaped manager would have ignored.
+        self.assertEqual(self.manager.call_names().count("request_stop"), 1)
+        self.assertEqual(self.manager.call_names().count("repeat_stop_signal"), 1)
+        snapshot = service.status_snapshot(self.job())
+        self.assertIn("second stop", snapshot["message"])
+        self.assertEqual(
+            [incident["kind"] for incident in snapshot["open_incidents"]],
+            [service.DRAIN_ESCALATION_INCIDENT_KIND],
+        )
+
+    def test_a_second_manager_stop_is_not_how_a_drain_escalates(self):
+        # The negative control over the fake itself: asked of a systemd-shaped
+        # manager, a repeated stop signals nothing, so the test above could
+        # only pass through the direct signal.
+        _hold, runner_pid, _pass_pid = self.start_mid_pass()
+        self.assertTrue(service.stop_service(self.job())["draining"])
+        self.manager.request_stop(self.label())
+        time.sleep(2)
+        still = service.status_snapshot(self.job())
+        if self.shape == "systemd":
+            self.assertTrue(pid_alive(runner_pid))
+            self.assertEqual(still["state"], service.STATE_DRAINING)
+        else:
+            wait_until(lambda: not pid_alive(runner_pid), message="launchd's second signal")
+        self.manager.repeat_stop_signal(self.label())
+        wait_until(lambda: not pid_alive(runner_pid), message="the escalation")
+
+
+class DrainSystemdTests(SystemdShapeMixin, DrainTests):
+    pass
 
 
 class StartConfirmationTests(InstallerFixture):

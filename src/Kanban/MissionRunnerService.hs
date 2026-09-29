@@ -724,6 +724,10 @@ data MissionRunnerActivity
     MissionRunnerIdle
   | -- | The last pass left a mission waiting on a person.
     MissionRunnerWaiting
+  | -- | A stop was asked for while a pass was in flight: no further pass
+    -- starts, and that one is finishing its step before the runner stops. Still
+    -- live, and neither advancing nor stopped.
+    MissionRunnerDraining
   | -- | Stopped on purpose. Distinct from every failure.
     MissionRunnerStopped
   | -- | The run ended in failure.
@@ -980,6 +984,7 @@ observationFrom identity raw = case containment of
     statusFrom (Just "running") = live MissionRunnerAdvancing "advancing"
     statusFrom (Just "idle") = live MissionRunnerIdle "idle"
     statusFrom (Just "waiting") = live MissionRunnerWaiting "waiting on input"
+    statusFrom (Just "draining") = live MissionRunnerDraining "draining"
     statusFrom (Just "stopped") = live MissionRunnerStopped "stopped"
     statusFrom (Just "failed") = live MissionRunnerFailed "failed"
     statusFrom (Just "unknown") =
@@ -1055,13 +1060,15 @@ missionRunnerUnavailableStatus unavailable =
       MissionRunnerDefinitionUnreadable -> MissionRunnerUnknown
 
 -- | Whether the runner is supervising this repository right now, read off the
--- activity rather than off the rendered detail. The three live states are
--- @tools\/mission_runner_service.py@'s @LIVE_STATES@.
+-- activity rather than off the rendered detail. The four live states are
+-- @tools\/mission_runner_service.py@'s @LIVE_STATES@: a draining runner is
+-- still there, still holds its run lock, and is not yet stopped.
 missionRunnerIsRunning :: MissionRunnerStatus -> Bool
 missionRunnerIsRunning status = case status.missionRunnerActivity of
   MissionRunnerAdvancing -> True
   MissionRunnerIdle -> True
   MissionRunnerWaiting -> True
+  MissionRunnerDraining -> True
   MissionRunnerStopped -> False
   MissionRunnerFailed -> False
   MissionRunnerUnsupported -> False
@@ -1098,6 +1105,7 @@ missionRunnerStoppedJob controller status = case status.missionRunnerActivity of
   MissionRunnerAdvancing -> Nothing
   MissionRunnerIdle -> Nothing
   MissionRunnerWaiting -> Nothing
+  MissionRunnerDraining -> Nothing
   MissionRunnerFailed -> Nothing
   MissionRunnerUnsupported -> Nothing
   MissionRunnerUnknown -> Nothing
@@ -1118,9 +1126,11 @@ missionRunnerStatusTimeoutSeconds = 4
 
 -- | Longer than the other two services'. This controller's own @start@ waits up
 -- to @START_TIMEOUT_SECONDS@ for the job it kicked to announce itself and its
--- @stop@ up to @STOP_TIMEOUT_SECONDS@ for the run to be confirmed gone, so a
--- budget of theirs would cut every successful slow stop short and report an
--- outcome the next status read would have to reconcile.
+-- @stop@ up to @STOP_TIMEOUT_SECONDS@ for the run to report @draining@ or be
+-- confirmed gone, so a budget of theirs would cut every successful slow stop
+-- short and report an outcome the next status read would have to reconcile.
+-- Never long enough to cover a drain itself, and it need not be: the stop
+-- returns once the drain has begun, not once it ends.
 missionRunnerTransitionTimeoutSeconds :: Int
 missionRunnerTransitionTimeoutSeconds = 45
 

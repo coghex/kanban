@@ -48,8 +48,11 @@ PASS_MODULE = REPO_ROOT / "src" / "Kanban" / "Mission" / "Pass.hs"
 # controller it runs as a separate process. `FIXTURE_SETTLE_SECONDS` shortens
 # how long settling a recorded pass waits before it kills and before it gives
 # up, so a stubborn survivor costs seconds rather than the service's own
-# bounds. `FIXTURE_DIE_AT` names a `Controller` method that kills the
-# controller outright instead of running -- the death no cleanup runs after.
+# bounds. `FIXTURE_DRAIN_GRACE_SECONDS` and `FIXTURE_STOP_GRACE_SECONDS` do the
+# same for how long a stop lets a pass finish its step and how long an
+# escalation waits before it kills. `FIXTURE_DIE_AT` names a `Controller`
+# method that kills the controller outright instead of running -- the death no
+# cleanup runs after.
 CONTROLLER_WRAPPER = '''#!/usr/bin/env python3
 import os
 import signal
@@ -67,6 +70,12 @@ settle = os.environ.get("FIXTURE_SETTLE_SECONDS")
 if settle:
     service.SETTLE_GRACE_SECONDS = float(settle)
     service.SETTLE_KILL_SECONDS = float(settle)
+drain = os.environ.get("FIXTURE_DRAIN_GRACE_SECONDS")
+if drain:
+    service.DRAIN_GRACE_SECONDS = float(drain)
+stop = os.environ.get("FIXTURE_STOP_GRACE_SECONDS")
+if stop:
+    service.STOP_GRACE_SECONDS = float(stop)
 die_at = os.environ.get("FIXTURE_DIE_AT")
 if die_at:
     def die(*_arguments, **_keywords):
@@ -100,6 +109,18 @@ STUBBORN = (
     "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
     "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
     "time.sleep(300)\\n"
+)
+
+# A `kanban --mission` child part-way through its step: it reports itself,
+# works until the fixture releases it, and records that it finished. The
+# default SIGTERM disposition is left alone, so a stop that cuts the step off
+# ends it without a finish -- which is what leaves a real mission interrupted.
+STEP = (
+    "import os, sys, time\\n"
+    "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
+    "while not os.path.exists(sys.argv[2]):\\n"
+    "    time.sleep(0.02)\\n"
+    "open(sys.argv[3], 'w').write('finished')\\n"
 )
 
 
@@ -137,8 +158,17 @@ def alive(pid):
 def main():
     plan = read_json(PLAN, {})
     index = len(recorded())
+    # The dashboard's commands, consumed as a controller iteration consumes
+    # them: whatever is queued when the pass begins, and nothing after.
+    consumed = []
+    requests = plan.get("requests_dir")
+    if requests and os.path.isdir(requests):
+        for name in sorted(os.listdir(requests)):
+            os.unlink(os.path.join(requests, name))
+            consumed.append(name)
     record(
         {
+            "consumed": consumed,
             "argv": sys.argv[1:],
             "cwd": os.getcwd(),
             "stdin_is_a_terminal": sys.stdin.isatty(),
@@ -155,9 +185,14 @@ def main():
     if worker_marker:
         # What a mission child hands agent work to: a process leading a
         # session of its own, which no settlement of the runner's chain may
-        # reach.
+        # reach. It writes to logs of its own rather than to the pass's
+        # streams, so it holds none of them open behind the pass.
         subprocess.Popen(
-            [sys.executable, "-c", STUBBORN, worker_marker], start_new_session=True
+            [sys.executable, "-c", STUBBORN, worker_marker],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         while not os.path.exists(worker_marker):
             time.sleep(0.01)
@@ -168,6 +203,12 @@ def main():
         subprocess.Popen([sys.executable, "-c", STUBBORN, child_marker])
         while not os.path.exists(child_marker):
             time.sleep(0.01)
+    step = plan.get("step_child")
+    if step:
+        # Waited for, as a real pass waits for every mission child it starts.
+        subprocess.Popen(
+            [sys.executable, "-c", STEP, step["marker"], step["release"], step["done"]]
+        ).wait()
     reports = plan.get("reports") or []
     report = reports[index] if index < len(reports) else plan.get("report")
     if report is None:
@@ -231,6 +272,15 @@ def wait_until(predicate, *, timeout=25.0, message="condition"):
             return value
         time.sleep(0.01)
     raise AssertionError(f"timed out waiting for {message}")
+
+
+def force_stop(child):
+    """Stop a controller twice, which is a forced stop: the first drains, and
+    the second -- sent once the first has been published -- escalates."""
+    os.killpg(child.pid, signal.SIGTERM)
+    # Apart, so the two are not coalesced into one pending signal.
+    time.sleep(0.5)
+    os.killpg(child.pid, signal.SIGTERM)
 
 
 def process_gone(pid):
@@ -1599,11 +1649,13 @@ class LifecycleTests(MissionRunnerFixture):
         self.assertEqual(status, 1)
         self.assertIn("already running", stderr)
         self.assertEqual(len(self.recorded()), before)
-        os.killpg(first.pid, signal.SIGTERM)
+        force_stop(first)
         first.wait(timeout=30)
 
     def test_a_stop_ends_the_run_without_recording_a_failure(self):
-        self.write_plan({"report": {"document": pass_document(), "hold_seconds": 30}})
+        # One stop drains: the pass holding its report is let finish, and the
+        # run ends on purpose with nothing to report.
+        self.write_plan({"report": {"document": pass_document(), "hold_seconds": 3}})
         child = self.start_controller()
         wait_until(lambda: self.recorded(), message="a pass to start")
         os.killpg(child.pid, signal.SIGTERM)
@@ -1613,24 +1665,29 @@ class LifecycleTests(MissionRunnerFixture):
         self.assertEqual(snapshot["state"], service.STATE_STOPPED)
         self.assertEqual(snapshot["open_incidents"], [])
 
-    def test_a_stop_during_a_partial_report_records_no_failure(self):
+    def test_a_forced_stop_during_a_partial_report_records_no_pass_failure(self):
         # A report is written in one call, but the pipe need not carry it in
         # one piece and its attention list is unbounded — so a stop can land
         # after a nonempty prefix. Emptiness was the old test for "interrupted",
-        # which turned an operator's own stop into a failure incident.
+        # which turned an operator's own stop into a failure incident. Only a
+        # stop that cut the pass off can do that, so this one is forced; the
+        # escalation is what it reports instead.
         document = pass_document(attention=[attention_entry()])
         prefix = json.dumps(document)[: len(json.dumps(document)) // 2]
         self.write_plan({"report": {"raw": prefix, "status": 0, "hold_seconds": 30}})
         child = self.start_controller()
         wait_until(lambda: self.recorded(), message="a pass to start")
-        os.killpg(child.pid, signal.SIGTERM)
+        force_stop(child)
         child.wait(timeout=30)
         self.assertEqual(child.returncode, 0)
         snapshot = self.status()
         self.assertEqual(snapshot["state"], service.STATE_STOPPED)
-        self.assertEqual(snapshot["open_incidents"], [])
+        self.assertEqual(
+            [incident["kind"] for incident in snapshot["open_incidents"]],
+            [service.DRAIN_ESCALATION_INCIDENT_KIND],
+        )
 
-    def test_stopping_leaves_no_mission_child_of_the_active_pass_running(self):
+    def test_a_forced_stop_leaves_no_mission_child_of_the_active_pass_running(self):
         # Requirement 11's containment, staged against a mission child that
         # ignores SIGTERM: what this proves is the controller's escalation
         # rather than the child's cooperation.
@@ -1645,11 +1702,308 @@ class LifecycleTests(MissionRunnerFixture):
         wait_until(marker.exists, message="the mission child to register itself")
         mission_pid = int(marker.read_text(encoding="utf-8"))
         self.addCleanup(lambda: process_gone(mission_pid) or os.kill(mission_pid, signal.SIGKILL))
-        os.killpg(child.pid, signal.SIGTERM)
+        force_stop(child)
         child.wait(timeout=40)
         wait_until(
             lambda: process_gone(mission_pid),
             message="the mission child to be ended by the stop",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Draining on stop
+# ---------------------------------------------------------------------------
+
+
+class DrainTests(MissionRunnerFixture):
+    """RUN-8: a stop lets the pass in flight finish its step (design D-15),
+    for at most the drain grace (D-19), and a second stop or the grace running
+    out escalates as a forced stop does."""
+
+    def setUp(self):
+        super().setUp()
+        self.step_marker = self.root / "step.pid"
+        self.release = self.root / "release"
+        self.done = self.root / "step.done"
+
+    def step_plan(self, **extra):
+        plan = {
+            "step_child": {
+                "marker": str(self.step_marker),
+                "release": str(self.release),
+                "done": str(self.done),
+            },
+            "report": {"document": pass_document()},
+        }
+        plan.update(extra)
+        self.write_plan(plan)
+
+    def ensure_gone(self, pid):
+        def kill():
+            if not process_gone(pid):
+                with contextlib_suppress():
+                    os.kill(pid, signal.SIGKILL)
+        self.addCleanup(kill)
+
+    def start_mid_step(self, *arguments, environment=None):
+        """A controller whose pass has a mission child part-way through its
+        step, and that child's identifier."""
+        child = self.start_controller(*arguments, environment=environment)
+        wait_until(self.step_marker.exists, message="the mission child to begin its step")
+        step = int(wait_until(lambda: self.step_marker.read_text(encoding="utf-8")))
+        self.ensure_gone(step)
+        return child, step
+
+    def stop(self, child):
+        # The wrapper alone, as a service manager's stop reaches it: the pass
+        # leads a session of its own, which only the wrapper may signal.
+        os.kill(child.pid, signal.SIGTERM)
+
+    def wait_for_state(self, state):
+        return wait_until(
+            lambda: (snapshot := self.status())["state"] == state and snapshot,
+            message=f"the status document to report {state}",
+        )
+
+    def incident_kinds(self):
+        return [incident["kind"] for incident in self.status()["open_incidents"]]
+
+    def test_a_drain_lets_the_mission_child_finish_its_step(self):
+        self.step_plan()
+        child, step = self.start_mid_step()
+        self.stop(child)
+        draining = self.wait_for_state(service.STATE_DRAINING)
+        self.assertIsNotNone(draining["pass_pid"])
+        self.assertIsNone(draining["reason"])
+        # Nothing is signalled: the step goes on, and so does the drain.
+        time.sleep(1.5)
+        self.assertFalse(process_gone(step))
+        self.assertFalse(self.done.exists())
+        self.assertIsNone(child.poll())
+        self.assertEqual(self.status()["state"], service.STATE_DRAINING)
+        self.release.touch()
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        self.assertTrue(self.done.exists(), "the step was cut off")
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertIn("finished its step", snapshot["message"])
+        self.assertEqual(snapshot["open_incidents"], [])
+        # No further pass: the one in flight was the last.
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertFalse(self.job().pass_record_path.exists())
+
+    def test_the_grace_escalates_as_a_forced_stop(self):
+        # A stubborn mission child beside the step, so what is proved is that
+        # the escalation kills rather than only asks.
+        stubborn = self.root / "stubborn.pid"
+        self.step_plan(mission_child=str(stubborn))
+        child, step = self.start_mid_step(
+            environment=self.environment(
+                FIXTURE_DRAIN_GRACE_SECONDS="2", FIXTURE_STOP_GRACE_SECONDS="1"
+            )
+        )
+        stubborn_pid = int(stubborn.read_text(encoding="utf-8"))
+        self.ensure_gone(stubborn_pid)
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        child.wait(timeout=40)
+        self.assertEqual(child.returncode, 0)
+        wait_until(lambda: process_gone(step), message="the step to be cut off")
+        wait_until(lambda: process_gone(stubborn_pid), message="the stubborn child to be killed")
+        self.assertFalse(self.done.exists())
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        # The escalation survives the final write, in the message and as an
+        # open incident, which is what tells it apart from a clean drain.
+        self.assertIn("escalating the drain", snapshot["message"])
+        self.assertIn("grace", snapshot["message"])
+        self.assertEqual(self.incident_kinds(), [service.DRAIN_ESCALATION_INCIDENT_KIND])
+        self.assertIn("interrupted", snapshot["open_incidents"][0]["detail"])
+        self.assertEqual(len(self.recorded()), 1)
+
+    def test_a_second_stop_escalates_at_once(self):
+        stubborn = self.root / "stubborn.pid"
+        self.step_plan(mission_child=str(stubborn))
+        # The service's own five-minute grace: only the second stop can end
+        # this inside the test's patience.
+        child, step = self.start_mid_step(
+            environment=self.environment(FIXTURE_STOP_GRACE_SECONDS="1")
+        )
+        stubborn_pid = int(stubborn.read_text(encoding="utf-8"))
+        self.ensure_gone(stubborn_pid)
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        self.stop(child)
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        wait_until(lambda: process_gone(step), message="the step to be cut off")
+        wait_until(lambda: process_gone(stubborn_pid), message="the stubborn child to be killed")
+        self.assertFalse(self.done.exists())
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertIn("second stop", snapshot["message"])
+        self.assertEqual(self.incident_kinds(), [service.DRAIN_ESCALATION_INCIDENT_KIND])
+
+    def test_a_stop_between_passes_exits_without_waiting(self):
+        child = self.start_controller("--interval", "60")
+        wait_until(
+            lambda: self.recorded() and self.status()["state"] == service.STATE_IDLE,
+            message="the first pass to finish",
+        )
+        started = time.monotonic()
+        self.stop(child)
+        child.wait(timeout=30)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(child.returncode, 0)
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["message"], "Stopped intentionally.")
+        self.assertEqual(len(self.recorded()), 1)
+
+    def test_a_request_queued_during_the_drain_is_left_for_the_next_runner(self):
+        requests = self.root / "store" / "control" / "requests"
+        requests.mkdir(parents=True)
+        self.step_plan(requests_dir=str(requests))
+        child, _step = self.start_mid_step()
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        queued = requests / "request-1.json"
+        queued.write_text("{}", encoding="utf-8")
+        self.release.touch()
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        self.assertTrue(queued.exists(), "the drain consumed or discarded a queued command")
+        self.write_plan({"requests_dir": str(requests), "report": {"document": pass_document()}})
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        self.assertFalse(queued.exists())
+        self.assertEqual(self.recorded()[-1]["consumed"], ["request-1.json"])
+
+    def test_a_detached_worker_is_not_waited_for_and_outlives_the_drain(self):
+        worker_marker = self.root / "worker.pid"
+        self.step_plan(detached_worker=str(worker_marker))
+        child, _step = self.start_mid_step()
+        worker = int(worker_marker.read_text(encoding="utf-8"))
+        self.ensure_gone(worker)
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        self.release.touch()
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 0)
+        self.assertFalse(process_gone(worker))
+        # The next runner neither settles it nor finds it gone: its pass sees
+        # the worker still live, which is what it reconciles against rather
+        # than dispatching the step again.
+        self.write_plan({"report_alive": [worker], "report": {"document": pass_document()}})
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        self.assertFalse(process_gone(worker))
+        self.assertEqual(self.recorded()[-1]["alive"], [worker])
+
+    def test_the_run_lock_is_handed_over_once_the_drain_ends(self):
+        self.step_plan()
+        child, _step = self.start_mid_step()
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        status, _stdout, stderr = self.run_controller("--passes", "1", timeout=30)
+        self.assertEqual(status, 1)
+        self.assertIn("already running", stderr)
+        with self.assertRaises(service.ServiceError):
+            with service.exclusive_of_runs(self.job(), "installing it"):
+                pass
+        self.assertEqual(len(self.recorded()), 1)
+        self.release.touch()
+        child.wait(timeout=30)
+        with service.exclusive_of_runs(self.job(), "installing it"):
+            pass
+        self.write_plan({"report": {"document": pass_document()}})
+        status, _stdout, stderr = self.run_controller("--passes", "1")
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(self.recorded()), 2)
+
+    def test_a_pass_that_fails_on_its_own_during_a_drain_still_fails(self):
+        # A drain signals nothing, so what the pass it waited for wrote is the
+        # pass's own verdict: an unreadable report is a failure, not a stop.
+        prefix = json.dumps(pass_document())[:20]
+        self.step_plan(report={"raw": prefix, "status": 0})
+        child, _step = self.start_mid_step()
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        self.release.touch()
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 1)
+        self.assertEqual(self.status()["state"], service.STATE_FAILED)
+        self.assertEqual(self.incident_kinds(), [service.PASS_INCIDENT_KIND])
+
+    def test_a_completed_pass_during_a_drain_leaves_draining_until_the_stop(self):
+        # The pass's own verdict is kept as the last pass, but never written as
+        # the run's state: nothing is running or idle once a drain has begun.
+        self.step_plan(report={"document": pass_document(admitted=[admitted_entry()])})
+        child, _step = self.start_mid_step()
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        self.release.touch()
+        seen = set()
+        while child.poll() is None:
+            seen.add(self.status()["state"])
+            time.sleep(0.01)
+        self.assertEqual(child.returncode, 0)
+        self.assertLessEqual(seen, {service.STATE_DRAINING, service.STATE_STOPPED})
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_STOPPED)
+        self.assertEqual(snapshot["passes"], 1)
+        self.assertEqual(snapshot["last_pass"]["admitted"], [admitted_entry()])
+
+
+class DrainClockTests(unittest.TestCase):
+    """The grace, read against an injected clock rather than waited out."""
+
+    def controller(self, root):
+        patched = mock.patch.object(service, "account_home", lambda: Path(root))
+        patched.start()
+        self.addCleanup(patched.stop)
+        job = service.job_for_identity(Path(root), "acme/widgets")
+        return service.Controller(job, kanban=Path("/nonexistent/kanban"), interval=60)
+
+    def test_the_grace_is_measured_from_the_first_stop_and_never_reset(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            with mock.patch.object(service.time, "monotonic", return_value=1000.0):
+                controller.handle_stop(signal.SIGTERM, None)
+            self.assertEqual(controller._drain_deadline, 1000.0 + service.DRAIN_GRACE_SECONDS)
+            with mock.patch.object(service.time, "monotonic", return_value=1100.0):
+                controller.handle_stop(signal.SIGTERM, None)
+            self.assertEqual(controller._drain_deadline, 1000.0 + service.DRAIN_GRACE_SECONDS)
+
+    def test_a_first_stop_signals_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            fake_child = mock.Mock()
+            fake_child.poll.return_value = None
+            controller._child = fake_child
+            with mock.patch.object(service.os, "killpg") as killpg:
+                controller.handle_stop(signal.SIGTERM, None)
+                killpg.assert_not_called()
+                self.assertIsNone(controller._escalation)
+                controller.handle_stop(signal.SIGTERM, None)
+                killpg.assert_called_once_with(fake_child.pid, signal.SIGTERM)
+                self.assertIn("second stop", controller._escalation)
+                controller.handle_stop(signal.SIGTERM, None)
+                killpg.assert_called_with(fake_child.pid, signal.SIGKILL)
+
+    def test_the_drain_grace_is_five_minutes_and_the_unit_outlasts_it(self):
+        # D-19: a five-minute grace, and a systemd stop timeout that covers it,
+        # the escalation's polite stop and kill, and the settlement after.
+        self.assertEqual(service.DRAIN_GRACE_SECONDS, 300.0)
+        timeout = service.service_manager.MISSION_RUNNER_NAMESPACE.stop_timeout_seconds
+        self.assertIsNotNone(timeout)
+        self.assertGreater(
+            timeout,
+            service.DRAIN_GRACE_SECONDS
+            + service.STOP_GRACE_SECONDS
+            + service.SETTLE_KILL_SECONDS
+            + 60,
         )
 
 
@@ -2323,6 +2677,39 @@ class StatusTests(MissionRunnerFixture):
         snapshot = service.status_snapshot(job)
         self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
         self.assertIn("different process", snapshot["reason"])
+
+    def test_a_stale_draining_document_is_not_believed(self):
+        # Draining is live, so it is held to the runner's identity like the
+        # others: a wrapper that died mid-drain leaves no draining runner, and
+        # its document must not read as one -- nor as a stopped job.
+        job = self.job()
+        job.status_path.parent.mkdir(parents=True, exist_ok=True)
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait(timeout=30)
+        for runner_pid, identity, reason in (
+            (gone.pid, "Thu Jan  1 00:00:00 1970", "not running"),
+            (os.getpid(), "Thu Jan  1 00:00:00 1970", "different process"),
+        ):
+            with self.subTest(reason=reason):
+                job.status_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": service.STATUS_SCHEMA,
+                            "version": service.STATUS_VERSION,
+                            "state": service.STATE_DRAINING,
+                            "repository": self.identity,
+                            "repo": str(self.repo),
+                            "runner_pid": runner_pid,
+                            "runner_identity": identity,
+                            "pass_pid": runner_pid,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                snapshot = service.status_snapshot(job)
+                self.assertEqual(snapshot["state"], service.STATE_UNKNOWN)
+                self.assertIn(reason, snapshot["reason"])
+                self.assertIsNone(snapshot["runner_pid"])
 
     def test_a_live_state_with_no_runner_identity_is_not_believed(self):
         # A document that records no identity cannot have its process

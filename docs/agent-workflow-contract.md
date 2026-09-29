@@ -1020,8 +1020,9 @@ reimplement the removal, and `--check` remains read-only.
   job that per-repository jobs replaced only ever existed under launchd.
 - **Invocation:** `launchctl` (`bootstrap`/`bootout`/`kickstart`/`print`/
   `kill`) manages the LaunchAgent on macOS, and `systemctl --user`
-  (`daemon-reload`/`reset-failed`/`start`/`stop`/`show`) manages the user unit
-  on Linux. Managing a job is `tools/service_manager.py`'s alone
+  (`daemon-reload`/`reset-failed`/`start`/`stop`/`kill`/`show`) manages the
+  user unit on Linux. `kill --kill-whom=main` is the mission runner's alone: it
+  is how a second stop reaches a draining runner (§2.12). Managing a job is `tools/service_manager.py`'s alone
   — the controller and the installer both reach their host's manager through
   that backend, and neither builds a `launchctl` or `systemctl` argument
   vector, reads either one's output, or writes or parses a plist or a unit
@@ -2446,6 +2447,11 @@ report did not name.
   the job's own process group — already did, and whatever of the runner's own
   chain a crash leaves behind is settled by the rule above on the next start.
   The PR drainer's and the issue approval service's units keep `KillMode=mixed`.
+  The mission runner's unit alone also declares `TimeoutStopSec=420`
+  (`ServiceNamespace.stop_timeout_seconds`), longer than its drain's
+  five-minute grace plus the escalation and settlement after it, so systemd
+  never SIGKILLs a drain the wrapper is still inside; the other two keep
+  systemd's default.
   An installation made before this is upgraded by no migration: `start`
   rewrites and reloads the definition before it kicks the job, so the next
   start of a *stopped* runner carries the new kill mode. A start that finds the
@@ -2498,13 +2504,44 @@ report did not name.
   published a status — and refuses to run against any directory but the one the
   record names, because relocating an installation is the installer's operation
   and only it takes back what the old directory is left holding — and `stop`
-  asks it to end and waits until the manager agrees it has. None of them takes an install-directory option: the copy that
+  asks it to end and waits until the status document reports `draining`, or,
+  when there was nothing to drain, until the manager agrees the run is gone;
+  its result's `draining` says which. A `start` during a drain starts nothing
+  and says so. None of them takes an install-directory option: the copy that
   runs them is the installation they are about, and it reads its own location
   from the environment that launched it. Three of the four refuse a location
   the discovery record does not name, because writing a definition or a record
   entry somewhere else moves an installation and only the installer takes back
   what the old directory is left holding; `stop` needs no such refusal, because
   it writes neither.
+- **Stop and upgrade:** a normal stop drains (the mission runner design's D-15
+  and D-19). The status document's states are `running`, `idle`, `waiting`,
+  `draining`, `stopped`, and `failed`, and `status` synthesizes `unknown` for a
+  document it cannot believe. `draining` is live, held to the runner's
+  identity like the other three, and decoded by `Kanban.MissionRunnerService`
+  as an activity of its own. On the first stop signal the wrapper starts no
+  further pass. With none in flight it stops at once. With one in flight it
+  signals nothing, publishes `draining`, and lets that pass and its `--mission`
+  children finish their step. It records `stopped` and exits, releasing the
+  run lock exactly once, when the pass has finished. A pass that fails on its
+  own while draining still fails the run with its incident. It never waits for
+  a detached worker: those keep running and the next runner's controller
+  iterations adopt them. A command under the mission store's
+  `control/requests/` that the draining pass did not consume is left for the
+  next runner. The drain's grace is five minutes from the first stop, never
+  reset. When it runs out, or a second stop signal arrives, the wrapper
+  escalates exactly as a forced stop: the pass's process group is signalled,
+  then killed ten seconds later. A mission whose step that cuts off is left
+  `interrupted` by the next runner's reconciliation (§2.12's Authority
+  bullet), and a `mission-runner-drain-escalated` incident and the terminal
+  status message both report the escalation. A `stop` issued while the status
+  document reports `draining` is that second signal, delivered to the wrapper
+  itself through the backend's `repeat_stop_signal` (`launchctl kill SIGTERM`,
+  or `systemctl --user kill --kill-whom=main --signal=SIGTERM`, since systemd
+  merges a second stop request into the one in progress), and it waits for the
+  run to be gone. An upgrade is the operator's stop, install, and start:
+  install and uninstall are refused while the draining run holds its lock, and
+  succeed once it has ended.
 - **Notifications:** off by default, and when enabled the operator's own
   configured command is run through the bounded command-capture seam with two
   fixed values appended — the repository identity and `attention-required` —

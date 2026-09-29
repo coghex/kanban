@@ -3960,7 +3960,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   them. The status document is decoded against a pinned schema and version and
   against the board's own repository identity, and the states it distinguishes
   are the runner's own: a pass advancing, idle between passes, waiting on a
-  person, stopped on purpose, and a run that failed. The open incidents
+  person, draining the pass in flight before it stops, stopped on purpose, and
+  a run that failed. Draining is live, as the first three are, and is neither
+  advancing nor stopped. The open incidents
   published beside them are decoded there too, each checked for its own schema
   and version before its payload, so one another release wrote is absent rather
   than misread.
@@ -3975,7 +3977,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   and none is reported as an absent installation. Start and stop go through the
   same bounded, process-grouped invocation the two services above use, and keep
   the same distinction between a transition whose consequence the next status
-  read reconciles and an operation that gets no such promise.
+  read reconciles and an operation that gets no such promise. A stop returns as
+  soon as the runner reports draining, never when the drain ends, so the
+  dashboard's transition budget never has to cover a step.
 - One mission's durable events replay from a cursor its caller supplies: the
   mission's own journal under the store's decoding rules — a line another
   release wrote consumed and absent, a malformed or foreign one reported rather
@@ -4240,6 +4244,40 @@ Defaults:
   stopped runner carries the new kill mode. A start that finds the runner
   already running refreshes nothing, so that run's stop is still governed by
   the definition it was started from until it is stopped and started again.
+- A normal stop, and therefore a normal upgrade, which is a stop, an install,
+  and a start, *drains* the runner rather than cutting its current step off
+  (the mission runner design's D-15 and D-19). On the first stop signal the
+  wrapper starts no further pass. With none in flight it stops at once. With
+  one in flight it signals nothing, publishes `draining`, and lets that pass
+  and its `--mission` children finish their step. A step waits on GitHub calls,
+  never on an agent. The run then records `stopped` and exits, releasing its
+  run lock exactly once. A pass that fails on its own during a drain still
+  fails the run with its incident: only a pass the stop cut off is excused
+  from its verdict. A drain never waits for a detached worker. The workers the
+  draining pass dispatched keep running, and the next runner's controller
+  iterations adopt them rather than dispatching their steps again. A command
+  queued under the mission store's `control/requests/` that the draining pass
+  did not consume stays there for the next runner. The drain is bounded by a
+  five-minute grace, measured from the first stop and never reset. A pass
+  still running when it ends is cut off exactly as a forced stop cuts one off:
+  its process group is signalled and, ten seconds later, killed. A second stop
+  signal during a drain does the same at once. An escalation opens a
+  `mission-runner-drain-escalated` incident, and the terminal status message
+  still names it. A mission whose step it cut off is left `interrupted` by the
+  next runner's reconciliation. `stop` sends its signal and returns once the
+  status document reports `draining`, or once the run is gone when there was
+  nothing to drain, saying which. A `stop` issued while the runner is already
+  draining is the second signal. It is sent to the wrapper itself (`launchctl
+  kill`, or `systemctl --user kill --kill-whom=main`), because systemd folds a
+  second stop request into the one in progress and signals nothing, and it
+  then waits for the run to be gone. A `start` during a drain starts nothing
+  and says so. An install or uninstall is refused while the draining run holds
+  its lock and succeeds once the drain has ended, so an upgrade hands the lock
+  over exactly once. The mission runner's systemd unit alone declares
+  `TimeoutStopSec=420`, longer than the grace plus the escalation and
+  settlement after it, so systemd never kills a drain the wrapper is still
+  inside. The other two units keep systemd's default. launchd's `kill` has no
+  timeout.
 - Beside those runtime documents the service keeps durable records of its
   *installation*. `config.json` in the service root is the discovery record —
   one `repositories` table holding each installed repository's entry, naming the
@@ -4943,7 +4981,14 @@ systemd unit now signals only its wrapper (`KillMode=process`), so a stop,
 restart, or crash of the runner leaves every mission-dispatched worker and its
 agent running, as launchd already did, and the runner's own leftovers are
 settled on the next start; an existing installation takes the new unit on the
-next start of a stopped runner. A step whose launch was journaled
+next start of a stopped runner. A normal stop or upgrade now drains the runner
+instead of cutting its current step off: the wrapper starts no further pass,
+publishes a `draining` state the dashboard decodes as its own, and lets the
+pass in flight and its `--mission` children finish their step, without waiting
+for detached workers. `stop` returns once the drain is recorded. A drain is
+bounded by a five-minute grace, after which, or on a second stop, it escalates
+as a forced stop does and opens an incident. The runner's systemd unit
+declares a stop timeout longer than that. A step whose launch was journaled
 and cut off before any worker or result was recorded is `interrupted`, stops
 its mission, is never retried by a later pass or a restarted service, and is
 recovered by the runner's `override`. Every mission session's event stream and
