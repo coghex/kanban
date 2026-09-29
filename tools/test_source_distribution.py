@@ -227,14 +227,17 @@ EXCLUDED_TRACKED_PATHS = (
     # added later inherits the decision, and so a non-Markdown file such as a
     # chooser config.yml is covered too -- §7 sees only the *.md files.
     ".github/ISSUE_TEMPLATE/",
-    # CI's own harness for the drainer's systemd lifecycle: an image that boots
-    # systemd, the unit that runs the check inside it, and the check itself.
-    # Out for the same reason the workflows below are — it verifies the source
-    # distribution rather than being part of it, and it is useless without a
-    # container runtime and a GitHub Actions runner to build one on.
+    # CI's own systemd harness: an image that boots systemd, and for each of
+    # the drainer's lifecycle and the mission runner's worker survival the unit
+    # that runs the check inside it and the check itself. Out for the same
+    # reason the workflows below are — it verifies the source distribution
+    # rather than being part of it, and it is useless without a container
+    # runtime and a GitHub Actions runner to build one on.
     ".github/systemd-lifecycle/Dockerfile",
     ".github/systemd-lifecycle/lifecycle-check.service",
     ".github/systemd-lifecycle/lifecycle_check.py",
+    ".github/systemd-lifecycle/mission-runner-check.service",
+    ".github/systemd-lifecycle/mission_runner_check.py",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     ".github/workflows/review-gate.yml",

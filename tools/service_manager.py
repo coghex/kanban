@@ -16,8 +16,10 @@ load, kick, stop, and remove it.
 
 Three services now share that boundary, so a backend is constructed for one
 `ServiceNamespace`: the prefix its identifiers are built from, the description
-its definitions carry, and whether it has a machine-wide singleton predating
-per-repository jobs. Only the drainer has one. The namespace is what keeps
+its definitions carry, whether it has a machine-wide singleton predating
+per-repository jobs, and whether a stop may kill what the job leaves behind.
+Only the drainer has a singleton, and only the mission runner's stop leaves its
+descendants running. The namespace is what keeps
 three services' jobs, and the definitions they are written from, from ever
 colliding without any of them restating a single identifier of its own. A
 service is a namespace rather than a backend: the two backends below serve
@@ -215,40 +217,67 @@ class ServiceNamespace:
 
     A backend is constructed for exactly one of these, so every identifier it
     derives, every definition it writes, and every legacy question it answers
-    belong to that service alone. Nothing else about a backend varies: every
-    service here is a non-resident job started on demand, and a namespace that
-    could change that would be a second lifecycle rather than a second name.
+    belong to that service alone. Every service here is a non-resident job
+    started on demand, and a namespace that could change that would be a second
+    lifecycle rather than a second name. The one other thing a namespace varies
+    is what a stop leaves behind — `kill_mode` below.
 
     `legacy_prefix` is the machine-wide singleton this namespace's
     per-repository jobs replaced, or None for a namespace that never had one.
     None is not "no singleton installed" — it is "this service has no such
     concept", which is why asking for its identifier is an error rather than
     an answer.
+
+    `kill_mode` is what systemd does to the rest of the unit's cgroup once the
+    main process has been signalled. `KILL_MODE_MIXED` signals the main process
+    alone and then SIGKILLs whatever the cgroup still holds after it exits;
+    `KILL_MODE_PROCESS` signals the main process alone and kills nothing else.
+    It is declared here rather than inferred from a name because it is a
+    property of what the service's descendants are: a process that leaves its
+    session still stays in the unit's cgroup, so under `mixed` nothing a job
+    starts can outlive it. The drainer and the issue approval service want that
+    — their children are theirs, and a stop that left one behind would leave a
+    merge or a review running with no supervisor. The mission runner does not:
+    the workers its missions dispatch lead sessions of their own and belong to
+    no pass, and a runner that stopped, restarted, or crashed must leave them
+    and their agents running (`docs/designs/mission_runner_design.md` D-2 and
+    D-17). Whatever of the runner's own chain a crash leaves behind is settled
+    by the next run instead (`mission_runner_service.settle_pass`). launchd
+    has no counterpart to declare: it kills only the job's own process group,
+    which every one of those processes has already left.
     """
 
     name: str
     prefix: str
     description: str
     legacy_prefix: str | None
+    kill_mode: str
 
+
+# The two systemd kill modes a namespace may declare. See `ServiceNamespace`.
+KILL_MODE_MIXED = "mixed"
+KILL_MODE_PROCESS = "process"
 
 DRAINER_NAMESPACE = ServiceNamespace(
     name="pr-drainer",
     prefix=LABEL_PREFIX,
     description="Kanban PR drainer",
     legacy_prefix=LEGACY_LABEL,
+    kill_mode=KILL_MODE_MIXED,
 )
 ISSUE_APPROVAL_NAMESPACE = ServiceNamespace(
     name="issue-approval",
     prefix=ISSUE_APPROVAL_LABEL_PREFIX,
     description="Kanban issue approval",
     legacy_prefix=None,
+    kill_mode=KILL_MODE_MIXED,
 )
 MISSION_RUNNER_NAMESPACE = ServiceNamespace(
     name="mission-runner",
     prefix=MISSION_RUNNER_LABEL_PREFIX,
     description="Kanban mission runner",
     legacy_prefix=None,
+    kill_mode=KILL_MODE_PROCESS,
 )
 
 
@@ -684,10 +713,17 @@ class SystemdBackend(ServiceManagerBackend):
         #   Restart=no       plus no `[Install]` section: started on demand
         #                    and never resident, which is launchd's
         #                    RunAtLoad=false/KeepAlive=false.
-        #   KillMode=mixed   only the main process is signalled, so the runner
-        #                    performs its own shutdown and forwards to its
-        #                    child exactly as it does under launchd, instead
-        #                    of systemd SIGTERMing the whole cgroup first.
+        #   KillMode         the namespace's own (`ServiceNamespace.kill_mode`).
+        #                    Both modes signal only the main process, so the
+        #                    runner performs its own shutdown and forwards to
+        #                    its child exactly as it does under launchd,
+        #                    instead of systemd SIGTERMing the whole cgroup
+        #                    first. They differ in what happens once the main
+        #                    process is gone, by a stop or on its own: `mixed`
+        #                    then SIGKILLs everything the cgroup still holds,
+        #                    new sessions included, and `process` leaves it —
+        #                    which is what lets a mission-dispatched worker
+        #                    outlive the mission runner.
         #
         # There is deliberately no start rate limit: launchd's ThrottleInterval
         # bounds relaunches of a crashing job, and a unit that neither restarts
@@ -710,7 +746,7 @@ class SystemdBackend(ServiceManagerBackend):
             f"StandardError=append:{_unit_value(definition.stderr_path)}",
             "Restart=no",
             "KillSignal=SIGTERM",
-            "KillMode=mixed",
+            f"KillMode={self._namespace.kill_mode}",
         ]
         lines.extend(
             "Environment=" + _unit_word(f"{name}={value}")

@@ -302,6 +302,26 @@ class CiWorkflowShapeTests(unittest.TestCase):
         self.assertIn(HASKELL_JOB, others)
         self.assertIn(PYTHON_JOB, others)
 
+    def test_the_systemd_job_runs_the_mission_runner_survival_check(self):
+        # RUN-9 (#751): that a mission's worker outlives the runner's unit is
+        # proved under the real user manager, so the job has to start the
+        # check's unit, the image has to install it, and it has to run the
+        # tracked check rather than anything else.
+        directives = job_directives(SYSTEMD_JOB)
+        self.assertIn("systemctl start lifecycle-check.service", directives)
+        self.assertIn("systemctl start mission-runner-check.service", directives)
+        harness = LIFECYCLE_CHECK.parent
+        self.assertIn(
+            "/etc/systemd/system/mission-runner-check.service",
+            (harness / "Dockerfile").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "ExecStart=/usr/bin/python3 "
+            "/workspace/.github/systemd-lifecycle/mission_runner_check.py",
+            (harness / "mission-runner-check.service").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((harness / "mission_runner_check.py").is_file())
+
     def test_the_aggregate_runs_whatever_its_dependencies_did(self):
         self.assertEqual(job_field(AGGREGATE_JOB, "if"), "always()")
 

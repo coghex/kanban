@@ -2411,6 +2411,21 @@ report did not name.
   and a survivor that cannot be verified gone fails the run with a
   `mission-runner-unsettled-pass` incident, leaving the record for every later
   start. It never reaches a detached worker, which leads a session of its own.
+  Nor does the service manager. A new session leaves the process group but not
+  a systemd unit's cgroup, so the mission runner's unit alone is rendered with
+  `KillMode=process` (`tools/service_manager.py`'s `ServiceNamespace.kill_mode`):
+  systemd signals only the wrapper and kills nothing else once it is gone. A
+  stop, a restart, or a crash of the runner on Linux therefore leaves every
+  mission-dispatched worker and its agent running, as launchd — which kills only
+  the job's own process group — already did, and whatever of the runner's own
+  chain a crash leaves behind is settled by the rule above on the next start.
+  The PR drainer's and the issue approval service's units keep `KillMode=mixed`.
+  An installation made before this is upgraded by no migration: `start`
+  rewrites and reloads the definition before it kicks the job, so the next
+  start of a *stopped* runner carries the new kill mode. A start that finds the
+  runner already running refreshes nothing, so that run's own stop is still
+  governed by the definition it was started from, and its workers are not
+  protected until it has been stopped and started again.
   Beside these, a per-identity run lock under `mission-runner-lock-dir`, beside the
   per-identity transition lock and the per-installation link lock a managed
   transition is performed under; and — inside each mission's own record in the

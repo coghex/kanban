@@ -465,6 +465,33 @@ class FakeServiceManager(service_manager.ServiceManagerBackend):
         )
 
 
+class RealUnitServiceManager(FakeServiceManager):
+    """The fake manager, also writing the unit file real systemd would load.
+
+    Every write goes through the real `SystemdBackend` for this service's
+    namespace as well, into whatever `service_manager.SYSTEMD_USER_DIR` names,
+    so the unit on disk is exactly what an installed runner's user manager
+    would read. The fake's own JSON definition stays the one `kick` launches
+    from and the record names: what this adds is an observation, never a second
+    route to the process.
+    """
+
+    def __init__(self, root):
+        super().__init__(root, "systemd")
+        self.real = service_manager.SystemdBackend(
+            lambda *arguments, **options: None,
+            service_manager.MISSION_RUNNER_NAMESPACE,
+        )
+
+    def unit_path(self, identifier):
+        return self.real.definition_path(identifier)
+
+    def write_definition(self, definition):
+        path = super().write_definition(definition)
+        self.real.write_definition(definition)
+        return path
+
+
 class InstallerFixture(unittest.TestCase):
     """A temporary account root, temporary checkouts, a fake `kanban`, and a
     fake service manager.
@@ -1227,6 +1254,78 @@ class StartConfirmationSystemdTests(SystemdShapeMixin, StartConfirmationTests):
 
 class LifecycleSystemdTests(SystemdShapeMixin, LifecycleTests):
     pass
+
+
+class KillModeUpgradeTests(InstallerFixture):
+    """How an installation made before RUN-9 comes to carry `KillMode=process`.
+
+    No migration: a `start` refreshes the definition before it kicks the job,
+    so the first start of a stopped installation after the installed code is
+    updated rewrites the unit and reloads it. A start that finds the runner
+    already running refreshes nothing, so that run stays under the definition
+    it was started from until it is stopped and started again.
+    """
+
+    shape = "systemd"
+
+    def setUp(self):
+        super().setUp()
+        units = self.root / "systemd" / "user"
+        units.mkdir(parents=True)
+        patched = mock.patch.object(service_manager, "SYSTEMD_USER_DIR", units)
+        patched.start()
+        self.addCleanup(patched.stop)
+        # The fixture's `service_backend` seams read `self.manager` when they
+        # are called, so replacing it here routes both modules through this one.
+        self.manager = RealUnitServiceManager(self.root / "unit-manager")
+        self.manager.configure(wrapper=self.wrapper, account=self.account)
+
+    def kill_modes(self):
+        unit = self.manager.unit_path(self.label()).read_text(encoding="utf-8")
+        return [line for line in unit.splitlines() if line.startswith("KillMode=")]
+
+    def downgrade_unit(self):
+        """Leave the unit on disk as a release before RUN-9 wrote it."""
+        path = self.manager.unit_path(self.label())
+        unit = path.read_text(encoding="utf-8")
+        self.assertIn("KillMode=process", unit)
+        path.write_text(
+            unit.replace("KillMode=process", "KillMode=mixed"), encoding="utf-8"
+        )
+        self.assertEqual(self.kill_modes(), ["KillMode=mixed"])
+
+    def test_a_start_leaves_a_stopped_installations_mixed_unit_as_process(self):
+        self.install()
+        self.downgrade_unit()
+        self.assertNotIn(
+            service.status_snapshot(self.job())["state"], service.LIVE_STATES
+        )
+        self.assertFalse(self.manager.is_running(self.label()))
+        before = len(self.manager.calls())
+
+        result = service.start_service(self.job(), self.install_dir)
+
+        self.assertTrue(result["started"])
+        self.assertEqual(self.kill_modes(), ["KillMode=process"])
+        # Rewritten, then reloaded, then started: the job is kicked from the
+        # definition the manager holds, so a reload after the kick would start
+        # the run under the old kill mode.
+        self.assertEqual(
+            [call[0] for call in self.manager.calls()[before:]],
+            ["write_definition", "load_definition", "kick"],
+        )
+
+    def test_a_start_that_finds_the_runner_running_rewrites_nothing(self):
+        self.install()
+        service.start_service(self.job(), self.install_dir)
+        self.downgrade_unit()
+        before = len(self.manager.calls())
+
+        result = service.start_service(self.job(), self.install_dir)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(self.kill_modes(), ["KillMode=mixed"])
+        self.assertEqual(self.manager.calls()[before:], [])
 
 
 class ManagerLivenessTests(InstallerFixture):
