@@ -26,7 +26,7 @@ concrete precondition
 - [x] RUN-5. Admit mission work under a two-agent ceiling with fair rotation — [#746]
 - [x] RUN-9. Keep mission workers alive when the runner's systemd unit stops — [#751]
 - [x] RUN-7. Wait out provider rate limits without holding a slot — [#752]
-- [ ] RUN-8. Drain the runner on stop and upgrade
+- [x] RUN-8. Drain the runner on stop and upgrade — [#753]
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
 
 ## Epic contract
@@ -957,6 +957,11 @@ doubling to a one-hour cap, with depleted credits stopping for the operator.
 - **Open questions:** `None`; `D-18` settles the evidence rule.
 
 ### RUN-8. Drain the runner on stop and upgrade
+
+> Filed as [#753], depending on [#744] and [#751]. Filing found no stop budget
+> covers one step, which D-19 settled before drafting: `stop` returns at
+> `draining`, and the drain escalates after a five-minute grace. A repeat stop
+> while draining escalates, per D-15.
 
 - **Outcome:** A normal stop or upgrade drains per D-15 — the current pass and
   its `--mission` children finish their step — and hands the runner lock over
