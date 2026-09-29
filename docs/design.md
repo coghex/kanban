@@ -4255,8 +4255,9 @@ Defaults:
   run lock exactly once. A pass that fails on its own during a drain still
   fails the run with its incident. Only a pass the stop cut off is excused
   from its verdict: one whose scheduler was still running when the escalation
-  reached it and died of that signal, and even then a report it had already
-  written whole is acted on. A failed run's terminal status still names an
+  reached it and died of that signal, leaving output that does not parse as
+  a whole document. Output that does parse was finished by the scheduler: a
+  valid report is acted on, and an invalid one fails the run. A failed run's terminal status still names an
   escalation. A drain never waits for a detached worker. The workers the
   draining pass dispatched keep running, and the next runner's controller
   iterations adopt them rather than dispatching their steps again. A command

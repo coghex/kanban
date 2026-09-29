@@ -1622,6 +1622,20 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
     return document
 
 
+def is_whole_json(stdout: str) -> bool:
+    """Whether the output is one complete JSON document.
+
+    A report is a single JSON object, so a prefix of one cut short by a kill
+    never parses, while anything that does parse was finished by whoever
+    wrote it -- whatever it then says.
+    """
+    try:
+        json.loads(stdout)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
 def declared_exit_status(stdout: str) -> int | None:
     """The exit status a report says its pass ends with, or None when the
     output is not a JSON object naming one as a plain integer."""
@@ -3262,14 +3276,20 @@ class Controller:
             # must not hide a pass that failed on its own. Nor may an
             # escalation that reached only the mission children a scheduler
             # left behind, after the scheduler had written its report and gone
-            # (`cut_off_by_escalation`).
+            # (`cut_off_by_escalation`). Nor, finally, a report the scheduler
+            # finished before the kill: a document that parses whole was
+            # written whole, and only a report the kill cut short -- which,
+            # being one JSON object, can never parse -- is the stop's doing
+            # (`is_whole_json`).
             #
             # A pass that *completed* is never suppressed, which is why this
             # sits after the parse rather than before it: a whole, valid report
             # is acted on however the run ended, because work that really
             # happened must not be reported as work that did not
             # (`read_report`).
-            if self.cut_off_by_escalation(command.returncode):
+            if self.cut_off_by_escalation(command.returncode) and not is_whole_json(
+                command.stdout
+            ):
                 self.log(
                     "A pass was interrupted by the stop and left no readable result; "
                     "recording no verdict for it."

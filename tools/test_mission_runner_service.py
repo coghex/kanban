@@ -2005,6 +2005,50 @@ class DrainTests(MissionRunnerFixture):
                     snapshot["last_pass"]["detail"], report["document"]["detail"]
                 )
 
+    def test_a_whole_invalid_report_written_before_the_escalation_is_a_failure(self):
+        # Complete, and wrong: the scheduler finished writing it and then the
+        # second stop killed it. Without the stop the same report fails the
+        # pass, and the kill that followed it must not change that.
+        for name, raw in (
+            ("foreign object", json.dumps({"bogus": True})),
+            ("not an object", json.dumps(["a", "list"])),
+        ):
+            with self.subTest(name):
+                self.setUp()
+                self.write_plan({"report": {"raw": raw, "status": 0, "linger_seconds": 60}})
+                child = self.start_controller(
+                    environment=self.environment(FIXTURE_STOP_GRACE_SECONDS="1")
+                )
+                wait_until(lambda: self.recorded(), message="the scheduler to run")
+                time.sleep(1.5)
+                self.stop(child)
+                self.wait_for_state(service.STATE_DRAINING)
+                self.stop(child)
+                child.wait(timeout=30)
+                self.assertEqual(child.returncode, 1)
+                snapshot = self.status()
+                self.assertEqual(snapshot["state"], service.STATE_FAILED)
+                self.assertIn("escalated", snapshot["message"])
+                self.assertEqual(
+                    sorted(self.incident_kinds()),
+                    sorted([service.DRAIN_ESCALATION_INCIDENT_KIND, service.PASS_INCIDENT_KIND]),
+                )
+
+    def test_only_output_that_does_not_parse_whole_can_be_a_cut_off_report(self):
+        document = json.dumps(pass_document(attention=[attention_entry()]))
+        for stdout, whole in (
+            ("", False),
+            ("   ", False),
+            (document[: len(document) // 2], False),
+            (document[:-1], False),
+            (document, True),
+            (document + "\n", True),
+            (json.dumps({"bogus": True}), True),
+            ("null", True),
+        ):
+            with self.subTest(stdout=stdout[:30]):
+                self.assertEqual(service.is_whole_json(stdout), whole)
+
     def test_a_scheduler_that_ends_itself_during_an_escalation_keeps_its_failure(self):
         # Alive when the escalation reaches it, but it exits with a status of
         # its own rather than dying of the signal: whatever it left -- here,
