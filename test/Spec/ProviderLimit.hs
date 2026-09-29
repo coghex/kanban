@@ -250,10 +250,41 @@ snapshotSpec = describe "the Codex account snapshot" $ do
       ( snapshotResponse
           ( "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":"
               <> window 100 resetEpoch
-              <> ",\"secondary\":{\"usedPercent\":\"lots\",\"resetsAt\":\"soon\"}}"
+              <> ",\"secondary\":{\"usedPercent\":10,\"resetsAt\":\"soon\"}}"
           )
       )
       `shouldBe` reached "rate_limit_reached" (Just resetTime)
+    -- Two blocking windows, one undatable: the latest reset cannot be
+    -- established, so the limit is undated rather than dated by the other.
+    decoded
+      ( snapshotResponse
+          ( "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":"
+              <> window 100 resetEpoch
+              <> ",\"secondary\":{\"usedPercent\":100,\"resetsAt\":\"soon\"}}"
+          )
+      )
+      `shouldBe` reached "rate_limit_reached" Nothing
+    -- A window whose usage cannot be read may be the one blocking: its reset
+    -- counts when it has one, and the latest of them wins ...
+    decoded
+      ( snapshotResponse
+          ( "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":"
+              <> window 100 resetEpoch
+              <> ",\"secondary\":{\"usedPercent\":\"lots\",\"resetsAt\":"
+              <> show (resetEpoch + 100)
+              <> "}}"
+          )
+      )
+      `shouldBe` reached "rate_limit_reached" (Just (posixSecondsToUTCTime (fromInteger (resetEpoch + 100))))
+    -- ... and it undates the limit when it has none.
+    decoded
+      ( snapshotResponse
+          ( "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":"
+              <> window 100 resetEpoch
+              <> ",\"secondary\":{\"usedPercent\":\"lots\"}}"
+          )
+      )
+      `shouldBe` reached "rate_limit_reached" Nothing
 
   it "reads the codex bucket, not an unrelated one" $
     decoded

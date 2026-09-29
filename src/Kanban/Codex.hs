@@ -219,22 +219,27 @@ parseAccountLimit = withObject "Codex RPC response" $ \response -> do
       reached <- snapshot .:? "rateLimitReachedType"
       primary <- snapshot .:? "primary"
       secondary <- snapshot .:? "secondary"
-      let resets = catMaybes (map exhaustedReset (catMaybes [primary, secondary]))
+      let limiting = catMaybes (map windowReset (catMaybes [primary, secondary]))
       pure
         CodexAccountLimit
           { codexLimitReachedType = reached,
-            codexLimitResetsAt = if null resets then Nothing else Just (maximum resets)
+            -- The latest reset among the windows blocking execution, and only
+            -- when every one of them names a usable one: a blocking window
+            -- that cannot be dated may be the one that ends last, so the
+            -- limit is undated and backs off.
+            codexLimitResetsAt = case sequence limiting of
+              Just resets@(_ : _) -> Just (maximum resets)
+              _ -> Nothing
           }
-    -- Each window on its own, and leniently. The reached type is what
-    -- identifies a limit; a window only dates it. A window this cannot read
-    -- — an unusable usage figure or reset time — dates nothing, which is the
-    -- backoff's case, rather than taking the identified limit down with it.
-    exhaustedReset :: Value -> Maybe UTCTime
-    exhaustedReset value = do
-      (usedPercent, resetSeconds) <- parseMaybe (withObject "rate-limit window" (\window -> (,) <$> window .: "usedPercent" <*> window .:? "resetsAt")) value
-      if (usedPercent :: Integer) >= 100
-        then posixSecondsToUTCTime . fromInteger <$> (resetSeconds :: Maybe Integer)
-        else Nothing
+    -- One window, read leniently. The reached type is what identifies a
+    -- limit; a window only dates it, so a window this cannot read never takes
+    -- the identified limit down with it. 'Nothing' is a window with room
+    -- left, which blocks nothing and dates nothing; @Just Nothing@ is one that
+    -- blocks — or may, when its usage cannot be read — with no usable reset.
+    windowReset :: Value -> Maybe (Maybe UTCTime)
+    windowReset value = case parseMaybe (withObject "rate-limit window" (.: "usedPercent")) value of
+      Just usedPercent | (usedPercent :: Integer) < 100 -> Nothing
+      _ -> Just (posixSecondsToUTCTime . fromInteger <$> (parseMaybe (withObject "rate-limit window" (.: "resetsAt")) value :: Maybe Integer))
 
 durationLabel :: Integer -> Text
 durationLabel 300 = "5 hour"

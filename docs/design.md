@@ -376,7 +376,8 @@ Such a step becomes `waiting_capacity`, carrying a wait recorded once and never
 recomputed (section 16): the retry time, the number of consecutive waits the
 step has had, and the failed session the wait was recorded for. The retry time
 is the provider's reset — the rejected event's `resetsAt` for Claude, the latest
-reset among the exhausted windows for Codex — even one already past, which is
+reset among the exhausted windows for Codex when every window that blocks, or
+whose usage cannot be read, names one — even one already past, which is
 due at once; evidence with no usable reset backs off one minute, doubling with
 each consecutive wait of the same step, to at most one hour. Reading the same
 failure again, a restarted runner, and passes that skip the waiting mission
