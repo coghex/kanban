@@ -53,6 +53,8 @@ module Kanban.Worker.IssueHost
     childCommandOutcome,
     canonicalStageOutcome,
     issueHostGone,
+    AdoptionDecision (..),
+    claimForAdoption,
     neverAdopted,
     terminalStatus,
     revisionTurnOutcome,
@@ -150,7 +152,7 @@ import Kanban.Worker.Types
     issueActionTask,
     WorkerTask (..),
   )
-import System.Directory (removeFile)
+import System.Directory (doesFileExist, removeFile)
 import System.Posix.Process (getProcessID)
 
 -- | How often the host looks for new children, new commands, and children
@@ -621,18 +623,10 @@ adoptNewChildren host = do
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
         _ -> do
-          -- Claimed before anything else is done with it: the launch waiting
-          -- on this child gives up after a bound and removes it, and it may
-          -- give up between this scan and the first event this host would
-          -- journal. Whichever of the two claims first has the child ('claimIssueAction'),
-          -- so a child its launch withdrew is never run, and one this host
-          -- claimed is never removed. A claim a host already holds — this
-          -- one on an earlier pass, or one that died — is an adoption to
-          -- continue.
-          claimed <- claimIssueAction descriptor (ClaimedByHost host.hostSpec.workerId)
-          case claimed of
-            IssueActionClaimHeld ClaimedByWithdrawal -> pure ()
-            IssueActionClaimUnsettled message ->
+          decision <- claimForAdoption host.hostSpec.workerId descriptor
+          case decision of
+            AdoptionTurnedAway -> pure ()
+            AdoptionUnsettled message ->
               hostDiagnostic
                 host
                 ( "could not settle whether "
@@ -640,7 +634,7 @@ adoptNewChildren host = do
                     <> " is this host's to run, so it was left for the next pass: "
                     <> message
                 )
-            _ -> do
+            AdoptionClaimed -> do
               owned <- rehomeChild host descriptor task
               case owned of
                 Left message ->
@@ -652,6 +646,51 @@ adoptNewChildren host = do
                         <> message
                     )
                 Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
+
+-- | Whether a child this host found is this host's to take.
+data AdoptionDecision
+  = -- | Claimed by this host, now or on an earlier pass, and still there.
+    AdoptionClaimed
+  | -- | Its launch withdrew it, or it has gone since the scan found it.
+    AdoptionTurnedAway
+  | -- | Nothing could be settled; try again next pass.
+    AdoptionUnsettled Text
+  deriving stock (Eq, Show)
+
+-- | Claims a child found by a scan, before anything else is done with it.
+--
+-- The launch waiting on a child gives up after a bound, and it may give up
+-- between the scan that found the child and the first event this host would
+-- journal. Whichever of the two claims first has the child
+-- ('claimIssueAction'), so a child its launch withdrew is never run and one
+-- this host claimed is never removed. A claim a host already holds — this one
+-- on an earlier pass, or one that died — is an adoption to continue.
+--
+-- The scan's descriptor can be older than the claim, though. A launch that
+-- won its withdrawal removes the specification and then the claim, so a host
+-- that paused after its scan and resumes after that cleanup finds no claim at
+-- all, and would win one over a child that no longer exists — and re-homing
+-- would write the specification back. So a claim this host holds is only
+-- good while the specification is still there, and the specification is
+-- asked about after the claim, never before: the withdrawal removed it before
+-- it removed the claim, so a claim won afterwards always finds it gone. The
+-- claim such a host is left holding is its own to remove.
+claimForAdoption :: WorkerId -> WorkerDescriptor -> IO AdoptionDecision
+claimForAdoption hostId descriptor = do
+  claimed <- claimIssueAction descriptor (ClaimedByHost hostId)
+  case claimed of
+    IssueActionClaimHeld ClaimedByWithdrawal -> pure AdoptionTurnedAway
+    IssueActionClaimUnsettled message -> pure (AdoptionUnsettled message)
+    IssueActionClaimHeld (ClaimedByHost _) -> stillThere (pure ())
+    IssueActionClaimWon ->
+      stillThere (void (try @IOException (removeFile descriptor.workerDescriptorAdoptionPath)))
+  where
+    stillThere onGone = do
+      present <- try @IOException (doesFileExist descriptor.workerDescriptorSpecPath)
+      case present of
+        Left exception -> pure (AdoptionUnsettled ("its specification could not be checked: " <> Text.pack (show exception)))
+        Right True -> pure AdoptionClaimed
+        Right False -> AdoptionTurnedAway <$ onGone
 
 -- | What this host may do with a child, if anything.
 --

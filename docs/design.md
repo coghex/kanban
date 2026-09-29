@@ -5223,8 +5223,12 @@ The first solve/autosolve-compatible slice is implemented.
   withdrawal there never runs the child; a launch that finds a host's claim
   there reports the launch as adopted and removes nothing; and a withdrawn
   child's specification is removed before anything else of it, so no later
-  scan finds it. A claim neither side can read or write removes nothing and
-  runs nothing. A host also
+  scan finds it. A host checks that the specification is still there after
+  its claim stands and before it re-homes or runs the child: one whose scan
+  found the child, paused, and resumed after the withdrawal had removed both
+  the specification and the claim wins a claim over nothing, finds the
+  specification gone, and gives the claim back. A claim neither side can read
+  or write removes nothing and runs nothing. A host also
   adopts a child whose named host is provably gone —
   never one a live host is serving. A host counts as live unless it is
   disproven: terminal, or recording an identity a successful process snapshot

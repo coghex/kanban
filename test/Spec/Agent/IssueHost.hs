@@ -53,6 +53,8 @@ import Kanban.Transcript (transcriptRoot)
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
     IssueActionAdoptionRefusal (..),
+    AdoptionDecision (..),
+    claimForAdoption,
     IssueActionClaim (..),
     IssueActionClaimOutcome (..),
     claimIssueAction,
@@ -2162,6 +2164,44 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
         confirmIssueActionAdoptedWith 2 1000 (pure (Right (WorkerId "host-1"))) testRepository descriptor
           `shouldReturn` Left (IssueActionWithdrawn "no review host took this action on")
         claimIssueAction descriptor (ClaimedByHost (WorkerId "host-1")) `shouldReturn` IssueActionClaimHeld ClaimedByWithdrawal
+
+  -- Round 6's window: a host that found the child, paused before claiming
+  -- it, and resumed after the withdrawing launch had removed the child and
+  -- its claim. Its scan's descriptor still names the child, and no claim
+  -- stands in its way; the specification being gone is what stops it.
+  it "turns a host away from a child withdrawn and removed after its scan found it" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        scanned <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile scanned.workerDescriptorSpecPath (encode scanned.workerDescriptorSpec)
+        -- The launch gives up, wins its withdrawal, and cleans up — all
+        -- while the host holds only the descriptor its scan returned.
+        claimIssueAction scanned ClaimedByWithdrawal `shouldReturn` IssueActionClaimWon
+        removeFile scanned.workerDescriptorSpecPath
+        removeFile scanned.workerDescriptorAdoptionPath
+        claimForAdoption (WorkerId "host-1") scanned `shouldReturn` AdoptionTurnedAway
+        -- Nothing written back: no specification, and no claim left behind.
+        doesFileExist scanned.workerDescriptorSpecPath `shouldReturn` False
+        doesFileExist scanned.workerDescriptorAdoptionPath `shouldReturn` False
+
+  -- And the ordinary answers, so that one is not passing by refusing
+  -- everything.
+  it "claims a child that is still there, and continues one it claimed before" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        claimForAdoption (WorkerId "host-1") descriptor `shouldReturn` AdoptionClaimed
+        claimForAdoption (WorkerId "host-2") descriptor `shouldReturn` AdoptionClaimed
+        readIssueActionClaim descriptor `shouldReturn` Right (Just (ClaimedByHost (WorkerId "host-1")))
 
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->

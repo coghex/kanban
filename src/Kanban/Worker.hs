@@ -50,6 +50,8 @@ module Kanban.Worker
     launchIssueAction,
     confirmIssueActionAdoptedWith,
     IssueActionAdoptionRefusal (..),
+    AdoptionDecision (..),
+    claimForAdoption,
     IssueActionClaim (..),
     IssueActionClaimOutcome (..),
     claimIssueAction,
@@ -184,7 +186,9 @@ import Kanban.Worker.Discovery
     workerHoldingTurn,
   )
 import Kanban.Worker.IssueHost
-  ( IssueHostProvider (..),
+  ( AdoptionDecision (..),
+    IssueHostProvider (..),
+    claimForAdoption,
     IssueHostTuning (..),
     canonicalStageOutcome,
     issueHostGone,
