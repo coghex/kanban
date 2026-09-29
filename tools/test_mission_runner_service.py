@@ -1907,6 +1907,52 @@ class DrainTests(MissionRunnerFixture):
                     self.incident_kinds(), [service.DRAIN_ESCALATION_INCIDENT_KIND]
                 )
 
+    def test_a_pass_its_scheduler_finished_keeps_its_own_verdict_through_an_escalation(self):
+        # The scheduler writes its report and exits on its own, and a mission
+        # child it left holds the pass's streams until the grace escalates.
+        # What the scheduler wrote is its verdict, not the stop's doing: a
+        # failed report still fails the run, and so does one that will not
+        # parse -- and the terminal status still reports the escalation.
+        failed = pass_document(termination="failed", detail="the pass failed by itself")
+        for name, report, expected in (
+            ("failed report", {"document": failed, "status": 1}, "the pass failed by itself"),
+            ("malformed report", {"raw": json.dumps(failed)[:20], "status": 0}, "report"),
+        ):
+            with self.subTest(name):
+                self.setUp()
+                stubborn = self.root / "stubborn.pid"
+                self.write_plan({"mission_child": str(stubborn), "report": report})
+                child = self.start_controller(
+                    environment=self.environment(
+                        FIXTURE_DRAIN_GRACE_SECONDS="1", FIXTURE_STOP_GRACE_SECONDS="1"
+                    )
+                )
+                wait_until(stubborn.exists, message="the mission child to register itself")
+                stubborn_pid = int(wait_until(lambda: stubborn.read_text(encoding="utf-8")))
+                self.ensure_gone(stubborn_pid)
+                wait_until(lambda: self.recorded(), message="the scheduler to run")
+                time.sleep(1.5)
+                self.stop(child)
+                child.wait(timeout=30)
+                self.assertEqual(child.returncode, 1)
+                wait_until(
+                    lambda: process_gone(stubborn_pid), message="the mission child to be killed"
+                )
+                snapshot = self.status()
+                self.assertEqual(snapshot["state"], service.STATE_FAILED)
+                self.assertIn("escalated", snapshot["message"])
+                self.assertIn("grace", snapshot["message"])
+                self.assertEqual(
+                    sorted(self.incident_kinds()),
+                    sorted([service.PASS_INCIDENT_KIND, service.DRAIN_ESCALATION_INCIDENT_KIND]),
+                )
+                failure = [
+                    incident
+                    for incident in snapshot["open_incidents"]
+                    if incident["kind"] == service.PASS_INCIDENT_KIND
+                ][0]
+                self.assertIn(expected, failure["summary"])
+
     def test_a_stop_between_passes_exits_without_waiting(self):
         child = self.start_controller("--interval", "60")
         wait_until(
@@ -2126,6 +2172,26 @@ class DrainClockTests(unittest.TestCase):
             gate.write.assert_not_called()
             self.assertFalse(controller._released)
             self.assertTrue(controller._ended_at_gate)
+
+    def test_only_an_escalation_that_reached_the_scheduler_excuses_its_report(self):
+        with tempfile.TemporaryDirectory() as root:
+            for alive, returncode, excused in (
+                (True, -signal.SIGTERM, True),
+                (True, 1, True),
+                (True, 0, False),
+                (False, -signal.SIGKILL, False),
+                (False, 1, False),
+            ):
+                with self.subTest(alive=alive, returncode=returncode):
+                    controller = self.controller(root)
+                    fake_child = mock.Mock()
+                    fake_child.poll.return_value = None if alive else 1
+                    controller._child = fake_child
+                    controller._released = True
+                    self.assertFalse(controller.cut_off_by_escalation(returncode))
+                    with mock.patch.object(service.os, "killpg"):
+                        controller.escalate("the grace ran out")
+                    self.assertEqual(controller.cut_off_by_escalation(returncode), excused)
 
     def test_an_escalation_reaches_a_group_whose_leader_has_exited(self):
         with tempfile.TemporaryDirectory() as root:

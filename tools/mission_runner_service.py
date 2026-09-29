@@ -2502,6 +2502,10 @@ class Controller:
         # is nothing to cut off otherwise.
         self._escalation: str | None = None
         self._escalation_reported = False
+        # Whether the escalation found the scheduler itself still running, so
+        # that its signal is what can have ended it mid-report. False when the
+        # scheduler had already exited and only its mission children remained.
+        self._escalation_reached_scheduler = False
         # Whether the current pass's gate has been opened. Before it has, the
         # pass has run nothing, so a stop ends it rather than draining it.
         self._released = False
@@ -2575,7 +2579,22 @@ class Controller:
         if child is None or not self._released or self._escalation is not None:
             return
         self._escalation = reason
+        self._escalation_reached_scheduler = child.poll() is None
         self.signal_pass_group(child, signal.SIGTERM)
+
+    def cut_off_by_escalation(self, returncode: int) -> bool:
+        """Whether an escalation is what ended the scheduler: it was still
+        running when the escalation signalled it, and it did not exit cleanly.
+
+        A scheduler that had already exited wrote whatever it wrote on its own,
+        and so did one that exited successfully however the stop arrived; either
+        way that output is the pass's own verdict.
+        """
+        return (
+            self._escalation is not None
+            and self._escalation_reached_scheduler
+            and returncode != 0
+        )
 
     def signal_pass_group(self, child: subprocess.Popen[str], forwarded: int) -> None:
         """Signal a released pass's group while its output is still being
@@ -2743,7 +2762,16 @@ class Controller:
             self.log(f"Recorded incident {incident['incident_id']} at {incident['path']}")
         except OSError as exc:
             self.log(f"Additionally failed to record the incident: {exc}")
-        self.write_status(STATE_FAILED, message=summary)
+        # A failure that ends an escalated drain is still a failure, and the
+        # escalation is still owed to whoever reads the terminal status: the
+        # failure does not erase the pass that was cut off.
+        message = summary
+        if self._escalation is not None:
+            message = (
+                f"{summary} The drain had been escalated first: {self._escalation}; "
+                "the pass in flight was cut off."
+            )
+        self.write_status(STATE_FAILED, message=message)
         return 1
 
     # -- the pass record ----------------------------------------------------
@@ -3198,13 +3226,16 @@ class Controller:
             # Only a pass the stop really *cut off*, though. A drain signals
             # nothing, so a pass it merely waited for ran to its own end, and
             # whatever that pass wrote is its own verdict: a stop being pending
-            # must not hide a pass that failed on its own.
+            # must not hide a pass that failed on its own. Nor may an
+            # escalation that reached only the mission children a scheduler
+            # left behind, after the scheduler had written its report and gone
+            # (`cut_off_by_escalation`).
             #
             # A pass that *completed* is never suppressed, which is why this
             # sits after the parse rather than before it: a whole, valid report
             # is acted on however the run ended, because work that really
             # happened must not be reported as work that did not.
-            if self._escalation is not None:
+            if self.cut_off_by_escalation(command.returncode):
                 self.log(
                     "A pass was interrupted by the stop and left no readable result; "
                     "recording no verdict for it."
