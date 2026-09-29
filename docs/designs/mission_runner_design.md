@@ -165,14 +165,31 @@ its scope did not name, and the second contradicts D-2 and D-15 on Linux.
   No mission or step record carries a reset, retry, or backoff time, and no
   worker, provider-adapter, or stream-reader module classifies a provider
   limit.
-- **The providers already stream structured limit evidence into the worker's
-  session log.** A Claude session log carries `rate_limit_event` records with
-  `rate_limit_info.status`, `resetsAt` (epoch seconds), and `rateLimitType`;
-  a Codex app-server session log carries `account/rateLimits/updated`
-  notifications with per-window `resetsAt` and `rateLimitReachedType`. Only
-  the non-limited spellings (`status: "allowed"`, `rateLimitReachedType: null`)
-  were observed in the local worker cache; the limited spellings, and Codex
-  `exec`'s own form, are not yet verified.
+- **Claude streams structured limit evidence; Codex `exec` does not.**
+  Verified from the installed providers' own schemas on 2026-09-29 (claude CLI
+  2.1.284; `codex app-server generate-json-schema`, codex-cli 0.159.0) and the
+  local worker cache:
+  - A Claude session log carries `rate_limit_event` records whose
+    `rate_limit_info.status` is one of `allowed`, `allowed_warning`, or
+    `rejected`, with `resetsAt` (epoch seconds), `rateLimitType`, and
+    `overageStatus` (the same three values). A `rejected` status is covered by
+    paid overage while `overageStatus` is `allowed` or `allowed_warning`, and
+    nothing is then cut off; overage can also be disabled with a reason such as
+    `out_of_credits`. The turn's final `result` message carries `is_error` and
+    `api_error_status`, the HTTP status of an API error that ended it. API-key,
+    Bedrock, and Vertex sessions never emit `rate_limit_event`.
+  - Mission solve and pull-request workers run `codex exec --json`
+    (`src/Kanban/Solve.hs`, `src/Kanban/PullRequestFlow.hs`), whose
+    `turn.failed` event carries only an error message. No limit evidence was
+    found in any local `exec` log.
+  - The Codex app server does report structured evidence. A failed turn's
+    `TurnError.codexErrorInfo` can be `usageLimitExceeded` or
+    `rateLimitExceeded`. The account snapshot `account/rateLimits/read` — which
+    `Kanban.Codex` already calls for `--usage` — reports `rateLimitReachedType`
+    (`rate_limit_reached`, `workspace_owner_usage_limit_reached`,
+    `workspace_member_usage_limit_reached`, `workspace_owner_credits_depleted`,
+    or `workspace_member_credits_depleted`) and a `resetsAt` per window. The
+    two credit-depletion values have no reset.
 - **On systemd, stopping or exiting the runner kills every detached worker.**
   The rendered unit sets `KillMode=mixed` (`tools/service_manager.py`,
   `SystemdBackend.render_definition`), which SIGKILLs every process left in
@@ -550,24 +567,47 @@ the fix into RUN-8.
 
 **Signed off:** by the user, 2026-09-29.
 
-### D-18. A provider limit is identified only from the provider's structured event
+### D-18. A provider limit is identified only from structured provider evidence
 
-A limit is identified only from the provider's own structured event in the
-session that concluded — Claude's `rate_limit_event` with a non-`allowed`
-status, or Codex's `account/rateLimits/updated` with a non-null
-`rateLimitReachedType` — never from matching error text. The retry time is that
-event's `resetsAt`; an event without one retries through bounded exponential
-backoff, one minute doubling to a one-hour cap. Anything else, including an
-unrecognised provider or an event in an unknown spelling, concludes as today's
-`ActionFailed` and stops the mission. The limited spellings, and Codex
-`exec`'s form if it differs from the app server's, are verified with a captured
-fixture when RUN-7 is filed.
+Amended 2026-09-29, before RUN-7 was filed, once the providers' schemas were
+read (see "Found while processing RUN-7"). The first wording counted any
+non-`allowed` Claude status (which includes the `allowed_warning` warning) and
+named a Codex notification that `codex exec` never emits.
 
-**Rationale:** D-9 retries only a positively identified limit; text matching is
+A limit is identified only from structured provider evidence about a session
+that failed, never from matching error text:
+
+- **Claude.** The turn ended with `is_error`, and either its latest
+  `rate_limit_event` has status `rejected` and is not covered by overage
+  (`overageStatus` is neither `allowed` nor `allowed_warning`) — retried at that
+  event's `resetsAt` — or no such event exists and `api_error_status` is 429,
+  which retries through backoff. That second case covers API-key, Bedrock, and
+  Vertex sessions. `allowed_warning` never counts.
+- **Codex.** After a Codex session fails, the account's rate-limit snapshot is
+  read through the existing `Kanban.Codex` app-server read. It counts only when
+  `rateLimitReachedType` is `rate_limit_reached`,
+  `workspace_owner_usage_limit_reached`, or
+  `workspace_member_usage_limit_reached`, and the retry time is the limiting
+  window's `resetsAt`. A session run on the app server may also use its failed
+  turn's `codexErrorInfo` of `usageLimitExceeded` or `rateLimitExceeded`.
+- **Depleted credits stop for the operator.** Codex's
+  `workspace_*_credits_depleted` values, and a Claude `rejected` status whose
+  overage is disabled for lack of credits, have no reset time. They conclude
+  as a failure that says credits are depleted, not as a capacity wait.
+
+Evidence without a reset time retries through bounded exponential backoff, one
+minute doubling to a one-hour cap. Anything else, including an unrecognised
+provider or value, or a snapshot that cannot be read, concludes as today's
+`ActionFailed` and stops the mission.
+
+**Rationale:** D-9 retries only a positively identified limit. Text matching is
 the fail-open path that would retry an authentication or configuration failure
-indefinitely.
+indefinitely. Reading the account after a failure is the only structured
+evidence a `codex exec` worker has. Depleted credits need someone to act on
+billing, so backing off would only repeat a failure.
 
-**Signed off:** by the user, 2026-09-29.
+**Signed off:** by the user, 2026-09-29; amendment signed off by the user,
+2026-09-29.
 
 ## Open questions
 
@@ -619,8 +659,9 @@ D-9 retries only a "positively identified" limit and stops on everything else.
 The evidence available is structured, but only its non-limited spellings have
 been observed.
 
-Resolved by D-18: structured provider events only, retrying at `resetsAt` or
-through backoff from one minute doubling to a one-hour cap.
+Resolved by D-18, amended the same day: structured provider evidence about a
+failed session only, retrying at `resetsAt` or through backoff from one minute
+doubling to a one-hour cap, with depleted credits stopping for the operator.
 
 ## Verification strategy
 
@@ -835,10 +876,11 @@ through backoff from one minute doubling to a one-hour cap.
 
 - **Outcome:** A positively identified rate limit or exhausted quota releases
   its slot and retries at the provider's reset time or with bounded backoff,
-  while authentication, executable, and configuration failures stop for the
-  operator as they do today.
-- **Scope:** Classifying a concluded agent session's structured provider
-  limit evidence into a distinct action outcome (Q-4); recording the step and
+  while authentication, executable, configuration, and depleted-credit
+  failures stop for the operator.
+- **Scope:** Classifying a failed agent session's structured provider evidence
+  into a distinct action outcome (D-18): Claude's recorded stream, and the Codex
+  account snapshot read after a Codex session fails; recording the step and
   mission `waiting_capacity` — states that exist but nothing writes — with a
   durable wake time; the scheduler treating such a mission as runnable again
   once its wake time passes, and not before, so a waiting mission neither
@@ -847,12 +889,14 @@ through backoff from one minute doubling to a one-hour cap.
 - **Depends on:** `RUN-5`, whose ceiling is the slot a capacity wait releases.
 - **Ordering:** `critical path` for the epic; independent of RUN-8.
 - **Relevant decisions:** `D-9`, `D-18`, `D-4`.
-- **Acceptance signals:** A captured limited-provider fixture frees its slot,
-  records the provider's reset time, and is retried at that time with the TUI
-  absent; one without a reset time backs off within the bound; the wake time
-  survives a runner restart; an authentication, executable, or configuration
-  failure, and a limit event in an unrecognised spelling, still stop the
-  mission.
+- **Acceptance signals:** A Claude session failing on a `rejected`,
+  uncovered limit, and a Codex session failing while the account snapshot
+  reports a usage or rate limit, each free the slot, record the provider's
+  reset time, and are retried at that time with the TUI absent; a bare Claude
+  429 backs off within the bound; the wake time survives a runner restart; an
+  `allowed_warning` event, depleted credits, an authentication, executable, or
+  configuration failure, an unreadable snapshot, and an unrecognised value all
+  still stop the mission.
 - **Out of scope:** The ceiling and rotation themselves (RUN-5); the drain
   (RUN-8); a host-wide or cross-repository budget (D-14).
 - **Open questions:** `None`; `D-18` settles the evidence rule.
