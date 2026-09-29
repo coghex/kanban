@@ -219,20 +219,22 @@ parseAccountLimit = withObject "Codex RPC response" $ \response -> do
       reached <- snapshot .:? "rateLimitReachedType"
       primary <- snapshot .:? "primary"
       secondary <- snapshot .:? "secondary"
-      windows <- traverse exhaustedReset (catMaybes [primary, secondary])
-      let resets = catMaybes windows
+      let resets = catMaybes (map exhaustedReset (catMaybes [primary, secondary]))
       pure
         CodexAccountLimit
           { codexLimitReachedType = reached,
             codexLimitResetsAt = if null resets then Nothing else Just (maximum resets)
           }
-    exhaustedReset = withObject "rate-limit window" $ \window -> do
-      usedPercent <- window .: "usedPercent"
-      resetSeconds <- window .:? "resetsAt"
-      pure $
-        if (usedPercent :: Integer) >= 100
-          then posixSecondsToUTCTime . fromInteger <$> resetSeconds
-          else Nothing
+    -- Each window on its own, and leniently. The reached type is what
+    -- identifies a limit; a window only dates it. A window this cannot read
+    -- — an unusable usage figure or reset time — dates nothing, which is the
+    -- backoff's case, rather than taking the identified limit down with it.
+    exhaustedReset :: Value -> Maybe UTCTime
+    exhaustedReset value = do
+      (usedPercent, resetSeconds) <- parseMaybe (withObject "rate-limit window" (\window -> (,) <$> window .: "usedPercent" <*> window .:? "resetsAt")) value
+      if (usedPercent :: Integer) >= 100
+        then posixSecondsToUTCTime . fromInteger <$> (resetSeconds :: Maybe Integer)
+        else Nothing
 
 durationLabel :: Integer -> Text
 durationLabel 300 = "5 hour"

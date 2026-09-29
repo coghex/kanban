@@ -145,10 +145,13 @@ claudeSessionLimit events = case lastOf "result" of
       found -> Just (last found)
     rateLimitEvent Nothing = ProviderLimitUnidentified
     rateLimitEvent (Just info) = case textField "status" info of
+      -- Depleted credits first, whatever the overage status beside them
+      -- claims: that is the evidence that names a person's job rather than a
+      -- wait, and it takes precedence over every other reading.
       Just "rejected"
-        | textField "overageStatus" info `elem` [Just "allowed", Just "allowed_warning"] -> ProviderLimitUnidentified
         | textField "overageDisabledReason" info == Just "out_of_credits" ->
             ProviderCreditsDepleted "claude rejected the turn at its rate limit and overage is disabled because the account is out of credits"
+        | textField "overageStatus" info `elem` [Just "allowed", Just "allowed_warning"] -> ProviderLimitUnidentified
         | otherwise ->
             ProviderLimitReached
               (posixSecondsToUTCTime . fromInteger <$> integerField "resetsAt" info)

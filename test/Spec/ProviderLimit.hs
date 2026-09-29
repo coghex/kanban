@@ -127,9 +127,12 @@ claudeSpec = describe "a Claude session" $ do
     claudeSessionLimit (events [rateLimitEvent "rejected" ",\"overageStatus\":\"allowed_warning\"", errorResult "429"])
       `shouldBe` ProviderLimitUnidentified
 
-  it "names depleted credits rather than waiting on them" $
+  it "names depleted credits rather than waiting on them, whatever the overage status claims" $ do
     claudeSessionLimit
       (events [rateLimitEvent "rejected" ",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"out_of_credits\"", errorResult "429"])
+      `shouldSatisfy` isDepleted
+    claudeSessionLimit
+      (events [rateLimitEvent "rejected" ",\"overageStatus\":\"allowed\",\"overageDisabledReason\":\"out_of_credits\"", errorResult "429"])
       `shouldSatisfy` isDepleted
 
   it "does not count a session that did not end in error, or never ended" $ do
@@ -236,6 +239,21 @@ snapshotSpec = describe "the Codex account snapshot" $ do
       `shouldBe` Right (CodexAccountLimit Nothing (Just resetTime))
     decoded (snapshotResponse ("{\"primary\":" <> window 100 (resetEpoch - 100) <> ",\"secondary\":" <> window 100 resetEpoch <> "}"))
       `shouldBe` Right (CodexAccountLimit Nothing (Just resetTime))
+
+  it "keeps an identified limit when a window's reset or usage cannot be read" $ do
+    -- The limiting window's reset is unusable: the limit stands, undated.
+    decoded (snapshotResponse "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":{\"usedPercent\":100,\"resetsAt\":\"soon\"}}")
+      `shouldBe` reached "rate_limit_reached" Nothing
+    -- An unused window's unreadable reset takes nothing from the one that
+    -- dates the limit.
+    decoded
+      ( snapshotResponse
+          ( "{\"rateLimitReachedType\":\"rate_limit_reached\",\"primary\":"
+              <> window 100 resetEpoch
+              <> ",\"secondary\":{\"usedPercent\":\"lots\",\"resetsAt\":\"soon\"}}"
+          )
+      )
+      `shouldBe` reached "rate_limit_reached" (Just resetTime)
 
   it "reads the codex bucket, not an unrelated one" $
     decoded
