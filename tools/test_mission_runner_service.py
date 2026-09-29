@@ -224,15 +224,24 @@ def main():
         report = {"kind": "idle"}
     if report.get("stderr"):
         print(report["stderr"], file=sys.stderr)
+    term_exit = report.get("term_exit")
+    if term_exit is not None:
+        # A scheduler that ends itself on a stop signal, with a status of its
+        # own -- which the real one never does, and so a verdict of its own.
+        signal.signal(signal.SIGTERM, lambda *_: os._exit(term_exit))
     hold = report.get("hold_seconds")
     if hold:
         time.sleep(hold)
     if report.get("raw") is not None:
         sys.stdout.write(report["raw"])
-        sys.stdout.flush()
-        return report.get("status", 0)
-    sys.stdout.write(json.dumps(report["document"]))
+    else:
+        sys.stdout.write(json.dumps(report["document"]))
     sys.stdout.flush()
+    # Still running once the report is whole, so a stop can reach the
+    # scheduler after its verdict is written.
+    linger = report.get("linger_seconds")
+    if linger:
+        time.sleep(linger)
     return report.get("status", 0)
 
 
@@ -1953,6 +1962,74 @@ class DrainTests(MissionRunnerFixture):
                 ][0]
                 self.assertIn(expected, failure["summary"])
 
+    def test_a_whole_report_the_escalation_killed_the_scheduler_after_is_acted_on(self):
+        # The scheduler has written its whole report and is still running
+        # when the second stop kills it. Only the exit the kill imposed
+        # disagrees with the report, so the report is the pass's verdict.
+        failed = pass_document(termination="failed", detail="the pass failed by itself")
+        for name, report, state, kinds in (
+            (
+                "failed",
+                {"document": failed, "status": 1, "linger_seconds": 60},
+                service.STATE_FAILED,
+                [service.DRAIN_ESCALATION_INCIDENT_KIND, service.PASS_INCIDENT_KIND],
+            ),
+            (
+                "completed",
+                {
+                    "document": pass_document(admitted=[admitted_entry()]),
+                    "linger_seconds": 60,
+                },
+                service.STATE_STOPPED,
+                [service.DRAIN_ESCALATION_INCIDENT_KIND],
+            ),
+        ):
+            with self.subTest(name):
+                self.setUp()
+                self.write_plan({"report": report})
+                child = self.start_controller(
+                    environment=self.environment(FIXTURE_STOP_GRACE_SECONDS="1")
+                )
+                wait_until(lambda: self.recorded(), message="the scheduler to run")
+                time.sleep(1.5)
+                self.stop(child)
+                self.wait_for_state(service.STATE_DRAINING)
+                self.stop(child)
+                child.wait(timeout=30)
+                snapshot = self.status()
+                self.assertEqual(snapshot["state"], state)
+                self.assertIn("second stop", snapshot["message"])
+                self.assertEqual(sorted(self.incident_kinds()), sorted(kinds))
+                self.assertEqual(snapshot["passes"], 1)
+                self.assertEqual(
+                    snapshot["last_pass"]["detail"], report["document"]["detail"]
+                )
+
+    def test_a_scheduler_that_ends_itself_during_an_escalation_keeps_its_failure(self):
+        # Alive when the escalation reaches it, but it exits with a status of
+        # its own rather than dying of the signal: whatever it left -- here,
+        # nothing -- is its own verdict, and an unreadable one fails the run.
+        self.write_plan(
+            {"report": {"document": pass_document(), "hold_seconds": 60, "term_exit": 1}}
+        )
+        child = self.start_controller(
+            environment=self.environment(FIXTURE_STOP_GRACE_SECONDS="1")
+        )
+        wait_until(lambda: self.recorded(), message="the scheduler to run")
+        time.sleep(1.5)
+        self.stop(child)
+        self.wait_for_state(service.STATE_DRAINING)
+        self.stop(child)
+        child.wait(timeout=30)
+        self.assertEqual(child.returncode, 1)
+        snapshot = self.status()
+        self.assertEqual(snapshot["state"], service.STATE_FAILED)
+        self.assertIn("escalated", snapshot["message"])
+        self.assertEqual(
+            sorted(self.incident_kinds()),
+            sorted([service.DRAIN_ESCALATION_INCIDENT_KIND, service.PASS_INCIDENT_KIND]),
+        )
+
     def test_a_stop_between_passes_exits_without_waiting(self):
         child = self.start_controller("--interval", "60")
         wait_until(
@@ -2177,7 +2254,8 @@ class DrainClockTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             for alive, returncode, excused in (
                 (True, -signal.SIGTERM, True),
-                (True, 1, True),
+                (True, -signal.SIGKILL, True),
+                (True, 1, False),
                 (True, 0, False),
                 (False, -signal.SIGKILL, False),
                 (False, 1, False),

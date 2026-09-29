@@ -4253,9 +4253,11 @@ Defaults:
   and its `--mission` children finish their step. A step waits on GitHub calls,
   never on an agent. The run then records `stopped` and exits, releasing its
   run lock exactly once. A pass that fails on its own during a drain still
-  fails the run with its incident: only a pass the stop cut off, its
-  scheduler still running when the escalation reached it, is excused from its
-  verdict, and a failed run's terminal status still names an escalation. A drain never waits for a detached worker. The workers the
+  fails the run with its incident. Only a pass the stop cut off is excused
+  from its verdict: one whose scheduler was still running when the escalation
+  reached it and died of that signal, and even then a report it had already
+  written whole is acted on. A failed run's terminal status still names an
+  escalation. A drain never waits for a detached worker. The workers the
   draining pass dispatched keep running, and the next runner's controller
   iterations adopt them rather than dispatching their steps again. A command
   queued under the mission store's `control/requests/` that the draining pass

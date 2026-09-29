@@ -1622,6 +1622,18 @@ def parse_pass_report(stdout: str, returncode: int) -> dict[str, Any]:
     return document
 
 
+def declared_exit_status(stdout: str) -> int | None:
+    """The exit status a report says its pass ends with, or None when the
+    output is not a JSON object naming one as a plain integer."""
+    try:
+        document = json.loads(stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(document, dict) or not is_plain_integer(document.get("exit_code")):
+        return None
+    return document["exit_code"]
+
+
 def _require_mission_identifier(value: Any, what: str) -> str:
     """One mission identifier, held to what a mission store can address."""
     if not isinstance(value, str) or not value.strip():
@@ -2584,16 +2596,18 @@ class Controller:
 
     def cut_off_by_escalation(self, returncode: int) -> bool:
         """Whether an escalation is what ended the scheduler: it was still
-        running when the escalation signalled it, and it did not exit cleanly.
+        running when the escalation signalled it, and it died of a signal.
 
-        A scheduler that had already exited wrote whatever it wrote on its own,
-        and so did one that exited successfully however the stop arrived; either
-        way that output is the pass's own verdict.
+        The scheduler installs no handler for the stop signals, so one the
+        escalation cut off is killed by it, and an exit status of its own --
+        success or failure -- means it finished by itself. A scheduler that had
+        already exited wrote whatever it wrote on its own too. Any of those is
+        the pass's own verdict.
         """
         return (
             self._escalation is not None
             and self._escalation_reached_scheduler
-            and returncode != 0
+            and returncode < 0
         )
 
     def signal_pass_group(self, child: subprocess.Popen[str], forwarded: int) -> None:
@@ -3209,12 +3223,31 @@ class Controller:
                     self.terminate_process_group(child)
                     deadline = time.monotonic() + STOP_GRACE_SECONDS
 
+    def read_report(self, command: PassCommand) -> dict[str, Any]:
+        """The pass's report, read against the status it exited with.
+
+        Except when the escalation killed the scheduler after it had already
+        written a whole report: the exit the kill imposed then disagrees with
+        a verdict the pass really reached, so a report that is complete in
+        itself -- agreeing with the exit status it declares -- is read against
+        that status instead. Anything short of that is still refused.
+        """
+        try:
+            return parse_pass_report(command.stdout, command.returncode)
+        except PassFailure:
+            if not self.cut_off_by_escalation(command.returncode):
+                raise
+            declared = declared_exit_status(command.stdout)
+            if declared is None:
+                raise
+            return parse_pass_report(command.stdout, declared)
+
     def one_pass(self) -> None:
         command = self.spawn()
         if command is None:
             return
         try:
-            document = parse_pass_report(command.stdout, command.returncode)
+            document = self.read_report(command)
         except PassFailure as failure:
             # A pass this controller signalled decided nothing, so treating
             # what it managed to write as a failure would record an intentional
@@ -3234,7 +3267,8 @@ class Controller:
             # A pass that *completed* is never suppressed, which is why this
             # sits after the parse rather than before it: a whole, valid report
             # is acted on however the run ended, because work that really
-            # happened must not be reported as work that did not.
+            # happened must not be reported as work that did not
+            # (`read_report`).
             if self.cut_off_by_escalation(command.returncode):
                 self.log(
                     "A pass was interrupted by the stop and left no readable result; "
