@@ -26,10 +26,14 @@ jobs:
   # New commits that touch this pull request's own files invalidate a prior
   # approval: strip the label so the gate closes until a reviewer approves the
   # updated code. The removal fires an `unlabeled` event, which re-runs
-  # review-approved. A synchronize push that touches none of this pull
-  # request's own files -- a base-branch update merged forward with no
-  # overlapping content -- leaves the label alone: the reviewed code has not
-  # changed, only the branch's ancestry has.
+  # review-approved. A synchronize push that touches none of the files this
+  # pull request changed, either before or after the push -- a base-branch
+  # update merged forward with no overlapping content -- leaves the label
+  # alone: the reviewed code has not changed, only the branch's ancestry has.
+  # Both file sets count because the post-push one alone forgets a reviewed
+  # file the push reverted to its base contents, or one the pull request added
+  # and the push deleted. File names are compared byte for byte, so a name
+  # Git would quote or escape is matched like any other.
   #
   # Keeping the label is the ONLY positive content-safe signal this repository
   # publishes, and the drainer reads it as one (`tools/drain_prs.py`,
@@ -55,6 +59,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -101,27 +106,74 @@ jobs:
             strip
             exit 0
           fi
-          if ! drifted_files=$(git diff --name-only "$BEFORE" "$AFTER"); then
+          # Every file list below comes straight from Git, NUL-delimited and
+          # with rename detection off, so each names a path exactly as Git
+          # stores it -- no quoting, escaping, or newline splitting to
+          # reconcile between lists -- and a rename counts both its paths.
+          lists=$(mktemp -d)
+          trap 'rm -rf "$lists"' EXIT
+          names() {
+            git diff --no-ext-diff --no-renames --name-only -z "$@"
+          }
+          if ! names "$BEFORE" "$AFTER" > "$lists/drift"; then
             echo "couldn't diff 'before'..'after' -- can't confirm, stripping"
             strip
             exit 0
           fi
-          if [ -z "$drifted_files" ]; then
+          if [ ! -s "$lists/drift" ]; then
             echo "push introduced no file changes -- stripping (unexpected, be safe)"
             strip
             exit 0
           fi
-          if ! pr_files=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only); then
-            echo "couldn't fetch this PR's own file list -- can't confirm, stripping"
+          # The pull request's own files are read at BOTH ends of the push,
+          # each against the base branch the way GitHub computes a pull
+          # request's diff: from where that head meets the base to the head.
+          # The post-push list alone would lose a reviewed file this push
+          # reverted to its base contents, or a file the pull request added
+          # and this push deleted. Measuring each end from its own meeting
+          # point keeps a base branch that has advanced since from lending the
+          # pull request files it never changed.
+          base_tip="refs/remotes/origin/$BASE_REF"
+          if [ -z "$BASE_REF" ] || ! git rev-parse --quiet --verify "$base_tip^{commit}" >/dev/null; then
+            echo "base branch '$BASE_REF' isn't in this checkout -- can't establish this PR's own files, stripping"
             strip
             exit 0
           fi
-          if [ -z "$pr_files" ]; then
-            echo "this PR reports no files of its own -- nothing to prove non-overlap against, stripping"
+          for side in before after; do
+            if [ "$side" = before ]; then head=$BEFORE; else head=$AFTER; fi
+            if ! fork=$(git merge-base "$base_tip" "$head"); then
+              echo "the '$side' head shares no history with '$BASE_REF' -- can't establish this PR's own files $side the push, stripping"
+              strip
+              exit 0
+            fi
+            if ! names "$fork" "$head" > "$lists/$side"; then
+              echo "couldn't diff this PR's own files $side the push -- can't confirm, stripping"
+              strip
+              exit 0
+            fi
+            if [ ! -s "$lists/$side" ]; then
+              echo "this PR changes no files of its own $side the push -- nothing to prove non-overlap against, stripping"
+              strip
+              exit 0
+            fi
+          done
+          # Byte-exact set intersection; any failure here strips as well.
+          if ! overlap=$(python3 - "$lists/before" "$lists/after" "$lists/drift" <<'PY'
+          import sys
+
+          def names(path):
+              with open(path, "rb") as handle:
+                  return {name for name in handle.read().split(b"\0") if name}
+
+          before, after, drift = (names(path) for path in sys.argv[1:])
+          for name in sorted((before | after) & drift):
+              print(ascii(name.decode("utf-8", "backslashreplace")))
+          PY
+          ); then
+            echo "couldn't compare this push with this PR's own files -- can't confirm, stripping"
             strip
             exit 0
           fi
-          overlap=$(comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$drifted_files" | sort -u))
           if [ -n "$overlap" ]; then
             echo "push touched PR-owned file(s): $overlap -- stripping"
             strip

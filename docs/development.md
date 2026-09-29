@@ -39,11 +39,15 @@ as a refusal. A job added to `ci.yml` that `build-test` does not depend on fails
 Pull requests also require the `review-approved` check, which passes while the
 current pull request carries `reviewed:approve`. A head change removes that
 label through the review-gate workflow, requiring a fresh review. The single
-exception is a push the workflow can prove touches none of the pull request's
-own files — a base-branch update merged forward — which changes only the
-branch's ancestry and so keeps the label. Anything it cannot prove
-content-free that way, including any failure to establish either file list,
-removes the label as before. A removal the workflow cannot confirm actually
+exception is a push the workflow can prove touches none of the files the pull
+request changed, either before or after the push — a base-branch update merged
+forward — which changes only the branch's ancestry and so keeps the label.
+Both file sets count, each measured from where that head meets the base
+branch, so a push that reverts a reviewed file to its base contents or deletes
+a file the pull request added still removes the label; file names are compared
+exactly as Git stores them, however unusual. Anything it cannot prove
+content-free that way, including any failure to establish the push's files or
+either of the pull request's file sets, removes the label as before. A removal the workflow cannot confirm actually
 happened fails the job rather than reporting a decision the label does not
 reflect.
 
