@@ -93,6 +93,57 @@ class LatestCheckTests(unittest.TestCase):
     def test_missing_status_check_rollup_treated_as_empty(self):
         self.assertIsNone(drain_prs.latest_check({}, "build-test"))
 
+    def test_a_queued_duplicate_outranks_a_finished_success(self):
+        # Two runs of one check on one head, as a label swap starts: the first
+        # finished, the second's job still queued, with no start time yet.
+        finished = {
+            "name": "review-approved",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-09-29T02:24:16Z",
+            "completedAt": "2026-09-29T02:24:22Z",
+        }
+        queued = {"name": "review-approved", "status": "QUEUED", "conclusion": None}
+        for rollup in ([finished, queued], [queued, finished]):
+            with self.subTest(order=[item["status"] for item in rollup]):
+                pr = {"statusCheckRollup": rollup}
+                self.assertIs(drain_prs.latest_check(pr, "review-approved"), queued)
+                self.assertEqual(
+                    drain_prs.configured_check_state(pr, "review-approved"), "pending"
+                )
+
+    def test_a_running_duplicate_outranks_a_later_timestamped_completion(self):
+        running = {
+            "name": "build-test",
+            "status": "IN_PROGRESS",
+            "startedAt": "2026-01-01T00:00:00Z",
+        }
+        finished = {
+            "name": "build-test",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-01-02T00:00:00Z",
+        }
+        pr = {"statusCheckRollup": [running, finished]}
+        self.assertEqual(drain_prs.configured_check_state(pr, "build-test"), "pending")
+
+    def test_the_gate_holds_a_merge_behind_a_queued_duplicate(self):
+        pr = {
+            "number": 7,
+            "headRefOid": "a" * 40,
+            "labels": [{"name": drain_prs.APPROVE_LABEL}],
+            "statusCheckRollup": [
+                {"name": "build-test", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-09-29T02:20:00Z"},
+                {"name": "review-approved", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-09-29T02:24:16Z"},
+                {"name": "review-approved", "status": "QUEUED", "conclusion": None},
+            ],
+        }
+        gates = drain_prs.GateConfig(required_ci_check="build-test", required_review_check="review-approved")
+        with mock.patch.object(drain_prs, "blocking_review_marker", return_value=None):
+            regression = drain_prs.gate_regression(mock.sentinel.ctx, pr, gates)
+        self.assertIsNotNone(regression)
+        self.assertEqual(regression[0], "checks_pending")
+
 
 class ActionsRerunTests(unittest.TestCase):
     def test_extracts_run_id_from_actions_details_url(self):
