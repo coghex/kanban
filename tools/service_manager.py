@@ -245,6 +245,16 @@ class ServiceNamespace:
     by the next run instead (`mission_runner_service.settle_pass`). launchd
     has no counterpart to declare: it kills only the job's own process group,
     which every one of those processes has already left.
+
+    `stop_timeout_seconds` is how long systemd lets a stopping unit's main
+    process take before it SIGKILLs it, or None for systemd's own default. The
+    mission runner declares one because its stop drains: the wrapper lets the
+    pass in flight finish its step for up to
+    `mission_runner_service.DRAIN_GRACE_SECONDS`, then escalates and settles,
+    and a SIGKILL inside that would cut off the very step the drain exists to
+    let finish (`docs/designs/mission_runner_design.md` D-19). The drainer and
+    the issue approval service keep the default. launchd's `kill` has no
+    timeout to declare.
     """
 
     name: str
@@ -252,6 +262,7 @@ class ServiceNamespace:
     description: str
     legacy_prefix: str | None
     kill_mode: str
+    stop_timeout_seconds: int | None = None
 
 
 # The two systemd kill modes a namespace may declare. See `ServiceNamespace`.
@@ -278,6 +289,10 @@ MISSION_RUNNER_NAMESPACE = ServiceNamespace(
     description="Kanban mission runner",
     legacy_prefix=None,
     kill_mode=KILL_MODE_PROCESS,
+    # The five-minute drain grace, the escalation's ten-second polite stop and
+    # ten-second kill, the settlement of what is left, and room for the
+    # terminal status and incident writes, with two minutes to spare.
+    stop_timeout_seconds=420,
 )
 
 
@@ -429,6 +444,19 @@ class ServiceManagerBackend(ABC):
     def request_stop(self, identifier: str) -> None:
         """Ask the manager to stop the service the way it asks a service to
         exit cleanly, so the drainer runs its own shutdown."""
+
+    def repeat_stop_signal(self, identifier: str) -> None:
+        """Deliver the stop signal to a service that is already stopping.
+
+        Not a second `request_stop`: a manager may fold a stop asked of a
+        service already stopping into the one in progress and signal nothing,
+        which is what systemd does. The mission runner's second stop escalates
+        its drain, so it has to reach the running process itself. Only the
+        mission runner asks, so only the real backends answer.
+        """
+        raise ServiceManagerError(
+            f"The {self.backend_name()} backend cannot repeat a stop signal."
+        )
 
     @abstractmethod
     def uninstall_definition(self, identifier: str) -> UninstallOutcome:
@@ -584,6 +612,12 @@ class LaunchdBackend(ServiceManagerBackend):
             ["launchctl", "kill", "SIGTERM", launch_target_for(identifier)]
         )
 
+    def repeat_stop_signal(self, identifier: str) -> None:
+        # `launchctl kill` is itself a signal to the job's process rather than
+        # a request the manager can merge, so the second stop is the first
+        # stop's command again.
+        self.request_stop(identifier)
+
     def uninstall_definition(self, identifier: str) -> UninstallOutcome:
         # Booted out before the plist is unlinked, never after: launchd
         # re-bootstraps what is still in `~/Library/LaunchAgents` at login, so
@@ -724,12 +758,15 @@ class SystemdBackend(ServiceManagerBackend):
         #                    new sessions included, and `process` leaves it —
         #                    which is what lets a mission-dispatched worker
         #                    outlive the mission runner.
+        #   TimeoutStopSec   the namespace's own when it declares one
+        #                    (`ServiceNamespace.stop_timeout_seconds`): the
+        #                    mission runner's, so a drain is never SIGKILLed.
         #
         # There is deliberately no start rate limit: launchd's ThrottleInterval
         # bounds relaunches of a crashing job, and a unit that neither restarts
         # nor lingers has no relaunch to bound. systemd's own default start
         # limit remains, and refusing a start is a worse failure than a fast
-        # one. TimeoutStopSec is likewise left at systemd's default, which is
+        # one. TimeoutStopSec is otherwise left at systemd's default, which is
         # longer than the controller's own STOP_TIMEOUT_SECONDS patience, so
         # the drainer is never SIGKILLed out from under a stop still waiting
         # on it.
@@ -748,6 +785,8 @@ class SystemdBackend(ServiceManagerBackend):
             "KillSignal=SIGTERM",
             f"KillMode={self._namespace.kill_mode}",
         ]
+        if self._namespace.stop_timeout_seconds is not None:
+            lines.append(f"TimeoutStopSec={self._namespace.stop_timeout_seconds}")
         lines.extend(
             "Environment=" + _unit_word(f"{name}={value}")
             for name, value in definition.environment.items()
@@ -802,6 +841,22 @@ class SystemdBackend(ServiceManagerBackend):
         # blocking stop would wait out systemd's much longer patience inside a
         # call the controller intends to return from immediately.
         self._run(["systemctl", "--user", "--no-block", "stop", identifier])
+
+    def repeat_stop_signal(self, identifier: str) -> None:
+        # A second `systemctl stop` of a unit already deactivating joins the
+        # stop job in progress and signals nothing, so the signal is sent to
+        # the unit's main process directly -- the wrapper, which is the one
+        # process that decides what a second stop means.
+        self._run(
+            [
+                "systemctl",
+                "--user",
+                "kill",
+                "--kill-whom=main",
+                "--signal=SIGTERM",
+                identifier,
+            ]
+        )
 
     def uninstall_definition(self, identifier: str) -> UninstallOutcome:
         unloaded = self.is_loaded(identifier)

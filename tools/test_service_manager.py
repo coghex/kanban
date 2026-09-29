@@ -211,6 +211,14 @@ class LifecycleSequenceTests(BackendTestCase):
             ],
         )
 
+    def test_a_repeated_stop_signal_is_the_same_signal_again(self):
+        # `launchctl kill` signals the job's process itself, so the mission
+        # runner's escalating second stop reaches the draining wrapper.
+        self.backend.repeat_stop_signal(self.identifier)
+        self.assertEqual(
+            self.runner.commands, [["launchctl", "kill", "SIGTERM", self.target]]
+        )
+
 
 class LivenessProbeTests(BackendTestCase):
     def setUp(self):
@@ -687,6 +695,26 @@ class SystemdLifecycleTests(SystemdBackendTestCase):
             ],
         )
 
+    def test_a_repeated_stop_signal_goes_to_the_main_process_not_the_stop_job(self):
+        # A second `stop` of a unit already deactivating joins the job in
+        # progress and signals nothing, so the mission runner's escalating
+        # second stop is sent to the wrapper directly.
+        self.backend.repeat_stop_signal(self.unit)
+        self.assertEqual(
+            self.runner.commands,
+            [
+                [
+                    "systemctl",
+                    "--user",
+                    "kill",
+                    "--kill-whom=main",
+                    "--signal=SIGTERM",
+                    self.unit,
+                ]
+            ],
+        )
+        self.assertNotIn("stop", self.runner.commands[0])
+
     def test_a_failing_start_raises_the_injected_runners_error(self):
         self.answer(
             ["systemctl", "--user", "start", self.unit], _completed(1, stderr="boom")
@@ -1070,6 +1098,54 @@ class NamespaceTests(unittest.TestCase):
         ):
             with self.subTest(namespace=namespace.name):
                 self.assertEqual(self.kill_modes(namespace), ["KillMode=mixed"])
+
+    def stop_timeouts(self, namespace):
+        """Every `TimeoutStopSec=` directive the namespace's unit carries."""
+        rendered = (
+            service_manager.SystemdBackend(self.runner, namespace)
+            .render_definition(self.definition())
+            .decode("utf-8")
+        )
+        return [
+            line for line in rendered.splitlines() if line.startswith("TimeoutStopSec=")
+        ]
+
+    def test_only_the_mission_runners_unit_outlasts_its_drain(self):
+        # D-19: systemd must never SIGKILL a drain the wrapper is still inside,
+        # so the mission runner's unit declares a stop timeout of its own. The
+        # other two keep systemd's default, which is what they rendered before.
+        self.assertEqual(
+            self.stop_timeouts(service_manager.MISSION_RUNNER_NAMESPACE),
+            [
+                "TimeoutStopSec="
+                f"{service_manager.MISSION_RUNNER_NAMESPACE.stop_timeout_seconds}"
+            ],
+        )
+        for namespace in (
+            service_manager.DRAINER_NAMESPACE,
+            service_manager.ISSUE_APPROVAL_NAMESPACE,
+        ):
+            with self.subTest(namespace=namespace.name):
+                self.assertIsNone(namespace.stop_timeout_seconds)
+                self.assertEqual(self.stop_timeouts(namespace), [])
+
+    def test_the_stop_timeout_is_the_namespaces_declaration_not_its_name(self):
+        self.assertEqual(
+            self.stop_timeouts(
+                dataclasses.replace(
+                    service_manager.DRAINER_NAMESPACE, stop_timeout_seconds=17
+                )
+            ),
+            ["TimeoutStopSec=17"],
+        )
+        self.assertEqual(
+            self.stop_timeouts(
+                dataclasses.replace(
+                    service_manager.MISSION_RUNNER_NAMESPACE, stop_timeout_seconds=None
+                )
+            ),
+            [],
+        )
 
     def test_the_namespaces_do_not_all_render_one_kill_mode(self):
         # The negative control: a renderer that ignored the namespace and wrote

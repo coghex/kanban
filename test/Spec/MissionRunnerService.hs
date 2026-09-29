@@ -498,6 +498,7 @@ statusDecodingSpec = describe "decoding the status document" $ do
       [ ("running", MissionRunnerAdvancing),
         ("idle", MissionRunnerIdle),
         ("waiting", MissionRunnerWaiting),
+        ("draining", MissionRunnerDraining),
         ("stopped", MissionRunnerStopped),
         ("failed", MissionRunnerFailed)
       ]
@@ -505,11 +506,12 @@ statusDecodingSpec = describe "decoding the status document" $ do
         observed <- expectRight (decodeMissionRunnerStatus boardIdentity (acceptedStatus ["\"state\":\"" <> state <> "\""]))
         observed.observedMissionRunnerStatus.missionRunnerActivity `shouldBe` activity
 
-  it "treats the three live states as running and the two terminal ones as not" $
+  it "treats the four live states as running and the two terminal ones as not" $
     forM_
       [ ("running", True),
         ("idle", True),
         ("waiting", True),
+        ("draining", True),
         ("stopped", False),
         ("failed", False)
       ]
@@ -717,6 +719,7 @@ unavailableVocabularySpec = describe "why there is no runner to observe" $ do
       [ ("running", Nothing),
         ("idle", Nothing),
         ("waiting", Nothing),
+        ("draining", Nothing),
         ("failed", Nothing),
         ("unknown", Nothing),
         ("reticulating", Nothing),
