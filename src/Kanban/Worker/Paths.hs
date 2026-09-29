@@ -77,7 +77,8 @@ descriptorForSpec spec = do
         workerDescriptorHandoffPath = directory </> base <> ".handing-off",
         workerDescriptorCommandPath = directory </> base <> ".commands.jsonl",
         workerDescriptorCommandAckPath = directory </> base <> ".command-acks.jsonl",
-        workerDescriptorAdoptionPath = directory </> base <> ".adoption"
+        workerDescriptorAdoptionPath = directory </> base <> ".adoption",
+        workerDescriptorCensusGapPath = directory </> base <> ".census-gap"
       }
 
 -- | The item a task reserves, which is what the one-live-worker invariant is

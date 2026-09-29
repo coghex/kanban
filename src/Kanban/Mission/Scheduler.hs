@@ -73,7 +73,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, SomeException, bracket, finally, throwIO, try)
 import Control.Monad (filterM, forM)
 import Data.List (nub, sortOn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, getCurrentTime)
@@ -129,6 +129,7 @@ import Kanban.Mission.Pass
     missionPassUnresolvedRepository,
   )
 import Kanban.Mission.Paths (MissionRead (..), MissionStore (..), openMissionStore)
+import Kanban.Mission.Reconcile (nextDispatchableStep)
 import Kanban.Mission.Seal (sealMissionSessionLogs)
 import Kanban.Mission.Store (listMissionsStrictly, readMissionSnapshot, readMissionSpecification)
 import Kanban.Mission.Types
@@ -210,9 +211,10 @@ data MissionSchedulerSeams = MissionSchedulerSeams
     -- withdraws the mission's place in the rotation, which a mission behind
     -- it may be waiting on.
     missionSchedulerAdvance :: [MissionId] -> (MissionId -> IO ()) -> IO [(MissionId, Either Text MissionChildResult)],
-    -- | Enters the missions about to be advanced in the agent rotation, and
-    -- returns them in the order it serves them ("Kanban.Mission.Admission").
-    missionSchedulerExpect :: [MissionId] -> IO (Either Text [MissionId]),
+    -- | Orders the missions about to be advanced by the agent rotation, and
+    -- enters in line the second list's — those that may ask for a slot
+    -- ("Kanban.Mission.Admission").
+    missionSchedulerExpect :: [MissionId] -> [MissionId] -> IO (Either Text [MissionId]),
     -- | Withdraws what 'missionSchedulerExpect' entered for one mission.
     missionSchedulerWithdraw :: MissionId -> IO (),
     -- | How many mission-dispatched agents are live in this repository.
@@ -253,11 +255,12 @@ runMissionSchedulerPass seams missions store repository = do
     pass startedAt agentCeiling = do
       (inventory, unreadable) <- readInventory store
       candidates <- admissible seams inventory
+      claimants <- filterM (mayClaimSlot store inventory) candidates
       -- Every runnable mission nothing else is advancing, in the rotation's
       -- order. A rotation record nobody can read is not a reason to advance
       -- nothing — a mission watching its live worker needs no slot — but it
       -- is state nobody can account for, and it fails the pass.
-      entered <- if null candidates then pure (Right []) else seams.missionSchedulerExpect candidates
+      entered <- if null candidates then pure (Right []) else seams.missionSchedulerExpect candidates claimants
       let (admitted, unordered) = case entered of
             Right ordered -> (ordered, [])
             Left detail -> (candidates, ["the agent rotation could not be entered, so missions were advanced in identifier order: " <> detail])
@@ -386,6 +389,24 @@ admissible seams inventory =
   filterM free [mission | (mission, snapshot) <- inventory, missionIsRunnable snapshot]
   where
     free mission = null <$> seams.missionSchedulerLeaseHeld mission
+
+-- | Whether a mission's next transition may start an agent, as its own
+-- records tell it: a step is pending with every dependency met.
+--
+-- Read from this machine and nothing else, so it costs a pass no network.
+-- It is a question about who may ask for a slot, not a promise that the
+-- child will — a child that ends up reconciling or observing first simply
+-- asks next time — and a mission it answers no for asks at the lock with
+-- no place in line, which never makes a slot wait on it. A specification
+-- that cannot be read answers no; the child's own refusal reports it.
+mayClaimSlot :: MissionStore -> [(MissionId, MissionSnapshot)] -> MissionId -> IO Bool
+mayClaimSlot store inventory mission = case lookup mission inventory of
+  Nothing -> pure False
+  Just snapshot -> do
+    specification <- readMissionSpecification store mission
+    pure $ case specification of
+      MissionPresent present -> isJust (nextDispatchableStep present snapshot)
+      _ -> False
 
 -- | What one admitted mission's child amounted to.
 --

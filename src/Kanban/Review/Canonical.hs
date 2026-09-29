@@ -27,7 +27,6 @@ module Kanban.Review.Canonical
 where
 
 import Control.Exception (IOException, try)
-import Control.Monad (unless)
 import Data.Aeson (FromJSON (..), eitherDecodeStrict, withObject, (.:!))
 import qualified Data.ByteString.Char8 as ByteString
 import Data.Maybe (fromMaybe)
@@ -40,7 +39,6 @@ import Kanban.CommandCapture
     awaitCommandOutcome,
     captureGraceMicros,
     capturedBytes,
-    commandRanToCompletion,
     releaseCapture,
     renderWindow,
     startCapture,
@@ -52,7 +50,7 @@ import Kanban.ManagedPaths
     managedRecordPath,
     recordPathOccupied,
   )
-import Kanban.Process (ManagedProcess, killManagedProcess, managedProcess)
+import Kanban.Process (ManagedProcess, managedProcess, sweepCommandGroup)
 import Kanban.Review.Diagnostics
   ( decodeClaudeBytes,
     exceptionText,
@@ -77,6 +75,7 @@ import System.Process
     ProcessHandle,
     StdStream (..),
     createProcess,
+    getPid,
     proc,
   )
 
@@ -333,6 +332,9 @@ runCanonicalCommand bounds repository issueNumber executable arguments processSt
     Left exception -> finishLog sessionLog >> pure (Left ("Could not start canonical issue reviewer: " <> exceptionText exception))
     Right (Nothing, Just outputHandle, Just errorHandle, processHandle) -> do
       (managed, groupLeaderProblem) <- managedProcess processHandle
+      -- Captured before anything can reap the leader, as the usage command
+      -- captures its own: the group is checked by this pid after a clean exit.
+      rootPid <- getPid processHandle
       mapM_ (\value -> mapM_ (logMessage value "group-leadership-unverified") groupLeaderProblem) sessionLog
       processStarted managed
       outputCapture <- startCapture outputHandle
@@ -344,7 +346,12 @@ runCanonicalCommand bounds repository issueNumber executable arguments processSt
       -- paths actually bounded: a still-running reviewer, or a descendant
       -- that outlived it still holding a capture pipe, would otherwise be
       -- left behind once this call returns.
-      unless (commandRanToCompletion completed) (killManagedProcess managed)
+      --
+      -- And a clean exit too (issue #746). A descendant that closed its pipes
+      -- and stayed in the reviewer's group survives a reviewer that exited
+      -- normally, and its caller releases the agent slot the review held the
+      -- moment this returns. Only an occupied group pays the escalation.
+      sweepCommandGroup rootPid managed
       result <- case completed of
         CommandUnfinished ->
           pure

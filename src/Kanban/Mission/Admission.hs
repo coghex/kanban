@@ -281,11 +281,19 @@ workerOccupies takeSnapshot descriptor = do
     --
     -- The one proof that an unfinished action will never run is its launch's
     -- withdrawal claim: a host turns away every action that carries one.
+    --
+    -- And a gate whose census once failed may have left behind something no
+    -- record names, which nothing could ever show ended: that action keeps
+    -- its slot whatever its state says, including after a successor host or
+    -- a stale recovery has rewritten that state.
     IssueActionWorkerTaskKind _ -> do
       claim <- readIssueActionClaim descriptor
+      gap <- doesFileExist descriptor.workerDescriptorCensusGapPath
       case claim of
         Right (Just ClaimedByWithdrawal) -> pure False
-        _ -> issueActionLive stateRead
+        _
+          | gap -> pure True
+          | otherwise -> issueActionLive stateRead
     _ -> case stateRead of
       StateUnreadable -> pure True
       StateRead state -> case state.workerStateStatus of
@@ -659,18 +667,21 @@ settleMissionAgentSlot seams store invocation =
         ()
       )
 
--- | Enters the missions a pass is about to advance, and returns them in the
--- order the rotation serves them.
+-- | Returns the missions a pass is about to advance in the order the rotation
+-- serves them, and enters in line those of them that may ask for a slot.
 --
--- The order is the one the pass launches and waits for its children in. That
--- is what makes a wait safe: a child only ever waits for missions ahead of it,
--- and the pass withdraws each of those as soon as its child is done.
-expectMissionAgents :: MissionAdmissionSeams -> MissionStore -> [MissionId] -> IO (Either Text [MissionId])
-expectMissionAgents seams store missions =
+-- The order is the one the pass launches its children in. Only a mission
+-- that may ask is entered, because an entrant is a slot left free for it: a
+-- mission whose next transition can only watch a worker, settle a step, or
+-- record a result would hold that slot idle for as long as its child took,
+-- while a mission behind it waited to start an agent. The pass withdraws each
+-- entrant as soon as its child is done.
+expectMissionAgents :: MissionAdmissionSeams -> MissionStore -> [MissionId] -> [MissionId] -> IO (Either Text [MissionId])
+expectMissionAgents seams store missions claimants =
   withAdmission seams store $ \_ state -> do
     self <- seams.missionAdmissionSelf
     now <- seams.missionAdmissionNow
-    let entered = [MissionAdmissionEntrant mission self now | mission <- missions]
+    let entered = [MissionAdmissionEntrant mission self now | mission <- missions, mission `elem` claimants]
         ordered = sortOn (rankOf state) missions
     pure (Just state {missionAdmissionEntrants = state.missionAdmissionEntrants <> entered}, ordered)
 

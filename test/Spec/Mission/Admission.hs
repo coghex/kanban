@@ -19,6 +19,7 @@ import Control.Monad (forM, forM_)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Map.Strict as Map
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -151,6 +152,17 @@ occupancySpec = describe "what the worker cache says is running" $ do
         )
       counted <- observeMissionAgentsWith (pure (Right [])) slotRepository
       fmap missionAgentsLive counted `shouldBe` Right 1
+
+  -- A gate whose census once failed may have left something no record
+  -- names. The marker outlives the host that wrote it and every rewrite of
+  -- the action's state, so the slot stays taken however the action was
+  -- settled — here, terminal with nothing recorded at all.
+  it "keeps the slot of an issue action whose gate census once failed" $
+    withSlotRoots $ \_ -> do
+      descriptor <- writeAgentWorker slotRepository "action-gap" (Just "invocation-gap") (reviewTask 26) (Just (WorkerTerminal SolveCompleted))
+      missionAgentsNow `shouldReturn` 0
+      writeFile descriptor.workerDescriptorCensusGapPath "census-gap\n"
+      missionAgentsNow `shouldReturn` 1
 
   -- A withdrawn action is the one unfinished action no host will ever run,
   -- so its slot is free even while its records wait to be removed.
@@ -390,7 +402,7 @@ rotationSpec = describe "the rotation" $ do
   it "leaves a free slot for a mission ahead that has not asked yet" $
     withSlotRoots $ \store -> do
       let admission = quiet []
-      expectMissionAgents admission store [MissionId "b", MissionId "a"] `shouldReturn` Right [MissionId "a", MissionId "b"]
+      expectMissionAgents admission store [MissionId "b", MissionId "a"] [MissionId "b", MissionId "a"] `shouldReturn` Right [MissionId "a", MissionId "b"]
       behind <- claimMissionAgentSlot admission store 1 (MissionId "b") "b-1"
       behind `shouldSatisfy` heldSaying "left for a mission ahead"
       claimMissionAgentSlot admission store 1 (MissionId "a") "a-1" `shouldReturn` MissionAgentSlotGranted
@@ -400,7 +412,7 @@ rotationSpec = describe "the rotation" $ do
   it "uses a slot no mission ahead can take" $
     withSlotRoots $ \store -> do
       let admission = quiet []
-      _ <- expectMissionAgents admission store [MissionId "a", MissionId "b"]
+      _ <- expectMissionAgents admission store [MissionId "a", MissionId "b"] [MissionId "a", MissionId "b"]
       claimMissionAgentSlot admission store 2 (MissionId "b") "b-1" `shouldReturn` MissionAgentSlotGranted
       claimMissionAgentSlot admission store 3 (MissionId "c") "c-1" `shouldReturn` MissionAgentSlotGranted
       withdrawExpectedMission admission store (MissionId "a") `shouldReturn` Right ()
@@ -416,8 +428,41 @@ rotationSpec = describe "the rotation" $ do
         settleMissionAgentSlot (quiet [occupant invocation True]) store invocation `shouldReturn` Right ()
       reopened <- openMissionStore slotRepository
       restarted <- either (fail . Text.unpack) pure reopened
-      expectMissionAgents (quiet []) restarted [MissionId "a", MissionId "b", MissionId "c"]
+      expectMissionAgents (quiet []) restarted [MissionId "a", MissionId "b", MissionId "c"] []
         `shouldReturn` Right [MissionId "c", MissionId "b", MissionId "a"]
+
+  -- Round 9: only a mission that may ask for a slot is entered in line. One
+  -- ahead that can only watch its worker, however slow its child, leaves
+  -- the last free slot to a mission behind it that is ready to start one.
+  it "leaves no place in line for a mission that cannot ask for a slot" $
+    withSlotRoots $ \store -> do
+      let admission = quiet []
+      expectMissionAgents admission store [MissionId "a", MissionId "b"] [MissionId "b"] `shouldReturn` Right [MissionId "a", MissionId "b"]
+      claimMissionAgentSlot admission store 1 (MissionId "b") "b-1" `shouldReturn` MissionAgentSlotGranted
+
+  -- And the pass asks its own records who that is: a mission watching its
+  -- live worker with nothing left to dispatch is advanced, and not entered.
+  it "enters only the missions with a step ready to dispatch" $
+    withSlotRoots $ \store -> do
+      watching <- putAgentMission store "a-watching"
+      stepAgentMission 2 store watching >>= (`shouldSatisfy` dispatched)
+      ready <- putAgentMission store "b-ready"
+      claimants <- newIORef []
+      let recording = slotAdmission {missionAdmissionPollMicros = 1000, missionAdmissionPolls = 3}
+      _ <-
+        runMissionSchedulerPass
+          (inertSeams store)
+            { missionSchedulerExpect = \missions claimed -> do
+                writeIORef claimants claimed
+                expectMissionAgents recording store missions claimed,
+              missionSchedulerAdvance = \admitted _ -> pure [(mission, Left "not run in this example") | mission <- admitted],
+              missionSchedulerAgents = pure (Right 1),
+              missionSchedulerSeal = \_ -> pure []
+            }
+          defaultMissionsConfig
+          store
+          slotRepository
+      readIORef claimants `shouldReturn` [ready]
 
 -- ---------------------------------------------------------------------------
 -- One mission step
@@ -780,7 +825,7 @@ inertSeams store =
     { missionSchedulerNow = getCurrentTime,
       missionSchedulerLeaseHeld = missionLeaseHeld store,
       missionSchedulerAdvance = \_ _ -> fail "a refused pass advances nothing",
-      missionSchedulerExpect = \_ -> fail "a refused pass enters nothing",
+      missionSchedulerExpect = \_ _ -> fail "a refused pass enters nothing",
       missionSchedulerWithdraw = \_ -> pure (),
       missionSchedulerAgents = fail "a refused pass counts nothing",
       missionSchedulerNotify = \_ -> fail "a refused pass notifies nothing",

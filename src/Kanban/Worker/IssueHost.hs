@@ -73,6 +73,7 @@ import Data.List (find)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Aeson (encode)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
@@ -1123,7 +1124,7 @@ recordLiveCanonicalProcess child process = do
   forM_ processId $ \pid -> do
     recordProviderIdentity child.hostChildDescriptor child.hostChildState (fromIntegral pid)
     taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
-    unless taken (writeIORef child.hostChildCensusMissed True)
+    unless taken (markCensusGap child)
     updateChildState child $ \state ->
       state
         { workerStateProviderPid = Just (fromIntegral pid),
@@ -1710,7 +1711,9 @@ settleSettledChild host child outcome = do
     -- child's recorded census. A @gh@ or @python3@ the gate started outlives
     -- the process that spawned it otherwise.
     terminated <- withMVar child.hostChildState terminateRecordedStateProcesses
-    missed <- readIORef child.hostChildCensusMissed
+    -- The marker as well as this host's memory: a gap an earlier host
+    -- recorded before it died is this settle's gap too.
+    missed <- (||) <$> readIORef child.hostChildCensusMissed <*> doesFileExist child.hostChildDescriptor.workerDescriptorCensusGapPath
     let settlement
           | missed = GateUnaccounted
           | terminated = GateEnded
@@ -2042,6 +2045,15 @@ closeChildLogs host = do
 refreshChildHeartbeats :: IssueReviewHost -> IO ()
 refreshChildHeartbeats host = liveChildren host >>= mapM_ (\child -> censusGate child >> updateChildState child id)
 
+-- | Records that a census of this child's gate could not be taken, in
+-- memory and on disk. The file is what outlives this host: a successor that
+-- adopts the child to settle it, and every count of running agents, read it
+-- where they would otherwise read a tree with nothing unrecorded in it.
+markCensusGap :: HostChild -> IO ()
+markCensusGap child = do
+  writeIORef child.hostChildCensusMissed True
+  void (try @IOException (ByteString.writeFile child.hostChildDescriptor.workerDescriptorCensusGapPath "census-gap\n"))
+
 -- | Takes a census of a child's canonical gate while it runs.
 --
 -- Every poll rather than once when the gate starts, because the gate's tree
@@ -2056,4 +2068,4 @@ censusGate child = do
     Nothing -> pure ()
     Just _ -> do
       taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
-      unless taken (writeIORef child.hostChildCensusMissed True)
+      unless taken (markCensusGap child)

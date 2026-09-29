@@ -496,6 +496,7 @@ companionArtifactPaths descriptor =
     descriptor.workerDescriptorCommandPath,
     descriptor.workerDescriptorCommandAckPath,
     descriptor.workerDescriptorHandoffPath,
+    descriptor.workerDescriptorCensusGapPath,
     -- Last among the companions: while the specification is still there,
     -- the claim is what keeps a host from adopting an action on its way out.
     descriptor.workerDescriptorAdoptionPath

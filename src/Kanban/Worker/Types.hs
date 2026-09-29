@@ -495,7 +495,13 @@ data WorkerDescriptor = WorkerDescriptor
     -- action a host has adopted ('Kanban.Worker.Paths.claimIssueAction').
     -- Only an issue action ever has one; the path is derived for every
     -- worker for the collection pass's sake, as the command journals are.
-    workerDescriptorAdoptionPath :: FilePath
+    workerDescriptorAdoptionPath :: FilePath,
+    -- | Marks an issue action whose canonical gate a census once failed to
+    -- read, so something it spawned may be running that nothing recorded.
+    -- A file rather than a state field, because every path that settles or
+    -- recovers an action rewrites its state and a dead host's successor
+    -- starts from what is on disk: nothing but collection removes this.
+    workerDescriptorCensusGapPath :: FilePath
   }
   deriving stock (Eq, Show)
 

@@ -310,7 +310,12 @@ by nothing else. A settle that cannot show that tree ended keeps the gate's
 recorded pid and identity on the terminal state; a gate whose identity was
 never captured, or any of whose censuses could not be taken, keeps its pid with
 no identity and so holds its slot for good, since nothing could ever show its
-tree gone. A
+tree gone. A failed census also leaves a `.census-gap` marker beside the action's
+records, which nothing but collection removes, so the slot stays taken after a
+successor host or a stale recovery has rewritten the action's state. The
+canonical gate's process group is swept on every exit, a clean one included,
+because a descendant that stayed in the group outlives a gate that exited
+normally. A
 record that will not decode, and a snapshot that cannot be taken, keep the
 slot. Lowering the ceiling below what is running starts nothing new until
 enough of it finishes, and ends nothing.
@@ -339,10 +344,13 @@ place is the number of its latest successful admission, so the mission admitted
 longest ago — or never — goes first, and a restarted runner resumes the same
 order. Only a launch that started its own worker moves a mission to the back;
 one that was refused, went stale, failed to start, or joined a worker somebody
-else started leaves its place alone. A pass enters every mission it is about to
-advance in that order before any child starts, launches the children in that
-order, and withdraws each mission's place as soon as that mission's own child
-exits, whatever the children ahead of it are still doing. A free
+else started leaves its place alone. A pass launches the children in that order and,
+before any starts, enters in line those missions its own records say may ask
+for a slot — a step pending with every dependency met — withdrawing each
+mission's place as soon as that mission's own child exits, whatever the
+children ahead of it are still doing. A mission that can only watch its
+worker, settle a step, or record a result is not entered, so it never holds
+a free slot idle for a mission behind it. A free
 slot a mission ahead may still take is left for it, so the rotation rather than
 which child reaches the lock first decides who gets it; a slot nobody ahead can
 take is used, so a lone runnable mission may use every free slot over
@@ -3989,6 +3997,7 @@ Suggested paths:
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.{spec,state}.json
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.events.jsonl
 ~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.adoption
+~/.cache/kanban/workers/<owner>-<repo>/<worker-id>.census-gap
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/specification.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/snapshot.json
 ~/.local/state/kanban/missions/repositories/<owner>/<repo>/<mission>/events.jsonl
