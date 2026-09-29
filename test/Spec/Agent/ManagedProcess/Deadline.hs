@@ -1133,7 +1133,9 @@ workerStateReviewRequest = Nothing
                   workerDescriptorPendingTerminationPath = temporaryRoot </> "unused.pending-termination",
                   workerDescriptorHandoffPath = temporaryRoot </> "unused.handing-off",
                   workerDescriptorCommandPath = temporaryRoot </> "unused.commands.jsonl",
-                  workerDescriptorCommandAckPath = temporaryRoot </> "unused.command-acks.jsonl"
+                  workerDescriptorCommandAckPath = temporaryRoot </> "unused.command-acks.jsonl",
+                  workerDescriptorAdoptionPath = temporaryRoot </> "unused.adoption",
+                  workerDescriptorCensusGapPath = temporaryRoot </> "unused.census-gap"
                 }
             fixtureState =
               WorkerState

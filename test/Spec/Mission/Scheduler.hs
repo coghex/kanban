@@ -94,16 +94,18 @@ spec = describe "the repository mission scheduler" $ do
 
 admissionSpec :: Spec
 admissionSpec = describe "which missions one pass admits" $ do
-  -- Requirements 2 and 3.
-  it "admits at most two of three runnable missions" $
+  -- Issue #746, requirement 6: the per-pass mission limit #666 shipped is
+  -- retired. Every runnable mission is advanced by one transition, and the
+  -- ceiling governs only the agents those transitions would start — so a
+  -- mission that is only watching its live worker is never crowded out.
+  it "admits every runnable mission, not a fixed number of them" $
     withStore $ \store -> do
       forM_ ["mission-a", "mission-b", "mission-c"] $ \mission ->
         putMission store mission MissionRunning
       (report, advanced) <- passWith store defaultMissionsConfig id
-      readIORef advanced `shouldReturn` [[MissionId "mission-a", MissionId "mission-b"]]
+      readIORef advanced `shouldReturn` [[MissionId "mission-a", MissionId "mission-b", MissionId "mission-c"]]
       map (.missionDispositionMission) report.missionPassAdmitted
-        `shouldBe` [MissionId "mission-a", MissionId "mission-b"]
-      missionAdmissionCeiling `shouldBe` 2
+        `shouldBe` [MissionId "mission-a", MissionId "mission-b", MissionId "mission-c"]
 
   -- Requirement 2's exclusions, one lifecycle at a time rather than as a set,
   -- so a rule that admitted one of them would name which.
@@ -285,7 +287,7 @@ leaseSpec = describe "a mission another process is already advancing" $ do
       putMission store "mission-a" MissionRunning
       (report, _) <- passWith store defaultMissionsConfig $ \seams ->
         seams
-          { missionSchedulerAdvance = \admitted ->
+          { missionSchedulerAdvance = \admitted _ ->
               pure [(mission, Right (childRefusal mission MissionChildAlreadyAdvancing)) | mission <- admitted]
           }
       map (.missionDispositionValue) report.missionPassAdmitted `shouldBe` [MissionDispositionLeaseRefused]
@@ -303,7 +305,7 @@ leaseSpec = describe "a mission another process is already advancing" $ do
       withStore $ \store -> do
         putMission store "mission-a" MissionRunning
         (report, _) <- passWith store defaultMissionsConfig $ \seams ->
-          seams {missionSchedulerAdvance = \admitted -> pure [(mission, Right (childRefusal mission refusal)) | mission <- admitted]}
+          seams {missionSchedulerAdvance = \admitted _ -> pure [(mission, Right (childRefusal mission refusal)) | mission <- admitted]}
         (refusal, map (.missionDispositionValue) report.missionPassAdmitted) `shouldBe` (refusal, [MissionDispositionRefused])
         (refusal, report.missionPassTermination) `shouldBe` (refusal, MissionPassFailed)
         (refusal, missionPassExitCode report.missionPassTermination) `shouldBe` (refusal, 1)
@@ -318,7 +320,7 @@ leaseSpec = describe "a mission another process is already advancing" $ do
         breakSpecification store (MissionId "mission-a") shape
         (report, advanced) <- passWith store defaultMissionsConfig $ \seams ->
           seams
-            { missionSchedulerAdvance = \admitted ->
+            { missionSchedulerAdvance = \admitted _ ->
                 pure [(mission, Right (childRefusal mission MissionChildUnreadableRecord)) | mission <- admitted]
             }
         -- Admitted, because the snapshot is runnable and nothing reads the
@@ -341,7 +343,7 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
         putMission store "mission-a" MissionRunning
         (report, _) <- passWith store defaultMissionsConfig $ \seams ->
           seams
-            { missionSchedulerAdvance = \admitted -> do
+            { missionSchedulerAdvance = \admitted _ -> do
                 forM_ admitted $ \mission -> putMission store (Text.unpack mission.unMissionId) settledAs
                 pure [(mission, Right (childAdvanced mission)) | mission <- admitted]
             }
@@ -351,7 +353,7 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
     withStore $ \store -> do
       putMission store "mission-a" MissionRunning
       (report, _) <- passWith store defaultMissionsConfig $ \seams ->
-        seams {missionSchedulerAdvance = \admitted -> pure [(mission, Left "the child died") | mission <- admitted]}
+        seams {missionSchedulerAdvance = \admitted _ -> pure [(mission, Left "the child died") | mission <- admitted]}
       map (.missionDispositionValue) report.missionPassAdmitted `shouldBe` [MissionDispositionFailed]
       report.missionPassTermination `shouldBe` MissionPassFailed
       missionPassExitCode report.missionPassTermination `shouldBe` 1
@@ -364,7 +366,7 @@ dispositionSpec = describe "what a pass makes of a child that ran" $ do
       putMission store "mission-a" MissionRunning
       (report, _) <- passWith store defaultMissionsConfig $ \seams ->
         seams
-          { missionSchedulerAdvance = \admitted -> do
+          { missionSchedulerAdvance = \admitted _ -> do
               forM_ admitted (removeSnapshot store)
               pure [(mission, Right (childAdvanced mission)) | mission <- admitted]
           }
@@ -509,13 +511,13 @@ passContractSpec = describe "the pass report" $ do
   -- them.
   it "pins its schema, its version, and its exit statuses" $ do
     missionPassSchema `shouldBe` "kanban-mission-scheduler-pass"
-    missionPassVersion `shouldBe` 1
+    missionPassVersion `shouldBe` 2
     map missionPassTerminationTag missionPassTerminations `shouldBe` ["completed", "refused", "failed"]
     map missionPassExitCode missionPassTerminations `shouldBe` [0, 2, 1]
 
   it "pins the disposition and notification vocabularies" $ do
     map missionDispositionTag missionDispositions
-      `shouldBe` ["advanced", "settled", "blocked", "lease_refused", "refused", "failed"]
+      `shouldBe` ["advanced", "settled", "blocked", "awaiting", "deferred", "lease_refused", "refused", "failed"]
     map missionNotificationStateTag missionNotificationStates
       `shouldBe` [ "disabled",
                    "suppressed",
@@ -538,7 +540,7 @@ passContractSpec = describe "the pass report" $ do
       map (.missionDispositionMission) report.missionPassAdmitted `shouldBe` [MissionId "mission-a"]
       map (.missionAttentionRecordMission) report.missionPassAttention `shouldBe` [MissionId "mission-b"]
       let encoded = ByteString.unpack (LazyByteString.toStrict (encodeMissionPassReport report))
-      forM_ ["\"schema\"", "\"version\"", "\"repository\"", "\"termination\"", "\"admitted\"", "\"attention\"", "\"started_at\"", "\"finished_at\""] $ \field ->
+      forM_ ["\"schema\"", "\"version\"", "\"repository\"", "\"termination\"", "\"admitted\"", "\"attention\"", "\"agents\"", "\"started_at\"", "\"finished_at\""] $ \field ->
         (field, field `isInfixOf` encoded) `shouldBe` (field, True)
 
   it "narrates to a list that never carries the document" $
@@ -724,8 +726,8 @@ childResultSpec :: Spec
 childResultSpec = describe "the child result document" $ do
   it "pins its schema and version" $ do
     missionChildResultSchema `shouldBe` "kanban-mission-child-result"
-    missionChildResultVersion `shouldBe` 1
-    map missionChildOutcomeTag missionChildOutcomes `shouldBe` ["advanced", "refused", "failed"]
+    missionChildResultVersion `shouldBe` 2
+    map missionChildOutcomeTag missionChildOutcomes `shouldBe` ["advanced", "awaiting", "deferred", "refused", "failed"]
     sort (map missionChildRefusalTag missionChildRefusals)
       `shouldBe` sort
         [ "already_advancing",
@@ -756,15 +758,15 @@ malformedChildResults =
   [ ("not json", "{"),
     ("not an object", "[]"),
     ("empty", ""),
-    ("unknown schema", "{\"schema\":\"something-else\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
-    ("unknown version", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
-    ("missing outcome", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"refusal\":null,\"detail\":\"\"}"),
-    ("missing mission", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
-    ("wrong-typed version", "{\"schema\":\"kanban-mission-child-result\",\"version\":\"1\",\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
-    ("unknown outcome", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"nearly\",\"refusal\":null,\"detail\":\"\"}"),
-    ("unknown refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"refused\",\"refusal\":\"because\",\"detail\":\"\"}"),
-    ("refused with no refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"refused\",\"refusal\":null,\"detail\":\"\"}"),
-    ("advanced with a refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":\"already_advancing\",\"detail\":\"\"}")
+    ("unknown schema", "{\"schema\":\"something-else\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
+    ("unknown version", "{\"schema\":\"kanban-mission-child-result\",\"version\":3,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
+    ("missing outcome", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"refusal\":null,\"detail\":\"\"}"),
+    ("missing mission", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
+    ("wrong-typed version", "{\"schema\":\"kanban-mission-child-result\",\"version\":\"2\",\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":null,\"detail\":\"\"}"),
+    ("unknown outcome", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"nearly\",\"refusal\":null,\"detail\":\"\"}"),
+    ("unknown refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"refused\",\"refusal\":\"because\",\"detail\":\"\"}"),
+    ("refused with no refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"refused\",\"refusal\":null,\"detail\":\"\"}"),
+    ("advanced with a refusal", "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\",\"outcome\":\"advanced\",\"refusal\":\"already_advancing\",\"detail\":\"\"}")
   ]
 
 -- ---------------------------------------------------------------------------
@@ -773,6 +775,50 @@ malformedChildResults =
 
 childExecutionSpec :: Spec
 childExecutionSpec = describe "the child a pass actually launches" $ do
+  -- The watcher of a child starts before the next child is launched: here
+  -- the second launch cannot finish until the first child's watcher has run,
+  -- which it could never do if watching waited for every launch.
+  it "watches each child from the moment it is launched, while later launches are still under way" $ do
+    firstWatched <- newEmptyMVar
+    let start item
+          | item == (1 :: Int) = pure item
+          | otherwise = takeMVar firstWatched >> pure item
+        watch item = do
+          if item == 1 then putMVar firstWatched () else pure ()
+          pure (item * 10)
+    finished <- timeout 5000000 (launchWatched start watch [1, 2])
+    finished `shouldBe` Just [10, 20]
+
+  -- A child that has finished must not go on standing in line in front of
+  -- the missions behind it while a slower child ahead of it is still
+  -- running: each mission's place is withdrawn as its own child exits, and
+  -- the accounts still come back in the order they were handed over.
+  it "withdraws each mission's place as its own child exits, in whatever order that is" $
+    withStore $ \store -> withScratch $ \scratch -> do
+      fake <-
+        writeFakeKanban
+          scratch
+          ( unlines
+              [ "#!/bin/sh",
+                "if [ \"$2\" = mission-a ]; then sleep 1; fi",
+                resultLine "\"$2\"" "coghex/kanban" "advanced",
+                "exit 0"
+              ]
+          )
+      putMission store "mission-a" MissionRunning
+      putMission store "mission-b" MissionRunning
+      withdrawn <- newIORef []
+      results <-
+        advanceMissions
+          fake
+          testOptions
+          (checkoutIn scratch)
+          scratch
+          [MissionId "mission-a", MissionId "mission-b"]
+          (\mission -> atomicModifyIORef' withdrawn (\seen -> (seen <> [mission], ())))
+      map fst results `shouldBe` [MissionId "mission-a", MissionId "mission-b"]
+      readIORef withdrawn `shouldReturn` [MissionId "mission-b", MissionId "mission-a"]
+
   -- Requirement 5, and the review's verification anchor. The checkout has a
   -- space in it and so does the configuration path, and the fake records what
   -- it was handed rather than being asserted about from this side.
@@ -793,6 +839,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
             boardRepository {repositoryRoot = checkout}
             scratch
             [MissionId "mission-a"]
+            (\_ -> pure ())
         map (fmap (.missionChildResultOutcome) . snd) results `shouldBe` [Right MissionChildAdvanced]
         recorded <- lines <$> readFile transcript
         -- The checkout travels as the working directory, so a name with a
@@ -814,7 +861,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch (chatteringScript "advanced" 0)
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Right result] -> do
             ("NOISE" `Text.isInfixOf` result.missionChildResultDetail) `shouldBe` False
@@ -834,7 +881,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
         writeFile (scratch </> "child-0.json") staleRefusalDocument
         fake <- writeFakeKanban scratch "#!/bin/sh\nexit 1\n"
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("wrote no result document" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("a stale document was accepted: " <> show other)
@@ -848,7 +895,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
         writeFile (scratch </> "child-0.json") staleRefusalDocument
         fake <- writeFakeKanban scratch "#!/bin/sh\nexit 1\n"
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         let report = disposedPass store results
         report >>= \dispositions -> map (.missionDispositionValue) dispositions `shouldBe` [MissionDispositionFailed]
 
@@ -857,7 +904,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch "#!/bin/sh\nexit 0\n"
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("wrote no result document" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("unexpected results: " <> show other)
@@ -867,7 +914,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch "#!/bin/sh\nprintf '{\"schema\":\"kanban-mission' > \"$4\"\nexit 0\n"
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("will not parse" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("unexpected results: " <> show other)
@@ -877,7 +924,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch (resultScript "mission-elsewhere" "coghex/kanban" "advanced" 0)
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("wrote a result for mission-elsewhere" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("unexpected results: " <> show other)
@@ -897,7 +944,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch (unlines ["#!/bin/sh", resultLineFor "\"$2\"" "coghex/kanban" "advanced" "some-other-launch", "exit 0"])
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("some-other-launch" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("a foreign launch's result was accepted: " <> show other)
@@ -911,7 +958,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
         let transcript = scratch </> "transcript"
         fake <- writeFakeKanban scratch (recordingScript transcript "advanced" 0)
         forM_ ["mission-a", "mission-b"] $ \mission -> putMission store mission MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"] (\_ -> pure ())
         map (fmap (.missionChildResultOutcome) . snd) results
           `shouldBe` [Right MissionChildAdvanced, Right MissionChildAdvanced]
         recorded <- lines <$> readFile transcript
@@ -927,7 +974,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
       withScratch $ \scratch -> do
         fake <- writeFakeKanban scratch (resultScript "mission-a" "someone/else" "advanced" 0)
         putMission store "mission-a" MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
         case map snd results of
           [Left message] -> ("someone/else" `Text.isInfixOf` message) `shouldBe` True
           other -> expectationFailure ("a foreign result was accepted: " <> show other)
@@ -938,7 +985,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
         forM_ [("advanced", 1 :: Int), ("failed", 0)] $ \(outcome, status) -> do
           fake <- writeFakeKanban scratch (resultScript "mission-a" "coghex/kanban" outcome status)
           putMission store "mission-a" MissionRunning
-          results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"]
+          results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a"] (\_ -> pure ())
           case map snd results of
             [Left message] -> (outcome, "reported" `Text.isInfixOf` message) `shouldBe` (outcome, True)
             other -> expectationFailure ("unexpected results for " <> outcome <> ": " <> show other)
@@ -949,7 +996,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
         let marker = scratch </> "slow-finished"
         fake <- writeFakeKanban scratch (slowScript marker)
         forM_ ["mission-a", "mission-b"] $ \mission -> putMission store mission MissionRunning
-        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"]
+        results <- advanceMissions fake testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"] (\_ -> pure ())
         length results `shouldBe` 2
         -- Written by the child just before it exits, so its presence the
         -- instant `advanceMissions` returns is the wait rather than a race.
@@ -959,7 +1006,7 @@ childExecutionSpec = describe "the child a pass actually launches" $ do
     withStore $ \store ->
       withScratch $ \scratch -> do
         forM_ ["mission-a", "mission-b"] $ \mission -> putMission store mission MissionRunning
-        results <- advanceMissions (scratch </> "no-such-executable") testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"]
+        results <- advanceMissions (scratch </> "no-such-executable") testOptions (checkoutIn scratch) scratch [MissionId "mission-a", MissionId "mission-b"] (\_ -> pure ())
         map fst results `shouldBe` [MissionId "mission-a", MissionId "mission-b"]
         forM_ (map snd results) $ \outcome -> case outcome of
           Left message -> ("could not be started" `Text.isInfixOf` message) `shouldBe` True
@@ -1860,7 +1907,7 @@ childRefusal mission refusal =
 
 enabledWith :: Maybe [Text] -> MissionsConfig
 enabledWith argv =
-  MissionsConfig
+  defaultMissionsConfig
     { missionsNotifications =
         MissionNotificationConfig
           { missionNotificationEnabled = True,
@@ -1900,6 +1947,16 @@ withController action = withStore $ \store -> do
       stopMissionController controller
       pure result
 
+-- | Admission over a real record whose worker cache holds exactly these
+-- occupants, so nothing an example does reaches a real one.
+quietAdmission :: [MissionAgentOccupant] -> MissionAdmissionSeams
+quietAdmission occupants =
+  (liveMissionAdmissionSeams boardRepository)
+    { missionAdmissionOccupants = pure (Right occupants),
+      missionAdmissionPollMicros = 1000,
+      missionAdmissionPolls = 50
+    }
+
 inertDriver :: MissionDriver
 inertDriver =
   MissionDriver
@@ -1910,7 +1967,9 @@ inertDriver =
       missionDriverAdoptInvocation = \_ -> pure (Right Nothing),
       missionDriverDispatch = \_ -> fail "this fixture dispatches nothing",
       missionDriverTerminate = \_ -> pure (Right []),
-      missionDriverSealSession = \_ -> pure []
+      missionDriverSealSession = \_ -> pure [],
+      missionDriverClaimSlot = \_ _ -> pure MissionSlotNotNeeded,
+      missionDriverSettleSlot = \_ -> pure ()
     }
 
 putMission :: MissionStore -> String -> MissionLifecycle -> IO ()
@@ -2153,7 +2212,10 @@ passWith store missions adjust = do
         MissionSchedulerSeams
           { missionSchedulerNow = getCurrentTime,
             missionSchedulerLeaseHeld = missionLeaseHeld store,
-            missionSchedulerAdvance = \admitted -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
+            missionSchedulerExpect = expectMissionAgents (quietAdmission []) store,
+            missionSchedulerWithdraw = \mission -> () <$ withdrawExpectedMission (quietAdmission []) store mission,
+            missionSchedulerAgents = pure (Right 0),
+            missionSchedulerAdvance = \admitted _ -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
             missionSchedulerNotify = \_ -> fail "this example runs no notification command",
             missionSchedulerSeal = \_ -> pure []
           }
@@ -2163,9 +2225,9 @@ passWith store missions adjust = do
       -- have done with it.
       recorded =
         adjusted
-          { missionSchedulerAdvance = \admitted -> do
+          { missionSchedulerAdvance = \admitted settled -> do
               atomicModifyIORef' advanced (\seen -> (seen <> [admitted], ()))
-              adjusted.missionSchedulerAdvance admitted
+              adjusted.missionSchedulerAdvance admitted settled
           }
   report <- runMissionSchedulerPass recorded missions store boardRepository
   pure (report, advanced)
@@ -2182,7 +2244,10 @@ passRecordingNotificationsInto store missions invocations =
     MissionSchedulerSeams
       { missionSchedulerNow = getCurrentTime,
         missionSchedulerLeaseHeld = missionLeaseHeld store,
-        missionSchedulerAdvance = \admitted -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
+            missionSchedulerExpect = expectMissionAgents (quietAdmission []) store,
+            missionSchedulerWithdraw = \mission -> () <$ withdrawExpectedMission (quietAdmission []) store mission,
+            missionSchedulerAgents = pure (Right 0),
+        missionSchedulerAdvance = \admitted _ -> pure [(mission, Right (childAdvanced mission)) | mission <- admitted],
         missionSchedulerNotify = recordingNotifier invocations (MissionNotificationAttempt MissionNotificationCompleted Nothing),
         missionSchedulerSeal = \_ -> pure []
       }
@@ -2204,7 +2269,7 @@ recordingNotifier invocations attempt argv = do
 -- agreeing with the non-zero status a child that wrote nothing exits with.
 staleRefusalDocument :: String
 staleRefusalDocument =
-  "{\"schema\":\"kanban-mission-child-result\",\"version\":1,"
+  "{\"schema\":\"kanban-mission-child-result\",\"version\":2,"
     <> "\"invocation\":\"a-launch-that-is-long-gone\","
     <> "\"repository\":\"coghex/kanban\",\"mission\":\"mission-a\","
     <> "\"outcome\":\"refused\",\"refusal\":\"already_advancing\","
@@ -2218,7 +2283,10 @@ disposedPass store results = do
       MissionSchedulerSeams
         { missionSchedulerNow = getCurrentTime,
           missionSchedulerLeaseHeld = missionLeaseHeld store,
-          missionSchedulerAdvance = \_ -> pure results,
+            missionSchedulerExpect = expectMissionAgents (quietAdmission []) store,
+            missionSchedulerWithdraw = \mission -> () <$ withdrawExpectedMission (quietAdmission []) store mission,
+            missionSchedulerAgents = pure (Right 0),
+          missionSchedulerAdvance = \_ _ -> pure results,
           missionSchedulerNotify = \_ -> fail "this example runs no notification command",
           missionSchedulerSeal = \_ -> pure []
         }
@@ -2292,7 +2360,7 @@ resultLine mission repository outcome = resultLineFor mission repository outcome
 resultLineFor :: String -> String -> String -> String -> String
 resultLineFor mission repository outcome invocation =
   "printf '%s' '"
-    <> "{\"schema\":\"kanban-mission-child-result\",\"version\":1,\"invocation\":\"'"
+    <> "{\"schema\":\"kanban-mission-child-result\",\"version\":2,\"invocation\":\"'"
     <> invocation
     <> "'\",\"repository\":\""
     <> repository

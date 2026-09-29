@@ -24,6 +24,10 @@ module Kanban.Worker.Paths
     readWorkerState,
     writeState,
     persistState,
+    IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    readIssueActionClaim,
   )
 where
 
@@ -35,6 +39,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime, getCurrentTime)
 import Kanban.Domain (Repository (..))
 import Kanban.Worker.Types
@@ -47,9 +52,10 @@ import Kanban.Worker.Types
     WorkerState (..),
     WorkerTask (..),
   )
-import System.Directory (XdgDirectory (XdgCache), doesDirectoryExist, getXdgDirectory, listDirectory, renameFile)
+import System.Directory (XdgDirectory (XdgCache), doesDirectoryExist, getXdgDirectory, listDirectory, removeFile, renameFile)
+import System.IO.Error (isAlreadyExistsError, isDoesNotExistError)
 import System.FilePath ((</>))
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (createLink, setFileMode)
 import System.Posix.Process (getProcessID)
 
 descriptorForSpec :: WorkerSpec -> IO WorkerDescriptor
@@ -70,7 +76,9 @@ descriptorForSpec spec = do
         workerDescriptorPendingTerminationPath = directory </> base <> ".pending-termination",
         workerDescriptorHandoffPath = directory </> base <> ".handing-off",
         workerDescriptorCommandPath = directory </> base <> ".commands.jsonl",
-        workerDescriptorCommandAckPath = directory </> base <> ".command-acks.jsonl"
+        workerDescriptorCommandAckPath = directory </> base <> ".command-acks.jsonl",
+        workerDescriptorAdoptionPath = directory </> base <> ".adoption",
+        workerDescriptorCensusGapPath = directory </> base <> ".census-gap"
       }
 
 -- | The item a task reserves, which is what the one-live-worker invariant is
@@ -156,3 +164,73 @@ writeState descriptor = void . writePrivateJson descriptor.workerDescriptorState
 
 persistState :: WorkerDescriptor -> MVar WorkerState -> IO ()
 persistState descriptor stateLock = withMVar stateLock (writeState descriptor)
+
+-- | Who has taken an issue action.
+data IssueActionClaim
+  = -- | The review host with this identity adopted it.
+    ClaimedByHost WorkerId
+  | -- | Its launch withdrew it after nothing adopted it in time.
+    ClaimedByWithdrawal
+  deriving stock (Eq, Show)
+
+data IssueActionClaimOutcome
+  = -- | This caller's claim is the one that stands.
+    IssueActionClaimWon
+  | -- | Somebody else's claim was already there.
+    IssueActionClaimHeld IssueActionClaim
+  | -- | Nothing could be settled: the claim could not be written, or the one
+    -- already there could not be read. Never taken as either answer.
+    IssueActionClaimUnsettled Text
+  deriving stock (Eq, Show)
+
+-- | Takes an issue action for a host or for its launch's withdrawal, unless
+-- the other already has.
+--
+-- A host adopts a child by inserting it into memory and journaling its first
+-- event some moments later, and the launch that is waiting for that event
+-- gives up after a bound and removes the child. Neither end can see the
+-- other's decision from a file it merely reads, so both make it the same
+-- way: by creating one file that cannot be created twice. The whole claim is
+-- written beside it first and hard-linked into place, so the file is never
+-- seen half-written, and a link onto a name that exists fails rather than
+-- replacing it.
+claimIssueAction :: WorkerDescriptor -> IssueActionClaim -> IO IssueActionClaimOutcome
+claimIssueAction descriptor claim = do
+  processId <- getProcessID
+  now <- getCurrentTime
+  let path = descriptor.workerDescriptorAdoptionPath
+      staging = path <> ".staging-" <> show processId <> "-" <> Text.unpack (timestampKey now)
+  staged <- try @IOException $ do
+    ByteString.writeFile staging (claimBytes claim)
+    setFileMode staging 0o600
+  case staged of
+    Left exception -> pure (IssueActionClaimUnsettled ("the adoption claim could not be staged: " <> Text.pack (show exception)))
+    Right () -> do
+      linked <- try @IOException (createLink staging path)
+      ignoreFileOperation (removeFile staging)
+      case linked of
+        Right () -> pure IssueActionClaimWon
+        Left exception
+          | isAlreadyExistsError exception -> do
+              existing <- readIssueActionClaim descriptor
+              pure $ case existing of
+                Right (Just held) -> IssueActionClaimHeld held
+                Right Nothing -> IssueActionClaimUnsettled "the adoption claim vanished while it was being read"
+                Left message -> IssueActionClaimUnsettled message
+          | otherwise -> pure (IssueActionClaimUnsettled ("the adoption claim could not be made: " <> Text.pack (show exception)))
+  where
+    claimBytes (ClaimedByHost host) = TextEncoding.encodeUtf8 ("host " <> host.unWorkerId <> "\n")
+    claimBytes ClaimedByWithdrawal = "withdrawn\n"
+
+-- | The claim an issue action carries, 'Nothing' when it carries none.
+readIssueActionClaim :: WorkerDescriptor -> IO (Either Text (Maybe IssueActionClaim))
+readIssueActionClaim descriptor = do
+  loaded <- try @IOException (ByteString.readFile descriptor.workerDescriptorAdoptionPath)
+  pure $ case loaded of
+    Left exception
+      | isDoesNotExistError exception -> Right Nothing
+      | otherwise -> Left ("the adoption claim could not be read: " <> Text.pack (show exception))
+    Right bytes -> case Text.words (TextEncoding.decodeUtf8With (\_ _ -> Just '\xfffd') bytes) of
+      ["withdrawn"] -> Right (Just ClaimedByWithdrawal)
+      ["host", host] -> Right (Just (ClaimedByHost (WorkerId host)))
+      _ -> Left "the adoption claim is not one this release writes"

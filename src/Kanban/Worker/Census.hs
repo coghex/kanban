@@ -14,11 +14,13 @@ module Kanban.Worker.Census
   ( processKey,
     recordProviderIdentity,
     refreshProcessCensus,
+    refreshProcessCensusReporting,
     liveRecordedProcessesWith,
   )
 where
 
 import Control.Concurrent.MVar (MVar, modifyMVar_, withMVar)
+import Control.Monad (void)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -63,11 +65,20 @@ recordProviderIdentity descriptor stateLock providerPid = do
 -- 'recordProviderIdentity' does (see its own documentation) -- discovery
 -- and verification are deliberately independent axes for tests to vary.
 refreshProcessCensus :: WorkerDescriptor -> MVar WorkerState -> IO ()
-refreshProcessCensus descriptor stateLock = do
+refreshProcessCensus descriptor stateLock = void (refreshProcessCensusReporting descriptor stateLock)
+
+-- | 'refreshProcessCensus', saying whether a census was actually taken.
+--
+-- 'False' is a snapshot that could not be read, after which whatever the
+-- tree grew since the last census is recorded nowhere. A caller that has to
+-- account for every process a child left behind cannot treat that as the
+-- same answer as a census that found nothing new.
+refreshProcessCensusReporting :: WorkerDescriptor -> MVar WorkerState -> IO Bool
+refreshProcessCensusReporting descriptor stateLock = do
   snapshotResult <- readProcessSnapshot
   case snapshotResult of
-    Left _ -> pure ()
-    Right snapshot ->
+    Left _ -> pure False
+    Right snapshot -> fmap (const True) $
       modifyMVar_ stateLock $ \state -> do
         let survivingKnown = matchingIdentities snapshot state.workerStateKnownProcesses
             providerRoots = maybe [] (map processIdentityPid . matchingIdentities snapshot . (: [])) state.workerStateProviderIdentity

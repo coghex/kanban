@@ -8,6 +8,7 @@ module Kanban.Config
     MissionNotificationCommand (..),
     MissionNotificationConfig (..),
     MissionsConfig (..),
+    MissionAgentCeiling (..),
     WorkflowOverride (..),
     LimitsOverride (..),
     TimeoutsOverride (..),
@@ -22,6 +23,9 @@ module Kanban.Config
     defaultMissionsConfig,
     defaultMissionNotificationConfig,
     missionNotificationRefusal,
+    defaultMissionAgentCeiling,
+    missionAgentCeilingValue,
+    missionAgentCeilingRefusal,
     defaultRawConfig,
     emptyWorkflowOverride,
     emptyLimitsOverride,
@@ -227,8 +231,47 @@ data MissionNotificationConfig = MissionNotificationConfig
 --
 -- One table rather than a bare @[missions.notifications]@ so that the mission
 -- runner's later settings have somewhere to go without moving this one.
-newtype MissionsConfig = MissionsConfig {missionsNotifications :: MissionNotificationConfig}
+data MissionsConfig = MissionsConfig
+  { missionsNotifications :: MissionNotificationConfig,
+    -- | @agent_ceiling@: how many mission-dispatched agents may be live at
+    -- once for one repository (D-4, as amended).
+    missionsAgentCeiling :: MissionAgentCeiling
+  }
   deriving stock (Eq, Show)
+
+-- | @[missions] agent_ceiling@, as the file spelled it.
+--
+-- Kept as written rather than refused while the file is read, for the reason
+-- 'missionNotificationRefusal' gives: a dashboard and a usage query read this
+-- file too and consult nothing here, so a ceiling of zero must not take the
+-- repository away from them. 'missionAgentCeilingRefusal' refuses it by name
+-- where a mission would start an agent under it.
+data MissionAgentCeiling
+  = -- | A positive whole number.
+    MissionAgentCeiling Int
+  | -- | Anything else, with the value as the file wrote it.
+    MissionAgentCeilingInvalid Text
+  deriving stock (Eq, Show)
+
+-- | Two, the ceiling D-4 decided and the one an absent key means.
+defaultMissionAgentCeiling :: Int
+defaultMissionAgentCeiling = 2
+
+-- | The configured ceiling, or why there is none to apply.
+missionAgentCeilingValue :: MissionsConfig -> Either Text Int
+missionAgentCeilingValue missions = case missions.missionsAgentCeiling of
+  MissionAgentCeiling configured -> Right configured
+  MissionAgentCeilingInvalid written ->
+    Left
+      ( "missions.agent_ceiling must be a positive whole number, and it is "
+          <> written
+          <> ", so no mission may start an agent under it"
+      )
+
+-- | 'missionAgentCeilingValue''s refusal, for a caller that only needs to know
+-- whether there is one.
+missionAgentCeilingRefusal :: MissionsConfig -> Maybe Text
+missionAgentCeilingRefusal = either Just (const Nothing) . missionAgentCeilingValue
 
 defaultMissionNotificationConfig :: MissionNotificationConfig
 defaultMissionNotificationConfig =
@@ -238,7 +281,11 @@ defaultMissionNotificationConfig =
     }
 
 defaultMissionsConfig :: MissionsConfig
-defaultMissionsConfig = MissionsConfig {missionsNotifications = defaultMissionNotificationConfig}
+defaultMissionsConfig =
+  MissionsConfig
+    { missionsNotifications = defaultMissionNotificationConfig,
+      missionsAgentCeiling = MissionAgentCeiling defaultMissionAgentCeiling
+    }
 
 -- | Why this notification configuration cannot be acted on, if it cannot.
 --
@@ -689,7 +736,29 @@ usageProviderTableParser = do
 missionsConfigParser :: ParseTable Position MissionsConfig
 missionsConfigParser = do
   notifications <- optKeyOf "notifications" (parseTableFromValue missionNotificationParser)
-  pure MissionsConfig {missionsNotifications = fromMaybe defaultMissionNotificationConfig notifications}
+  agentCeiling <- optKeyOf "agent_ceiling" parseAgentCeiling
+  pure
+    MissionsConfig
+      { missionsNotifications = fromMaybe defaultMissionNotificationConfig notifications,
+        missionsAgentCeiling = fromMaybe (MissionAgentCeiling defaultMissionAgentCeiling) agentCeiling
+      }
+
+-- | @agent_ceiling@, classified rather than refused.
+--
+-- Every value parses, because the refusal belongs where the ceiling is
+-- applied ('missionAgentCeilingRefusal'). A positive integer is a ceiling;
+-- zero, a negative number, a fraction, and anything that is not a number at
+-- all are recorded as written, so the refusal can name exactly what the file
+-- says.
+parseAgentCeiling :: Value' l -> Matcher l MissionAgentCeiling
+parseAgentCeiling value = pure $ case value of
+  Integer' _ number
+    | number > 0 && number <= toInteger (maxBound :: Int) -> MissionAgentCeiling (fromInteger number)
+    | otherwise -> MissionAgentCeilingInvalid (Text.pack (show number))
+  Double' _ number -> MissionAgentCeilingInvalid (Text.pack (show number))
+  Text' _ text -> MissionAgentCeilingInvalid (Text.pack (show text))
+  Bool' _ flag -> MissionAgentCeilingInvalid (if flag then "true" else "false")
+  _ -> MissionAgentCeilingInvalid "not a number"
 
 -- | Both keys of @[missions.notifications]@, each optional. A command with no
 -- @enabled@ stays off, which is what lets one be written down and tried later;

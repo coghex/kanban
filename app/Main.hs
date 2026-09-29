@@ -15,6 +15,9 @@ import Kanban.Mission
     missionRunSucceeded,
     missionStartRefusalMessage,
     runMissionMode,
+    runMissionStepMode,
+    missionStepReportLines,
+    missionStepSucceeded,
     runMissionSchedulerCommand,
     writeMissionChildResult,
   )
@@ -201,34 +204,43 @@ main = do
             Right repository -> do
               let ownerName = repositoryIdentity repository.repositoryOwner repository.repositoryName
                   resolvedConfig = resolveConfig ownerName rawConfig
-              outcome <- runMissionMode options resolvedConfig repository (Text.pack mission)
-              -- Written before this process decides how to exit, and only when
-              -- a caller asked for one. A scheduler needs the typed account of
-              -- a refusal that the exit status below flattens away; an
-              -- operator at a terminal gets exactly the run they always got.
-              mapM_
-                ( \resultPath -> do
-                    written <-
-                      writeMissionChildResult
-                        resultPath
-                        ( missionChildResultOf
-                            (maybe "" Text.pack options.optionMissionInvocation)
-                            ownerName
-                            (MissionId (Text.strip (Text.pack mission)))
-                            outcome
-                        )
-                    case written of
-                      Left detail -> hPutStrLn stderr ("kanban: could not write the mission result document: " <> Text.unpack detail)
-                      Right () -> pure ()
-                )
-                options.optionMissionResult
-              case outcome of
-                Left refusal -> do
-                  hPutStrLn stderr ("kanban: " <> Text.unpack (missionStartRefusalMessage refusal))
-                  exitFailure
-                Right report -> do
-                  mapM_ TextIO.putStrLn (missionRunReportLines report)
-                  unless (missionRunSucceeded report) exitFailure
+              case options.optionMissionResult of
+                -- A scheduler's child: one step, and a typed account of it.
+                -- Written before this process decides how to exit, because a
+                -- scheduler needs the refusal the exit status below flattens
+                -- away, and a pass advances each mission by at most one
+                -- transition rather than waiting on any of them.
+                Just resultPath -> do
+                  outcome <- runMissionStepMode options resolvedConfig repository (Text.pack mission)
+                  written <-
+                    writeMissionChildResult
+                      resultPath
+                      ( missionChildResultOf
+                          (maybe "" Text.pack options.optionMissionInvocation)
+                          ownerName
+                          (MissionId (Text.strip (Text.pack mission)))
+                          outcome
+                      )
+                  case written of
+                    Left detail -> hPutStrLn stderr ("kanban: could not write the mission result document: " <> Text.unpack detail)
+                    Right () -> pure ()
+                  case outcome of
+                    Left refusal -> do
+                      hPutStrLn stderr ("kanban: " <> Text.unpack (missionStartRefusalMessage refusal))
+                      exitFailure
+                    Right report -> do
+                      mapM_ TextIO.putStrLn (missionStepReportLines report)
+                      unless (missionStepSucceeded report) exitFailure
+                -- An operator's own run, exactly the run it always was.
+                Nothing -> do
+                  outcome <- runMissionMode options resolvedConfig repository (Text.pack mission)
+                  case outcome of
+                    Left refusal -> do
+                      hPutStrLn stderr ("kanban: " <> Text.unpack (missionStartRefusalMessage refusal))
+                      exitFailure
+                    Right report -> do
+                      mapM_ TextIO.putStrLn (missionRunReportLines report)
+                      unless (missionRunSucceeded report) exitFailure
     -- The repository scheduler: one bounded pass over this repository's
     -- runnable missions. Exactly one JSON document goes to stdout and every
     -- word of narration goes to stderr, because the supervisor above this

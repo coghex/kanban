@@ -206,6 +206,7 @@ library kanban-internal
     Kanban.GitHub.Rate
     Kanban.GitHub.Run
     Kanban.GitHub.Warnings
+    Kanban.Mission.Admission
     Kanban.Mission.Control
     Kanban.Mission.Controller
     Kanban.Mission.Digest
@@ -329,6 +330,7 @@ test-suite kanban-test
     Spec.GitHub.RefreshCoordinator
     Spec.ManagedPaths
     Spec.Mission
+    Spec.Mission.Admission
     Spec.Mission.Runner
     Spec.Mission.Scheduler
     Spec.MissionRunnerService
@@ -338,6 +340,7 @@ test-suite kanban-test
     Spec.Repository.Lease
     Spec.Repository.State
     Spec.SingleAgentMode
+    Spec.Support.AgentSlots
     Spec.Support.App
     Spec.Support.Board
     Spec.Support.ClaudeProbe

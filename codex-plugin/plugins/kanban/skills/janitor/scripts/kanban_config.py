@@ -419,6 +419,8 @@ class LimitsConfig:
 # worker was bounded at before the bound became configurable, and the one
 # documented ceiling the key is validated against.
 DEFAULT_WORKER_DEADLINE_SECONDS = 4 * 60 * 60
+# Kanban.Config.defaultMissionAgentCeiling.
+DEFAULT_MISSION_AGENT_CEILING = 2
 MAXIMUM_WORKER_DEADLINE_SECONDS = 7 * 24 * 60 * 60
 
 
@@ -477,6 +479,15 @@ class MissionsConfig:
     notifications: MissionNotificationConfig = field(
         default_factory=MissionNotificationConfig
     )
+    # Kanban.Config.MissionAgentCeiling: how many mission-dispatched agents
+    # may be live at once for one repository. Carried for the reason the
+    # notification table is -- a documented key must not warn as unknown here
+    # -- and classified rather than refused, exactly as the Haskell reader
+    # does: a value that is not a positive whole number is recorded in
+    # `agent_ceiling_refusal` and refused by name where a mission would start
+    # an agent under it, never while the file is read.
+    agent_ceiling: int = DEFAULT_MISSION_AGENT_CEILING
+    agent_ceiling_refusal: str | None = None
 
 
 # Per-field overrides for [workflow]/[limits]/[timeouts], decoded identically
@@ -1016,8 +1027,20 @@ def _parse_mission_notifications(table: dict, path: str, warnings: list[str]) ->
 def _parse_missions_table(value: dict, path: str, warnings: list[str]) -> MissionsConfig:
     table = dict(value)
     notifications = _parse_mission_notifications(table, path, warnings)
+    written = table.pop("agent_ceiling", None)
     _collect_unknown(table, path, warnings)
-    return MissionsConfig(notifications=notifications)
+    if written is None:
+        return MissionsConfig(notifications=notifications)
+    # `bool` is a subclass of `int`, and `true` is not a count.
+    if isinstance(written, int) and not isinstance(written, bool) and written > 0:
+        return MissionsConfig(notifications=notifications, agent_ceiling=written)
+    return MissionsConfig(
+        notifications=notifications,
+        agent_ceiling_refusal=(
+            f"{_join(path, 'agent_ceiling')} must be a positive whole number, and it "
+            f"is {written!r}, so no mission may start an agent under it"
+        ),
+    )
 
 
 def _parse_usage_table(value: dict, path: str, warnings: list[str]) -> UsageConfig:

@@ -55,6 +55,7 @@ import qualified Spec.GitHub.RecordLock as RecordLock
 import qualified Spec.GitHub.RefreshCoordinator as RefreshCoordinator
 import qualified Spec.ManagedPaths as ManagedPaths
 import qualified Spec.Mission as Mission
+import qualified Spec.Mission.Admission as MissionAdmission
 import qualified Spec.Mission.Runner as MissionRunner
 import qualified Spec.Mission.Scheduler as MissionScheduler
 import qualified Spec.MissionRunnerService as MissionRunnerService
@@ -70,6 +71,7 @@ import Spec.Support.Lanes
     SuiteGroup (..),
     runSuiteInLanes,
   )
+import Spec.Support.AgentSlots (admissionProbeVariable, runAdmissionProbe)
 import Spec.Support.LeaseProbes (leaseProbeVariable, runLeaseProbe)
 import Spec.Support.MissionProbes (missionProbeVariable, runMissionProbe)
 import Spec.Support.NotifyProbe (notifyProbeVariable, runNotifyProbe)
@@ -106,7 +108,7 @@ import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stdin, stdout)
 
--- | Ordinarily the suite. Eight markers divert it instead, and each names a
+-- | Ordinarily the suite. Nine markers divert it instead, and each names a
 -- condition that cannot be established from inside an already-started test
 -- process: 'localeProbeVariable' makes this the C-locale child a single test
 -- re-ran the binary as (see "Spec.Support.Locale" for why the locale is fixed
@@ -140,7 +142,11 @@ import System.IO (stdin, stdout)
 -- (see "Spec.Support.ReaderProbes" for why a thread would share the pid every
 -- claim there is about).
 --
--- All eight are asked about before the suite and deliberately so: a lane
+-- 'admissionProbeVariable' makes it one process holding or asking for one of a
+-- repository's agent slots, because whether a holder is gone is asked of its
+-- process identifier, which every thread shares (see "Spec.Support.AgentSlots").
+--
+-- All nine are asked about before the suite and deliberately so: a lane
 -- carries its own marker in the environment its children inherit, and a child
 -- started from inside a lane must run its probe rather than that lane a second
 -- time. No marker reaches a child of a probe, so this cannot recurse.
@@ -167,16 +173,18 @@ main = do
       notifyProbe <- lookupEnv notifyProbeVariable
       schedulerProbe <- lookupEnv schedulerProbeVariable
       readerProbe <- lookupEnv readerProbeVariable
-      case (localeProbe, usageWriter, leaseProbe, recordWriter, missionProbe, notifyProbe, schedulerProbe, readerProbe) of
-        (Just probeRoot, _, _, _, _, _, _, _) -> runLocaleProbe probeRoot
-        (Nothing, Just planPath, _, _, _, _, _, _) -> runUsageWriter planPath
-        (Nothing, Nothing, Just planPath, _, _, _, _, _) -> runLeaseProbe planPath
-        (Nothing, Nothing, Nothing, Just planPath, _, _, _, _) -> runRecordWriter planPath
-        (Nothing, Nothing, Nothing, Nothing, Just planPath, _, _, _) -> runMissionProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Just directory, _, _) -> runNotifyProbe directory
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just argv, _) -> runSchedulerProbe argv
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just planPath) -> runReaderProbe planPath
-        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
+      admissionProbe <- lookupEnv admissionProbeVariable
+      case (localeProbe, usageWriter, leaseProbe, recordWriter, missionProbe, notifyProbe, schedulerProbe, readerProbe, admissionProbe) of
+        (Just probeRoot, _, _, _, _, _, _, _, _) -> runLocaleProbe probeRoot
+        (Nothing, Just planPath, _, _, _, _, _, _, _) -> runUsageWriter planPath
+        (Nothing, Nothing, Just planPath, _, _, _, _, _, _) -> runLeaseProbe planPath
+        (Nothing, Nothing, Nothing, Just planPath, _, _, _, _, _) -> runRecordWriter planPath
+        (Nothing, Nothing, Nothing, Nothing, Just planPath, _, _, _, _) -> runMissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Just directory, _, _, _) -> runNotifyProbe directory
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just argv, _, _) -> runSchedulerProbe argv
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just planPath, _) -> runReaderProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Just planPath) -> runAdmissionProbe planPath
+        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) -> runSuiteInLanes suiteGroups suiteColocations
 
 -- | Every group, its lane, and its established order.
 --
@@ -263,6 +271,9 @@ suiteGroups =
     -- churn the swept-process assertions are measured against, for the reason
     -- @Spec.Mission@'s comment above gives.
     SuiteGroup "Spec.Mission.Scheduler" UsageLane MissionScheduler.spec,
+    -- Beside the scheduler for the same reason: its process examples start
+    -- suite processes of their own, the admission probes.
+    SuiteGroup "Spec.Mission.Admission" UsageLane MissionAdmission.spec,
     SuiteGroup "Spec.Agent.UsageMode" PingLane UsageMode.spec, -- 3.6s
     SuiteGroup "Spec.Agent.IssueHost" PingLane IssueHost.spec,
     SuiteGroup "Spec.Agent.IssueReviewer" PingLane IssueReviewer.spec,

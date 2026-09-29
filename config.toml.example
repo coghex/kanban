@@ -116,6 +116,28 @@ worker_deadline_seconds = 14400
 # command = ["/usr/local/bin/my-claude-usage", "--json"]
 # estimated_percent_per_solve_round = 12
 
+# How many mission-dispatched agents may be live at once for this machine's
+# checkouts of one repository: a solve, a pull-request task, or one issue
+# review on the repository's review host, started by any mission, counted
+# across every mission, every scheduler pass, and every checkout of the same
+# repository. Work you launch from the board is never counted and never waits
+# for it.
+#
+# A mission whose next step would start an agent while every slot is taken
+# waits for one without failing and without asking for attention: the pass
+# reports it as `deferred` and asks again next time. A step that only watches
+# a running agent, records that one ended, or settles a result never waits.
+# Free slots go to waiting missions in a durable round-robin order, the one
+# admitted longest ago first, and a restarted runner resumes that order.
+#
+# Defaults to 2. Anything but a positive whole number is refused by name where
+# it is applied: the scheduler refuses the pass, and a mission run refuses to
+# start an agent, rather than guessing. Lowering it below what is already
+# running starts nothing new until enough of those agents finish; it stops
+# none of them.
+[missions]
+agent_ceiling = 2
+
 # Whether Kanban tells you that a mission is waiting on a person, and what it
 # runs to do so. Read only by `kanban --mission-scheduler`, which is the
 # unattended pass `tools/mission_runner_service.py` supervises; no other mode
@@ -181,7 +203,7 @@ worker_deadline_seconds = 14400
 # observe, and no record claims it did. A failed notification never resolves
 # the mission's attention and never stops the scheduler.
 #
-# Both keys are global, like [usage]; setting `missions` inside a
+# Every [missions] key is global, like [usage]; setting `missions` inside a
 # [repositories."owner/name"] table is a startup error rather than a warning,
 # because a notification command is the operator's rather than one
 # repository's.

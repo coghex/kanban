@@ -79,7 +79,7 @@ print(
     json.dumps(
         {
             "schema": "kanban-mission-scheduler-pass",
-            "version": 1,
+            "version": 2,
             "repository": args.repo,
             "started_at": "2026-09-12T00:00:00Z",
             "finished_at": "2026-09-12T00:00:01Z",
@@ -87,6 +87,7 @@ print(
             "exit_code": 0,
             "admitted": [],
             "attention": [],
+            "agents": {"live": 0, "ceiling": 2},
             "detail": "Nothing was runnable.",
         }
     )

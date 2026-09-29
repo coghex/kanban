@@ -369,6 +369,16 @@ spec = do
         result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
         result `shouldBe` Right "{\"approved\":true}"
 
+    -- Issue #746: a reviewer that exits cleanly can leave behind a child that
+    -- closed its pipes and stayed in its group. The caller releases the agent
+    -- slot the review held as soon as this returns, so the group is swept on
+    -- a clean exit as well as on the giving-up paths.
+    it "sweeps a clean canonical review's group of the child it left behind" $
+      withFakeCanonicalReviewer ["sleep 30 >/dev/null 2>&1 </dev/null & echo $! > \"$XDG_CACHE_HOME/left-behind.pid\"", "printf '%s' '{\"approved\":true}'"] $ \cacheRoot repository reviewerPath -> do
+        result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath
+        result `shouldBe` Right "{\"approved\":true}"
+        shouldRecordASweptProcess (cacheRoot </> "left-behind.pid") "the child a clean canonical review left in its group"
+
     it "gives canonical outcome-unknown guidance without any same-tool reread instruction" $
       withFakeCanonicalReviewer ["sleep 30"] $ \_ repository reviewerPath -> do
         result <- runBoundedCanonicalCommand boundedCallMicros injectedBounds repository reviewerPath

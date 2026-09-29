@@ -2340,16 +2340,23 @@ report did not name.
   back to `$HOME`, neither of which the installer and the job read the same
   way.
 - **The pass contract:** one JSON document on stdout and narration on stderr,
-  carrying `kanban-mission-scheduler-pass` version 1, the repository identity,
+  carrying `kanban-mission-scheduler-pass` version 2, the repository identity,
   each admitted mission and its disposition, each outstanding attention
   identity with the typed items it is about and what became of its
-  notification, and a termination reason of `completed`, `refused`, or `failed`
-  — exiting 0, 2, and 1 respectively. A pass fails for reasons of its own as
-  well as for a mission's: a snapshot that will not decode, one recorded
-  against another repository, a store or legacy root it cannot enumerate, a
-  specification that cannot be read behind a waiting mission, a child that
-  refused for any reason other than losing the advancement lease, and a scratch
-  directory it could not prepare each produce a `failed` pass. That last child
+  notification, the mission-dispatched agents it saw live against the ceiling
+  it applied (`agents`, or `null` when it counted none), and a termination
+  reason of `completed`, `refused`, or `failed` — exiting 0, 2, and 1
+  respectively. Two dispositions are neither progress nor failure: `awaiting`,
+  a mission whose only eligible work was watching its own live worker, and
+  `deferred`, one the agent ceiling held back; the controller waits its
+  interval after a pass that did nothing else, and opens no incident for one.
+  There is no limit on how many missions one report may name. A pass fails for
+  reasons of its own as well as for a mission's: a snapshot that will not
+  decode, one recorded against another repository, a store or legacy root it
+  cannot enumerate, a specification that cannot be read behind a waiting
+  mission, an agent rotation it cannot enter or live agents it cannot count, a
+  child that refused for any reason other than losing the advancement lease,
+  and a scratch directory it could not prepare each produce a `failed` pass. That last child
   case is the only place a mission whose *specification* is unreadable or
   foreign is found at all — the inventory reads snapshots, so such a mission has
   a perfectly runnable one and is admitted. Only the last
@@ -2358,7 +2365,9 @@ report did not name.
   dispositions for the missions it did advance, and a supervisor must read the
   termination rather than infer it from an empty `admitted` list. A `refused`
   pass is the one that observed nothing at all: it returns before the inventory
-  is read, so both its admitted and its attention lists are empty. The
+  is read, so both its admitted and its attention lists are empty and its
+  agent count is `null`. An agent ceiling that is not a positive whole number
+  refuses the pass, as an enabled notification with no command does. The
   schema, the version, the three vocabularies and that exit mapping are
   declared once in `Kanban.Mission.Pass` and mirrored as constants in the
   controller, which cannot import them;
@@ -2367,10 +2376,17 @@ report did not name.
   version, about another repository, carrying an unknown disposition or
   notification state, or contradicting the status its child exited with is a
   failed pass, never a quiet one.
-- **Authority:** none beyond what a mission already had. A pass admits at most
-  two runnable missions and advances each through its own `kanban --mission`
-  child, which dispatches through the workflow action registry exactly as a
-  board key press does. An `interrupted` mission — one whose step was cut off
+- **Authority:** none beyond what a mission already had. A pass admits every
+  runnable mission and advances each by one transition through its own
+  `kanban --mission` child, which dispatches through the workflow action
+  registry exactly as a board key press does. What is capped is agents: at
+  most `[missions] agent_ceiling` (default two) mission-dispatched agents may be
+  live at once for one repository, counted from the worker cache across every
+  mission, pass, and checkout and claimed under a lock in
+  `missions/.admission/<owner>/<repo>/` before a launch is journaled, with free
+  slots shared by a durable round-robin (`docs/design.md` §5). The ceiling adds
+  no authority and removes none: the per-target worker lease and the canonical
+  approval lock still decide beneath it whether a granted launch may happen. An `interrupted` mission — one whose step was cut off
   mid-flight, its launch journaled by a `--mission` child that died before any
   worker or result was recorded — is not runnable: no pass and no restarted
   service retries it, and only the runner console's `override` replans the

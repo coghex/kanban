@@ -52,6 +52,16 @@ import Kanban.UI.Review (reviewOutcomePhase)
 import Kanban.Transcript (transcriptRoot)
 import Kanban.Worker
   ( IssueActionWorkerTask (..),
+    IssueActionAdoptionRefusal (..),
+    AdoptionDecision (..),
+    claimForAdoption,
+    settledChildState,
+    GateSettlement (..),
+    IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    readIssueActionClaim,
+    readWorkerState,
     recoverIfWorkerStoppedWith,
     IssueHostProvider (..),
     IssueHostTuning (..),
@@ -1171,6 +1181,25 @@ lifecycleSpec = describe "one running host" $ do
   -- the host's map from that moment and every later scan skips a child it
   -- already holds, so the retry never happened and discovery and the
   -- collection pass went on reading a dead host as the owner.
+  -- The host's half of the adoption claim: a child whose launch withdrew it
+  -- is never begun, while the child published after it is.
+  it "never adopts a child its launch withdrew" $
+    withRunningHost $ \host -> do
+      withdrawn <- childDescriptorFor host "action-withdrawn" 594 IssueRevision
+      createDirectoryIfMissing True (takeDirectory withdrawn.workerDescriptorSpecPath)
+      claimIssueAction withdrawn ClaimedByWithdrawal `shouldReturn` IssueActionClaimWon
+      _ <- publishChild host "action-withdrawn" 594 IssueRevision
+      kept <- publishChild host "action-kept" 595 IssueRevision
+      _ <- awaitCallsFor host 1 isBeginCall
+      threadDelay 300000
+      calls <- providerCalls host
+      [issue | BeginReview issue <- calls] `shouldBe` [595]
+      readIssueActionClaim withdrawn `shouldReturn` Right (Just ClaimedByWithdrawal)
+      readIssueActionClaim kept `shouldReturn` Right (Just (ClaimedByHost hostIdUnderTest))
+      -- Removed as the launch that withdrew it removes it, which is what the
+      -- teardown's accounting of every discovered child expects.
+      removeFile withdrawn.workerDescriptorSpecPath
+
   it "refuses an adoption whose ownership will not persist, and retries it" $
     withRunningHost $ \host -> do
       descriptor <- childDescriptorNaming host (WorkerId "host-that-died") "action-1" 594 IssueRevision
@@ -1924,6 +1953,28 @@ collectionSpec = describe "collecting host and child records" $ do
       collectWorkerCache testRepository
       doesFileExist child.workerDescriptorSpecPath `shouldReturn` False
 
+  -- Issue #746: an action whose gate's process tree could not be accounted
+  -- for keeps its agent slot, and the records that say so must not be the
+  -- thing retention removes — collecting them would free that slot while a
+  -- process nothing recorded may still be running.
+  it "keeps a finished child whose gate's process tree was never accounted for" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      writeFile child.workerDescriptorCensusGapPath "census-gap\n"
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
+      doesFileExist child.workerDescriptorCensusGapPath `shouldReturn` True
+
+  it "keeps a finished child whose settle kept an unidentified gate pid" $
+    withHostTopology (WorkerTerminal SolveCompleted) (WorkerTerminal SolveCompleted) $ \host child -> do
+      acknowledgeWorker child
+      acknowledgeWorker host
+      settled <- either (fail . show) pure =<< readWorkerState child
+      writeChildState child settled {workerStateProviderPid = Just 4242, workerStateProviderIdentity = Nothing}
+      collectWorkerCache testRepository
+      doesFileExist child.workerDescriptorSpecPath `shouldReturn` True
+
   -- The mirror image. A child records its host's id and reattaches only to
   -- the host it names, so a host record collected out from under a live child
   -- leaves that child naming an owner nothing can resolve.
@@ -2103,7 +2154,99 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
             (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
         LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
         confirmIssueActionAdoptedWith 5 1000 (pure (Right (WorkerId "host-2"))) testRepository descriptor
-          `shouldReturn` Left "no review host took this action on"
+          `shouldReturn` Left (IssueActionWithdrawn "no review host took this action on")
+
+  -- Issue #746's round-5 race: a host puts a child in memory and journals
+  -- its first event some moments later, so a launch that stopped waiting in
+  -- between used to remove a child the host was about to run — an agent no
+  -- ceiling could count. Paused exactly there: the host has claimed the
+  -- child and journaled nothing.
+  it "leaves a child a host has claimed but not yet journaled to that host" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        claimIssueAction descriptor (ClaimedByHost (WorkerId "host-1")) `shouldReturn` IssueActionClaimWon
+        confirmIssueActionAdoptedWith 3 1000 (pure (Right (WorkerId "host-1"))) testRepository descriptor
+          `shouldReturn` Right ()
+        readIssueActionClaim descriptor `shouldReturn` Right (Just (ClaimedByHost (WorkerId "host-1")))
+
+  -- The other order: a launch that gave up first has the child, and a host
+  -- arriving afterwards is turned away rather than running it.
+  it "turns a host away from a child its launch has withdrawn" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        confirmIssueActionAdoptedWith 2 1000 (pure (Right (WorkerId "host-1"))) testRepository descriptor
+          `shouldReturn` Left (IssueActionWithdrawn "no review host took this action on")
+        claimIssueAction descriptor (ClaimedByHost (WorkerId "host-1")) `shouldReturn` IssueActionClaimHeld ClaimedByWithdrawal
+
+  -- Round 6's window: a host that found the child, paused before claiming
+  -- it, and resumed after the withdrawing launch had removed the child and
+  -- its claim. Its scan's descriptor still names the child, and no claim
+  -- stands in its way; the specification being gone is what stops it.
+  it "turns a host away from a child withdrawn and removed after its scan found it" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        scanned <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile scanned.workerDescriptorSpecPath (encode scanned.workerDescriptorSpec)
+        -- The launch gives up, wins its withdrawal, and cleans up — all
+        -- while the host holds only the descriptor its scan returned.
+        claimIssueAction scanned ClaimedByWithdrawal `shouldReturn` IssueActionClaimWon
+        removeFile scanned.workerDescriptorSpecPath
+        removeFile scanned.workerDescriptorAdoptionPath
+        claimForAdoption (WorkerId "host-1") scanned `shouldReturn` AdoptionTurnedAway
+        -- Nothing written back: no specification, and no claim left behind.
+        doesFileExist scanned.workerDescriptorSpecPath `shouldReturn` False
+        doesFileExist scanned.workerDescriptorAdoptionPath `shouldReturn` False
+
+  -- And the ordinary answers, so that one is not passing by refusing
+  -- everything.
+  it "claims a child that is still there, and continues one it claimed before" $
+    withTemporaryCacheRoot $ \temporaryRoot ->
+      withEnvironmentValue "XDG_CACHE_HOME" temporaryRoot $ do
+        directory <- workerDirectory testRepository
+        createDirectoryIfMissing True directory
+        descriptor <-
+          descriptorForSpec
+            (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 IssueRevision (WorkerId "host-1") IssueOriginClaude)))
+        LazyByteString.writeFile descriptor.workerDescriptorSpecPath (encode descriptor.workerDescriptorSpec)
+        claimForAdoption (WorkerId "host-1") descriptor `shouldReturn` AdoptionClaimed
+        claimForAdoption (WorkerId "host-2") descriptor `shouldReturn` AdoptionClaimed
+        readIssueActionClaim descriptor `shouldReturn` Right (Just (ClaimedByHost (WorkerId "host-1")))
+
+  -- Issue #746's round-7 blocker: a settle that cannot show its gate's tree
+  -- ended must not wipe the only record of it. An inconclusive termination
+  -- keeps the provider record, and so does a gate whose identity the census
+  -- never captured; only a verified end clears it.
+  it "keeps the provider record of a settle it could not verify" $ do
+    now <- getCurrentTime
+    descriptor <- descriptorForSpec (specFor (WorkerId "action-1") (IssueActionWorkerTaskKind (IssueActionWorkerTask 594 InitialReview (WorkerId "host-1") IssueOriginClaude)))
+    let gate = ProcessIdentity 4242 1 4242 "Mon Sep 28 12:00:00 2026" "approve_issues.py"
+        running = (runningChildState descriptor now) {workerStateProviderPid = Just 4242, workerStateProviderIdentity = Nothing}
+        identified = running {workerStateProviderIdentity = Just gate}
+        provider state = (state.workerStateProviderPid, state.workerStateProviderIdentity)
+    provider (settledChildState GateEnded SolveCompleted identified) `shouldBe` (Nothing, Nothing)
+    provider (settledChildState GateUnverified SolveCompleted identified) `shouldBe` (Just 4242, Just gate)
+    provider (settledChildState GateEnded SolveCompleted running) `shouldBe` (Just 4242, Nothing)
+    -- Round 8: a census that could not be taken may have missed a
+    -- descendant, and nothing recorded can ever show that one ended — so the
+    -- terminal state is the unidentified gate that keeps its slot for good.
+    provider (settledChildState GateUnaccounted SolveCompleted identified) `shouldBe` (Just 4242, Nothing)
+    (settledChildState GateUnverified SolveCompleted running).workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
 
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->

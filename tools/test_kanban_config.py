@@ -4,6 +4,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 """
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -579,6 +580,43 @@ class RepositoryGlobalOnlyKeyTests(unittest.TestCase):
             '[repositories."acme/widgets".missions.notifications]\nenabled = true\n',
             'repositories."acme/widgets".missions',
         )
+
+
+class MissionAgentCeilingTests(unittest.TestCase):
+    """Kanban.Config's `[missions] agent_ceiling`, mirrored so the shared
+    schema stays one schema. Nothing in Python applies the ceiling; what this
+    reader owes is not to warn about the key, and to classify a value the way
+    the Haskell reader does rather than refuse the file over it."""
+
+    def load(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(Path(tmp), text)
+            return kc.load_raw_config(str(path))
+
+    def test_the_key_is_read_without_a_warning(self):
+        raw, warnings = self.load("[missions]\nagent_ceiling = 5\n")
+        self.assertEqual(warnings, [])
+        self.assertEqual(raw.missions.agent_ceiling, 5)
+        self.assertIsNone(raw.missions.agent_ceiling_refusal)
+
+    def test_an_absent_key_is_the_default_of_two(self):
+        raw, warnings = self.load("")
+        self.assertEqual(warnings, [])
+        self.assertEqual(raw.missions.agent_ceiling, kc.DEFAULT_MISSION_AGENT_CEILING)
+        self.assertEqual(kc.DEFAULT_MISSION_AGENT_CEILING, 2)
+
+    def test_an_unusable_value_is_recorded_by_name_rather_than_refused(self):
+        for written in ("0", "-1", "1.5", '"two"', "true"):
+            with self.subTest(written=written):
+                raw, warnings = self.load(f"[missions]\nagent_ceiling = {written}\n")
+                self.assertEqual(warnings, [])
+                self.assertIn("missions.agent_ceiling", raw.missions.agent_ceiling_refusal)
+
+    def test_the_default_matches_the_haskell_declaration(self):
+        config = (REPO_ROOT / "src" / "Kanban" / "Config.hs").read_text(encoding="utf-8")
+        match = re.search(r"^defaultMissionAgentCeiling = (\d+)$", config, re.MULTILINE)
+        self.assertIsNotNone(match, "defaultMissionAgentCeiling is not declared")
+        self.assertEqual(kc.DEFAULT_MISSION_AGENT_CEILING, int(match.group(1)))
 
 
 class RepositoryRosterPathTests(unittest.TestCase):

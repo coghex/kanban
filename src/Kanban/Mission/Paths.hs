@@ -89,6 +89,7 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Kanban.Config (asciiLowercase)
 import Kanban.Domain (Repository (..))
 import Kanban.Mission.Types
   ( MissionEnvelope (..),
@@ -154,6 +155,20 @@ data MissionStore = MissionStore
     -- | @$XDG_STATE_HOME\/kanban\/missions\/.deleted@: where a mission on
     -- its way out is moved to, one rename, before it is cleared up.
     missionStoreHoldingDirectory :: FilePath,
+    -- | @$XDG_STATE_HOME\/kanban\/missions\/.admission\/<owner>\/<repo>@:
+    -- the repository's agent admission record ("Kanban.Mission.Admission").
+    --
+    -- Not inside 'missionStoreDirectory', because every entry there is a
+    -- mission and any plain name, this one included, may be a mission's
+    -- identifier. Beside @.deleted@ at the missions root instead, and for the
+    -- same reasons: no legacy root can be named this, since each joins owner
+    -- to name with a hyphen, and @repositories@ is a different name.
+    --
+    -- Folded to lower case where the store itself is not. GitHub treats
+    -- @Coghex\/Kanban@ and @coghex\/kanban@ as one repository, and a remote
+    -- or @--repo@ may spell it either way in different checkouts; the ceiling
+    -- is one per repository, so both spellings share one lock and one record.
+    missionStoreAdmissionDirectory :: FilePath,
     missionStoreRepository :: MissionRepository
   }
   deriving stock (Eq, Show)
@@ -177,6 +192,7 @@ openMissionStore repository = case missionStoreKey repository of
             { missionStoreDirectory = root,
               missionStoreLegacyDirectory = missions </> legacyMissionStoreKey (missionRepository repository),
               missionStoreHoldingDirectory = missions </> deletedMissionsName,
+              missionStoreAdmissionDirectory = missions </> admissionName </> Text.unpack (asciiLowercase repository.repositoryOwner) </> Text.unpack (asciiLowercase repository.repositoryName),
               missionStoreRepository = missionRepository repository
             }
     prepared <- ensureMissionDirectory root
@@ -267,6 +283,12 @@ legacyMissionStoreKey repository =
 -- directory would be that repository's store.
 deletedMissionsName :: FilePath
 deletedMissionsName = ".deleted"
+
+-- | The root every repository's agent admission record sits under, named once.
+-- 'missionStoreKey' has already refused an owner or name that is not a single
+-- plain component, so the path below it is injective in the same way.
+admissionName :: FilePath
+admissionName = ".admission"
 
 -- | Rejects anything that is not a plain name inside the directory it would
 -- sit in: the empty string, the two entries every directory has, and any

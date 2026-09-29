@@ -1045,7 +1045,9 @@ testWorkerDescriptor task =
       workerDescriptorPendingTerminationPath = "/tmp/worker-1.terminating",
       workerDescriptorHandoffPath = "/tmp/worker-1.handing-off",
       workerDescriptorCommandPath = "/tmp/worker-1.commands.jsonl",
-      workerDescriptorCommandAckPath = "/tmp/worker-1.command-acks.jsonl"
+      workerDescriptorCommandAckPath = "/tmp/worker-1.command-acks.jsonl",
+      workerDescriptorAdoptionPath = "/tmp/worker-1.adoption",
+      workerDescriptorCensusGapPath = "/tmp/worker-1.census-gap"
     }
 
 -- | The dashboard with @item@ selected, at whichever column and row it drew.

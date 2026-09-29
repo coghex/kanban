@@ -53,6 +53,10 @@ module Kanban.Worker.IssueHost
     childCommandOutcome,
     canonicalStageOutcome,
     issueHostGone,
+    settledChildState,
+    GateSettlement (..),
+    AdoptionDecision (..),
+    claimForAdoption,
     neverAdopted,
     terminalStatus,
     revisionTurnOutcome,
@@ -69,8 +73,9 @@ import Data.List (find)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Aeson (encode)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
@@ -80,8 +85,8 @@ import Kanban.Domain (Repository)
 import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
 import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
-import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus)
-import Kanban.Worker.Termination (terminateRecordedProcesses)
+import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus, refreshProcessCensusReporting)
+import Kanban.Worker.Termination (terminateRecordedStateProcesses)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
     ConnectionId,
@@ -128,7 +133,15 @@ import Kanban.Worker.Command
 import Kanban.Worker.Discovery (discoverWorkerHistory)
 import Kanban.Worker.Journal (EventJournalLock, appendWorkerEvent, newEventJournalLock)
 import Kanban.Worker.Lease (releaseWorkerLease)
-import Kanban.Worker.Paths (descriptorForSpec, readWorkerState, writePrivateJson, writeState)
+import Kanban.Worker.Paths
+  ( IssueActionClaim (..),
+    IssueActionClaimOutcome (..),
+    claimIssueAction,
+    descriptorForSpec,
+    readWorkerState,
+    writePrivateJson,
+    writeState,
+  )
 import Kanban.GitHub.Guard (GhRecordLock)
 import Kanban.Worker.Precondition (preconditionStillHolds)
 import Kanban.Worker.Types
@@ -142,7 +155,7 @@ import Kanban.Worker.Types
     issueActionTask,
     WorkerTask (..),
   )
-import System.Directory (removeFile)
+import System.Directory (doesFileExist, removeFile)
 import System.Posix.Process (getProcessID)
 
 -- | How often the host looks for new children, new commands, and children
@@ -313,7 +326,15 @@ data HostChild = HostChild
     -- A termination is deliberately outside it. Its own settle is what would
     -- deadlock against it, and it already journals its line before applying
     -- for the same terminal-envelope reason.
-    hostChildDelivery :: MVar ()
+    hostChildDelivery :: MVar (),
+    -- | Whether a census of this child's canonical gate ever failed.
+    --
+    -- The census is how a gate's descendants become this child's to settle,
+    -- and a snapshot that could not be read leaves whatever the tree grew
+    -- since the last one recorded nowhere. Once that has happened nothing
+    -- can show the tree ended, so the settle says as much on the terminal
+    -- state rather than calling it done ('settledChildState').
+    hostChildCensusMissed :: IORef Bool
   }
 
 data IssueReviewHost = IssueReviewHost
@@ -613,17 +634,74 @@ adoptNewChildren host = do
       case stateResult of
         Right state | terminalStatus state.workerStateStatus -> pure ()
         _ -> do
-          owned <- rehomeChild host descriptor task
-          case owned of
-            Left message ->
+          decision <- claimForAdoption host.hostSpec.workerId descriptor
+          case decision of
+            AdoptionTurnedAway -> pure ()
+            AdoptionUnsettled message ->
               hostDiagnostic
                 host
-                ( "could not record this host as the owner of "
+                ( "could not settle whether "
                     <> descriptor.workerDescriptorSpec.workerId.unWorkerId
-                    <> ", so it was left for the next pass: "
+                    <> " is this host's to run, so it was left for the next pass: "
                     <> message
                 )
-            Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
+            AdoptionClaimed -> do
+              owned <- rehomeChild host descriptor task
+              case owned of
+                Left message ->
+                  hostDiagnostic
+                    host
+                    ( "could not record this host as the owner of "
+                        <> descriptor.workerDescriptorSpec.workerId.unWorkerId
+                        <> ", so it was left for the next pass: "
+                        <> message
+                    )
+                Right (ownedDescriptor, ownedTask) -> adoptChild host ownedDescriptor ownedTask adoption
+
+-- | Whether a child this host found is this host's to take.
+data AdoptionDecision
+  = -- | Claimed by this host, now or on an earlier pass, and still there.
+    AdoptionClaimed
+  | -- | Its launch withdrew it, or it has gone since the scan found it.
+    AdoptionTurnedAway
+  | -- | Nothing could be settled; try again next pass.
+    AdoptionUnsettled Text
+  deriving stock (Eq, Show)
+
+-- | Claims a child found by a scan, before anything else is done with it.
+--
+-- The launch waiting on a child gives up after a bound, and it may give up
+-- between the scan that found the child and the first event this host would
+-- journal. Whichever of the two claims first has the child
+-- ('claimIssueAction'), so a child its launch withdrew is never run and one
+-- this host claimed is never removed. A claim a host already holds — this one
+-- on an earlier pass, or one that died — is an adoption to continue.
+--
+-- The scan's descriptor can be older than the claim, though. A launch that
+-- won its withdrawal removes the specification and then the claim, so a host
+-- that paused after its scan and resumes after that cleanup finds no claim at
+-- all, and would win one over a child that no longer exists — and re-homing
+-- would write the specification back. So a claim this host holds is only
+-- good while the specification is still there, and the specification is
+-- asked about after the claim, never before: the withdrawal removed it before
+-- it removed the claim, so a claim won afterwards always finds it gone. The
+-- claim such a host is left holding is its own to remove.
+claimForAdoption :: WorkerId -> WorkerDescriptor -> IO AdoptionDecision
+claimForAdoption hostId descriptor = do
+  claimed <- claimIssueAction descriptor (ClaimedByHost hostId)
+  case claimed of
+    IssueActionClaimHeld ClaimedByWithdrawal -> pure AdoptionTurnedAway
+    IssueActionClaimUnsettled message -> pure (AdoptionUnsettled message)
+    IssueActionClaimHeld (ClaimedByHost _) -> stillThere (pure ())
+    IssueActionClaimWon ->
+      stillThere (void (try @IOException (removeFile descriptor.workerDescriptorAdoptionPath)))
+  where
+    stillThere onGone = do
+      present <- try @IOException (doesFileExist descriptor.workerDescriptorSpecPath)
+      case present of
+        Left exception -> pure (AdoptionUnsettled ("its specification could not be checked: " <> Text.pack (show exception)))
+        Right True -> pure AdoptionClaimed
+        Right False -> AdoptionTurnedAway <$ onGone
 
 -- | What this host may do with a child, if anything.
 --
@@ -785,6 +863,7 @@ adoptChild host descriptor task adoption = do
   journalGate <- newMVar False
   settleClaim <- newIORef False
   delivery <- newMVar ()
+  censusMissed <- newIORef False
   let child =
         HostChild
           { hostChildDescriptor = descriptor,
@@ -796,7 +875,8 @@ adoptChild host descriptor task adoption = do
             hostChildStageThread = stageThread,
             hostChildProcess = process,
             hostChildSettleClaim = settleClaim,
-            hostChildDelivery = delivery
+            hostChildDelivery = delivery,
+            hostChildCensusMissed = censusMissed
           }
   modifyMVar_ host.hostChildren (pure . Map.insert descriptor.workerDescriptorSpec.workerId child)
   persistChild child
@@ -1043,7 +1123,8 @@ recordLiveCanonicalProcess child process = do
   processId <- managedProcessPid process
   forM_ processId $ \pid -> do
     recordProviderIdentity child.hostChildDescriptor child.hostChildState (fromIntegral pid)
-    refreshProcessCensus child.hostChildDescriptor child.hostChildState
+    taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
+    unless taken (markCensusGap child)
     updateChildState child $ \state ->
       state
         { workerStateProviderPid = Just (fromIntegral pid),
@@ -1622,11 +1703,21 @@ settleSettledChild host child outcome = do
     state <- readMVar child.hostChildState
     forM_ state.workerStateReviewThread $ \threadId ->
       forM_ provider (\connected -> connected.providerFinishThread threadId)
+    -- One last census while the gate is still there to walk from: once it
+    -- is killed, what it spawned is reparented and no census can find it.
+    censusGate child
     readIORef child.hostChildProcess >>= mapM_ interruptThenKillManagedProcess
     -- The canonical subprocess's own descendants, verified against this
     -- child's recorded census. A @gh@ or @python3@ the gate started outlives
     -- the process that spawned it otherwise.
-    terminateRecordedProcesses child.hostChildState
+    terminated <- withMVar child.hostChildState terminateRecordedStateProcesses
+    -- The marker as well as this host's memory: a gap an earlier host
+    -- recorded before it died is this settle's gap too.
+    missed <- (||) <$> readIORef child.hostChildCensusMissed <*> doesFileExist child.hostChildDescriptor.workerDescriptorCensusGapPath
+    let settlement
+          | missed = GateUnaccounted
+          | terminated = GateEnded
+          | otherwise = GateUnverified
     -- The envelope before the state, because these are two writes and a host
     -- dying between them leaves whichever prefix landed. This order's prefix
     -- is a closed journal over a state that still reads as running, which
@@ -1636,19 +1727,7 @@ settleSettledChild host child outcome = do
     -- a reattaching dashboard replays an action that never ends, and the
     -- journal stays open to the appends the envelope exists to stop.
     journalChildTerminal child (WorkerFinished outcome)
-    updateChildState child $ \current ->
-      current
-        { workerStateStatus = WorkerTerminal outcome,
-          workerStateProviderPid = Nothing,
-          workerStateProviderIdentity = Nothing,
-          -- The thread goes with the turn. A settled child holding a thread
-          -- still reads as addressable to every thread-scoped check, which is
-          -- what let a command queued behind a termination pass one.
-          workerStateReviewThread = Nothing,
-          workerStateReviewTurn = Nothing,
-          workerStateReviewRequest = Nothing,
-          workerStateLastActivity = terminalActivity outcome
-        }
+    updateChildState child (settledChildState settlement outcome)
     releaseWorkerLease child.hostChildDescriptor
     -- Retired first, live entry removed second. The two maps are separate
     -- cells, so a lookup landing between the updates sees whichever order
@@ -1664,6 +1743,46 @@ settleSettledChild host child outcome = do
     -- reached here itself would otherwise kill itself before its own journal
     -- write landed.
     void . forkIO $ readIORef child.hostChildStageThread >>= mapM_ killThread
+
+-- | The state a settled child is written with.
+--
+-- Its provider record goes only when the settle could show the process tree
+-- it spawned has ended. A termination that was inconclusive, and a gate whose
+-- identity was never recorded because the census snapshot failed, both leave
+-- a process nothing has shown gone; clearing the record would leave a terminal
+-- action whose running descendant no count of running agents could find. So
+-- the pid and whatever identity was recorded stay on the terminal state,
+-- which is what "Kanban.Mission.Admission" reads before it frees the slot.
+settledChildState :: GateSettlement -> SolveOutcome -> WorkerState -> WorkerState
+settledChildState settlement outcome current =
+  current
+    { workerStateStatus = WorkerTerminal outcome,
+      workerStateProviderPid = if ended then Nothing else current.workerStateProviderPid,
+      workerStateProviderIdentity = if ended || settlement == GateUnaccounted then Nothing else current.workerStateProviderIdentity,
+      -- The thread goes with the turn. A settled child holding a thread
+      -- still reads as addressable to every thread-scoped check, which is
+      -- what let a command queued behind a termination pass one.
+      workerStateReviewThread = Nothing,
+      workerStateReviewTurn = Nothing,
+      workerStateReviewRequest = Nothing,
+      workerStateLastActivity = terminalActivity outcome
+    }
+  where
+    unidentified = isJust current.workerStateProviderPid && isNothing current.workerStateProviderIdentity
+    ended = settlement == GateEnded && not unidentified
+
+-- | What a settle could show about the tree a child's canonical gate spawned.
+data GateSettlement
+  = -- | Every recorded process was shown ended, and every census was taken.
+    GateEnded
+  | -- | A recorded process could not be shown ended. Its identity stays on
+    -- the terminal state, where a later check can still find it gone.
+    GateUnverified
+  | -- | A census could not be taken, so the tree may hold a process nothing
+    -- recorded. The gate's pid stays with no identity beside it, which is
+    -- the record nothing can ever show ended.
+    GateUnaccounted
+  deriving stock (Eq, Show)
 
 terminalActivity :: SolveOutcome -> Text
 terminalActivity SolveCompleted = "completed"
@@ -1924,4 +2043,29 @@ closeChildLogs host = do
 -- protects — the ones holding a pending question across a dashboard restart —
 -- age into looking abandoned.
 refreshChildHeartbeats :: IssueReviewHost -> IO ()
-refreshChildHeartbeats host = liveChildren host >>= mapM_ (\child -> updateChildState child id)
+refreshChildHeartbeats host = liveChildren host >>= mapM_ (\child -> censusGate child >> updateChildState child id)
+
+-- | Records that a census of this child's gate could not be taken, in
+-- memory and on disk. The file is what outlives this host: a successor that
+-- adopts the child to settle it, and every count of running agents, read it
+-- where they would otherwise read a tree with nothing unrecorded in it.
+markCensusGap :: HostChild -> IO ()
+markCensusGap child = do
+  writeIORef child.hostChildCensusMissed True
+  void (try @IOException (ByteString.writeFile child.hostChildDescriptor.workerDescriptorCensusGapPath "census-gap\n"))
+
+-- | Takes a census of a child's canonical gate while it runs.
+--
+-- Every poll rather than once when the gate starts, because the gate's tree
+-- grows after that: a @gh@ it spawns later is recorded by the census that
+-- sees it and by nothing else, and a descendant nothing recorded is one no
+-- settle can end and no count of running agents can find. A census that
+-- could not be taken is remembered ('hostChildCensusMissed').
+censusGate :: HostChild -> IO ()
+censusGate child = do
+  gate <- readIORef child.hostChildProcess
+  case gate of
+    Nothing -> pure ()
+    Just _ -> do
+      taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
+      unless taken (markCensusGap child)

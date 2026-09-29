@@ -25,6 +25,7 @@ module Kanban.Worker.Discovery
     collectWorkerCache,
     collectWorkerCacheWith,
     removeWorkerArtifacts,
+    withdrawIssueActionArtifacts,
   )
 where
 
@@ -33,7 +34,7 @@ import Control.Monad (filterM, unless, void, when)
 import qualified Data.ByteString as ByteString
 import Data.Either (isRight)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -350,9 +351,25 @@ collectTerminalArtifacts takeSnapshot repository directory history = do
       when eligible $ do
         collectable <- artifactsCollectable takeSnapshot directory descriptor state
         held <- heldByHostTopology history descriptor
-        when (collectable && not held) $ do
+        unaccounted <- processTreeUnaccounted descriptor state
+        when (collectable && not held && not unaccounted) $ do
           released <- missionWorkerLogsReleasable sealIndex descriptor state
           when released (removeWorkerArtifacts descriptor)
+
+-- | Whether an issue action may have left a process nothing recorded.
+--
+-- Two records say so, and both are what "Kanban.Mission.Admission" reads to
+-- keep the action's agent slot taken: a census of its canonical gate that
+-- failed ('workerDescriptorCensusGapPath'), and a gate pid its settle kept
+-- with no identity beside it. Neither can ever be shown resolved, so
+-- collecting the records that carry them would free a slot a surviving
+-- process may still be using — whatever the retention window says.
+processTreeUnaccounted :: WorkerDescriptor -> WorkerState -> IO Bool
+processTreeUnaccounted descriptor state = case descriptor.workerDescriptorSpec.workerTask of
+  IssueActionWorkerTaskKind _
+    | isJust state.workerStateProviderPid && isNothing state.workerStateProviderIdentity -> pure True
+    | otherwise -> doesFileExist descriptor.workerDescriptorCensusGapPath
+  _ -> pure False
 
 -- | The two host/child rules the collection pass owes on top of every rule it
 -- already applied (SAG-10).
@@ -494,8 +511,28 @@ companionArtifactPaths descriptor =
     -- future kind acquiring a command ledger that nothing collects.
     descriptor.workerDescriptorCommandPath,
     descriptor.workerDescriptorCommandAckPath,
-    descriptor.workerDescriptorHandoffPath
+    descriptor.workerDescriptorHandoffPath,
+    descriptor.workerDescriptorCensusGapPath,
+    -- Last among the companions: while the specification is still there,
+    -- the claim is what keeps a host from adopting an action on its way out.
+    descriptor.workerDescriptorAdoptionPath
   ]
+
+-- | Removes an issue action its launch withdrew, the @.spec.json@ anchor
+-- /first/.
+--
+-- The reverse of 'removeWorkerArtifacts', and for the reason that function
+-- keeps the anchor last. A withdrawn action must never be adopted, and a host
+-- finds one only through its specification; the withdrawal claim is what
+-- turns a host away meanwhile, so it goes after the anchor rather than
+-- before it. A removal that fails partway leaves companions no scan finds,
+-- which is the lesser cost here: an action run after its launch reported it
+-- refused is an agent nothing counts.
+withdrawIssueActionArtifacts :: WorkerDescriptor -> IO Bool
+withdrawIssueActionArtifacts descriptor = do
+  anchored <- removeArtifact descriptor.workerDescriptorSpecPath
+  when anchored (void (mapM removeArtifact (companionArtifactPaths descriptor)))
+  pure anchored
 
 -- | Removes a collected worker's files, the @.spec.json@ anchor last on
 -- purpose. 'discoverWorkerHistory' reaches a worker only through that file, so

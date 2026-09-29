@@ -30,6 +30,7 @@ module Kanban.Action.Types
     workflowActionKindTag,
     workflowActionKindTitle,
     workflowActionTargetKind,
+    workflowActionStartsAgent,
 
     -- * The decode boundary
     ActionKindDecodeError (..),
@@ -206,6 +207,24 @@ workflowActionTargetKind kind = case kind of
   RevisePullRequest -> Just ActionTargetPullRequest
   RepairPullRequest -> Just ActionTargetPullRequest
   ObserveApprovalQueue -> Nothing
+
+-- | Whether dispatching this kind starts a provider agent: a solve, a
+-- pull-request task, or an issue action on the repository's review host.
+--
+-- This is what decides whether a mission's dispatch takes one of the
+-- repository's agent slots (issue #746). The one kind that does not is the
+-- approval-queue read, which the approval controller answers as it is asked
+-- and which leaves no worker behind.
+workflowActionStartsAgent :: WorkflowActionKind -> Bool
+workflowActionStartsAgent kind = case kind of
+  ReviewIssue -> True
+  ReviseIssue -> True
+  SolveIssue -> True
+  AutoSolveIssue -> True
+  ReviewPullRequest -> True
+  RevisePullRequest -> True
+  RepairPullRequest -> True
+  ObserveApprovalQueue -> False
 
 -- | The only way an unregistered action kind can be named at all.
 --
