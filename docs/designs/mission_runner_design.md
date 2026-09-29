@@ -24,7 +24,7 @@ concrete precondition
 - [x] RUN-3. Discover, monitor, and control the mission runner from Kanban — [#668]
 - [x] RUN-4. Own and reap the descendant tree across crash, timeout, and termination — [#744]
 - [x] RUN-5. Admit mission work under a two-agent ceiling with fair rotation — [#746]
-- [ ] RUN-9. Keep mission workers alive when the runner's systemd unit stops
+- [x] RUN-9. Keep mission workers alive when the runner's systemd unit stops — [#751]
 - [ ] RUN-7. Wait out provider rate limits without holding a slot
 - [ ] RUN-8. Drain the runner on stop and upgrade
 - [ ] RUN-6. Document installing, operating, and recovering the mission runner
@@ -800,6 +800,11 @@ through backoff from one minute doubling to a one-hour cap.
 - **Open questions:** `None`; `D-14` settles per-repository installation.
 
 ### RUN-9. Keep mission workers alive when the runner's systemd unit stops
+
+> Filed as [#751], depending on [#744]. Filing found CI already runs a real
+> systemd user session (`systemd-drainer-lifecycle`), so #751 proves worker
+> survival there rather than only in rendering tests. Epic #597 was edited in
+> the same step for the D-16 split: RUN-7 retitled and RUN-8 added.
 
 - **Outcome:** On systemd, stopping the runner, the runner exiting by itself,
   and the runner crashing each leave every mission-dispatched worker and its
