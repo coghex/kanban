@@ -241,6 +241,13 @@ occupancySpec = describe "what the worker cache says is running" $ do
       missionAgentsNow `shouldReturn` 1
       writeLeaseOwner starting "somebody-later"
       missionAgentsNow `shouldReturn` 0
+      -- An acknowledgement is not proof: a launch acknowledges a supervisor
+      -- it could not see exit and keeps its lease for exactly that case.
+      stalled <- writeAgentWorker slotRepository "stalled-alive" (Just "invocation-stalled-alive") solveTask Nothing
+      writeFile stalled.workerDescriptorAckPath "handled\n"
+      -- The same item's lease, now naming this launch.
+      writeLeaseOwner stalled "stalled-alive"
+      missionAgentsNow `shouldReturn` 1
 
 -- ---------------------------------------------------------------------------
 -- Claims
@@ -313,6 +320,20 @@ claimSpec = describe "a claim for one slot" $ do
       later <- readMissionAdmissionState store
       fmap (Map.toList . (.missionAdmissionRotation)) later `shouldBe` Right [("slow-start", 1)]
       fmap (map (.missionReservationInvocation) . (.missionAdmissionReservations)) later `shouldBe` Right ["other-1", "third-1"]
+
+  -- Two launches whose holders both died after their workers started: a
+  -- restart records them in the order they were granted, so the one granted
+  -- first is not handed the back of the line ahead of the one granted after.
+  it "records gone holders' admissions in the order they were granted" $
+    withSlotRoots $ \store -> do
+      -- Both granted while their holder still lives, then pruned together.
+      let departed = (quiet []) {missionAdmissionSelf = pure 424242, missionAdmissionHolderAlive = const (pure True)}
+          survivor = (quiet [occupant "first-1" True, occupant "second-1" True]) {missionAdmissionHolderAlive = pure . (/= 424242)}
+      claimMissionAgentSlot departed store 3 (MissionId "first") "first-1" `shouldReturn` MissionAgentSlotGranted
+      claimMissionAgentSlot departed store 3 (MissionId "second") "second-1" `shouldReturn` MissionAgentSlotGranted
+      claimMissionAgentSlot survivor store 3 (MissionId "third") "third-1" `shouldReturn` MissionAgentSlotGranted
+      state <- readMissionAdmissionState store
+      fmap (Map.toList . (.missionAdmissionRotation)) state `shouldBe` Right [("first", 1), ("second", 2)]
 
   it "drops a gone holder's reservation, and counts its launch when its worker exists" $
     withSlotRoots $ \store -> do

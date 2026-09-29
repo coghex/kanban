@@ -297,14 +297,20 @@ names a mission invocation is a mission's agent; the review host itself is
 never one, and a worker launched from the board names no invocation and is
 neither counted nor delayed. A worker is live until its own records prove
 otherwise, by the worker lease's own rules: a terminal state, a recorded
-process identity a snapshot no longer finds, or an acknowledged launch that
-never started. An issue action is live until it is terminal, since a host that
+process identity a snapshot no longer finds, or — before any state exists — an
+item lease that no longer names it or names a supervisor shown gone; an
+acknowledgement alone proves nothing, since a launch acknowledges a supervisor
+it could not see exit and keeps its lease for that case. An issue action is live until it is terminal, since a host that
 died leaves its unfinished actions to be re-homed and run by the next one — and
 without a state it is live too — and a terminal one still holds its slot while a
-process it ran, such as a canonical review's subprocess, survives. A settle that
-cannot show that tree ended keeps the gate's recorded pid and identity on the
-terminal state, and a gate whose identity the census never captured holds its
-slot for good, since nothing could ever show it gone. A
+process it ran, such as a canonical review's subprocess, survives. The host takes
+a census of a running gate's tree on every poll and once more before a settle
+kills it, since what the gate spawned is recorded by a census that sees it and
+by nothing else. A settle that cannot show that tree ended keeps the gate's
+recorded pid and identity on the terminal state; a gate whose identity was
+never captured, or any of whose censuses could not be taken, keeps its pid with
+no identity and so holds its slot for good, since nothing could ever show its
+tree gone. A
 record that will not decode, and a snapshot that cannot be taken, keep the
 slot. Lowering the ceiling below what is running starts nothing new until
 enough of it finishes, and ends nothing.

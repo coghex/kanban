@@ -56,6 +56,7 @@ import Kanban.Worker
     AdoptionDecision (..),
     claimForAdoption,
     settledChildState,
+    GateSettlement (..),
     IssueActionClaim (..),
     IssueActionClaimOutcome (..),
     claimIssueAction,
@@ -2215,10 +2216,14 @@ hostLivenessSpec = describe "which host a child is assigned to" $ do
         running = (runningChildState descriptor now) {workerStateProviderPid = Just 4242, workerStateProviderIdentity = Nothing}
         identified = running {workerStateProviderIdentity = Just gate}
         provider state = (state.workerStateProviderPid, state.workerStateProviderIdentity)
-    provider (settledChildState True SolveCompleted identified) `shouldBe` (Nothing, Nothing)
-    provider (settledChildState False SolveCompleted identified) `shouldBe` (Just 4242, Just gate)
-    provider (settledChildState True SolveCompleted running) `shouldBe` (Just 4242, Nothing)
-    (settledChildState False SolveCompleted running).workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
+    provider (settledChildState GateEnded SolveCompleted identified) `shouldBe` (Nothing, Nothing)
+    provider (settledChildState GateUnverified SolveCompleted identified) `shouldBe` (Just 4242, Just gate)
+    provider (settledChildState GateEnded SolveCompleted running) `shouldBe` (Just 4242, Nothing)
+    -- Round 8: a census that could not be taken may have missed a
+    -- descendant, and nothing recorded can ever show that one ended — so the
+    -- terminal state is the unidentified gate that keeps its slot for good.
+    provider (settledChildState GateUnaccounted SolveCompleted identified) `shouldBe` (Just 4242, Nothing)
+    (settledChildState GateUnverified SolveCompleted running).workerStateStatus `shouldBe` WorkerTerminal SolveCompleted
 
   it "reports a host whose recorded identity is gone as no live host at all" $
     withTemporaryCacheRoot $ \temporaryRoot ->

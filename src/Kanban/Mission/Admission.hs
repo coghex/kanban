@@ -296,12 +296,13 @@ workerOccupies takeSnapshot descriptor = do
           | null (identities state) -> pure False
           | otherwise -> (/= IdentityAbsent) <$> checkIdentityPresenceWith takeSnapshot (identities state)
         _ -> recordedIdentitiesLive state
-      StateAbsent -> do
-        -- No state yet. A launch that could not start its supervisor
-        -- acknowledges the worker before it gives the lease back, so an
-        -- acknowledged worker with no state never ran.
-        acknowledged <- doesFileExist descriptor.workerDescriptorAckPath
-        if acknowledged then pure False else launchStillLive
+      -- No state yet, and so no process recorded anywhere but on the item's
+      -- lease. An acknowledgement proves nothing here: a launch acknowledges
+      -- a supervisor that did not start in time even when it could not see
+      -- it exit, and keeps the lease for exactly that case — and a supervisor
+      -- whose state writes fail runs with no state at all. The lease is the
+      -- evidence, whichever way the launch ended.
+      StateAbsent -> launchStillLive
   where
     issueActionLive stateRead = case stateRead of
       StateAbsent -> pure True
@@ -654,7 +655,7 @@ settleMissionAgentSlot seams store invocation =
           | otherwise = (matched, reservation : others)
         launched = [reservation.missionReservationMission | reservation <- settled, Set.member invocation (startedInvocations occupants)]
     pure
-      ( if null settled then Nothing else Just (foldr admitted state {missionAdmissionReservations = kept} launched),
+      ( if null settled then Nothing else Just (foldl' (flip admitted) state {missionAdmissionReservations = kept} launched),
         ()
       )
 
@@ -752,9 +753,11 @@ prune seams occupants state = do
         alive || Set.member reservation.missionReservationInvocation starting
       gone = [reservation | (reservation, False) <- reservations, not (Set.member reservation.missionReservationInvocation starting)]
       launched = [reservation.missionReservationMission | reservation <- gone, Set.member reservation.missionReservationInvocation started]
+      -- In the order the slots were granted, so a restart records the
+      -- admissions in the order they happened rather than reversed.
       pruned =
-        foldr
-          admitted
+        foldl'
+          (flip admitted)
           state
             { missionAdmissionReservations = [reservation | entry@(reservation, _) <- reservations, kept entry],
               missionAdmissionEntrants = [entrant | (entrant, True) <- entrants]

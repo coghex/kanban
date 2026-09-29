@@ -54,6 +54,7 @@ module Kanban.Worker.IssueHost
     canonicalStageOutcome,
     issueHostGone,
     settledChildState,
+    GateSettlement (..),
     AdoptionDecision (..),
     claimForAdoption,
     neverAdopted,
@@ -83,7 +84,7 @@ import Kanban.Domain (Repository)
 import Kanban.Models (OperatingMode, loadModelRoster, loadedOperatingMode)
 import Kanban.Preflight (IssueOrigin, PreflightAction (..), preflightBlocker)
 import Kanban.Process (IdentityPresence (..), ManagedProcess, ProcessIdentity, checkIdentityPresenceWith, defaultProcessSnapshot, identityForPid, interruptThenKillManagedProcess, managedProcessPid, readProcessSnapshot)
-import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus)
+import Kanban.Worker.Census (recordProviderIdentity, refreshProcessCensus, refreshProcessCensusReporting)
 import Kanban.Worker.Termination (terminateRecordedStateProcesses)
 import Kanban.Review
   ( CanonicalIssueReviewResult (..),
@@ -324,7 +325,15 @@ data HostChild = HostChild
     -- A termination is deliberately outside it. Its own settle is what would
     -- deadlock against it, and it already journals its line before applying
     -- for the same terminal-envelope reason.
-    hostChildDelivery :: MVar ()
+    hostChildDelivery :: MVar (),
+    -- | Whether a census of this child's canonical gate ever failed.
+    --
+    -- The census is how a gate's descendants become this child's to settle,
+    -- and a snapshot that could not be read leaves whatever the tree grew
+    -- since the last one recorded nowhere. Once that has happened nothing
+    -- can show the tree ended, so the settle says as much on the terminal
+    -- state rather than calling it done ('settledChildState').
+    hostChildCensusMissed :: IORef Bool
   }
 
 data IssueReviewHost = IssueReviewHost
@@ -853,6 +862,7 @@ adoptChild host descriptor task adoption = do
   journalGate <- newMVar False
   settleClaim <- newIORef False
   delivery <- newMVar ()
+  censusMissed <- newIORef False
   let child =
         HostChild
           { hostChildDescriptor = descriptor,
@@ -864,7 +874,8 @@ adoptChild host descriptor task adoption = do
             hostChildStageThread = stageThread,
             hostChildProcess = process,
             hostChildSettleClaim = settleClaim,
-            hostChildDelivery = delivery
+            hostChildDelivery = delivery,
+            hostChildCensusMissed = censusMissed
           }
   modifyMVar_ host.hostChildren (pure . Map.insert descriptor.workerDescriptorSpec.workerId child)
   persistChild child
@@ -1111,7 +1122,8 @@ recordLiveCanonicalProcess child process = do
   processId <- managedProcessPid process
   forM_ processId $ \pid -> do
     recordProviderIdentity child.hostChildDescriptor child.hostChildState (fromIntegral pid)
-    refreshProcessCensus child.hostChildDescriptor child.hostChildState
+    taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
+    unless taken (writeIORef child.hostChildCensusMissed True)
     updateChildState child $ \state ->
       state
         { workerStateProviderPid = Just (fromIntegral pid),
@@ -1690,11 +1702,19 @@ settleSettledChild host child outcome = do
     state <- readMVar child.hostChildState
     forM_ state.workerStateReviewThread $ \threadId ->
       forM_ provider (\connected -> connected.providerFinishThread threadId)
+    -- One last census while the gate is still there to walk from: once it
+    -- is killed, what it spawned is reparented and no census can find it.
+    censusGate child
     readIORef child.hostChildProcess >>= mapM_ interruptThenKillManagedProcess
     -- The canonical subprocess's own descendants, verified against this
     -- child's recorded census. A @gh@ or @python3@ the gate started outlives
     -- the process that spawned it otherwise.
-    verified <- withMVar child.hostChildState terminateRecordedStateProcesses
+    terminated <- withMVar child.hostChildState terminateRecordedStateProcesses
+    missed <- readIORef child.hostChildCensusMissed
+    let settlement
+          | missed = GateUnaccounted
+          | terminated = GateEnded
+          | otherwise = GateUnverified
     -- The envelope before the state, because these are two writes and a host
     -- dying between them leaves whichever prefix landed. This order's prefix
     -- is a closed journal over a state that still reads as running, which
@@ -1704,7 +1724,7 @@ settleSettledChild host child outcome = do
     -- a reattaching dashboard replays an action that never ends, and the
     -- journal stays open to the appends the envelope exists to stop.
     journalChildTerminal child (WorkerFinished outcome)
-    updateChildState child (settledChildState verified outcome)
+    updateChildState child (settledChildState settlement outcome)
     releaseWorkerLease child.hostChildDescriptor
     -- Retired first, live entry removed second. The two maps are separate
     -- cells, so a lookup landing between the updates sees whichever order
@@ -1730,12 +1750,12 @@ settleSettledChild host child outcome = do
 -- action whose running descendant no count of running agents could find. So
 -- the pid and whatever identity was recorded stay on the terminal state,
 -- which is what "Kanban.Mission.Admission" reads before it frees the slot.
-settledChildState :: Bool -> SolveOutcome -> WorkerState -> WorkerState
-settledChildState verified outcome current =
+settledChildState :: GateSettlement -> SolveOutcome -> WorkerState -> WorkerState
+settledChildState settlement outcome current =
   current
     { workerStateStatus = WorkerTerminal outcome,
       workerStateProviderPid = if ended then Nothing else current.workerStateProviderPid,
-      workerStateProviderIdentity = if ended then Nothing else current.workerStateProviderIdentity,
+      workerStateProviderIdentity = if ended || settlement == GateUnaccounted then Nothing else current.workerStateProviderIdentity,
       -- The thread goes with the turn. A settled child holding a thread
       -- still reads as addressable to every thread-scoped check, which is
       -- what let a command queued behind a termination pass one.
@@ -1746,7 +1766,20 @@ settledChildState verified outcome current =
     }
   where
     unidentified = isJust current.workerStateProviderPid && isNothing current.workerStateProviderIdentity
-    ended = verified && not unidentified
+    ended = settlement == GateEnded && not unidentified
+
+-- | What a settle could show about the tree a child's canonical gate spawned.
+data GateSettlement
+  = -- | Every recorded process was shown ended, and every census was taken.
+    GateEnded
+  | -- | A recorded process could not be shown ended. Its identity stays on
+    -- the terminal state, where a later check can still find it gone.
+    GateUnverified
+  | -- | A census could not be taken, so the tree may hold a process nothing
+    -- recorded. The gate's pid stays with no identity beside it, which is
+    -- the record nothing can ever show ended.
+    GateUnaccounted
+  deriving stock (Eq, Show)
 
 terminalActivity :: SolveOutcome -> Text
 terminalActivity SolveCompleted = "completed"
@@ -2007,4 +2040,20 @@ closeChildLogs host = do
 -- protects — the ones holding a pending question across a dashboard restart —
 -- age into looking abandoned.
 refreshChildHeartbeats :: IssueReviewHost -> IO ()
-refreshChildHeartbeats host = liveChildren host >>= mapM_ (\child -> updateChildState child id)
+refreshChildHeartbeats host = liveChildren host >>= mapM_ (\child -> censusGate child >> updateChildState child id)
+
+-- | Takes a census of a child's canonical gate while it runs.
+--
+-- Every poll rather than once when the gate starts, because the gate's tree
+-- grows after that: a @gh@ it spawns later is recorded by the census that
+-- sees it and by nothing else, and a descendant nothing recorded is one no
+-- settle can end and no count of running agents can find. A census that
+-- could not be taken is remembered ('hostChildCensusMissed').
+censusGate :: HostChild -> IO ()
+censusGate child = do
+  gate <- readIORef child.hostChildProcess
+  case gate of
+    Nothing -> pure ()
+    Just _ -> do
+      taken <- refreshProcessCensusReporting child.hostChildDescriptor child.hostChildState
+      unless taken (writeIORef child.hostChildCensusMissed True)
