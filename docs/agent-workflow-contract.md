@@ -1207,7 +1207,7 @@ reimplement the removal, and `--check` remains read-only.
   as the `run_locked` reason. Every incident is attributed to the
   normalized canonical repository rather than to the checkout that raised it,
   so any clone of that repository lists, acknowledges, and clears it — only
-  *running* a drainer is exclusive per identity. Incidents come in three
+  *running* a drainer is exclusive per identity. Incidents come in five
   kinds. A crash incident says the drainer process died and is cleared per
   repository. A merge-conflict incident says a healthy drainer stopped
   merging one pull request; it carries that pull-request number and its
@@ -1220,8 +1220,16 @@ reimplement the removal, and `--check` remains read-only.
   outstanding after a bounded number of poll cycles; it carries that
   pull-request number and the outstanding steps, is unique per open
   (repository, pull request), never asks the drainer to exit, and resolves
-  itself once every step succeeds. Only the crash kind means the drainer is
-  not running.
+  itself once every step succeeds. A no-agent-mode incident is the
+  stale-head rereview no loaded provider can run, described above. A
+  missing-check incident says a healthy drainer skipped one pull request
+  because a required check reported nothing for its current head for longer
+  than the drainer's ten-minute grace period, so it stopped holding the queue
+  (issue #758); it carries that pull-request number, the head, and the missing
+  checks, is unique per open (repository, pull request), changes no label, and
+  resolves itself once every required check has reported for that head or the
+  pull request is closed, merged, no longer approved, or on a new head. Only
+  the crash kind means the drainer is not running.
 
   A network outage is none of those kinds (issue #735). A polling drainer
   whose `gh` or remote `git` command fails with a recognized transport failure
@@ -1331,10 +1339,11 @@ reimplement the removal, and `--check` remains read-only.
   the gate again for nothing.
 
   The drainer's own writes are deliberately not among them.
-  `tools/drain_prs.py` records conflict and cleanup incidents into the
-  installation through `record_conflict_incident` and
-  `record_cleanup_incident`, in its standalone `--pr` mode as much as under a
-  controller, and neither is gated here. It does not need to be: a drainer run
+  `tools/drain_prs.py` records conflict, cleanup, and missing-check incidents
+  into the installation through `record_conflict_incident`,
+  `record_cleanup_incident`, and `record_missing_check_incident`, in its
+  standalone `--pr` mode as much as under a controller, and none is gated
+  here. It does not need to be: a drainer run
   takes the checkout's own run lock as soon as the git directory is known and
   before any log line, state read, or GitHub call, and a run that moves or
   removes an installation fences on exactly that lock for every recorded

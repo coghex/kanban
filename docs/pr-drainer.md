@@ -666,9 +666,10 @@ candidate is consulted or changed.
 
 Kanban's `m` key drives exactly this entry point for the selected Done card;
 see [the user guide](user-guide.md). It refuses while *any* open incident
-stands, whatever its kind and whichever pull request it names. A merge-conflict
-or cleanup incident now survives an intentional stop, so it refuses `m` where
-being cleared by the stop used to allow the merge. Finish the work the incident
+stands, whatever its kind and whichever pull request it names. A
+merge-conflict, cleanup, or missing-check incident survives an intentional
+stop, so it refuses `m` where being cleared by the stop used to allow the
+merge. Finish the work the incident
 names, or dismiss it with `ack`, before `m` will run.
 
 ### Naming the repository
@@ -712,7 +713,8 @@ vocabulary:
 | `would_merge` | Dry run only: every gate passed, so a real run would merge it. |
 | `not_approved` | The approval label is missing. |
 | `changes_requested` | Changes were requested on this head: the changes-requested label is attached, which takes precedence when both labels are, or a review marker naming the current head requested changes, as [above](#which-review-verdict-wins). The message names which. |
-| `checks_pending` | A required check has not reported a result yet. The message names each configured check and its state, including `missing` for one that has not run at all. |
+| `checks_pending` | A required check has not reported a result yet: it is queued or running, or it is `missing` — has not run at all — and still inside its ten-minute grace period. The message names each configured check and its state. |
+| `checks_missing` | A required check has reported nothing for the pull request's current head for longer than the ten-minute grace period, so it no longer holds the queue. It was recorded as a `missing-check` incident and left alone, as [below](#required-checks-that-never-report). |
 | `checks_failed` | A required check failed. |
 | `merge_conflict` | The pull request conflicts with the default branch. It was recorded as an incident and left alone. |
 | `behind_base` | The branch was behind the default branch. The update was requested; merging waits for a later run. |
@@ -730,7 +732,7 @@ vocabulary:
 | Status | Meaning |
 | --- | --- |
 | `0` | A merge completed. |
-| `2` | No merge happened. A non-dry run may still have updated a branch behind its base or recorded a conflict incident. |
+| `2` | No merge happened. A non-dry run may still have updated a branch behind its base or recorded a conflict or missing-check incident. |
 | `1` | An error. `merged` may still be `true` if the merge landed before the failure. |
 
 A usage error exits `2` with nothing on stdout, so treat empty stdout as a
@@ -935,12 +937,19 @@ A candidate's turn ends in one of three ways.
   `reviewed:changes` or carries a review marker requesting changes on its
   current head (as above), conflicts with the default branch (recorded as an
   incident, as below), has a required check that failed with every automatic
-  rerun of that head already spent, has moved to a head no review has cleared,
-  or is still cooling down after a failed attempt.
+  rerun of that head already spent, has a required check that has reported
+  nothing for its current head for longer than the ten-minute grace period
+  (recorded as an incident, as [below](#required-checks-that-never-report)),
+  has moved to a head no review has cleared, or is still cooling down after a
+  failed attempt.
 - **A barrier ends the pass with nothing else touched.** A candidate whose
-  required CI or review check is missing, queued, pending, or in progress —
-  including the replacement checks a branch update or an automatic CI rerun
-  just started — is waiting, not blocked. So is one whose required CI check
+  required CI or review check is queued, pending, or in progress — including
+  the replacement checks a branch update or an automatic CI rerun just
+  started — is waiting, not blocked, however long that takes. So is one whose
+  required check is missing — has reported nothing at all — within its
+  ten-minute grace period, which covers the moments between a push and GitHub
+  registering its checks; a check still missing afterwards stops holding the
+  lane and is a skip instead. So is one whose required CI check
   still reads as the failure an automatic rerun was already requested against,
   as below. No later pull request is updated, rerun, or merged while it waits;
   the pass ends and the next ordinary poll looks at that candidate again.
@@ -1205,9 +1214,13 @@ lower its number.
 
 The lane is released when the pull request merges or closes, loses its
 approval, gains `reviewed:changes`, develops a merge conflict, exhausts its
-automatic CI reruns, leaves the eligible queue for any other reason, or reaches
-any of the skips above. Selection then restarts at the lowest number — within
-the same pass, and no candidate is examined twice in one pass.
+automatic CI reruns, has a required check still missing past its grace period,
+leaves the eligible queue for any other reason, or reaches any of the skips
+above. Selection then restarts at the lowest number — within the same pass, and
+no candidate is examined twice in one pass. A candidate skipped for a missing
+check keeps no claim on the lane: it is examined again on every later pass in
+its ordinary turn, behind whichever candidate holds the lane then, and resumes
+normal handling — barrier, advance or merge — once its checks report.
 
 An operational failure is none of those things. A `gh` call whose effect the
 drainer cannot establish ends the pass where it stands rather than moving on to
@@ -1221,8 +1234,8 @@ cooling candidate merely because it has nothing else to do. Failure cooldowns
 are denominated in passes rather than in attempts, so they expire on their own:
 an all-blocked queue does not have to advance some unrelated pull request first.
 
-Recording a merge-conflict incident is not an advance, so one pass can record
-more than one — it skips each conflicting candidate in turn. Marking an
+Recording a merge-conflict or missing-check incident is not an advance, so one
+pass can record more than one — it skips each such candidate in turn. Marking an
 approved draft ready for review is likewise not an advance and still applies to
 every approved draft in the queue. Canonical review publication now normally
 performs that transition immediately; the drainer keeps this step as a fallback
@@ -1255,6 +1268,55 @@ and to a drainer crash, are left open. Stopping the drainer does not clear it
 either: a stop makes no pull request mergeable, so the incident waits for the
 poll that finds the conflict gone. The one manual dismissal is `ack`, which
 resolves an open incident of any kind.
+
+## Required checks that never report
+
+A required check can report nothing for a pull request forever: its head
+predates the workflow that provides the check, the workflow's `paths` filter
+excludes it, the workflow is disabled, or the check was renamed. Nothing the
+drainer does creates such a check — a branch update does not either, when the
+branch is already up to date — so waiting on it would hold the lane
+indefinitely and strand every approved pull request behind it.
+
+So a missing check is a wait only for a grace period of ten minutes
+(`MISSING_CHECK_GRACE_SECONDS` in `tools/drain_prs.py`, not configurable).
+The period is measured per pull request per head, from the first pass that
+observed a configured check missing on that head. The observation is kept in
+the queue state, so a drainer restart continues it rather than starting over;
+a new head starts a fresh one; and it is cleared on the first pass that finds
+no configured check missing. A queue-state file written before the drainer
+recorded it simply gives a missing check a fresh grace period. A disabled gate
+is never missing.
+
+Within the grace period the candidate is a barrier exactly like a pending one.
+Afterwards the drainer:
+
+- skips the candidate for that pass and continues to the next one — the
+  `checks_missing` outcome. It is not a failed attempt: no cooldown, no
+  failure count, and nothing merged;
+- records an open `missing-check` incident naming the pull request, its head,
+  and each missing required check, which Kanban shows next to the drainer
+  state, beside merge conflicts. It changes no label;
+- records nothing new on later polls while that condition persists, so one
+  stuck head means one incident. The checks it names are kept current in place.
+
+Only a check that has reported *nothing* ages out. A required check that is
+queued or in progress, and a failed check awaiting an automatic rerun, keep
+their barrier however old they are — including when another required check
+beside them is missing past its grace period.
+
+The incident resolves itself on the first poll that finds every required
+check reported for the head it names — pending, failed and passed all count as
+reported — or finds the pull request closed, merged, or no longer approved. A
+new head supersedes it: that head gets a grace period of its own. This
+reconciliation reads the stored incidents rather than the queue, so it clears
+even while another candidate holds the lane; a read that fails keeps the
+incident open. Stopping the drainer does not clear it, and `ack` does: an
+acknowledgement satisfies no check, so a condition that continues opens a new
+incident on a later pass.
+
+`--dry-run` reports `checks_missing` and records neither the incident nor the
+observation.
 
 ## Post-merge cleanup
 
@@ -1333,7 +1395,7 @@ any of them, and drops the record only once every one of them is done.
 
 ## Notifications
 
-Crash, merge-conflict, and cleanup notifications are off by default. To use a private ntfy endpoint:
+Crash, merge-conflict, cleanup, and missing-check notifications are off by default. To use a private ntfy endpoint:
 
 ```console
 python3 tools/install_drainer.py --ntfy-url https://your-server.example/topic
@@ -1691,7 +1753,7 @@ still beats an exported `KANBAN_DRAINER_INSTALL_DIR`, for deciding which
 definitions are stale as well as for what is written into them.
 
 
-The controller records unexpected exits as incidents, and the drainer records a merge conflict and an unfinished post-merge cleanup as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict or cleanup incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed or its last obligation succeeds. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
+The controller records unexpected exits as incidents, and the drainer records a merge conflict, an unfinished post-merge cleanup, and a required check that never reported as per-pull-request incidents. Expected pull-request failures remain in the queue and are retried without stopping the service. Incidents are attributed to the canonical repository rather than to the checkout that raised them, so any clone of that repository can list, acknowledge, and clear them. Stopping the drainer intentionally clears that repository's crash incidents, and no other repository's — a stop ends the supervisor, which is exactly what a crash incident is about. It resolves nothing else: a conflict, cleanup, or missing-check incident stays open across the stop, still naming a debt that is still owed, and clears through its own path once that pull request is mergeable or closed, its last obligation succeeds, or its checks report. Starting the drainer is not gated on an open incident of any kind, and an incident already open when it starts is never mistaken for a startup failure.
 
 ## Removing the drainer
 

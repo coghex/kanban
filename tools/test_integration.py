@@ -5376,6 +5376,332 @@ class QueueOrderTests(ProcessPrFixture):
         self.assertEqual(list(self.incident_dir.glob("*.json")), [])
         self.assertFalse(self.state_path.exists())
 
+    # Issue #758: a required check that never reports stops holding the lane
+    # once its grace period has passed.
+
+    def _missing_checks_pr(self, number=7, head="b" * 40, **overrides):
+        """An approved pull request no required check has reported on."""
+        fields = {"statusCheckRollup": [], "mergeStateStatus": "BLOCKED"}
+        fields.update(overrides)
+        return self._other_pr_json(number, head, **fields)
+
+    def _assert_42_got_no_turn(self):
+        """The pass ended before #42. Stale-approval recovery reads every
+        recorded pull request, so a view of #42 proves nothing; a turn is what
+        stamps `last_attempt`, and a merge is what an advance would be."""
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._read_state()["prs"]["42"]["last_attempt"], 0)
+
+    def _missing_since(self, head="b" * 40, *, age):
+        return {"head": head, "observed_at": time.time() - age}
+
+    def _expired(self, head="b" * 40):
+        return self._missing_since(
+            head, age=drain_prs.MISSING_CHECK_GRACE_SECONDS + 60
+        )
+
+    def _incidents(self, *, open_only=False):
+        found = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.incident_dir.glob("**/incident-*.json"))
+        ]
+        if open_only:
+            found = [incident for incident in found if incident["status"] == "open"]
+        return found
+
+    def _record_missing_check_incident(self, number, head):
+        with self._drainer():
+            return drain_prs_service.record_missing_check_incident(
+                repo_path=self.ctx.path,
+                pull_request=number,
+                head=head,
+                checks=[drain_prs.DEFAULT_REQUIRED_CI_CHECK],
+            )
+
+    def test_a_missing_check_within_its_grace_period_is_a_barrier(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+
+        self._run_loop()
+        first = self._read_state()["prs"]["7"]["missing_check_since"]
+        # A second loop() reads the observation back off disk, as a restarted
+        # drainer does, and keeps measuring from it rather than starting over.
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._incidents(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(first["head"], "b" * 40)
+        self.assertEqual(state["prs"]["7"]["missing_check_since"], first)
+
+    def test_a_missing_check_past_its_grace_period_is_skipped_and_the_next_merges(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        expired = self._expired()
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=expired),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+
+        self._run_loop()
+
+        self.assertEqual(self._merged_numbers(), ["42"])
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        incident = incidents[0]
+        self.assertEqual(incident["kind"], drain_prs_service.MISSING_CHECK_INCIDENT_KIND)
+        self.assertEqual(incident["status"], "open")
+        self.assertEqual(incident["pull_request"], 7)
+        self.assertEqual(incident["head"], "b" * 40)
+        self.assertEqual(
+            incident["checks"],
+            [drain_prs.DEFAULT_REQUIRED_CI_CHECK, drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK],
+        )
+        state = self._read_state()
+        # The skip released the lane #7 held, and it is no failed attempt.
+        self.assertIsNone(state["active_pr"])
+        self.assertEqual(state["prs"]["7"]["consecutive_failures"], 0)
+        self.assertEqual(state["prs"]["7"]["retry_after_attempt"], 0)
+        self.assertEqual(state["prs"]["7"]["missing_check_since"], expired)
+
+    def test_repeated_skips_record_exactly_one_incident(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_pr_list([self._queued(7, "b" * 40)])
+        self._write_state({"7": self._entry("b" * 40, missing_check_since=self._expired())})
+
+        for _ in range(3):
+            self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["status"], "open")
+        self.assertEqual(self._advancing_gh_calls(), [])
+
+    def test_the_incident_resolves_once_the_checks_report(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_pr_list([self._queued(7, "b" * 40)])
+        self._write_state({"7": self._entry("b" * 40, missing_check_since=self._expired())})
+        self._run_loop()
+        self.assertEqual(len(self._incidents(open_only=True)), 1)
+
+        # Reported includes still running: the check exists now, so the
+        # condition the incident names is over.
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci())
+        )
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["status"], "resolved")
+        state = self._read_state()
+        # And the candidate is back to ordinary handling: a barrier again.
+        self.assertEqual(state["active_pr"], 7)
+        self.assertIsNone(state["prs"]["7"]["missing_check_since"])
+
+    def test_the_incident_resolves_when_the_pull_request_closes(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_pr_list([self._queued(7, "b" * 40)])
+        self._write_state({"7": self._entry("b" * 40, missing_check_since=self._expired())})
+        self._run_loop()
+
+        self._script_pr(7, self._missing_checks_pr(state="CLOSED"))
+        self._script_pr_list([])
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual([incident["status"] for incident in incidents], ["resolved"])
+        self.assertIn("no longer open", incidents[0]["resolution"])
+
+    def test_the_incident_resolves_when_the_pull_request_loses_its_approval(self):
+        self._record_missing_check_incident(7, "b" * 40)
+        self._script_pr(7, self._missing_checks_pr(labels=[]))
+        self._script_pr_list([])
+
+        self._run_loop()
+
+        incidents = self._incidents()
+        self.assertEqual([incident["status"] for incident in incidents], ["resolved"])
+        self.assertIn("no longer approved", incidents[0]["resolution"])
+
+    def test_the_incident_resolves_while_another_candidate_holds_the_lane(self):
+        self._record_missing_check_incident(7, "b" * 40)
+        self._script_pr(5, self._other_pr_json(5, "d" * 40, statusCheckRollup=self._pending_ci()))
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci())
+        )
+        self._script_pr_list([self._queued(5, "d" * 40), self._queued(7, "b" * 40)])
+        self._write_state(
+            {"5": self._entry("d" * 40), "7": self._entry("b" * 40)}, active_pr=5
+        )
+
+        self._run_loop()
+
+        self.assertEqual(
+            [incident["status"] for incident in self._incidents()], ["resolved"]
+        )
+        # Resolution neither preempted #5's lane nor gave #7 a turn.
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 5)
+        self.assertEqual(state["prs"]["7"]["last_attempt"], 0)
+        self.assertEqual(self._advancing_gh_calls(), [])
+
+    def test_a_new_head_restarts_the_grace_period_and_supersedes_the_incident(self):
+        old_head = "a" * 40
+        self._record_missing_check_incident(7, old_head)
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=self._expired(old_head)),
+                "42": self._entry(self.head_sha),
+            }
+        )
+
+        started = time.time()
+        self._run_loop()
+
+        # The new head is inside a grace period of its own: a barrier, with no
+        # incident for it, and the old head's incident is over.
+        self._assert_42_got_no_turn()
+        incidents = self._incidents()
+        self.assertEqual([incident["status"] for incident in incidents], ["resolved"])
+        self.assertEqual(incidents[0]["head"], old_head)
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        observed = state["prs"]["7"]["missing_check_since"]
+        self.assertEqual(observed["head"], "b" * 40)
+        self.assertGreaterEqual(observed["observed_at"], started)
+
+    def test_a_state_file_predating_the_observation_gets_a_fresh_grace_period(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        entry = self._entry("b" * 40)
+        self.assertNotIn("missing_check_since", entry)
+        self._write_state({"7": entry, "42": self._entry(self.head_sha)})
+
+        started = time.time()
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertGreaterEqual(
+            state["prs"]["7"]["missing_check_since"]["observed_at"], started
+        )
+
+    def test_a_running_check_beside_an_expired_missing_one_is_still_a_barrier(self):
+        running = [
+            {
+                "name": drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                "status": "IN_PROGRESS",
+                "conclusion": None,
+                "startedAt": "2026-07-18T00:00:00Z",
+            }
+        ]
+        self._script_pr(7, self._missing_checks_pr(statusCheckRollup=running))
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=self._expired()),
+                "42": self._entry(self.head_sha),
+            }
+        )
+
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+        self.assertEqual(self._read_state()["active_pr"], 7)
+
+    def test_a_queued_check_older_than_the_grace_period_is_still_a_barrier(self):
+        queued = [
+            {"name": name, "status": "QUEUED", "conclusion": None}
+            for name in (
+                drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+                drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+            )
+        ]
+        self._script_pr(7, self._missing_checks_pr(statusCheckRollup=queued))
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        # Whatever was once recorded, nothing is missing now: the observation
+        # is cleared and no age applies to a queued check.
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=self._expired()),
+                "42": self._entry(self.head_sha),
+            }
+        )
+
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertIsNone(state["prs"]["7"]["missing_check_since"])
+
+    def test_an_outstanding_ci_rerun_keeps_an_expired_missing_check_a_barrier(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry(
+                    "b" * 40,
+                    missing_check_since=self._expired(),
+                    ci_rerun_head="b" * 40,
+                    ci_rerun_attempts=1,
+                    ci_rerun_active=True,
+                    ci_rerun_attempt_identity="770001",
+                ),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertTrue(state["prs"]["7"]["ci_rerun_active"])
+
+    def test_a_dry_run_skips_an_expired_missing_check_and_writes_nothing(self):
+        self._script_pr(7, self._missing_checks_pr())
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=self._expired()),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+        before = self.state_path.read_bytes()
+
+        self._run_loop(dry_run=True)
+
+        # #7 was skipped and #42 reached, with no merge, incident or write.
+        self.assertTrue(self._views_of(42))
+        self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._incidents(), [])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
 
 
 GH_OUTAGE = (
