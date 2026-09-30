@@ -45,12 +45,13 @@ module Kanban.GitHub.Coordinator
     coordinatorMustSettle,
     coordinatorOpenCycleInFlight,
     newRefreshCoordinator,
+    newRefreshCoordinatorEntering,
     requestRefreshJob,
     shutdownRefreshCoordinator,
   )
 where
 
-import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar
   ( MVar,
     withMVar,
@@ -64,7 +65,7 @@ import Control.Concurrent.MVar
     takeMVar,
     tryPutMVar,
   )
-import Control.Exception (SomeException, finally, try)
+import Control.Exception (SomeException, finally, mask_, try)
 import Control.Monad (void, when)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
@@ -483,7 +484,14 @@ data RefreshCoordinator outcome = RefreshCoordinator
     -- across that would deadlock the moment the channel filled: the publisher
     -- would wait for the dashboard to drain it, and the dashboard would be
     -- waiting on the state lock to answer whether a cycle was in flight.
-    coordinatorPublishLock :: MVar ()
+    coordinatorPublishLock :: MVar (),
+    -- | Runs first on every job's thread, before that thread has installed
+    -- anything. It is 'pure ()' outside the tests, which supply an
+    -- uninterruptible wait here to stand in for a thread the runtime has not
+    -- scheduled yet: that is the one instant a shutdown's interruption can
+    -- reach a job before the job can answer for it, and nothing but a hook
+    -- can hold a thread there on demand.
+    coordinatorJobEntry :: IO ()
   }
 
 data LiveJob = LiveJob
@@ -500,7 +508,20 @@ newRefreshCoordinator ::
   (OpenGeneration -> outcome -> IO ()) ->
   (CoordinatorNotice -> IO ()) ->
   IO (RefreshCoordinator outcome)
-newRefreshCoordinator recordLock runner publish report = do
+newRefreshCoordinator = newRefreshCoordinatorEntering (pure ())
+
+-- | 'newRefreshCoordinator', with an action every job's thread runs before
+-- anything else (see 'coordinatorJobEntry'). The action must not be
+-- interruptible: it stands in for a thread that has not run yet, which
+-- nothing can interrupt, only leave an interruption pending against.
+newRefreshCoordinatorEntering ::
+  IO () ->
+  GhRecordLock ->
+  RefreshRunner outcome ->
+  (OpenGeneration -> outcome -> IO ()) ->
+  (CoordinatorNotice -> IO ()) ->
+  IO (RefreshCoordinator outcome)
+newRefreshCoordinatorEntering entry recordLock runner publish report = do
   state <- newMVar initialCoordinatorState
   wake <- newEmptyMVar
   live <- newMVar Nothing
@@ -514,7 +535,8 @@ newRefreshCoordinator recordLock runner publish report = do
             coordinatorPublish = publish,
             coordinatorReport = report,
             coordinatorLive = live,
-            coordinatorPublishLock = publishLock
+            coordinatorPublishLock = publishLock,
+            coordinatorJobEntry = entry
           }
   void (forkIO (schedulerLoop coordinator))
   pure coordinator
@@ -602,7 +624,10 @@ shutdownRefreshCoordinator coordinator = do
       -- in "Kanban.GitHub.Guard", so this wait is bounded by that budget
       -- rather than by the fetch it interrupted. A job that had already
       -- settled passes straight through both of these, and its verdict is the
-      -- one that answers for whatever it left behind.
+      -- one that answers for whatever it left behind. A job whose thread has
+      -- not run yet holds the interruption until it has installed its
+      -- settlement signal ('onJobThread'), so it settles too, having spawned
+      -- nothing.
       readMVar job.liveJobSettled
       ghFetchCleanupFailure job.liveJobGuard
 
@@ -744,14 +769,25 @@ remainingMicros now deadline =
 -- verified cleanup a refresh timeout does, rather than through a second
 -- implementation of it. 'Nothing' comes back when the body was interrupted or
 -- raised, which is exactly the set of endings that must publish nothing.
+--
+-- The thread starts masked and unmasks only for the body, so the signal that
+-- it has settled is in place before any interruption can reach it. Forked
+-- unmasked, a shutdown landing before the new thread first ran would kill it
+-- ahead of that handler: nothing would ever fill 'liveJobSettled', and both
+-- the shutdown and this scheduler would wait on it forever. Masked, the
+-- interruption stays pending until the body is entered, and the job unwinds
+-- as any other cancelled one does -- having spawned nothing, its guard's
+-- verdict is 'Nothing'.
 onJobThread :: RefreshCoordinator outcome -> GhFetchGuard -> IO result -> IO (Maybe result)
 onJobThread coordinator guard body = do
   settled <- newEmptyMVar
   value <- newIORef Nothing
   threadId <-
-    forkIO $
-      (try @SomeException body >>= writeIORef value . either (const Nothing) Just)
-        `finally` void (tryPutMVar settled ())
+    mask_ $
+      forkIOWithUnmask $ \unmask -> do
+        coordinator.coordinatorJobEntry
+        (try @SomeException (unmask body) >>= writeIORef value . either (const Nothing) Just)
+          `finally` void (tryPutMVar settled ())
   -- Fills the slot the plan emptied. Anything waiting on it — a shutdown that
   -- arrived while this was being set up — is released here with the job it was
   -- looking for.
