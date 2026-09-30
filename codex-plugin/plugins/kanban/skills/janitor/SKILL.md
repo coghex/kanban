@@ -620,7 +620,7 @@ be `$ROOT`:
 
 ```bash
 PRIMARY="$(git -C "$ROOT" worktree list --porcelain \
-  | awk -v want="branch refs/heads/$DEFAULT" '/^worktree /{p=substr($0,10)} $0==want{print p; exit}')"
+  | awk -v want="branch refs/heads/$DEFAULT" '/^worktree /{p=substr($(0),10)} $(0)==want{print p; exit}')"
 [ -n "$PRIMARY" ]
 git -C "$PRIMARY" merge --ff-only "origin/$DEFAULT"
 ```

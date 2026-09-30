@@ -214,6 +214,21 @@ because its session is Claude hosted by the Copilot CLI. Rendering refuses a lit
 where a directive belongs, and a block naming a brand the entry does not render,
 since that text could never reach a file.
 
+A Claude command body, rendered or hand-authored, is not delivered as stored.
+Before the session reads it, Claude Code substitutes the invocation's arguments
+into it: `$ARGUMENTS` becomes the whole argument string, and `$ARGUMENTS[N]` and
+the shorthand `$N` become the N-th argument, counting from zero. Shell code in a
+source or a command therefore never writes `$` followed by a digit. Spell an
+`awk` field reference `$(0)`, `$(1)`, and so on, which `awk` reads exactly as
+`$0` and `$1` and which substitution never matches, and read the command's own
+arguments through `$ARGUMENTS`. Do not escape it as `\$0` instead: Claude Code
+consumes that backslash only when it substitutes, so an invocation it passes
+through verbatim hands the backslash to the shell. The `$(N)` spelling is valid
+for every brand, so a shared source needs no per-brand variant for it.
+`tools/test_claude_argument_substitution.py` fails on any substitutable text in
+a Claude command, and applies the substitution to check that the
+argument-sensitive lookups still work when delivered.
+
 After editing a source, re-render and commit every generated file.
 `tools/test_render_command_sources.py` re-renders every registered source and
 byte-compares it against the tracked output, so a source changed without a

@@ -3607,7 +3607,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         snippet = (
             "```bash\n"
             'DOCS_WT="$(git worktree list --porcelain \\\n'
-            "  | awk '/^worktree /{p=substr($0,10)} "
+            "  | awk '/^worktree /{p=substr($(0),10)} "
             "/^branch refs\\/heads\\/docs-wip$/{print p; exit}')\"\n"
             '[ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"\n'
             "```\n"

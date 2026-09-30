@@ -94,7 +94,7 @@ already-resolved `$DOC_ROOT`, and do every file write there:
 
 ```bash
 DOCS_WT="$(git -C "$DOC_ROOT" worktree list --porcelain \
-  | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
+  | awk '/^worktree /{p=substr($(0),10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
 [ -n "$DOCS_WT" ] || DOCS_WT="$DOC_ROOT"
 ```
 

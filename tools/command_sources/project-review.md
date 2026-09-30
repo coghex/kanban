@@ -164,7 +164,7 @@ is read and written, and where a finished report is written:
 
 ```bash
 DOCS_WT="$(git -C "$ROOT" worktree list --porcelain \
-  | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
+  | awk '/^worktree /{p=substr($(0),10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
 [ -n "$DOCS_WT" ]
 ```
 
