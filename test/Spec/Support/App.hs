@@ -107,6 +107,7 @@ testAppState board = do
         appOverlayFullscreen = False,
         appNotice = emptyNoticeState,
         appBoardFreshness = Fresh epoch,
+        appLastBoardRefreshStarted = Nothing,
         appOpenSnapshot = Nothing,
         appLastSuccessfulFetch = Just epoch,
         appOpenGeneration = 0,

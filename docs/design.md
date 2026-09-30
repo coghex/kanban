@@ -5,7 +5,8 @@
 `kanban` is a fast, keyboard-driven Haskell terminal dashboard for a GitHub
 repository. It remains idle without consuming meaningful CPU and makes no
 network requests unless the application starts, the user explicitly updates
-data, or an explicitly started review/solve workflow performs its bounded work.
+data, terminal focus triggers an eligible update, or an explicitly started
+review/solve workflow performs its bounded work.
 
 The dashboard combines:
 
@@ -759,6 +760,23 @@ read-only-history notice in this mode exactly as it does in the other two.
 Refresh keys are ignored for a provider that already has a request in flight.
 Keybindings can become configurable later, but the first release should keep a
 small fixed set.
+
+Regaining terminal input focus also requests the unified board and usage update,
+including when an overlay is open. In cmux this happens when selecting the
+workspace restores focus to Kanban's terminal; with multiple panes, focusing
+another pane does not focus Kanban. Kanban enables standard terminal focus
+reporting when its terminal backend supports it. There is no cmux-specific
+configuration or dependency, and terminals without focus reporting keep their
+manual update behavior.
+
+Focus updates have a 60-second cooldown from the latest board refresh start,
+including startup, manual updates, workflow updates, and coordinator retries.
+The cooldown uses a monotonic clock and lives only for this dashboard launch.
+A focus event during the cooldown, a running or queued board refresh, or
+dashboard shutdown is ignored without queuing another update. Lost focus does
+nothing. Manual updates and required workflow refreshes bypass this cooldown.
+Remaining focused does not start periodic updates: eligibility is checked only
+when another gained-focus event arrives.
 
 The three live-agent overlays are modal, vim-style. Each solve, PR, and review
 session carries its own mode and opens in normal, so `Tab` shows the next
@@ -2963,14 +2981,15 @@ above are unchanged, and persistence the user switched off is not a failure.
 
 - Brick owns the blocking terminal event loop.
 - The GitHub and usage providers each run once in short-lived startup workers
-  and again only after an explicit unified update.
+  and again after an explicit unified update or an eligible terminal focus
+  event. Workflow handoffs may also require a board refresh.
 - One repository-scoped coordinator owns every `gh` a board refresh starts and
   the durable `gh` group record for that repository, and decides the order that
   repository's refresh jobs run in. Every production board-refresh entry point
-  goes through it — startup, `u`, and the refreshes a finished review, solve, or
-  pull-request action requires — so two requests arriving together resolve to
-  one owner and neither can spawn `gh` while the other holds it. The
-  coordinator and the lease below do not, on their own, keep the record's
+  goes through it — startup, `u`, focus updates, and the refreshes a finished
+  review, solve, or pull-request action requires — so two requests arriving
+  together resolve to one owner and neither can spawn `gh` while the other
+  holds it. The coordinator and the lease below do not, on their own, keep the record's
   updates from losing an entry, because processes the lease does not govern
   rewrite the record too. What does is a cross-process lock: every
   read-modify-write of the record — registering a group, dropping one, the
@@ -4027,8 +4046,9 @@ above are unchanged, and persistence the user switched off is not a failure.
   There is nothing to migrate: this component had no installation before
   this slice, so relocation is that override and only that.
 - Worker results enter the UI through a bounded `BChan`.
-- The UI redraws after a key event, resize, provider result, active review
-  event/spinner tick, notice expiry, or explicit terminal repaint.
+- The UI redraws after a key event, terminal focus event, resize, provider
+  result, active review event/spinner tick, notice expiry, or explicit terminal
+  repaint.
 - There are no periodic network or Git polls. The only recurring timers are
   the two ten-second local service status checks — the PR drainer's and the
   issue approval service's — plus one local one-shot timer per settled
@@ -4939,8 +4959,9 @@ because splitting the two leaves `master` red between the landings.
 ### Implementation state
 
 The warning-clean GHC2024/Cabal foundation, local repository resolution,
-event-driven Brick/Vty dashboard, standalone-card workflow, and explicit GitHub
-refresh are implemented. Open issues and open pull requests are fetched live
+event-driven Brick/Vty dashboard, standalone-card workflow, explicit GitHub
+refresh, and terminal focus updates with a 60-second cooldown are implemented.
+Open issues and open pull requests are fetched live
 and uncapped on every refresh, with no display limit and no repository snapshot
 on disk. Checklist-based tracker hierarchy, inherited PR membership, tracker
 progress, and the on-demand Codex and Claude usage providers are also
@@ -5511,7 +5532,8 @@ is implementation history rather than a second status checklist.
 Exit criteria: the application is warning-clean, fixture/integration tests pass,
 idle CPU is effectively zero apart from the inexpensive local service status
 timer and the one-shot notice-expiry timer a settled notice arms (section 15),
-and every network call is attributable to startup or an explicit refresh key.
+and every network call is attributable to startup, an explicit update, an
+eligible terminal focus event, or bounded workflow work.
 
 ## 20. Deferred ideas
 

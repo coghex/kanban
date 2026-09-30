@@ -2,6 +2,7 @@ module Kanban.UI.Refresh
   ( BoardRefreshDispatch (..),
     boardRefreshDispatch,
     boardRefreshRunner,
+    focusRefreshDue,
     historyPausedNotice,
     markBoardRefreshRunning,
     newBoardRefreshCoordinator,
@@ -13,6 +14,7 @@ module Kanban.UI.Refresh
     startAllRefreshes,
     startBoardRefresh,
     startCompletedHistory,
+    startFocusRefresh,
     startQueuedBoardRefresh,
     startUsageRefreshes,
     usageRefreshProviders,
@@ -29,6 +31,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time (TimeZone, UTCTime)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import Kanban.Claude (fetchClaudeUsage)
 import Kanban.Codex (fetchCodexUsage)
 import Kanban.Config (ResolvedConfig (..), TimeoutsConfig (..), UsageCommandConfig (..), UsageConfig (..))
@@ -66,13 +70,31 @@ startAllRefreshes = do
   startBoardRefresh
   startUsageRefreshes
 
+-- | A focus event is an opportunistic update, so it must never queue another
+-- cycle behind one already running or required by a workflow. The cooldown
+-- runs from the latest board refresh, regardless of what started it.
+focusRefreshDue :: Word64 -> AppState -> Bool -> Bool
+focusRefreshDue now state inFlight =
+  not state.appQuitPending
+    && not state.appBoardRefreshQueued
+    && boardRefreshDispatch state.appBoardFreshness inFlight == StartRefreshNow
+    && maybe True cooldownElapsed state.appLastBoardRefreshStarted
+  where
+    cooldownElapsed started = now >= started && now - started >= 60 * 1000 * 1000 * 1000
+
+startFocusRefresh :: EventM Name AppState ()
+startFocusRefresh = do
+  state <- get
+  now <- liftIO getMonotonicTimeNSec
+  inFlight <- liftIO (coordinatorOpenCycleInFlight state.appRefreshCoordinator)
+  when (focusRefreshDue now state inFlight) startAllRefreshes
+
 -- | The usage half of an update: one refresh per provider the operating mode
 -- has to observe.
 --
--- Startup, @u@, and the sidebar's @↻@ all reach this, so gating it here is
--- what keeps a board that loads no provider from spawning a usage probe on
--- any of the three. The board half above is untouched: @u@ and @↻@ still
--- update GitHub in every mode.
+-- Startup, @u@, the sidebar's @↻@, and eligible focus events all reach this,
+-- so gating it here keeps a board that loads no provider from spawning a
+-- usage probe. Each of those entry points still updates GitHub in every mode.
 --
 -- Which providers those are is 'usageRefreshProviders', a pure function,
 -- because an 'EventM' cannot be run outside brick and the suite has to be
@@ -178,8 +200,9 @@ startBoardRefresh = do
       announceOverDirectMergeResult "GitHub refresh is already running"
       modify (\current -> current {appBoardRefreshQueued = True})
     StartRefreshNow -> do
+      now <- liftIO getMonotonicTimeNSec
       announceOverDirectMergeResult "Refreshing GitHub…"
-      modify (\current -> current {appBoardFreshness = Loading})
+      modify (\current -> current {appBoardFreshness = Loading, appLastBoardRefreshStarted = Just now})
       -- No whole-request deadline. `github_seconds` bounds one page now
       -- (§13), and an uncapped traversal of a large repository legitimately
       -- takes many pages: bounding the whole of it by a single page's budget
@@ -199,8 +222,8 @@ startBoardRefresh = do
 -- | Claims the next completed identity and asks for the traversal that
 -- answers under it.
 --
--- Every launch and every @u@ starts the whole history again rather than
--- fetching what has newly completed, which is what makes an edit to a
+-- Every launch, @u@, and eligible focus update starts the whole history again
+-- rather than fetching what has newly completed, which makes an edit to a
 -- long-closed item visible at all: nothing about a title, label, or check
 -- changing moves an item into a "recently completed" window.
 --
@@ -234,18 +257,20 @@ startCompletedHistory = do
 -- nobody pressed for, and leaving it unrecorded is what would let the next
 -- press start a second one beside it.
 --
--- Only the freshness moves. Whatever notice is on screen -- above all the
--- rate limit that caused the reissue -- is the explanation for the wait, and
+-- Freshness and the focus cooldown move. Whatever notice is on screen --
+-- above all the rate limit that caused the reissue -- explains the wait, and
 -- replacing it would remove the one report that says why.
 --
 -- The generation it carries is recorded as the newest one, which is what
 -- makes a late outcome from the cycle this one superseded droppable.
 markBoardRefreshRunning :: OpenGeneration -> EventM Name AppState ()
-markBoardRefreshRunning generation =
+markBoardRefreshRunning generation = do
+  now <- liftIO getMonotonicTimeNSec
   modify
     ( \state ->
         state
           { appBoardFreshness = Loading,
+            appLastBoardRefreshStarted = Just now,
             appOpenGeneration = max state.appOpenGeneration generation
           }
     )
@@ -413,4 +438,3 @@ startClaudeRefresh = do
 runClaudeRefresh :: Int -> Maybe UsageCommandConfig -> BChan AppEvent -> IO ()
 runClaudeRefresh timeoutMicros command eventChannel =
   runUsageProvider timeoutMicros command fetchClaudeUsage >>= writeBChan eventChannel . ClaudeRefreshFinished
-
