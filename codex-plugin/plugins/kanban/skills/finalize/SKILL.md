@@ -625,8 +625,8 @@ pull request itself rather than from the session's own directory:
 ```bash
 BASE="$(gh pr view "$PR" -R "$REPO" --json baseRefName --jq .baseRefName)"
 BRANCH="$(gh pr view "$PR" -R "$REPO" --json isCrossRepository,headRefName --jq 'select(.isCrossRepository == false) | .headRefName')"
-ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[] | "\(.repository.owner.login)/\(.repository.name) \(.number)"' | awk -v want="$REPO" 'tolower($1) == tolower(want) {print $2; exit}')"
-WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$BRANCH" -v sha="$HEAD" '/^worktree /{path=substr($0,10); head=""} /^HEAD /{head=$2} /^branch /{if ($2==ref && head==sha) {print path; exit}}')"
+ISSUE="$(gh pr view "$PR" -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[] | "\(.repository.owner.login)/\(.repository.name) \(.number)"' | awk -v want="$REPO" 'tolower($(1)) == tolower(want) {print $(2); exit}')"
+WORKTREE="$(git -C "$ROOT" worktree list --porcelain | awk -v ref="refs/heads/$BRANCH" -v sha="$HEAD" '/^worktree /{path=substr($(0),10); head=""} /^HEAD /{head=$(2)} /^branch /{if ($(2)==ref && head==sha) {print path; exit}}')"
 BASE_CHECKOUT="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD | grep -Fx "$BASE")"
 OPEN_ISSUE="$(gh issue view "${ISSUE:-0}" -R "$REPO" --json number,state --jq 'select(.state == "OPEN") | .number')"
 LOCAL_BRANCH="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH")"

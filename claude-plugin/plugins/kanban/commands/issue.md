@@ -40,7 +40,7 @@ Body template (match the tracker's existing style if it differs): title in the i
 
 ```bash
 DOCS_WT="$(git worktree list --porcelain \
-  | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
+  | awk '/^worktree /{p=substr($(0),10)} /^branch refs\/heads\/docs-wip$/{print p; exit}')"
 [ -n "$DOCS_WT" ] || DOCS_WT="$(git rev-parse --show-toplevel)"
 ```
 
