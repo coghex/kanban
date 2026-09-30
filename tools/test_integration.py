@@ -5562,6 +5562,32 @@ class QueueOrderTests(ProcessPrFixture):
         # even though #7 itself was never examined.
         self.assertIsNone(state["prs"]["7"]["missing_check_since"])
 
+    def test_a_cleared_observation_survives_a_later_failure_in_the_same_poll(self):
+        # The reconciler clears #7's observation and resolves its incident;
+        # stale-approval recovery then fails before the loop's own save. A
+        # restart must not reload the expired observation, or a check missing
+        # again on this head would be skipped with no grace period at all.
+        self._record_missing_check_incident(7, "b" * 40)
+        self._script_pr(
+            7, self._other_pr_json(7, "b" * 40, statusCheckRollup=self._pending_ci())
+        )
+        self._write_state(
+            {"7": self._entry("b" * 40, missing_check_since=self._expired())}
+        )
+
+        with mock.patch.object(
+            drain_prs,
+            "recover_stale_approval",
+            side_effect=drain_prs.DrainError("recovery failed"),
+        ):
+            with self.assertRaises(drain_prs.DrainError):
+                self._run_loop()
+
+        self.assertEqual(
+            [incident["status"] for incident in self._incidents()], ["resolved"]
+        )
+        self.assertIsNone(self._read_state()["prs"]["7"]["missing_check_since"])
+
     def test_a_new_head_restarts_the_grace_period_and_supersedes_the_incident(self):
         old_head = "a" * 40
         self._record_missing_check_incident(7, old_head)

@@ -5528,6 +5528,10 @@ def reconcile_missing_check_incidents(
             observed = entry.get("missing_check_since") if entry else None
             if isinstance(observed, dict) and observed.get("head") == pr["headRefOid"]:
                 entry["missing_check_since"] = None
+                # Durable before the incident closes: a later step of this poll
+                # can fail before the loop's own save, and a restart must not
+                # reload an expired observation for a condition already over.
+                save_drain_state(ctx, state, dry_run=False)
         else:
             continue
         resolved = drain_prs_service.resolve_missing_check_incident(
