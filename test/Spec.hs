@@ -90,6 +90,7 @@ import qualified Spec.UI.CompletedHistory as CompletedHistory
 import qualified Spec.UI.Excerpts as Excerpts
 import qualified Spec.UI.Filter as Filter
 import qualified Spec.UI.FilterPanel as FilterPanel
+import qualified Spec.UI.FocusRefresh as FocusRefresh
 import qualified Spec.UI.Notice as Notice
 import qualified Spec.UI.Fullscreen as Fullscreen
 import qualified Spec.UI.Golden as Golden
@@ -311,6 +312,7 @@ suiteGroups =
     SuiteGroup "Spec.UI.Excerpts" PingLane Excerpts.spec,
     SuiteGroup "Spec.UI.Filter" PingLane Filter.spec,
     SuiteGroup "Spec.UI.FilterPanel" PingLane FilterPanel.spec,
+    SuiteGroup "Spec.UI.FocusRefresh" PingLane FocusRefresh.spec,
     SuiteGroup "Spec.UI.Fullscreen" PingLane Fullscreen.spec,
     SuiteGroup "Spec.UI.Notice" PingLane Notice.spec,
     SuiteGroup "Spec.UI.Golden" PingLane Golden.spec,

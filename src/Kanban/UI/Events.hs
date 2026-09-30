@@ -170,6 +170,10 @@ dispatchEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 dispatchEvent event = do
   state <- get
   case (state.appOverlay, event) of
+    -- Handle terminal focus before any overlay consumes the event. Refreshing
+    -- preserves the open overlay and draft, and losing focus starts no work.
+    (_, VtyEvent Vty.EvGainedFocus) -> startFocusRefresh
+    (_, VtyEvent Vty.EvLostFocus) -> pure ()
     (_, AppEvent (BoardRefreshFinished generation result)) -> applyBoardRefresh generation result
     (_, AppEvent (BoardRefreshStarted generation)) -> markBoardRefreshRunning generation
     -- The notice reports the pause once; the status is what outlives it, so

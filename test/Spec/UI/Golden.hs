@@ -1551,6 +1551,7 @@ restingState channel refreshCoordinator historyTraversal approvalEpoch =
       appOverlayFullscreen = False,
       appNotice = showNotice SettledNotice "Cached GitHub snapshot loaded · press u to update" emptyNoticeState,
       appBoardFreshness = Fresh goldenFetchedAt,
+      appLastBoardRefreshStarted = Nothing,
       appLastSuccessfulFetch = Just goldenFetchedAt,
       appOpenGeneration = 0,
       -- Both generations have published, which is what a board with a

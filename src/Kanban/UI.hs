@@ -13,6 +13,7 @@
 module Kanban.UI
   ( dashboardApplication,
     drawApplication,
+    enableFocusIfSupported,
     initialCompletedHistory,
     loadStartupCaches,
     restoreStartupNotice,
@@ -128,7 +129,7 @@ runHeldDashboard authority options config repository roster = do
   historyTraversal <- newHistoryTraversal
   -- One coordinator per repository for the dashboard's lifetime, started
   -- before any refresh can be asked for. Every board-refresh entry point --
-  -- startup, `u`, and the refreshes a finished review, solve, or
+  -- startup, `u`, focus updates, and the refreshes a finished review, solve, or
   -- pull-request action requires -- converges on 'startBoardRefresh' or
   -- 'requireBoardRefresh', so routing those two through it routes all of
   -- them (§15).
@@ -242,6 +243,7 @@ runHeldDashboard authority options config repository roster = do
             -- moves this to 'Loading' the moment the startup refresh is
             -- requested; the panel is the same either way.
             appBoardFreshness = NotLoaded,
+            appLastBoardRefreshStarted = Nothing,
             appOpenSnapshot = Nothing,
             appLastSuccessfulFetch = Nothing,
             appOpenGeneration = 0,
@@ -415,6 +417,7 @@ startApplication = do
   initialNotice <- (.appNotice) <$> get
   vty <- getVtyHandle
   liftIO (enableMouseIfSupported (Vty.outputIface vty))
+  liftIO (enableFocusIfSupported (Vty.outputIface vty))
   startAllRefreshes
   -- 'startAllRefreshes' announces each refresh it starts, which on any later
   -- press is the whole report. At startup those announcements land on top of
@@ -460,6 +463,12 @@ startApplication = do
 enableMouseIfSupported :: Vty.Output -> IO ()
 enableMouseIfSupported output =
   when (Vty.supportsMode output Vty.Mouse) (Vty.setMode output Vty.Mouse True)
+
+-- | Ask the terminal for focus events only when its backend supports them.
+-- Vty restores the mode on shutdown along with its other terminal modes.
+enableFocusIfSupported :: Vty.Output -> IO ()
+enableFocusIfSupported output =
+  when (Vty.supportsMode output Vty.Focus) (Vty.setMode output Vty.Focus True)
 
 monitorDrainer :: DrainerController -> BChan AppEvent -> IO ()
 monitorDrainer controller eventChannel = forever $ do

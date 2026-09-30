@@ -374,6 +374,7 @@ test-suite kanban-test
     Spec.UI.Excerpts
     Spec.UI.Filter
     Spec.UI.FilterPanel
+    Spec.UI.FocusRefresh
     Spec.UI.Fullscreen
     Spec.UI.Golden
     Spec.UI.Incidents

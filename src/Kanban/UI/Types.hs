@@ -63,6 +63,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time (TimeZone, UTCTime )
 import Data.Vector (Vector)
+import Data.Word (Word64)
 import Kanban.Browser (OpenFailure)
 import Kanban.CLI (Options (..))
 import Kanban.Config (ResolvedConfig (..) )
@@ -875,6 +876,11 @@ data AppState = AppState
     -- the tracked operations in 'Kanban.UI.Util.noticeActivityLive'.
     appNotice :: NoticeState,
     appBoardFreshness :: Freshness,
+    -- | Monotonic nanoseconds when the latest board refresh was requested or
+    -- observed starting. Focus refreshes share this cooldown with startup,
+    -- manual updates, and workflow updates; wall-clock corrections cannot
+    -- shorten it. Nothing is persisted between dashboard launches.
+    appLastBoardRefreshStarted :: Maybe Word64,
     -- | The newest complete open generation, kept beside the board it derived.
     -- The board alone cannot answer requirement 8: reconciling a completed
     -- generation against the open one means removing items and deriving again,
