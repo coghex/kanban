@@ -2062,9 +2062,12 @@ state.
   multi-token value is refused having read nothing. The repository identity is
   resolved once from the checkout's `origin` remote before the first GitHub
   read, reported to the user, and passed as `-R "$REPO"` on every
-  repository-addressed `gh` call; the paginated issue-comment feed embeds
-  `repos/$REPO/...`. The authenticated-user lookup is the one call that names
-  no repository, because that endpoint has none.
+  repository-addressed pull-request and issue call. The default-branch lookup
+  passes it as `gh repo view "$REPO"`'s positional argument instead, because
+  `repo view` has no `-R` flag and real `gh` refuses that spelling (issue
+  #759); the paginated issue-comment feed embeds `repos/$REPO/...`. The
+  authenticated-user lookup is the one call that names no repository, because
+  that endpoint has none.
 - **Target restriction:** it finalizes a pull request whose base is the
   repository's **default branch**, and refuses any other. A pull request can be
   *retargeted* to a different base without its head moving, which leaves both
@@ -3488,9 +3491,12 @@ workflow can carry, and the first packaged consumer of any of them that merges
 (issue #544, slice VEND-7). Its `gh` calls are the whole of its GitHub reach:
 the authenticated-user lookup, the pull-request read, the paginated
 issue-comment feed its review-marker gate is decided from, the check listing,
-the merge itself, the merged-state confirmation, the three cleanup reads, and
-the linked issue's close. Every one of those that addresses a repository
-carries `-R "$REPO"`, and the paginated feed embeds `repos/$REPO/...`; the
+the default-branch lookup, the merge itself, the merged-state confirmation, the
+three cleanup reads, and the linked issue's close. Every one of those that
+addresses a repository names `$REPO` in the shape its subcommand takes: the
+pull-request and issue calls carry `-R "$REPO"`, the default-branch lookup
+passes it positionally because `gh repo view` has no `-R` flag, and the
+paginated feed embeds `repos/$REPO/...`; the
 authenticated-user endpoint is global and takes neither, which is the one
 `gh` call in the workflow that names no repository because there is none to
 name. Its `git` calls are the primary checkout's own — the worktree listing,
