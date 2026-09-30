@@ -3186,7 +3186,10 @@ above are unchanged, and persistence the user switched off is not a failure.
   stop, not whether work is in flight. Settling cancels the queued work and
   interrupts the running job exactly as a refresh timeout does, so it unwinds
   through the same verified `gh` cleanup, bounded by that cleanup's own budget.
-  The board says it is stopping GitHub work while this happens; a cancelled job
+  That holds from the instant a job is started: an interruption that lands
+  before the job's own code has run is held until the job can answer for it, so
+  a job that never ran settles with nothing to clean up instead of leaving the
+  quit waiting on an answer that never comes. The board says it is stopping GitHub work while this happens; a cancelled job
   publishes nothing and requeues nothing; and nothing requested afterwards is
   accepted. A cancelled generation leaves no trace at all — no board update, and
   no file, since open cards are never written to disk (section 13). Whatever
