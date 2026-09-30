@@ -8,17 +8,20 @@
 -- against a model of it.
 module Spec.GitHub.RefreshCoordinator (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay, tryTakeMVar)
-import Control.Exception (finally, throwIO)
-import Control.Monad (unless, void)
+import Control.Concurrent (ThreadId, forkIO, newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay, tryPutMVar, tryTakeMVar)
+import Control.Exception (finally, throwIO, uninterruptibleMask_)
+import Control.Monad (unless, void, when)
 import qualified Data.ByteString.Char8 as ByteString
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time (UTCTime, addUTCTime, getCurrentTime, utc)
 import Kanban.Cache (ghGroupRecordPath, repositoryCachePath)
 import Kanban.Config
 import Kanban.Domain
+import GHC.Conc (BlockReason (..), ThreadStatus (..), threadStatus)
+import qualified Graphics.Vty as Vty
 import Kanban.GitHub
   ( CoordinatorNotice (..),
     GhCleanupFailure (..),
@@ -48,6 +51,7 @@ import Kanban.GitHub
     newGhFetchGuard,
     newGhRecordLock,
     newRefreshCoordinator,
+    newRefreshCoordinatorEntering,
     observeRateSample,
     planCoordinator,
     queueCoordinatorJob,
@@ -70,13 +74,17 @@ import Kanban.UI.Refresh
     historyPausedNotice,
     releaseQueuedBoardRefresh
   )
-import Kanban.UI.Types (BoardRefreshOutcome (..))
+import Kanban.UI.Types (AppState (..), BoardRefreshOutcome (..))
+import Spec.Support.App (testAppState)
 import Spec.Support.Board (openOnlyRefreshRunner, readMarkerPid, withFakeGh)
+import Spec.Support.Dashboard (DashboardRun (..), ScriptStep (..), quitStep, runDashboardScript)
 import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
 import Spec.Support.Expect (shouldMention)
-import Spec.Support.Fixtures (epoch, testResolvedConfig)
+import Spec.Support.Fixtures (epoch, fixtureBoard, testResolvedConfig)
 import Spec.Support.Json (emptyGraphqlPage, graphqlPageWithRateLimit, rateLimitedGraphqlResponse)
+import Spec.Support.Render (frameRowText)
 import System.Directory (doesFileExist)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -716,6 +724,46 @@ spec = do
       readIORef probe.probePublished `shouldReturn` []
       readIORef probe.probeStarted `shouldReturn` [OpenJob]
 
+  describe "shutting a job down at each point in its life" $
+    mapM_ shutdownLifecycle [minBound .. maxBound]
+
+  describe "quitting straight after an update" $ do
+    -- The press starts real coordinator work, so the quit has to go through
+    -- the coordinator: a dashboard with nothing to settle halts on `q`
+    -- immediately and would prove nothing. The work is in-memory and never
+    -- finishes on its own, so only the shutdown can end it.
+    --
+    -- Every job's thread is also held, uninterruptibly, for a moment after it
+    -- is forked. That widens the window in which a quit's interruption lands
+    -- before the job has started -- the interleaving an immediate `u` then
+    -- `q` hit -- without ever deciding whether the run can end: the
+    -- coordinator tests above force that window deterministically.
+    it "stops the refresh `u` started and halts, within five seconds" $ do
+      recordLock <- newGhRecordLock
+      coordinator <-
+        newRefreshCoordinatorEntering
+          (uninterruptibleMask_ (threadDelay 200000))
+          recordLock
+          RefreshRunner
+            { runOpenRefresh = \_ _ _ -> threadDelay 30000000 >> pure (OpenRefreshResult unfinished False),
+              openRefreshExpired = const (pure unfinished),
+              runHistoryPage = \_ _ -> threadDelay 30000000 >> pure (HistoryPageFetched False)
+            }
+          (\_ _ -> pure ())
+          (const (pure ()))
+      state <- testAppState (fixtureBoard [])
+      run <-
+        boundedWait "the scripted update-and-quit" $
+          runDashboardScript
+            (120, 30)
+            id
+            state {appRefreshCoordinator = coordinator}
+            [Press (Vty.EvKey (Vty.KChar 'u') []), quitStep]
+      -- The quit went through the settle path, said so, and the dashboard
+      -- halted only once the coordinator had answered.
+      run.runState.appQuitPending `shouldBe` True
+      any (any (Text.isInfixOf stoppingGitHubWorkNotice . frameRowText)) run.runFrames `shouldBe` True
+
   describe "an update requested during a running cycle" $ do
     -- Requirement 3 as the board sees it: `u` during a cycle reports the
     -- cycle and leaves one follow-up, and the one flag it leaves it in is
@@ -991,6 +1039,117 @@ uncachedConfig githubSeconds =
       resolvedTimeouts = defaultTimeoutsConfig {timeoutsGithubSeconds = githubSeconds}
     }
 
+-- | Shutdown against one kind of job before it runs, while it runs, and after
+-- it has finished. Every case bounds the shutdown at five seconds, so a
+-- coordinator that never settles fails here instead of hanging the suite, and
+-- every case checks what the shutdown left: no verdict, since an in-memory job
+-- spawns nothing; no publication from a cancelled job; and nothing started by
+-- a request made afterwards.
+shutdownLifecycle :: RefreshJob -> Spec
+shutdownLifecycle job = do
+  -- The job's thread is held at its very first instruction, standing in for a
+  -- thread the runtime has not scheduled yet, until the shutdown's
+  -- interruption is known to be pending against it. That is the interleaving
+  -- that hung a quit issued straight after an update: forked unmasked, the
+  -- thread died on that interruption before installing the handler that
+  -- reports it settled, and the shutdown waited for that report forever.
+  it ("settles a " <> show job <> " interrupted before its thread first ran") $ do
+    probe <- newProbe
+    entered <- newEmptyMVar
+    gate <- newEmptyMVar
+    coordinator <-
+      lifecycleCoordinator
+        (void (tryPutMVar entered ()) >> uninterruptibleMask_ (readMVar gate))
+        probe
+        job
+        (pure ())
+    requestRefreshJob coordinator job Nothing
+    boundedWait "the job's thread starting" (takeMVar entered)
+    stopped <- newEmptyMVar
+    stopping <- forkIO (shutdownRefreshCoordinator coordinator >>= putMVar stopped)
+    awaitInterruptionPending stopping
+    putMVar gate ()
+    boundedWait "the shutdown" (takeMVar stopped) `shouldReturn` Nothing
+    -- The body never ran, so nothing started, and nothing was published.
+    readIORef probe.probeStarted `shouldReturn` []
+    readIORef probe.probePublished `shouldReturn` []
+    expectNothingStartsAfterShutdown probe coordinator []
+
+  it ("settles a " <> show job <> " interrupted while it runs") $ do
+    probe <- newProbe
+    running <- newEmptyMVar
+    coordinator <-
+      lifecycleCoordinator
+        (pure ())
+        probe
+        job
+        (putMVar running () >> threadDelay 30000000)
+    requestRefreshJob coordinator job Nothing
+    boundedWait "the job starting" (takeMVar running)
+    boundedWait "the shutdown" (shutdownRefreshCoordinator coordinator) `shouldReturn` Nothing
+    readIORef probe.probePublished `shouldReturn` []
+    expectNothingStartsAfterShutdown probe coordinator [job]
+
+  it ("settles a " <> show job <> " that had already finished") $ do
+    probe <- newProbe
+    coordinator <- lifecycleCoordinator (pure ()) probe job (pure ())
+    requestRefreshJob coordinator job Nothing
+    awaitCount probe.probeStarted 1
+    awaitIdle coordinator
+    boundedWait "the shutdown" (shutdownRefreshCoordinator coordinator) `shouldReturn` Nothing
+    -- A finished open job published before the shutdown, and nothing since.
+    readIORef probe.probePublished `shouldReturn` ["open" | job == OpenJob]
+    expectNothingStartsAfterShutdown probe coordinator [job]
+
+-- | A probe coordinator in which @job@'s body runs @body@ before answering,
+-- and every job's thread runs @entry@ first.
+lifecycleCoordinator :: IO () -> Probe -> RefreshJob -> IO () -> IO (RefreshCoordinator Text)
+lifecycleCoordinator entry probe job body =
+  startProbeCoordinatorEntering
+    entry
+    probe
+    (\_ _ -> when (job == OpenJob) body >> pure (OpenRefreshResult "open" False))
+    (\_ -> when (job == HistoryJob) body >> pure (HistoryPageFetched False))
+
+-- | Asks for both kinds of job after a shutdown and checks neither started.
+expectNothingStartsAfterShutdown :: Probe -> RefreshCoordinator Text -> [RefreshJob] -> Expectation
+expectNothingStartsAfterShutdown probe coordinator startedBefore = do
+  requestRefreshJob coordinator OpenJob Nothing
+  requestRefreshJob coordinator HistoryJob Nothing
+  threadDelay 200000
+  readIORef probe.probeStarted `shouldReturn` startedBefore
+
+-- | Waits until @thread@ is blocked delivering an interruption, which for a
+-- shutdown means its 'killThread' is pending against a job thread that cannot
+-- take it yet.
+awaitInterruptionPending :: ThreadId -> IO ()
+awaitInterruptionPending thread = go (200 :: Int)
+  where
+    go 0 = expectationFailure "the shutdown never began interrupting the job"
+    go attempts = do
+      status <- threadStatus thread
+      case status of
+        ThreadBlocked BlockedOnException -> pure ()
+        _ -> threadDelay 25000 >> go (attempts - 1)
+
+-- | Waits until the coordinator has nothing running, queued, or reserved.
+awaitIdle :: RefreshCoordinator outcome -> IO ()
+awaitIdle coordinator = go (200 :: Int)
+  where
+    go 0 = expectationFailure "the coordinator never went idle"
+    go attempts = do
+      busy <- coordinatorMustSettle coordinator
+      when busy (threadDelay 25000 >> go (attempts - 1))
+
+-- | The explicit failure bound every fixture shutdown is held to: in-memory
+-- work spawns nothing, so a shutdown that takes longer than this is stuck.
+boundedWait :: String -> IO result -> IO result
+boundedWait what action =
+  timeout (5 * 1000 * 1000) action >>= maybe (fail (what <> " did not finish within five seconds")) pure
+
+unfinished :: BoardRefreshOutcome
+unfinished = BoardRefreshCompleted (Left (ProviderError RequestFailed "this fixture refresh never finishes"))
+
 -- | What a coordinator did, recorded as it did it.
 data Probe = Probe
   { -- | Every job that took the owner, newest first.
@@ -1021,9 +1180,19 @@ startProbeCoordinator ::
   (GhFetchGuard -> (Maybe RateSample -> IO ()) -> IO (OpenRefreshResult Text)) ->
   ((Maybe RateSample -> IO ()) -> IO HistoryPageResult) ->
   IO (RefreshCoordinator Text)
-startProbeCoordinator probe openBody historyBody = do
+startProbeCoordinator = startProbeCoordinatorEntering (pure ())
+
+-- | 'startProbeCoordinator', with an action every job's thread runs first.
+startProbeCoordinatorEntering ::
+  IO () ->
+  Probe ->
+  (GhFetchGuard -> (Maybe RateSample -> IO ()) -> IO (OpenRefreshResult Text)) ->
+  ((Maybe RateSample -> IO ()) -> IO HistoryPageResult) ->
+  IO (RefreshCoordinator Text)
+startProbeCoordinatorEntering entry probe openBody historyBody = do
   recordLock <- newGhRecordLock
-  newRefreshCoordinator
+  newRefreshCoordinatorEntering
+    entry
     recordLock
     RefreshRunner
       { runOpenRefresh = \guard observe _ -> instrumentedJob probe OpenJob (openBody guard observe),
