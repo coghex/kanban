@@ -1281,10 +1281,13 @@ indefinitely and strand every approved pull request behind it.
 So a missing check is a wait only for a grace period of ten minutes
 (`MISSING_CHECK_GRACE_SECONDS` in `tools/drain_prs.py`, not configurable).
 The period is measured per pull request per head, from the first pass that
-observed a configured check missing on that head. The observation is kept in
-the queue state, so a drainer restart continues it rather than starting over;
-a new head starts a fresh one; and it is cleared on the first pass that finds
-no configured check missing. A queue-state file written before the drainer
+observed a configured check missing on that head — including a pass where
+another required check has failed or is being rerun automatically, which
+still decides that pass's outcome. The observation is kept in the queue state,
+so a drainer restart continues it rather than starting over; a new head starts
+a fresh one; and it is cleared on the first pass that finds no configured
+check missing, or by the poll that resolves its incident because every
+required check has reported, even while another candidate holds the lane. A queue-state file written before the drainer
 recorded it simply gives a missing check a fresh grace period. A disabled gate
 is never missing.
 

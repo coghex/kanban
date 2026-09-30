@@ -5473,7 +5473,7 @@ def record_missing_check(
 
 
 def reconcile_missing_check_incidents(
-    ctx: RepoContext, gates: GateConfig, *, dry_run: bool
+    ctx: RepoContext, state: dict[str, Any], gates: GateConfig, *, dry_run: bool
 ) -> None:
     """Resolve missing-check incidents whose condition has ended.
 
@@ -5482,8 +5482,10 @@ def reconcile_missing_check_incidents(
     ends when the PR is no longer open, is no longer approved, has moved to a
     new head -- which starts a grace period of its own -- or has every
     configured check reported on the head the incident names, whether pending,
-    failed or passed. Only a confirmed reading closes one: a read that fails
-    keeps it open.
+    failed or passed. That last reading also clears the head's recorded
+    observation, so a check that goes missing again gets a fresh grace period
+    even when another candidate's lane keeps this one from being examined.
+    Only a confirmed reading closes one: a read that fails keeps it open.
     """
     if dry_run:
         return
@@ -5522,6 +5524,10 @@ def reconcile_missing_check_incidents(
             configured_check_state(pr, gates.required_review_check),
         ):
             note = f"Every required check has reported for PR #{number}'s head."
+            entry = state["prs"].get(str(number))
+            observed = entry.get("missing_check_since") if entry else None
+            if isinstance(observed, dict) and observed.get("head") == pr["headRefOid"]:
+                entry["missing_check_since"] = None
         else:
             continue
         resolved = drain_prs_service.resolve_missing_check_incident(
@@ -5933,6 +5939,11 @@ def process_pr(
     # Every configured check and its state travels with each message, so a
     # caller shown one blocking gate is never left guessing about the other.
     gate_detail = describe_check_gates(gates, build_state, review_state)
+    # Observed before the failed-check paths return, so a check missing beside
+    # a failed or rerunning one starts its grace period now rather than only
+    # once the failure clears. Those paths still decide this pass's outcome.
+    missing_checks = missing_required_checks(gates, build_state, review_state)
+    missing_since = observe_missing_checks(state, pr, missing_checks)
     if build_state == "failure":
         rerun = rerun_failed_ci(
             ctx,
@@ -5973,9 +5984,6 @@ def process_pr(
         )
         set_outcome(report, "checks_failed", message)
         raise DrainError(message)
-
-    missing_checks = missing_required_checks(gates, build_state, review_state)
-    missing_since = observe_missing_checks(state, pr, missing_checks)
 
     if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
         if build_state == "success":
@@ -6799,7 +6807,7 @@ def loop(
             refresh_finalize_assignment()
             reconcile_conflict_incidents(ctx, dry_run=dry_run)
             reconcile_no_agent_incidents(ctx, state, dry_run=dry_run)
-            reconcile_missing_check_incidents(ctx, gates, dry_run=dry_run)
+            reconcile_missing_check_incidents(ctx, state, gates, dry_run=dry_run)
             try:
                 recovered = recover_stale_approval(
                     ctx, state, dry_run=dry_run, gates=gates

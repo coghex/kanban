@@ -5540,7 +5540,11 @@ class QueueOrderTests(ProcessPrFixture):
         )
         self._script_pr_list([self._queued(5, "d" * 40), self._queued(7, "b" * 40)])
         self._write_state(
-            {"5": self._entry("d" * 40), "7": self._entry("b" * 40)}, active_pr=5
+            {
+                "5": self._entry("d" * 40),
+                "7": self._entry("b" * 40, missing_check_since=self._expired()),
+            },
+            active_pr=5,
         )
 
         self._run_loop()
@@ -5553,6 +5557,10 @@ class QueueOrderTests(ProcessPrFixture):
         self.assertEqual(state["active_pr"], 5)
         self.assertEqual(state["prs"]["7"]["last_attempt"], 0)
         self.assertEqual(self._advancing_gh_calls(), [])
+        # The reading that resolved it also cleared #7's observation, so a
+        # check that goes missing again on this head gets a fresh grace period
+        # even though #7 itself was never examined.
+        self.assertIsNone(state["prs"]["7"]["missing_check_since"])
 
     def test_a_new_head_restarts_the_grace_period_and_supersedes_the_incident(self):
         old_head = "a" * 40
@@ -5666,7 +5674,7 @@ class QueueOrderTests(ProcessPrFixture):
                     ci_rerun_head="b" * 40,
                     ci_rerun_attempts=1,
                     ci_rerun_active=True,
-                    ci_rerun_attempt_identity="770001",
+                    ci_rerun_attempt_identity="9911/770001",
                 ),
                 "42": self._entry(self.head_sha),
             },
@@ -5680,6 +5688,62 @@ class QueueOrderTests(ProcessPrFixture):
         state = self._read_state()
         self.assertEqual(state["active_pr"], 7)
         self.assertTrue(state["prs"]["7"]["ci_rerun_active"])
+
+    def test_a_missing_check_beside_a_failed_ci_check_starts_its_grace_period(self):
+        # The review gate is missing while CI is failed and an automatic rerun
+        # of it is in flight. That pass is the rerun's barrier, but it is also
+        # the first observation of the missing check, so the grace period runs
+        # from it rather than from whenever CI later succeeds.
+        failed_ci_only = self._failed_ci()[:1]
+        self._script_pr(7, self._missing_checks_pr(statusCheckRollup=failed_ci_only))
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue)
+        self._write_state(
+            {
+                "7": self._entry(
+                    "b" * 40,
+                    ci_rerun_head="b" * 40,
+                    ci_rerun_attempts=1,
+                    ci_rerun_active=True,
+                    ci_rerun_attempt_identity="9911/770001",
+                ),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+
+        started = time.time()
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        observed = state["prs"]["7"]["missing_check_since"]
+        self.assertEqual(observed["head"], "b" * 40)
+        self.assertGreaterEqual(observed["observed_at"], started)
+
+        # That observation ages past the grace period while CI is rerun; once
+        # CI succeeds the review gate is still missing, and no new ten-minute
+        # barrier starts: #7 is skipped and #42 merges in the same pass.
+        observed["observed_at"] -= drain_prs.MISSING_CHECK_GRACE_SECONDS + 60
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        green_ci_only = self._pending_ci()[:1]
+        green_ci_only[0] = {
+            **green_ci_only[0],
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }
+        self._script_pr(7, self._missing_checks_pr(statusCheckRollup=green_ci_only))
+
+        self._run_loop()
+
+        self.assertEqual(self._merged_numbers(), ["42"])
+        incidents = self._incidents(open_only=True)
+        self.assertEqual(
+            [(incident["pull_request"], incident["checks"]) for incident in incidents],
+            [(7, [drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK])],
+        )
 
     def test_a_dry_run_skips_an_expired_missing_check_and_writes_nothing(self):
         self._script_pr(7, self._missing_checks_pr())
