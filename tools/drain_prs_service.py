@@ -511,8 +511,9 @@ NTFY_URL = configured_ntfy_url()
 # incident says a merge landed but its post-merge obligations keep failing.
 # They have different payloads and different lifecycles, so every selector
 # filters on this field. Incidents written before the field existed are
-# crashes. Only the crash kind means the drainer is not running: the other two
-# are raised by a healthy drainer that keeps draining every other pull request.
+# crashes. Only the crash kind means the drainer is not running: every other
+# kind is raised by a healthy drainer that keeps draining every other pull
+# request.
 CRASH_INCIDENT_KIND = "drainer-exit"
 CONFLICT_INCIDENT_KIND = "merge-conflict"
 CLEANUP_INCIDENT_KIND = "cleanup-pending"
@@ -523,6 +524,12 @@ CLEANUP_INCIDENT_KIND = "cleanup-pending"
 # board's incidents panel has a fixed interior budget, and a row wider than the
 # widest it already draws is invisible rather than an error.
 NO_AGENT_INCIDENT_KIND = "no-agent-mode"
+# A pull request skipped because a required check has reported nothing for its
+# head past the drainer's grace period (issue #758). Like a conflict, a healthy
+# drainer raises it and keeps draining every other pull request; it clears once
+# the checks report or the pull request closes, merges or loses its approval.
+# Within `cleanup-pending`'s width, for the same incidents-panel budget.
+MISSING_CHECK_INCIDENT_KIND = "missing-check"
 CONFLICT_SUMMARY_FILES = 3
 CLEANUP_SUMMARY_STEPS = 3
 INTERVAL_SECONDS = 60
@@ -2669,6 +2676,25 @@ def open_no_agent_incidents(repo_path: Path) -> list[dict[str, Any]]:
     return incidents
 
 
+def find_open_missing_check_incident(
+    repo_path: Path, pull_request: int
+) -> tuple[Path, dict[str, Any]] | None:
+    return find_open_pr_incident(
+        incident_job(repo_path), pull_request, MISSING_CHECK_INCIDENT_KIND
+    )
+
+
+def open_missing_check_incidents(repo_path: Path) -> list[dict[str, Any]]:
+    incidents: list[dict[str, Any]] = []
+    for path in incident_files(
+        incident_job(repo_path), open_only=True, kind=MISSING_CHECK_INCIDENT_KIND
+    ):
+        incident = read_json(path)
+        if incident is not None:
+            incidents.append(incident)
+    return incidents
+
+
 def open_conflict_incidents(repo_path: Path) -> list[dict[str, Any]]:
     incidents: list[dict[str, Any]] = []
     for path in incident_files(
@@ -2871,6 +2897,46 @@ def record_no_agent_incident(
     )
 
 
+def record_missing_check_incident(
+    *,
+    repo_path: Path,
+    pull_request: int,
+    head: str,
+    checks: list[str],
+) -> dict[str, Any]:
+    """Record that one PR is skipped because a required check never reported.
+
+    Idempotent on (repository, kind, pull request) like every per-PR incident,
+    so a pull request skipped on every pass has one incident. `refresh` keeps
+    the named checks current while the same head stays skipped; the caller
+    resolves an incident left open for an older head before recording a new
+    one, so the head it names is always the head it was raised for.
+    """
+    return record_pr_incident(
+        job=incident_job(repo_path),
+        pull_request=pull_request,
+        kind=MISSING_CHECK_INCIDENT_KIND,
+        summary=(
+            f"PR #{pull_request}'s head {head[:12]} has required check(s) that "
+            f"never reported ({', '.join(checks)}); the drainer skips it until "
+            "they do."
+        ),
+        payload={"head": head, "checks": checks},
+        notes=[
+            "The drainer is still running and keeps draining every other "
+            "approved PR.",
+            "Start the missing checks on this head -- a workflow that predates "
+            "the PR, excludes it by path, is disabled or was renamed never "
+            "will on its own; this incident clears itself once every required "
+            "check has reported, or the PR is closed, merged or no longer "
+            "approved.",
+        ],
+        title="PR drainer skipping a PR whose required check never reported",
+        tags="warning,hourglass",
+        refresh=True,
+    )
+
+
 def resolve_pr_incident(
     job: DrainerJob, pull_request: int, kind: str, note: str
 ) -> dict[str, Any] | None:
@@ -2911,6 +2977,14 @@ def resolve_no_agent_incident(
     )
 
 
+def resolve_missing_check_incident(
+    repo_path: Path, pull_request: int, note: str
+) -> dict[str, Any] | None:
+    return resolve_pr_incident(
+        incident_job(repo_path), pull_request, MISSING_CHECK_INCIDENT_KIND, note
+    )
+
+
 def acknowledge_incident(
     job: DrainerJob, incident_id: str | None, note: str | None
 ) -> dict[str, Any]:
@@ -2946,9 +3020,10 @@ def resolve_crash_incidents(job: DrainerJob, note: str) -> list[Path]:
     An intentional stop ends the supervisor, so a `drainer-exit` incident --
     including a legacy one predating the `kind` field, which `incident_kind`
     reads as that kind -- is genuinely over. It discharges nothing else: a stop
-    makes no pull request mergeable, completes no post-merge step, and loads no
-    provider, so a `merge-conflict`, `cleanup-pending`, or `no-agent-mode`
-    incident stays open for the poll that can actually clear it.
+    makes no pull request mergeable, completes no post-merge step, loads no
+    provider, and reports no check, so a `merge-conflict`, `cleanup-pending`,
+    `no-agent-mode`, or `missing-check` incident stays open for the poll that
+    can actually clear it.
     `acknowledge_incident` remains the operator's manual dismissal, for an
     incident of any kind.
     """

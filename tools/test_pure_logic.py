@@ -617,6 +617,99 @@ class CandidateBlockReasonTests(unittest.TestCase):
         )
 
 
+class MissingCheckGraceTests(unittest.TestCase):
+    """Issue #758: how long a required check may report nothing before it
+    stops holding the queue, measured on a controlled clock."""
+
+    HEAD = "a" * 40
+    GATES = drain_prs.GateConfig(
+        required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+        required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+    )
+
+    def _state(self, **entry):
+        return {"attempt_counter": 1, "prs": {"42": {"approved_head": self.HEAD, **entry}}}
+
+    def _pr(self, head=HEAD):
+        return {"number": 42, "headRefOid": head}
+
+    def _expired_at(self, state, now, build="missing", review="success"):
+        with mock.patch("time.time", return_value=now):
+            since = drain_prs.observe_missing_checks(
+                state,
+                self._pr(),
+                drain_prs.missing_required_checks(self.GATES, build, review),
+            )
+            return drain_prs.missing_check_grace_expired(
+                state, self._pr(), since, build, review
+            )
+
+    def test_the_grace_period_expires_only_after_it_has_fully_passed(self):
+        state = self._state()
+        grace = drain_prs.MISSING_CHECK_GRACE_SECONDS
+        self.assertEqual(grace, 600)
+        self.assertFalse(self._expired_at(state, 1000.0))
+        self.assertFalse(self._expired_at(state, 1000.0 + grace))
+        self.assertTrue(self._expired_at(state, 1000.0 + grace + 0.001))
+        # Measured from the first observation, which later polls never move.
+        self.assertEqual(
+            state["prs"]["42"]["missing_check_since"],
+            {"head": self.HEAD, "observed_at": 1000.0},
+        )
+
+    def test_a_disabled_gate_is_never_missing(self):
+        gates = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=None,
+        )
+        self.assertEqual(
+            drain_prs.missing_required_checks(gates, "success", "disabled"), []
+        )
+        self.assertEqual(
+            drain_prs.missing_required_checks(gates, "missing", "disabled"),
+            [drain_prs.DEFAULT_REQUIRED_CI_CHECK],
+        )
+
+    def test_a_pending_check_beside_a_missing_one_never_expires(self):
+        state = self._state()
+        self._expired_at(state, 1000.0, review="pending")
+        self.assertFalse(self._expired_at(state, 1_000_000.0, review="pending"))
+
+    def test_an_outstanding_rerun_of_this_head_never_expires(self):
+        state = self._state(ci_rerun_active=True, ci_rerun_head=self.HEAD)
+        self._expired_at(state, 1000.0)
+        self.assertFalse(self._expired_at(state, 1_000_000.0))
+
+    def test_a_new_head_or_an_unreadable_record_starts_a_fresh_observation(self):
+        for recorded in (
+            {"head": "b" * 40, "observed_at": 1.0},
+            {"head": self.HEAD, "observed_at": "yesterday"},
+            {"head": self.HEAD, "observed_at": True},
+            "garbage",
+        ):
+            with self.subTest(recorded=recorded):
+                state = self._state(missing_check_since=recorded)
+                self.assertFalse(self._expired_at(state, 5000.0))
+                self.assertEqual(
+                    state["prs"]["42"]["missing_check_since"],
+                    {"head": self.HEAD, "observed_at": 5000.0},
+                )
+
+    def test_the_observation_clears_once_nothing_is_missing(self):
+        state = self._state(missing_check_since={"head": self.HEAD, "observed_at": 1.0})
+        self.assertFalse(self._expired_at(state, 5000.0, build="pending"))
+        self.assertIsNone(state["prs"]["42"]["missing_check_since"])
+
+    def test_a_pull_request_with_no_queue_entry_records_nothing(self):
+        state = {"attempt_counter": 1, "prs": {}}
+        self.assertIsNone(
+            drain_prs.observe_missing_checks(
+                state, self._pr(), [drain_prs.DEFAULT_REQUIRED_CI_CHECK]
+            )
+        )
+        self.assertEqual(state["prs"], {})
+
+
 class ClassifyPassOutcomeTests(unittest.TestCase):
     """Every outcome process_pr() can record is classified exactly once, and
     anything else ends the pass rather than reaching the next pull request.
@@ -637,6 +730,7 @@ class ClassifyPassOutcomeTests(unittest.TestCase):
             "changes_requested",
             "merge_conflict",
             "checks_failed",
+            "checks_missing",
             "approved_head_changed",
         ):
             with self.subTest(reason=reason):

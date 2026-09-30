@@ -2758,6 +2758,94 @@ class IncidentSelectionTests(RedirectedControllerTestCase):
             open_ids, {kept["incident_id"], crash.stem, legacy.stem}
         )
 
+    def _record_missing_check(self, pull_request, head, checks):
+        published = []
+
+        def capture(message, **kwargs):
+            published.append((message, kwargs))
+            return {"configured": False, "delivered": False}
+
+        with mock.patch.object(drain_prs_service, "publish_ntfy", side_effect=capture):
+            incident = drain_prs_service.record_missing_check_incident(
+                repo_path=self.repo,
+                pull_request=pull_request,
+                head=head,
+                checks=checks,
+            )
+        return incident, published
+
+    def test_missing_check_incidents_are_one_per_pull_request_and_kept_current(self):
+        # Issue #758: a pull request skipped on every pass has one incident and
+        # one notification; the checks it names follow what is still missing.
+        head = "b" * 40
+        first, published = self._record_missing_check(
+            42, head, ["build-test", "review-approved"]
+        )
+        repeat, again = self._record_missing_check(42, head, ["review-approved"])
+
+        self.assertEqual(repeat["incident_id"], first["incident_id"])
+        self.assertEqual(len(list(self.job.incident_dir.glob("*.json"))), 1)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(again, [])
+        self.assertEqual(first["kind"], drain_prs_service.MISSING_CHECK_INCIDENT_KIND)
+        self.assertEqual(first["pull_request"], 42)
+        self.assertEqual(first["head"], head)
+        self.assertEqual(repeat["checks"], ["review-approved"])
+        self.assertIn("#42", first["summary"])
+        self.assertIn(head[:12], first["summary"])
+        self.assertIn("build-test", first["summary"])
+
+    def test_missing_check_resolution_is_isolated_by_pull_request_and_kind(self):
+        conflict = drain_prs_service.record_conflict_incident(
+            repo_path=self.repo, pull_request=42, files=["README"]
+        )
+        self._record_missing_check(42, "b" * 40, ["build-test"])
+        other, _ = self._record_missing_check(43, "c" * 40, ["build-test"])
+
+        resolved = drain_prs_service.resolve_missing_check_incident(
+            self.repo, 42, "Every required check has reported for PR #42's head."
+        )
+
+        self.assertEqual(resolved["kind"], drain_prs_service.MISSING_CHECK_INCIDENT_KIND)
+        self.assertEqual(resolved["pull_request"], 42)
+        open_ids = {
+            json.loads(path.read_text(encoding="utf-8"))["incident_id"]
+            for path in drain_prs_service.incident_files(self.job, open_only=True)
+        }
+        self.assertEqual(open_ids, {conflict["incident_id"], other["incident_id"]})
+        self.assertEqual(
+            [
+                incident["pull_request"]
+                for incident in drain_prs_service.open_missing_check_incidents(self.repo)
+            ],
+            [43],
+        )
+
+    def test_a_missing_check_incident_survives_a_stop_and_ack_resolves_it(self):
+        first, _ = self._record_missing_check(42, "b" * 40, ["build-test"])
+        # A stop reports no check, so it resolves only crash incidents.
+        drain_prs_service.resolve_crash_incidents(self.job, "stopped")
+        self.assertIsNotNone(
+            drain_prs_service.find_open_missing_check_incident(self.repo, 42)
+        )
+
+        acknowledged = drain_prs_service.acknowledge_incident(self.job, None, "seen")
+        self.assertEqual(acknowledged["incident_id"], first["incident_id"])
+        self.assertIsNone(
+            drain_prs_service.find_open_missing_check_incident(self.repo, 42)
+        )
+        # Ack satisfies no check: a condition that continues is a recurrence,
+        # recorded as a new incident rather than reopening the old one.
+        recurrence, published = self._record_missing_check(42, "b" * 40, ["build-test"])
+        self.assertNotEqual(recurrence["incident_id"], first["incident_id"])
+        self.assertEqual(len(published), 1)
+
+    def test_the_missing_check_kind_fits_the_incidents_panel_budget(self):
+        self.assertLessEqual(
+            len(drain_prs_service.MISSING_CHECK_INCIDENT_KIND),
+            len(drain_prs_service.CLEANUP_INCIDENT_KIND),
+        )
+
     def test_a_running_service_surfaces_the_newest_conflict_incident(self):
         self.write_status(self.job, self.repo)
         drain_prs_service.record_conflict_incident(

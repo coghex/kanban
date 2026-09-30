@@ -585,6 +585,59 @@ class SinglePrOutcomeTests(SinglePrCliFixture):
         self.assertEqual(result["reason"], "checks_pending")
         self.assertIn(f"{drain_prs.DEFAULT_REQUIRED_CI_CHECK}=missing", result["message"])
 
+    def test_a_required_check_missing_past_its_grace_period_is_a_no_action_skip(self):
+        # Issue #758. The single-PR contract keeps its shape: the timeout is a
+        # no-action result under its own registered reason, exit 2, and the
+        # same incident the queue raises.
+        rollup = [
+            item
+            for item in self.base_pr_json()["statusCheckRollup"]
+            if item["name"] != drain_prs.DEFAULT_REQUIRED_CI_CHECK
+        ]
+        self.script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BLOCKED"})
+        observed = {
+            "head": self.head_sha,
+            "observed_at": time.time() - drain_prs.MISSING_CHECK_GRACE_SECONDS - 60,
+        }
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "active_pr": None,
+                "prs": {
+                    "42": {
+                        **self.state_entry(self.head_sha),
+                        "missing_check_since": observed,
+                    }
+                },
+            }
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["outcome"], "no_action")
+        self.assertEqual(result["reason"], "checks_missing")
+        self.assertIn(drain_prs.DEFAULT_REQUIRED_CI_CHECK, result["message"])
+        self.assertIn(f"{drain_prs.DEFAULT_REQUIRED_CI_CHECK}=missing", result["message"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        incidents = self.open_incidents()
+        self.assertEqual(
+            [(item["kind"], item["pull_request"], item["head"], item["checks"]) for item in incidents],
+            [
+                (
+                    drain_prs_service.MISSING_CHECK_INCIDENT_KIND,
+                    42,
+                    self.head_sha,
+                    [drain_prs.DEFAULT_REQUIRED_CI_CHECK],
+                )
+            ],
+        )
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        # Timeout alone imposes no failure cooldown.
+        self.assertEqual(state["prs"]["42"]["consecutive_failures"], 0)
+        self.assertEqual(state["prs"]["42"]["missing_check_since"], observed)
+
     def test_a_failed_required_check_is_reported_as_a_failure(self):
         rollup = self.base_pr_json()["statusCheckRollup"]
         rollup[0] = {**rollup[0], "conclusion": "FAILURE"}
@@ -1841,6 +1894,35 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
                 self.assertTrue(result["dry_run"])
                 self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
                 self.assertEqual(self.open_incidents(), [])
+
+    def test_an_expired_missing_check_dry_runs_without_mutating(self):
+        rollup = self.base_pr_json()["statusCheckRollup"][1:]
+        self.script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BLOCKED"})
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 0,
+                "active_pr": None,
+                "prs": {
+                    "42": {
+                        **self.state_entry(self.head_sha),
+                        "missing_check_since": {
+                            "head": self.head_sha,
+                            "observed_at": time.time()
+                            - drain_prs.MISSING_CHECK_GRACE_SECONDS
+                            - 60,
+                        },
+                    }
+                },
+            }
+        )
+
+        result, proc = self.run_pure()
+
+        self.assertEqual(result["reason"], "checks_missing")
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(self.open_incidents(), [])
 
     def test_a_polling_dry_run_is_just_as_pure(self):
         # Purity is a property of --dry-run, not of the single-PR mode.

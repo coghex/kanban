@@ -66,6 +66,14 @@ CI_RERUN_INTERVAL_SECONDS = 60
 MAX_CI_RERUN_ATTEMPTS = 3
 UPDATE_BRANCH_WAIT_SECONDS = 180
 UPDATE_BRANCH_POLL_SECONDS = 3
+# How long a required check may report nothing at all for one pull request's
+# head before it stops holding the queue (issue #758). Within it a missing check
+# is a barrier like a pending one, so the moments between a push and GitHub
+# registering its checks cannot let a later pull request advance; past it the
+# candidate is skipped and recorded as a `missing-check` incident. Measured from
+# the first pass that observed the check missing on that head, and persisted in
+# the queue state so a drainer restart does not restart it.
+MISSING_CHECK_GRACE_SECONDS = 600
 # How long GitHub is given to record a pull request the drainer merged by
 # advancing the default branch onto its head, rather than through the
 # pull-request merge endpoint.
@@ -281,6 +289,7 @@ NO_ACTION_REASONS = frozenset(
         "not_approved",
         "changes_requested",
         "checks_pending",
+        "checks_missing",
         "checks_failed",
         "merge_conflict",
         "behind_base",
@@ -347,6 +356,10 @@ PASS_OUTCOMES: dict[str, str] = {
     "changes_requested": PASS_SKIP,
     "merge_conflict": PASS_SKIP,
     "checks_failed": PASS_SKIP,
+    # A required check that has reported nothing for this head past its grace
+    # period (issue #758): nothing the drainer does creates it, so the lane is
+    # not held for it. Recorded as a `missing-check` incident.
+    "checks_missing": PASS_SKIP,
     # Only a fresh review clears this one, so holding the lane for it would
     # stall the queue on a pull request nothing the drainer does can help. It
     # can follow a `gh pr merge` that GitHub refused on --match-head-commit;
@@ -5406,6 +5419,131 @@ def reconcile_no_agent_incidents(
             )
 
 
+def record_missing_check(
+    ctx: RepoContext,
+    pr: dict[str, Any],
+    checks: list[str],
+    *,
+    dry_run: bool,
+) -> None:
+    """Record that one PR is skipped because a required check never reported.
+
+    Shaped like `record_merge_conflict`: one open per-PR incident, no label
+    touched, nothing merged, and every other candidate still drains. The
+    incident names the head it was raised for, so one left open for an older
+    head is superseded here rather than reused; the checks it names are kept
+    current in place while the same head stays skipped.
+    """
+    number = pr["number"]
+    head = pr["headRefOid"]
+    names = ", ".join(checks)
+    if dry_run:
+        log(
+            f"PR #{number}: required check(s) {names} never reported for head "
+            f"{head[:12]}; would record an open drainer incident and skip it"
+        )
+        return
+    existing = drain_prs_service.find_open_missing_check_incident(ctx.path, number)
+    if existing is not None and existing[1].get("head") != head:
+        drain_prs_service.resolve_missing_check_incident(
+            ctx.path,
+            number,
+            f"PR #{number}'s head moved to {head[:12]}; that head has its own "
+            "grace period.",
+        )
+        existing = None
+    incident = drain_prs_service.record_missing_check_incident(
+        repo_path=ctx.path,
+        pull_request=number,
+        head=head,
+        checks=checks,
+    )
+    if existing is not None:
+        log(
+            f"PR #{number}: required check(s) {names} still missing on head "
+            f"{head[:12]}; incident {incident['incident_id']} is already open; "
+            "skipping it"
+        )
+        return
+    log(
+        f"PR #{number}: required check(s) {names} reported nothing for head "
+        f"{head[:12]} in {MISSING_CHECK_GRACE_SECONDS // 60} minutes; recorded "
+        f"incident {incident['incident_id']} and skipped it"
+    )
+
+
+def reconcile_missing_check_incidents(
+    ctx: RepoContext, state: dict[str, Any], gates: GateConfig, *, dry_run: bool
+) -> None:
+    """Resolve missing-check incidents whose condition has ended.
+
+    Runs over the stored incidents rather than the queue, so one clears even
+    while another candidate holds the lane or after its PR left the queue. It
+    ends when the PR is no longer open, is no longer approved, has moved to a
+    new head -- which starts a grace period of its own -- or has every
+    configured check reported on the head the incident names, whether pending,
+    failed or passed. That last reading also clears the head's recorded
+    observation, so a check that goes missing again gets a fresh grace period
+    even when another candidate's lane keeps this one from being examined.
+    Only a confirmed reading closes one: a read that fails keeps it open.
+    """
+    if dry_run:
+        return
+    for incident in drain_prs_service.open_missing_check_incidents(ctx.path):
+        number = incident.get("pull_request")
+        if not isinstance(number, int):
+            log(
+                f"Incident {incident.get('incident_id')} names no pull request; "
+                "leaving it open"
+            )
+            continue
+        try:
+            pr = get_pr(ctx, number)
+        except DrainError as exc:
+            # Offline, this failure is the network being gone rather than
+            # this read's answer: it goes on to the polling loop's wait.
+            if NETWORK_OFFLINE is not None:
+                raise
+            log(
+                f"PR #{number}: could not confirm its required checks reported; "
+                f"keeping its missing-check incident open: {exc}"
+            )
+            continue
+        if pr.get("state") != "OPEN":
+            note = f"PR #{number} is no longer open."
+        elif not has_label(pr, APPROVE_LABEL) or has_label(pr, CHANGES_LABEL):
+            note = f"PR #{number} is no longer approved."
+        elif pr.get("headRefOid") != incident.get("head"):
+            note = (
+                f"PR #{number}'s head moved to {str(pr.get('headRefOid'))[:12]}; "
+                "that head has its own grace period."
+            )
+        elif not missing_required_checks(
+            gates,
+            configured_check_state(pr, gates.required_ci_check),
+            configured_check_state(pr, gates.required_review_check),
+        ):
+            note = f"Every required check has reported for PR #{number}'s head."
+            entry = state["prs"].get(str(number))
+            observed = entry.get("missing_check_since") if entry else None
+            if isinstance(observed, dict) and observed.get("head") == pr["headRefOid"]:
+                entry["missing_check_since"] = None
+                # Durable before the incident closes: a later step of this poll
+                # can fail before the loop's own save, and a restart must not
+                # reload an expired observation for a condition already over.
+                save_drain_state(ctx, state, dry_run=False)
+        else:
+            continue
+        resolved = drain_prs_service.resolve_missing_check_incident(
+            ctx.path, number, note
+        )
+        if resolved is not None:
+            log(
+                f"PR #{number}: resolved missing-check incident "
+                f"{resolved['incident_id']}"
+            )
+
+
 def reconcile_conflict_incidents(ctx: RepoContext, *, dry_run: bool) -> None:
     """Resolve conflict incidents whose PR is no longer conflicted.
 
@@ -5547,6 +5685,76 @@ def gate_regression(
             "review gate changed before merge",
         )
     return None
+
+
+def missing_required_checks(
+    gates: GateConfig, build_state: str, review_state: str
+) -> list[str]:
+    """The configured checks that have reported nothing at all on this head.
+
+    A disabled gate is not a check, so it is never missing.
+    """
+    return [
+        name
+        for name, state in (
+            (gates.required_ci_check, build_state),
+            (gates.required_review_check, review_state),
+        )
+        if name is not None and state == "missing"
+    ]
+
+
+def observe_missing_checks(
+    state: dict[str, Any], pr: dict[str, Any], missing: list[str]
+) -> float | None:
+    """When a configured check was first seen missing on this head, if it is.
+
+    The observation is keyed to the head it was made on and kept in the queue
+    state, so it survives polls and restarts, a new head starts a fresh one,
+    and it is cleared the first time no configured check is missing. An entry
+    written before the field existed, or one holding anything unreadable,
+    simply starts a fresh grace period now.
+    """
+    entry = state["prs"].get(str(pr["number"]))
+    if entry is None:
+        return None
+    if not missing:
+        if entry.get("missing_check_since") is not None:
+            entry["missing_check_since"] = None
+        return None
+    head = pr["headRefOid"]
+    recorded = entry.get("missing_check_since")
+    if isinstance(recorded, dict) and recorded.get("head") == head:
+        observed_at = recorded.get("observed_at")
+        if isinstance(observed_at, (int, float)) and not isinstance(
+            observed_at, bool
+        ):
+            return float(observed_at)
+    observed_at = time.time()
+    entry["missing_check_since"] = {"head": head, "observed_at": observed_at}
+    return observed_at
+
+
+def missing_check_grace_expired(
+    state: dict[str, Any],
+    pr: dict[str, Any],
+    missing_since: float | None,
+    build_state: str,
+    review_state: str,
+) -> bool:
+    """Whether a missing check has stopped being a wait (issue #758).
+
+    Only a check that has reported nothing expires. A queued or running check
+    beside it keeps the barrier whatever its age, and so does an automatic CI
+    rerun this drainer requested for this head: both are work GitHub has in
+    flight, and the grace period is no claim about either.
+    """
+    if missing_since is None or "pending" in (build_state, review_state):
+        return False
+    entry = state["prs"].get(str(pr["number"])) or {}
+    if entry.get("ci_rerun_active") and entry.get("ci_rerun_head") == pr["headRefOid"]:
+        return False
+    return time.time() - missing_since > MISSING_CHECK_GRACE_SECONDS
 
 
 def check_gate_reason(build_state: str, review_state: str) -> str:
@@ -5735,6 +5943,11 @@ def process_pr(
     # Every configured check and its state travels with each message, so a
     # caller shown one blocking gate is never left guessing about the other.
     gate_detail = describe_check_gates(gates, build_state, review_state)
+    # Observed before the failed-check paths return, so a check missing beside
+    # a failed or rerunning one starts its grace period now rather than only
+    # once the failure clears. Those paths still decide this pass's outcome.
+    missing_checks = missing_required_checks(gates, build_state, review_state)
+    missing_since = observe_missing_checks(state, pr, missing_checks)
     if build_state == "failure":
         rerun = rerun_failed_ci(
             ctx,
@@ -5779,6 +5992,23 @@ def process_pr(
     if not check_gate_satisfied(build_state) or not check_gate_satisfied(review_state):
         if build_state == "success":
             clear_ci_rerun(state, number)
+        if missing_check_grace_expired(
+            state, pr, missing_since, build_state, review_state
+        ):
+            # Nothing the drainer does creates a check that never started, so
+            # the lane is not held for it: the candidate is skipped -- no
+            # failure, no cooldown, no merge -- and looked at again next pass.
+            record_missing_check(ctx, pr, missing_checks, dry_run=dry_run)
+            set_outcome(
+                report,
+                "checks_missing",
+                f"PR #{number}: required check(s) "
+                f"{', '.join(missing_checks)} reported nothing for head "
+                f"{pr['headRefOid'][:12]} in "
+                f"{MISSING_CHECK_GRACE_SECONDS // 60} minutes; skipped until "
+                f"they report ({gate_detail}, mergeStateStatus={merge_state}).",
+            )
+            return False
         log(
             f"PR #{number}: waiting "
             f"({gate_detail}, mergeStateStatus={merge_state})"
@@ -6581,6 +6811,7 @@ def loop(
             refresh_finalize_assignment()
             reconcile_conflict_incidents(ctx, dry_run=dry_run)
             reconcile_no_agent_incidents(ctx, state, dry_run=dry_run)
+            reconcile_missing_check_incidents(ctx, state, gates, dry_run=dry_run)
             try:
                 recovered = recover_stale_approval(
                     ctx, state, dry_run=dry_run, gates=gates
