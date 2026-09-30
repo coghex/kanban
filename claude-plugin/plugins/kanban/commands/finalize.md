@@ -25,10 +25,13 @@ is the only thing standing between an unreviewed head and the default branch.
 ## 1. Resolve the repository, then the target
 
 Set `REPO` once, before the first GitHub read, and use that one identity for
-every `gh` call in this workflow. A `gh` call without `-R` targets whatever
-repository the session's working directory happens to be in, and this workflow's
-calls merge a pull request and delete a branch — neither is recoverable by
-editing a file afterwards.
+every `gh` call in this workflow: as `-R "$REPO"` on a pull-request or issue
+call, as the positional repository argument of the default-branch lookup
+(`repo view` takes its repository that way and has no `-R` flag), and inside
+the endpoint of an API call. A `gh` call that names no repository targets
+whatever repository the session's working directory happens to be in, and this
+workflow's calls merge a pull request and delete a branch — neither is
+recoverable by editing a file afterwards.
 
 Resolution reads the checkout's own remote and needs no GitHub call of its own,
 so there is no point in this workflow at which an unscoped `gh` invocation is
@@ -89,7 +92,7 @@ PR_STATE="$(gh pr view "$PR" -R "$REPO" --json number,url,body,headRefOid,headRe
 PR_COMMENTS="$(mktemp)"
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments?per_page=100" > "$PR_COMMENTS"
 PR_CHECKS="$(gh pr checks "$PR" -R "$REPO" --json name,state,bucket)"
-DEFAULT_BRANCH="$(gh repo view -R "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)"
+DEFAULT_BRANCH="$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)"
 HEAD="$(python3 - "$REPO" "$VIEWER" "$PR_STATE" "$PR_COMMENTS" "$PR_CHECKS" "$DEFAULT_BRANCH" <<'PY'
 import json
 import os

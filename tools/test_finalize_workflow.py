@@ -33,10 +33,12 @@ below fall into four kinds.
   `-R`, which targets whatever repository the session's directory happens to be
   in — and this workflow's calls merge a pull request and delete a branch.
   `RepositoryScopeTests` pins the calls the assets make, one spelling each, and
-  requires every repository-addressed one to carry `-R "$REPO"`. The
-  authenticated-user lookup is the declared exception, because that endpoint
-  names no repository; the comment feed embeds `repos/$REPO/...` instead, which
-  is the same binding in the shape that call takes.
+  requires every repository-addressed one to name the resolved repository in
+  the shape its subcommand takes: `-R "$REPO"` on a pull-request or issue call,
+  the positional `"$REPO"` of `gh repo view` — which has no `-R` flag, so real
+  `gh` rejects that spelling with `unknown shorthand flag` (issue #759) — and
+  `repos/$REPO/...` inside the comment feed's endpoint. The authenticated-user
+  lookup is the declared exception, because that endpoint names no repository.
 * **Claims that no longer hold.** `launchd` as *the* drainer's manager (
   `tools/service_manager.py` drives systemd user units on Linux behind the same
   boundary), the owner's name as the reason for a merge commit, and the
@@ -93,6 +95,15 @@ GH_INVOCATION_RE = re.compile(r"(?<![\w-])gh (?P<tail>[a-z][^\n`]*)")
 
 REPOSITORY_SCOPE = '-R "$REPO"'
 
+# `gh repo view` takes its repository as a positional argument and has no
+# `-R`/`--repo` flag: real `gh` refuses `gh repo view -R ...` with `unknown
+# shorthand flag: 'R' in -R`, which left the default-branch lookup empty and
+# the gate refusing every pull request (issue #759). The scripted `gh` below
+# matches argument prefixes rather than the CLI's grammar, so this is the one
+# place that grammar is held.
+REPOSITORY_VIEW = 'gh repo view "$REPO" '
+REPOSITORY_FLAG_RE = re.compile(r"(?<!\S)(?:-R|--repo)(?:[=\s]|$)")
+
 # The word of a `${VAR:?word}` refusal, which the shell evaluates rather than
 # prints verbatim.
 PARAMETER_REFUSAL_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:\?([^}]*)\}")
@@ -129,6 +140,38 @@ def gh_invocations(text: str) -> list[str]:
         # quote is part of the call.
         calls.append(call[:-2] if call.endswith(')"') else call)
     return calls
+
+def names_the_resolved_repository(call: str) -> bool:
+    """Whether `call` is scoped to `$REPO` in the shape its subcommand takes.
+
+    A `repo view` counts only with the positional `"$REPO"` and no repository
+    flag at all; every other call counts with `-R "$REPO"` or an endpoint under
+    `repos/$REPO/`.
+    """
+    if call.startswith("gh repo view"):
+        return call.startswith(REPOSITORY_VIEW) and not REPOSITORY_FLAG_RE.search(
+            call
+        )
+    return REPOSITORY_SCOPE in call or "repos/$REPO/" in call
+
+
+def unscoped_calls(text: str) -> list[str]:
+    """Every `gh` call in `text` that does not name the resolved repository."""
+    return [
+        call for call in gh_invocations(text) if not names_the_resolved_repository(call)
+    ]
+
+
+# The default-branch lookup as the assets spell it, and the two misspellings
+# the scoping rule must reject in its place: the flag real `gh` refuses, and a
+# lookup that reads whatever repository the working directory holds.
+DEFAULT_BRANCH_LOOKUP = 'gh repo view "$REPO" --json defaultBranchRef'
+MISSCOPED_DEFAULT_BRANCH_LOOKUPS = {
+    "the -R flag gh repo view does not have": (
+        'gh repo view -R "$REPO" --json defaultBranchRef'
+    ),
+    "a lookup that omits the repository": "gh repo view --json defaultBranchRef",
+}
 
 # How `$REPO` is filled: from the remote, with no GitHub call of its own. At
 # the point of resolution `$REPO` does not exist yet, so a `gh` call there
@@ -168,7 +211,7 @@ REPOSITORY_SCOPED_CALLS = (
     'pr view "$PR" -R "$REPO" --json ' + PR_VIEW_FIELDS,
     'api --paginate --slurp "' + COMMENT_FEED + '"',
     'pr checks "$PR" -R "$REPO" --json name,state,bucket',
-    'repo view -R "$REPO" --json defaultBranchRef',
+    'repo view "$REPO" --json defaultBranchRef',
     'pr merge "$PR" -R "$REPO" --admin --merge --match-head-commit',
     'pr view "$PR" -R "$REPO" --json state,mergedAt',
     'pr view "$PR" -R "$REPO" --json baseRefName',
@@ -575,7 +618,7 @@ class Harness:
         )
         self.fake.script(
             "gh",
-            ["repo", "view", "-R", REPO_SLUG, "--json", "defaultBranchRef"],
+            ["repo", "view", REPO_SLUG, "--json", "defaultBranchRef"],
             stdout=default_branch + "\n" if default_branch else "",
         )
         # Scripted for exactly one head. A merge bound to any other one finds
@@ -892,9 +935,11 @@ class RegistrationTests(unittest.TestCase):
 
 class RepositoryScopeTests(unittest.TestCase):
     """Requirement 4, as the review's correction scopes it: repository-
-    addressable calls carry `-R "$REPO"`, the repository API endpoint embeds
-    `repos/$REPO/...`, the authenticated-user lookup may be global, and no call
-    infers the repository from the current directory."""
+    addressable calls carry `-R "$REPO"`, the default-branch lookup passes
+    `"$REPO"` positionally because `gh repo view` has no `-R` (issue #759), the
+    repository API endpoint embeds `repos/$REPO/...`, the authenticated-user
+    lookup may be global, and no call infers the repository from the current
+    directory."""
 
     def test_the_declared_calls_are_the_ones_the_assets_carry(self):
         # Non-vacuity for the scoping assertion below: a regex that stopped
@@ -919,9 +964,8 @@ class RepositoryScopeTests(unittest.TestCase):
                 if call == "gh " + GLOBAL_CALLS[0]:
                     continue
                 with self.subTest(asset=relative_path, call=call):
-                    scoped = REPOSITORY_SCOPE in call or "repos/$REPO/" in call
                     self.assertTrue(
-                        scoped,
+                        names_the_resolved_repository(call),
                         f"{relative_path}: {call!r} would target whatever "
                         "repository the session's working directory happens "
                         "to be in",
@@ -932,13 +976,8 @@ class RepositoryScopeTests(unittest.TestCase):
         # call would fail here even though it is equally unscoped.
         for relative_path in RENDERED_ASSETS:
             content = read(relative_path)
-            unscoped = [
-                call
-                for call in gh_invocations(content)
-                if REPOSITORY_SCOPE not in call and "repos/$REPO/" not in call
-            ]
             with self.subTest(asset=relative_path):
-                self.assertEqual(unscoped, ["gh " + GLOBAL_CALLS[0]])
+                self.assertEqual(unscoped_calls(content), ["gh " + GLOBAL_CALLS[0]])
 
     def test_the_repository_is_resolved_without_a_github_call_of_its_own(self):
         # The identity cannot come from `gh`: at that point `$REPO` does not
@@ -953,9 +992,8 @@ class RepositoryScopeTests(unittest.TestCase):
                 self.assertIn(REPOSITORY_RESOLUTION, content)
                 unscoped = [
                     call
-                    for call in gh_invocations(content)
+                    for call in unscoped_calls(content)
                     if call.startswith("gh repo view")
-                    and REPOSITORY_SCOPE not in call
                 ]
                 self.assertEqual(unscoped, [])
 
@@ -991,12 +1029,42 @@ class RepositoryScopeTests(unittest.TestCase):
 
     def test_the_scope_detector_finds_a_planted_unscoped_call(self):
         planted = read(CLAUDE_ASSET) + '\n```bash\ngh pr merge "$PR" --admin\n```\n'
-        unscoped = [
-            call
-            for call in gh_invocations(planted)
-            if REPOSITORY_SCOPE not in call and "repos/$REPO/" not in call
-        ]
-        self.assertIn('gh pr merge "$PR" --admin', unscoped)
+        self.assertIn('gh pr merge "$PR" --admin', unscoped_calls(planted))
+
+    def test_the_scope_detector_rejects_a_misscoped_default_branch_lookup(self):
+        # Issue #759's regression control, planted in place of the real lookup
+        # in each rendered asset: the `-R` spelling real `gh` refuses, and a
+        # lookup naming no repository at all, are each reported as unscoped,
+        # and each fails both the scoping rule and the repo-view rule above.
+        for relative_path in RENDERED_ASSETS:
+            content = read(relative_path)
+            self.assertEqual(content.count(DEFAULT_BRANCH_LOOKUP), 1, relative_path)
+            for label, misspelling in MISSCOPED_DEFAULT_BRANCH_LOOKUPS.items():
+                with self.subTest(asset=relative_path, misspelling=label):
+                    planted = content.replace(DEFAULT_BRANCH_LOOKUP, misspelling)
+                    self.assertEqual(
+                        unscoped_calls(planted),
+                        [
+                            "gh " + GLOBAL_CALLS[0],
+                            misspelling + " --jq .defaultBranchRef.name",
+                        ],
+                    )
+
+    def test_the_repository_flag_detector_reads_each_spelling(self):
+        # The flag test is word-bounded, so a `$REPO` value or a `--jq` path
+        # containing an `R` cannot trip it, while every flag spelling does.
+        for flagged in (
+            'gh repo view "$REPO" -R "$REPO" --json defaultBranchRef',
+            'gh repo view "$REPO" --repo "$REPO" --json defaultBranchRef',
+            'gh repo view "$REPO" --repo="$REPO" --json defaultBranchRef',
+        ):
+            with self.subTest(call=flagged):
+                self.assertFalse(names_the_resolved_repository(flagged))
+        self.assertTrue(
+            names_the_resolved_repository(
+                DEFAULT_BRANCH_LOOKUP + " --jq .defaultBranchRef.name"
+            )
+        )
 
 
 class GateDecisionTests(unittest.TestCase):
