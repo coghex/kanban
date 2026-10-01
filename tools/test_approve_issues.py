@@ -1918,9 +1918,11 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
             None,
         )
 
-    def test_the_gate_reads_the_marker_timestamp_the_comment_carries(self):
-        # The seam that matters: 'review_records' copies `created_at` off the
-        # comment onto the marker, and 'marker_matches' is what spends it.
+    def test_the_gate_decides_on_brand_and_spec_never_on_models(self):
+        # Approvals gate on brand and spec freshness only. A marker written by
+        # long-retired models -- and dated outside every ledger window, which
+        # the old model rule would have retired -- still stands, and the gate
+        # never reads the ledger to decide it.
         module = self.backend()
         marker_body = (
             "<!-- issue-review:v2 spec={spec} origin=legacy reviewers=codex+claude "
@@ -1932,33 +1934,36 @@ class ReviewerLedgerTests(RosterBackedIssueGateTests):
                 "id": 7,
                 "body": marker_body,
                 "author_association": "OWNER",
-                "created_at": "2026-09-06T03:56:17Z",
+                "created_at": "2026-09-07T00:00:00Z",
                 "html_url": "https://example.invalid/c7",
             }
         ]
         marker = module.latest_review_marker(comments)
-        self.assertEqual(marker["created_at"], "2026-09-06T03:56:17Z")
-        reviewers = self.route(module, "codex+claude")
+        both = self.route(module, "codex+claude")
         with mock.patch.object(
             module,
             "read_reviewer_ledger",
-            return_value=(
-                module.LEDGER_INTACT,
-                [
-                    self.entry("2026-08-14T00:00:00Z", self.SOL_ERA),
-                    self.entry("2026-09-06T12:00:00Z", self.ASTRA_ERA),
-                ],
-            ),
+            side_effect=AssertionError("the gate must not consult the reviewer ledger"),
         ):
             self.assertTrue(
+                module.marker_matches(marker, spec_sha="a" * 64, origin=None, reviewers=both)
+            )
+            unknown_models = {**marker, "models": "some-future-model@max+another@low"}
+            self.assertTrue(
                 module.marker_matches(
-                    marker, spec_sha="a" * 64, origin=None, reviewers=reviewers
+                    unknown_models, spec_sha="a" * 64, origin=None, reviewers=both
                 )
             )
-            stale = {**marker, "created_at": "2026-09-07T00:00:00Z"}
+            # What still decides it: the spec, and the brands that reviewed.
+            self.assertFalse(
+                module.marker_matches(marker, spec_sha="c" * 64, origin=None, reviewers=both)
+            )
             self.assertFalse(
                 module.marker_matches(
-                    stale, spec_sha="a" * 64, origin=None, reviewers=reviewers
+                    marker,
+                    spec_sha="a" * 64,
+                    origin=None,
+                    reviewers=self.route(module, "codex"),
                 )
             )
 

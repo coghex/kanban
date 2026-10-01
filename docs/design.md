@@ -1307,21 +1307,11 @@ Each `r` invocation advances exactly one durable label-driven stage:
    issues route to Claude Fable 5.1 high, Kimi-origin and Google-origin issues
    route to GPT-6-Astra high, and unmarked issues require both. Single-agent mode
    collapses each of those routes onto the loaded provider; no-agent mode
-   starts no reviewer, publishes nothing, and changes no label. A *replaced*
-   default does not retire the approvals standing under it: an append-only
-   reviewer ledger records which assignment was canonical from when, and a
-   marker is judged against the assignment in force the day it was written
-   (`tools/approve_issues.py`, `--reviewer-ledger --json`). A marker inside its
-   assignment's recorded window is a legacy decision and is carried forward; one
-   outside every window is stale and rereviewed. Markers older than the ledger's
-   first entry fall back to the compiled prehistory — GPT-6-Astra, GPT-5.6-Sol,
-   GPT-5.6-Terra and GPT-5.5, Claude Fable 5.1, Claude Opus 5 and Claude
-   Fable 5, each at the xhigh they ran at — so a provider shipping a new model
-   cannot invalidate a backlog of approvals in one step. Recording the OUTGOING
-   cell is what every assignment change owes that prehistory; omitting it is
-   the churn PR #626 removed. A record that is present but unreadable is the
-   exception: it refuses every route but the current assignment rather than
-   falling back at all (contract §2.3.1). The retired reviewer
+   starts no reviewer, publishes nothing, and changes no label. An approval
+   stands while the reviewed spec is current and the reviewing brands are the
+   ones the origin requires; the marker's `models=` field records which models
+   ran and is never checked, so replacing a default model or effort retires no
+   approval (contract §2.3.1). The retired reviewer
    personas stay readable in the other direction, since a historical review that
    predates the marker's `verdicts=` field has only its human-readable summary
    to recover a per-reviewer verdict from.
