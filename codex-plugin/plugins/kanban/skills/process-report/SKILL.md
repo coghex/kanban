@@ -8,6 +8,8 @@ description: Process a large Markdown findings, audit, or code-health report one
 Process exactly one finding per invocation. Treat the report file as the durable
 cursor; never depend on conversation history to know where to resume.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 Establish the owning repository (see "Establish the owning repository" below)
 before anything else, then resolve the report path under `$DOCS_WT` before
 reading or editing it — a repo-relative report path names the copy in the

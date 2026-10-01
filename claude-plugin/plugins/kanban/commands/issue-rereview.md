@@ -5,6 +5,8 @@ argument-hint: "[issue number]"
 
 Require one positive issue number in `$ARGUMENTS`. Turn one changes-requested issue into a self-contained, hand-off-quality specification and submit the revision to the canonical approval gate. Edit the issue specification only; do not solve the issue or change repository code.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 Approval must be earned. Never independently post a review, manually add/remove `reviewed:approve` or `reviewed:changes`, or override a model verdict. Only the canonical backend manages verdict comments and labels.
 
 ## Resolving The Canonical Backend

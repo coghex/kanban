@@ -5,6 +5,8 @@ description: Organize a GitHub repository's open issues into prerequisite-aware 
 
 # Triage
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 ## Goal
 
 Produce a compact, visually usable issue roadmap from the current open GitHub issues. Optimize for a user leaving the answer open as a work queue.

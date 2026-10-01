@@ -5,6 +5,8 @@ description: Land documentation from the docs worktree straight onto master thro
 
 # Push Docs
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 ## Goal
 
 Land one or more documentation files from the `docs-wip` worktree straight

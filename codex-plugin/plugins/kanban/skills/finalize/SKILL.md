@@ -13,6 +13,8 @@ $finalize only when the drainer cannot be used — it is not installed on
 this host, it is stopped and its cause is not yet repaired, or the user has
 looked at the situation and asked for a manual merge of one named pull request.
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 **Never choose this path automatically.** A pull request being ready is not a
 reason to run this command. A solve session, a review session, and an autonomous
 loop each stop at the open pull request; none of them may finalize one, and this

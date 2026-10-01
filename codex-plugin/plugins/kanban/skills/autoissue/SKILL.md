@@ -7,6 +7,8 @@ description: Draft one verified, deduplicated GitHub issue with $issue, create i
 
 Run `$issue`, including any lead supplied with the invocation, then review the created issue through `$issue-review`. Read and follow both skills completely; this skill only joins their workflows and does not replace either contract.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 ## Draft and signoff
 
 1. Run `$issue` for exactly one candidate.

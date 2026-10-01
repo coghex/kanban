@@ -7,6 +7,8 @@ argument-hint: "[PR number]"
 
 Repair one positive PR number in `$ARGUMENTS`. Treat the canonical review as the contract; do not manually change `reviewed:approve` or `reviewed:changes`, post substitute review comments, force-push, or merge the PR.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 The canonical rereview route is fixed by brand: a Claude-origin PR uses the Codex reviewer; a Codex-origin PR uses the Claude reviewer; unknown or external origin uses both independently. Neither a specific model nor reasoning effort is pinned or verified; only the brand is selected, deferring to that installation's own configured default. This session runs on the PR's own origin brand (Kanban only ever resumes the original solver to revise); the rereview below therefore always hands off to the opposite brand's canonical reviewer identity, never to this session's own model.
 
 ## 1. Establish the review contract

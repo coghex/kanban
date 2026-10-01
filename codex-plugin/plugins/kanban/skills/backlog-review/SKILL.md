@@ -13,6 +13,8 @@ spec is exactly what the next agent will grab. Audit oldest-first for the same
 reason. Review only — never modify code; the only writes you ever make are
 tracker writes (edit/close/label/comment), and only after explicit approval.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 **Resolve the repository:** Set `REPO` once, before the first GitHub read
 below, and use that one identity for every `gh` call in this workflow. This is
 the workflow that closes issues and rewrites their bodies, and a `gh` call

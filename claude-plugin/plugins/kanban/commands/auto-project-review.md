@@ -8,6 +8,8 @@ argument-hint: "[optional: how many reviews to run; omit it to repeat until you 
 Repeat /project-review, one whole invocation at a time, until the count
 is reached or something stops the run.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 **This workflow reviews nothing itself.** Each iteration is one
 /project-review invocation, and everything an iteration does belongs to
 that workflow: the merged-pull-request inventory, the liveness registration,

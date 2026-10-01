@@ -11,6 +11,8 @@ This command runs only when the user asks for it in that turn: it is never
 invoked implicitly, and it never starts, stops, or acknowledges anything on its
 own initiative.
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 It controls the same managed job Codex controls through `$kanban:drain-prs` —
 one drainer per repository, two control surfaces, never a second daemon.
 

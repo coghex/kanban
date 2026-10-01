@@ -10,6 +10,8 @@ Optimize for a good design conversation, not issue-shaped prose. Leave tracker
 drafting, deduplication, approval, and creation to later `process-design-doc`
 runs.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 ## Human interaction and decision authority
 
 This is a human-led design conversation, not an autonomous specification pass.

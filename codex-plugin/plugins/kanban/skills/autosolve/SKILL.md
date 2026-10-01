@@ -9,6 +9,8 @@ Complete $solve for one GitHub issue, then obtain an opposite-brand
 review until approval. The solver must never review its own pull request. Stop
 at approval; never merge or finalize.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 $solve, $pr-review, and $pr-rereview are delegated
 sub-steps of this workflow. Each was written to be invoked directly, so each
 states its own terminal stop condition and its own assumptions about who is

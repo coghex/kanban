@@ -9,6 +9,8 @@ Process exactly one entry from a ready design document per invocation. The
 document is the durable cursor: a fresh conversation must be able to select and
 draft the next tracker artifact without relying on chat history.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 The first entry is the umbrella epic. Every later entry is one child issue or
 one explicit disposition. Never draft, approve, or create a second entry in the
 same run.

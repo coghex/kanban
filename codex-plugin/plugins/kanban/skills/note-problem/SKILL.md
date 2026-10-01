@@ -8,6 +8,8 @@ description: Capture one user observation in a Markdown findings report, investi
 Capture and investigate one observation. Leave issue disposition, drafting, and
 creation to a later `process-report` run.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 ## Establish the owning repository
 
 This workflow writes a durable document. That is irreversible in the wrong
