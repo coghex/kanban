@@ -597,56 +597,26 @@ that a particular comment should not.
     rereview route — from. The `models=` field's rule is narrower, and stated
     next.
     The resolved assignment is what a published marker's `models=` field
-    records and what §2.3.1's reconciliation accepts as current. Changing
-    either half of it does **not** retire the approvals already standing under
-    the old one: the backend keeps an append-only *reviewer ledger* at
+    records, and that record is all it is. Whether an approval stands depends
+    only on three things: the marker's `spec=` is the issue's current spec
+    fingerprint, its `origin=` is the issue's origin, and its `reviewers=` is
+    the route that origin requires — the opposite brand for a known origin,
+    both brands for an unmarked, legacy, or conflicting one. Which model or
+    effort reviewed it is never a condition. Models change faster than an issue
+    moves from approval to solve, so changing either half of the assignment,
+    in the roster or through the `APPROVE_ISSUES_*` overrides, retires no
+    approval; only a spec change or a route change does.
+    The backend still keeps its append-only *reviewer ledger* at
     `<install dir>/runtime/reviewer_ledger.json`, appending this run's
-    canonical assignment whenever it differs from the newest recorded one, and
-    a marker is judged against the assignment that was in force **the day the
-    marker was written**. So a marker naming a replaced assignment stands when
-    it falls inside that assignment's recorded window, and goes stale outside
-    it — which is what stops a model that was canonical for a week from
-    validating a marker written a year later. A marker older than the ledger's
-    first recorded entry is judged against the compiled prehistory in
-    `tools/approve_issues.py`'s `RETIRED_REVIEWER_CELLS` instead — recorded as
-    `model@effort`, so changing an effort alone retires nothing — and so the
-    approvals already standing when an install began keeping the log are
-    carried forward rather than retired wholesale — as is the first assignment
-    the ledger itself observed, which is how an operator's own previous cell
-    survives when no compiled table names it.
-    That reader answers ABSENCE and DAMAGE differently, and the distinction is
-    the whole safety of the record. An *absent* ledger is the fresh-install
-    path and bootstraps from the prehistory above. A ledger that is present but
-    unreadable, corrupt, foreign-versioned, or that carries even one entry this
-    build cannot parse is `damaged`: a record existed and cannot be read, so
-    the windows it would have supplied are unknown rather than empty, and every
-    route but the current assignment is refused. A damaged file is never
-    overwritten by the next append, so repairing the file restores the history
-    and removing it restores ACCEPTANCE -- a removed record reverts to the
-    prehistory rather than recovering what it held. A second state refuses the
-    same way: a
-    newest recorded entry that is not the assignment this run is using, which
-    is what a failed append looks like — left trusted, the previous
-    assignment's window would still be open-ended and would accept its markers
-    written long after it was replaced. Both cost rereviews rather than
-    granting approval, which is the direction an unreadable history must fail
-    in; the *roster*, by contrast, fails closed outright, because it decides
-    what runs rather than what already ran.
-    `--reviewer-ledger --json` prints the record, including which of those
-    three states it is in. It READS and never records: a diagnostic that
-    appended would close the running assignment's window for its own duration,
-    and the file is append-only. Its refusals match the other document modes —
-    it requires `--json`, is mutually exclusive with `--self-test` and with the
-    five issue modes (`--check`, `--review`, `--rereview`, `--review-queue`,
-    `--reconcile-approvals`), and is resolved before the repository context
-    loads.
-
-    The windows are per-install, so a marker published before THIS install's
-    first recorded entry rests on the compiled prehistory and on the first
-    assignment the ledger did observe. When a pair currently in force is
-    replaced, its outgoing cells must be added to `RETIRED_REVIEWER_CELLS` in
-    the same change — that is the one manual step this record does not remove,
-    and omitting it is what PR #626 was filed for.
+    canonical assignment whenever it differs from the newest recorded one, as
+    a history of which models were canonical when. No gate reads it.
+    `--reviewer-ledger --json` prints the record and the state it is in
+    (absent, intact, or damaged). It READS and never records, and its refusals
+    match the other document modes — it requires `--json`, is mutually
+    exclusive with `--self-test` and with the five issue modes (`--check`,
+    `--review`, `--rereview`, `--review-queue`, `--reconcile-approvals`), and
+    is resolved before the repository context loads. A damaged or missing
+    ledger therefore costs nothing but that history.
     `tools/drain_prs.py` resolves the `roles.drain_rereview` cell for the
     provider its operating mode selects (below) the same way for its
     stale-head rereview, re-read once per drain cycle so a roster edit

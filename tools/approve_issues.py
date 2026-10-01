@@ -137,13 +137,11 @@ def gate_effort(provider: str, variable: str) -> str:
     return assignment.effort if assignment else UNRESOLVED_ASSIGNMENT_VALUE
 
 
-# The current canonical reviewer assignment, per provider. The published
-# marker's `models=` field and 'marker_models_accepted''s rule 1 both read
-# these, so a roster or environment edit changes what runs -- and, since PR #626,
-# does NOT retire the approvals standing under the assignment it replaces.
-# Those are carried forward by the reviewer ledger's window for the assignment
-# in force the day each marker was written; see 'marker_models_accepted' and
-# docs/agent-workflow-contract.md §2.3.1.
+# The current canonical reviewer assignment, per provider: what runs, and what
+# a published marker's `models=` field records. A roster or environment edit
+# changes what runs and retires no approval -- approvals stand on spec, origin
+# and reviewer brand alone ('marker_matches', docs/agent-workflow-contract.md
+# §2.3.1).
 PRIMARY_CODEX_MODEL = gate_model("codex", "APPROVE_ISSUES_CODEX_MODEL")
 CODEX_EFFORT = gate_effort("codex", "APPROVE_ISSUES_CODEX_EFFORT")
 PRIMARY_CLAUDE_MODEL = gate_model("claude", "APPROVE_ISSUES_CLAUDE_MODEL")
@@ -1039,11 +1037,10 @@ def accepted_reviewer_models(reviewers: list[Reviewer]) -> set[str]:
     """Every route accepted without a date: the canonical one and the
     prehistory behind it.
 
-    Not a gate: nothing in production decides a verdict from this. The gate
-    goes through 'marker_models_accepted', which is strictly narrower -- it
-    consults the marker's own date, the ledger's windows, and how far the
-    record can be trusted. This is the dateless view the tests and diagnostics
-    read to state what the prehistory contains.
+    Not a gate: nothing in production decides a verdict from this or from
+    'marker_models_accepted'. The gate is 'marker_matches', which never looks
+    at models. This is the dateless view the tests and diagnostics read to
+    state what the prehistory contains.
     """
     return prehistoric_reviewer_models(reviewers)
 
@@ -1275,10 +1272,8 @@ def _record_reviewer_assignment_locked(
             handle.write("\n")
         os.replace(temporary, target)
     except OSError:
-        # Best effort, and the gate is what makes it safe: a transition this
-        # could not persist leaves the newest recorded assignment behind the
-        # one actually running, which 'marker_models_accepted' reads as a
-        # boundary it cannot place and refuses every non-current route on.
+        # Best effort: no gate reads the ledger, so a transition this could not
+        # persist costs only that history.
         if temporary is not None:
             with contextlib.suppress(OSError):
                 temporary.unlink()
@@ -1319,9 +1314,12 @@ def marker_models_accepted(
     entries: list[dict[str, Any]] | None = None,
     status: str | None = None,
 ) -> bool:
-    """Does this marker's `models=` field still stand?
+    """Would this marker's `models=` field have stood under the retired model rule?
 
-    Four ways, in order:
+    The issue gate no longer calls this: approvals stand on spec, origin and
+    reviewer brand alone ('marker_matches'). It is kept for the reviewer-ledger
+    history and its tests until that machinery is removed. The old rule, in
+    order:
 
     1. It names the canonical assignment. Always current, no date needed, and
        deliberately decided before the ledger is consulted at all -- the record
@@ -1405,10 +1403,9 @@ def reviewer_for_key(key: str) -> Reviewer:
 
 
 # Every display name a canonical reviewer has signed a human-readable summary
-# with, newest first, per reviewer key. Deliberately NOT the same question as
-# `marker_models_accepted`: that decides whether an approval still *stands*,
-# by the window rule PR #626 introduced -- a retired assignment is carried forward
-# inside the window it was canonical for, and goes stale outside it. This
+# with, newest first, per reviewer key. Deliberately NOT the question of
+# whether an approval still *stands* -- that is 'marker_matches', on spec,
+# origin and reviewer brand. This
 # decides only whether a historical review's individual verdicts are still
 # *readable*, and they must remain readable however many times the
 # persona changes -- `rereview_reviewers` computes the rereview route from
@@ -1573,18 +1570,21 @@ def marker_matches(
     origin: str | None,
     reviewers: list[Reviewer],
 ) -> bool:
+    """Does this review marker still approve the issue as it stands?
+
+    Only three things decide it: the reviewed spec is the current spec, the
+    origin is the one recorded, and the reviewers are the required brands
+    (the opposite brand of a known origin, both brands for an unknown one).
+    The marker's `models=` field is a record of which models ran, never a
+    condition: models change faster than issues move from approval to solve,
+    and a newer model must not retire an approval its brand already granted.
+    """
     if marker is None or not reviewers:
         return False
     return (
         marker.get("spec") == spec_sha
         and marker.get("origin") == expected_origin_name(origin)
         and marker.get("reviewers") == reviewer_route(reviewers)
-        # The marker's own publication instant, which 'review_records' copies
-        # off the comment: a retired assignment stands only for the markers
-        # written while it WAS the assignment (PR #626).
-        and marker_models_accepted(
-            marker.get("models"), marker.get("created_at"), reviewers
-        )
     )
 
 
@@ -3919,10 +3919,9 @@ def self_test() -> None:
         claude_cell.effort,
     )
     PRIMARY_CODEX_MODEL, PRIMARY_CLAUDE_MODEL = codex_cell.model, claude_cell.model
-    # And the ledger, for the same reason and by the same means. Without this
-    # the offline checks read durable host state: 'marker_matches' reaches
-    # 'marker_models_accepted', whose default is to load this machine's own
-    # record, while the fixture markers below carry fixed 2026-01 timestamps.
+    # And the ledger, for the same reason and by the same means. 'marker_matches'
+    # no longer reads it, but nothing here may depend on durable host state,
+    # and the fixture markers below carry fixed 2026-01 timestamps.
     # A ledger whose first entry predates them would make an installation-
     # independent check answer differently per machine -- and this file's
     # contract, stated above, is that it does not.
