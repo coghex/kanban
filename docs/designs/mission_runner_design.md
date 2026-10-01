@@ -27,7 +27,7 @@ concrete precondition
 - [x] RUN-9. Keep mission workers alive when the runner's systemd unit stops — [#751]
 - [x] RUN-7. Wait out provider rate limits without holding a slot — [#752]
 - [x] RUN-8. Drain the runner on stop and upgrade — [#753]
-- [ ] RUN-6. Document installing, operating, and recovering the mission runner — [deferred]: #751, #752, and #753 must be closed as completed first
+- [x] RUN-6. Document installing, operating, and recovering the mission runner — [#770]
 
 ## Epic contract
 
@@ -992,15 +992,6 @@ doubling to a one-hour cap, with depleted credits stopping for the operator.
 - **Open questions:** `None`.
 
 ### RUN-6. Document installing, operating, and recovering the mission runner
-
-> Deferred on 2026-09-29. This slice documents shipped behaviour, and RUN-9
-> (#751), RUN-7 (#752), and RUN-8 (#753) were filed but not yet implemented.
-> Precondition: all three issues closed as completed, with their pull requests
-> merged. Each of those issues, like #744 and #746 before them, carries its own
-> `docs/design.md` and `docs/agent-workflow-contract.md` updates, so this
-> slice's contract-entry work may be down to reconciliation when it resumes. No
-> mission runner operating guide exists yet; `docs/pr-drainer.md` and
-> `docs/issue-approval.md` are the other services' guides.
 
 - **Outcome:** Operators have one accurate document for installing, starting,
   stopping, inspecting, troubleshooting, and recovering the mission runner, and
