@@ -6,6 +6,8 @@ argument-hint: "[optional: paste of the prior roadmap, if not in this conversati
 
 # Retriage
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 ## Where files go
 
 This workflow reads the tracker through `gh`, reconciles approval markers

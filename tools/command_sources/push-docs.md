@@ -6,6 +6,8 @@ argument-hint: "[docs/<file>.md ... | all docs] — repository-relative Markdown
 
 # Push Docs
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 ## Goal
 
 Land one or more documentation files from the `docs-wip` worktree straight

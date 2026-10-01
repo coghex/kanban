@@ -5,6 +5,8 @@ argument-hint: "[PR number]"
 
 # Rereview Pull Request
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 Require one positive PR number in `$ARGUMENTS`. Read and follow the complete `/pr-review` policy — including its self-review protocol and the `--self-review-as claude` declaration gating it, which holds only where Kanban spawned this session as the canonical reviewer this pull request routes to — the opposite brand when the roster loads both providers, the sole loaded provider when it loads one — rather than on the pull request's own origin brand where nothing routes to it — then use its bundled coordinator in rereview mode:
 
 ```bash

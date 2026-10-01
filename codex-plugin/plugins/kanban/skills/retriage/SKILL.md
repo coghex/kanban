@@ -5,6 +5,8 @@ description: Update an existing GitHub issue roadmap after issues have been adde
 
 # Retriage
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 ## Where files go
 
 This workflow reads the tracker through `gh`, reconciles approval markers

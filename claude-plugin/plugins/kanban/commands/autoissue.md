@@ -5,6 +5,8 @@ argument-hint: "[optional: symptom, area, or idea to investigate]"
 
 Run `/issue` with `$ARGUMENTS`, then review the created issue through `/issue-review`. Follow both commands completely; this command only joins their workflows and does not replace either contract.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 ## Draft and signoff
 
 1. Run `/issue` for exactly one candidate, passing `$ARGUMENTS` through as its lead.

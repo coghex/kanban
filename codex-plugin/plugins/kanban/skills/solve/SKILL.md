@@ -7,6 +7,8 @@ description: Claim a GitHub issue, implement its minimal verified fix in an isol
 
 Take one issue through a tested pull request. Stop after opening the PR; review and merge are separate workflows.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 ## Resolving The Canonical Backend
 
 Kanban can work issues in any repository it is pointed at, so the canonical issue-review backend is not necessarily tracked inside the repository under review; resolve its install location the same way `Kanban.Review.resolveCanonicalIssueReviewer` does rather than a path relative to the repository being worked or any other personal path. The precedence is a non-empty `KANBAN_ISSUE_REVIEW_INSTALL_DIR`, then the backend path `tools/install_issue_review.py` recorded at a fixed location `--install-dir` cannot move, then — only when that record names none, which is how an installation predating the record looks — the directory the record itself lives in. That record has two locations, probed in one order on every platform: the XDG data directory's first, then `~/Library`'s. Whichever one exists is the installation, so no step here decides which platform it is on; when neither exists the XDG candidate supplies the answer and the diagnostic names both:

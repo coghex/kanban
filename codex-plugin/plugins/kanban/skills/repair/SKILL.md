@@ -7,6 +7,8 @@ description: "Repair one GitHub pull request that is blocked from merging: diagn
 
 Make one blocked pull request mergeable again. Repair works on the pull request's own code, so this session runs on the pull request's own origin brand, the same way `$pr-revise` does.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 Never merge the pull request, and never close an issue or pull request. Merging belongs to the repository's own merge or drainer process, never to this workflow.
 
 Never add or remove a verdict label directly. The configured approval and changes-requested labels (default `reviewed:approve` / `reviewed:changes`) change only as a consequence of the canonical rereview this workflow hands off to, which necessarily switches them. That handoff is the only path by which they may change.

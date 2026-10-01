@@ -7,6 +7,8 @@ description: Run the canonical issue-gated review for one GitHub pull request, r
 
 Require one positive PR number. When Kanban's own `r` key spawned this session, it spawned it as the canonical opposite-brand reviewer — that invocation pinned this session's model before this workflow ever ran — so for the normal known-origin case you perform the review yourself and the bundled coordinator only handles safe publication. Treat that as a precondition to check, not a given: a session running on the pull request's *own* origin brand — the solver that opened it, or anything continuing that work — is not its reviewer and must let the coordinator spawn the routed one. Declare this session's brand with `--self-review-as codex`; the coordinator refuses a declaration that is absent or names a brand other than the routed reviewer, publishing nothing and changing no label. Which reviewer a pull request routes to depends on the roster's loaded providers: the opposite brand when both are loaded, and the one loaded provider when only one is — in which case a declaration matching that provider is accepted even though it shares the pull request's own origin brand. Do not independently comment, label, or compensate for the coordinator's result.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 Kanban spawns this workflow with the *reviewed* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 ```bash

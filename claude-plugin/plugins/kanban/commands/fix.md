@@ -10,6 +10,8 @@ queue, taking its number from the argument below. This workflow touches the
 pull request's own code, so this session runs on the pull request's own origin
 brand, the same way /pr-revise and /repair do.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 **A diagnosis is not authorisation.** This workflow commits, pushes, and hands
 off a rereview, so it runs only when the user asked in that
 turn for the pull request to be fixed, unblocked, or made mergeable. "Why can't

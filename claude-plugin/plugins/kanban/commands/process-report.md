@@ -7,6 +7,8 @@ Process exactly one finding from the report named by `$ARGUMENTS`. Treat the
 report file as the durable cursor so a fresh Claude context resumes at the
 correct place without conversation history.
 
+Run this in a **Class A** session (see the `model-classes` skill).
+
 If `$ARGUMENTS` is empty, ask for the Markdown report path and stop.
 
 Establish the owning repository (see "Establish the owning repository" below)

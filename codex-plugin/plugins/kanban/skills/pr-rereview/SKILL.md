@@ -5,6 +5,8 @@ description: Rerun the canonical review for a changed GitHub pull request, prese
 
 # Rereview Pull Request
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 Require one positive PR number. Read and follow the complete `$pr-review` policy — including its self-review protocol and the `--self-review-as codex` declaration gating it, which holds only where Kanban spawned this session as the canonical reviewer this pull request routes to — the opposite brand when the roster loads both providers, the sole loaded provider when it loads one — rather than on the pull request's own origin brand where nothing routes to it — then use its bundled coordinator in rereview mode. Kanban spawns this workflow with the *reviewed* repository as the working directory, not this plugin's own install location, so locate the installed coordinator by searching under `$CODEX_HOME` (default `~/.codex`) rather than a path relative to the current directory:
 
 ```bash

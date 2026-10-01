@@ -10,6 +10,8 @@ report in chat, and create the file only after the user explicitly approves that
 draft. Leave tracker deduplication, issue disposition, issue drafting, and issue
 creation to later `process-report` runs.
 
+Run this in a **Class S** session (see the `model-classes` skill).
+
 ## Establish the owning repository
 
 This workflow writes a document and mutates a tracker. Both are irreversible in

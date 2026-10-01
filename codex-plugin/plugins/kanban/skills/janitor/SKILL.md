@@ -9,6 +9,8 @@ Produce an anomaly-only snapshot that preserves every possible copy of work.
 Keep the primary checkout clean, intentional long-lived state visible, and the
 local and GitHub signals consistent. Never clean by age or naming alone.
 
+Run this in a **Class B** session (see the `model-classes` skill).
+
 This audits a pipeline where autonomous agents claim issues (an assignee, or a
 `wip` label, plus an `issue-<n>-<slug>` worktree), open pull requests, take
 label-gated reviews, and merge through the service-managed PR drainer
