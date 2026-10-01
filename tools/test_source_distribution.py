@@ -271,6 +271,7 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/project_review_602-562.md",
     "docs/project_review_660-648.md",
     "docs/ui-bugs.md",
+    "docs/vision.md",
     "docs/workflow_audit_findings.md",
 )
 

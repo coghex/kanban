@@ -4345,7 +4345,7 @@ The `coordination` documents are
 `docs/project_review_600-573.md`,
 `docs/project_review_602-562.md`,
 `docs/project_review_660-648.md`,
-`docs/ui-bugs.md`, `docs/workflow_audit_findings.md`,
+`docs/ui-bugs.md`, `docs/vision.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
 `docs/coordination/`, every design document under `docs/designs/`, and the
@@ -4427,9 +4427,9 @@ recording only one would understate what a change to it can break:
   workflow may maintain it, as the `docs/project_review/` row's is: the reason
   is about what the document records and who in this repository reads it, per
   the `coordination` definition above, not about whether a human typed it.
-- `coordination-note` — a free-form note, roadmap sketch, or other
-  non-authoritative coordination document whose content no runtime,
-  installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`
+- `coordination-note` — a free-form note, roadmap sketch, the owner's vision
+  (`docs/vision.md`), or other non-authoritative coordination document whose
+  content no runtime, installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`
   declaration the same way. `audit-report` and `coordination-note` are the
   only reasons that admit the `coordination` lane, and neither is valid on a
   `pr-atomic` row.
@@ -4489,6 +4489,7 @@ docs/project_review_660-648.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
 docs/ui-bugs.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document
+docs/vision.md | coordination | coordination-note
 docs/workflow-setup.md | pr-atomic | release-document
 docs/workflow_audit_findings.md | coordination | audit-report
 google-plugin/ | pr-atomic | test-parsed;release-document
