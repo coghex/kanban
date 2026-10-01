@@ -47,23 +47,16 @@ VERDICT_LABEL_SPECS = {
 }
 DEFAULT_INTERVAL_SECONDS = 60
 # Every issue-gate model this build has ever shipped as canonical, per
-# provider, newest retirement first. These are not spawn values and the roster
-# has no words for them: they are what lets a review marker published before
-# this machine started keeping a reviewer ledger still validate, so they stay
-# literal by design.
+# provider, newest retirement first, as `model@effort` cells. These are not
+# spawn values and the roster has no words for them.
 #
-# This list is the PREHISTORY only. It answers for markers older than the
-# ledger's first recorded assignment change and nothing else -- once the ledger
-# has an observed entry, a retired model is trusted inside its recorded window
-# rather than forever. Names are only ever added: dropping one retires every
-# standing approval recorded under it, which is exactly the churn PR #626
-# removed.
-# Recorded as `model@effort` cells, not bare model names. The effort is half
-# the assignment and half of what a marker's `models=` field spells, so a
-# prehistory that rendered these at whatever effort the install runs TODAY
-# would go stale the moment an operator changed the effort alone -- retiring
-# every pre-ledger approval for a reason that has nothing to do with the model
-# that reviewed it.
+# LEGACY, HISTORY ONLY. No gate reads this table. An approval stands on its
+# spec fingerprint, its origin and its reviewer route alone ('marker_matches');
+# a marker's `models=` field records which models ran and is never checked, so
+# adding, dropping or reordering a cell here validates or retires nothing. The
+# table survives only as the prehistory of the retired model rule
+# ('marker_models_accepted'), which the reviewer-ledger diagnostics and their
+# tests still exercise, and it can be removed with that machinery.
 RETIRED_REVIEWER_CELLS: dict[str, tuple[str, ...]] = {
     "codex": ("gpt-6-astra@xhigh", "gpt-5.6-sol@xhigh", "gpt-5.6-terra@xhigh",
               "gpt-5.5@xhigh"),
@@ -168,7 +161,9 @@ DEFAULT_LOG_DIR = kanban_config.default_issue_review_log_dir()
 RUNTIME_DIR = INSTALL_DIR / "runtime"
 DEFAULT_INCIDENT_DIR = RUNTIME_DIR / "incidents"
 # PR #626: the append-only record of which models have been THE canonical
-# issue-gate assignment on this install, and from when. Derived here beside the
+# issue-gate assignment on this install, and from when. History only: no gate
+# reads it ('marker_matches' decides on spec, origin and reviewer route).
+# Derived here beside the
 # incident directory rather than spelled in kanban_config, for the same reason
 # that one is: both are this backend's own runtime state under the one managed
 # install directory kanban_config resolves.
@@ -191,7 +186,8 @@ PIPELINE_INCIDENT_DIR = DEFAULT_INCIDENT_DIR
 REVIEWER_LEDGER_SCHEMA = "approve-issues-reviewer-ledger"
 REVIEWER_LEDGER_VERSION = 1
 # How much this run can trust the record, which is NOT the same question as
-# whether it could be parsed. An absent ledger is the fresh-install path and
+# whether it could be parsed. These states only matter to the diagnostics and
+# the retired model rule; no gate depends on them. An absent ledger is the fresh-install path and
 # the only absence that may bootstrap from the compiled prehistory; a present
 # one this build cannot read is evidence that a record existed, so the windows
 # it would have supplied are unknown rather than empty.
@@ -1286,10 +1282,10 @@ def reviewer_ledger_windows(
     """Each recorded assignment as the half-open window it was canonical for.
 
     Entry *i* runs from its own `recorded_at` until entry *i+1*'s, and the
-    newest runs open-endedly forward. A marker is a legacy decision when it was
-    written inside the window of the assignment it names -- which is what stops
-    a model that was canonical for one week from validating a marker written a
-    year later.
+    newest runs open-endedly forward. Under the retired model rule
+    ('marker_models_accepted', which no gate calls any more) a marker was a
+    legacy decision when it was written inside the window of the assignment it
+    names. Kept for the ledger diagnostics; approvals no longer depend on it.
     """
     windows: list[tuple[datetime, datetime | None, str]] = []
     for index, entry in enumerate(entries):
