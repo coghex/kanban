@@ -13,11 +13,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import contextvars
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import tomllib
 import urllib.parse
 from dataclasses import dataclass
@@ -159,6 +162,115 @@ CHAT_REVIEW_COMMAND: contextvars.ContextVar[list[str] | None] = contextvars.Cont
 )
 
 
+# The wrapper may detach its child or die before cleaning it up. Register the
+# reviewer's own process group before allowing exec, so cleanup never depends
+# on wrapper signal forwarding. This inline launcher needs no extracted files.
+_REVIEW_LAUNCHER = """
+import os, pathlib, sys, time
+folder = pathlib.Path(sys.argv[1])
+if os.getpgrp() != os.getpid():
+    os.setsid()
+(folder / 'pending-pid').write_text(str(os.getpid()))
+(folder / 'pending-pid').replace(folder / 'pid')
+deadline = time.monotonic() + 10
+while not (folder / 'go').exists():
+    if (folder / 'stop').exists() or time.monotonic() >= deadline:
+        sys.exit(125)
+    time.sleep(0.01)
+if (folder / 'stop').exists():
+    sys.exit(125)
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def run_chat_reviewer(
+    prefix: list[str], args: list[str], *, cwd: Path,
+    input_text: str | None, timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Own the detached reviewer group until it ends, on every exit path."""
+    # Temporary handlers make coordinator-only SIGTERM unwind through cleanup,
+    # too. A terminal interrupt cannot kill the wrapper before we register its
+    # reviewer: the wrapper runs in a separate session.
+    handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        def interrupt(signum, frame):
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SystemExit(128 + signum)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(sig, interrupt)
+    try:
+        with tempfile.TemporaryDirectory(prefix="kanban-review-lifetime-") as directory:
+            folder = Path(directory)
+            command = prefix + ["--", sys.executable, "-c", _REVIEW_LAUNCHER,
+                                directory, *args]
+            proc = None
+            reviewer_pid = None
+            try:
+                proc = subprocess.Popen(
+                    command, cwd=cwd, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, start_new_session=True,
+                )
+                deadline = time.monotonic() + timeout
+                first = True
+                while True:
+                    if reviewer_pid is None and (folder / "pid").exists():
+                        reviewer_pid = int((folder / "pid").read_text())
+                        (folder / "go").touch()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        out, err = proc.communicate(
+                            input_text if first else None,
+                            timeout=remaining if reviewer_pid is not None else min(0.05, remaining),
+                        )
+                        return subprocess.CompletedProcess(command, proc.returncode, out, err)
+                    except subprocess.TimeoutExpired:
+                        first = False
+            finally:
+                # Repeated interrupts must not cut cleanup short. Signals become
+                # pending and are delivered after cleanup and handler restoration.
+                blocked = signal.pthread_sigmask(
+                    signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+                )
+                try:
+                    (folder / "stop").touch()
+                    if reviewer_pid is None and (folder / "pid").exists():
+                        reviewer_pid = int((folder / "pid").read_text())
+                    if reviewer_pid is not None:
+                        try:
+                            os.killpg(reviewer_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if proc is not None:
+                        # Let pchat reap the child, retain output and retire its
+                        # identity. Even a broken wrapper cannot keep the reviewer
+                        # alive; its group has already been killed independently.
+                        if proc.poll() is None:
+                            try:
+                                os.killpg(proc.pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        try:
+                            proc.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            proc.communicate()
+                finally:
+                    for sig, handler in handlers.items():
+                        signal.signal(sig, handler)
+                    handlers.clear()
+                    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
 def run(
     args: list[str],
     *,
@@ -168,21 +280,25 @@ def run(
     ok_codes: tuple[int, ...] = (0,),
 ) -> subprocess.CompletedProcess[str]:
     chat_command = CHAT_REVIEW_COMMAND.get()
-    if chat_command and args and args[0] in ("codex", "claude"):
-        prefix = list(chat_command)
-        if args[0] == "codex" and "-o" in args:
-            prefix += ["--result-file", args[args.index("-o") + 1]]
-        args = prefix + ["--"] + args
+    wrapped = bool(chat_command and args and args[0] in ("codex", "claude"))
     try:
-        proc = subprocess.run(
-            args,
-            cwd=cwd,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
+        if wrapped:
+            prefix = list(chat_command)
+            if args[0] == "codex" and "-o" in args:
+                prefix += ["--result-file", args[args.index("-o") + 1]]
+            proc = run_chat_reviewer(
+                prefix, args, cwd=cwd, input_text=input_text, timeout=timeout,
+            )
+        else:
+            proc = subprocess.run(
+                args,
+                cwd=cwd,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
     except subprocess.TimeoutExpired as exc:
         raise WorkflowError(f"{' '.join(args[:4])} timed out after {timeout}s") from exc
     except OSError as exc:

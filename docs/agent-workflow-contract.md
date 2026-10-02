@@ -557,6 +557,16 @@ validation, brand routing, issue/head freshness checks, and canonical publicatio
 remain owned by this coordinator. The wrapper preserves stdout and the original
 provider arguments, including model/effort and permission policy.
 
+The coordinator owns the reviewer's lifetime even when the wrapper detaches it.
+An inline launch handshake registers the reviewer's process group before it can
+execute the provider. On normal return, error, timeout, SIGINT or SIGTERM, the
+coordinator kills that group independently, then allows the wrapper a bounded
+interval to reap it and retire its identity before terminating the wrapper.
+The wrapper must terminate and reap its reviewer on every exit path, including
+cancellation; the coordinator does not rely on that obligation for cancellation.
+A cancelled launch never receives permission to execute the reviewer. Source
+cleanup occurs only after this lifetime cleanup, before another review begins.
+
 `pchat` and its registry/server are optional user-machine dependencies, not
 managed or installed by Kanban. The local installation owns account provisioning,
 role authority, durable outbox delivery, display colors, and registry/log retention.

@@ -872,14 +872,14 @@ def closing_parenthesis_probes(count: int) -> str:
     )
 
 
-# The shared IRC wrapper changes the diff alignment once more: 24 probes
-# reproduce the rejected unified-diff behavior on the current pair.
-CLOSING_PARENTHESIS_PROBES = closing_parenthesis_probes(24)
+# The shared IRC wrapper and lifetime cleanup change the diff alignment:
+# 25 probes reproduce the rejected unified-diff behavior on the current pair.
+CLOSING_PARENTHESIS_PROBES = closing_parenthesis_probes(25)
 
 # (description, anchor the edit lands before, edit, renderings it moves)
 SHARED_EDITS = (
     (
-        "24 closing-parenthesis probes",
+        "25 closing-parenthesis probes",
         "def publish_verdict(",
         CLOSING_PARENTHESIS_PROBES,
         ("unified-diff hunks",),
