@@ -42,8 +42,12 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
 
 ### Markdown changes
 
-- Author every Markdown edit in the `docs-wip` worktree, never in the primary checkout.
-  Resolve it by branch rather than a hard-coded path: the PR drainer fast-forwards the
+- Choose the lane by task, not by file type. Documentation that belongs to a code
+  change, including any contract, design note or verdict that change needs, is written in
+  that change's own worktree and travels in its pull request, whether or not a test parses
+  it. Author standalone documentation (no accompanying code change) in the `docs-wip`
+  worktree, never in the primary checkout. Resolve it by branch rather than a hard-coded
+  path: the PR drainer fast-forwards the
   primary after every merge and autostashes whatever it finds there, and a restore that
   conflicts wedges post-merge cleanup until a human clears it.
 - Leave a standalone Markdown change committed in that worktree and unpushed. The
@@ -55,8 +59,9 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   the sole exception. Do not push one yourself, do not run a landing the user did not
   explicitly request, and do not open a pull request for it; the subsection below is
   the exception, and it needs an explicit request.
-- Markdown may still travel inside a pull request, and must when a test parses it or an
-  implementation is coupled to it. A plugin command file is held to its bundle version by
+- Markdown travels inside a pull request whenever it belongs to the same issue or change
+  as that pull request's code, even if no test parses it, and always when a test parses
+  it or an implementation is coupled to it. A plugin command file is held to its bundle version by
   `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is compared against
   `Kanban.UI.Keys` by `Spec.UI.Keys`; splitting either from what gates it leaves `master`
   red between the two landings.
