@@ -536,6 +536,33 @@ that a particular comment should not.
   rationale; this remains a host-configuration concern for the Codex
   plugin's own nested call.
 
+#### Optional local IRC reviewer identities
+
+All six bundled PR review coordinators optionally discover `pchat` on `PATH`.
+They probe `pchat agent review-context --repo <resolved owner/name> --json`;
+missing, older, or unconfigured installations leave the reviewer invocation
+unchanged. A configured response supplies the project, request channel, parent
+agent, and optional request ID. The resolved repository is carried explicitly
+in the review payload; a fork's remote or the temporary extraction directory
+never selects the chat project.
+
+For a configured project, `pchat agent run` wraps each independent reviewer
+process. The local chat installation assigns a new permanent numbered reviewer
+account, passes its identity through the child's environment, retains process
+output (and Codex's structured-result file), reports starts and process outcomes,
+and retires the identity when the process exits. Its inner timeout is shorter
+than the coordinator's outer timeout so it can terminate and reap the reviewer
+before recording a timeout. Chat lifecycle messages do not grant approval:
+validation, brand routing, issue/head freshness checks, and canonical publication
+remain owned by this coordinator. The wrapper preserves stdout and the original
+provider arguments, including model/effort and permission policy.
+
+`pchat` and its registry/server are optional user-machine dependencies, not
+managed or installed by Kanban. The local installation owns account provisioning,
+role authority, durable outbox delivery, display colors, and registry/log retention.
+If the wrapper is selected and fails, the review reports its failure through the
+existing coordinator error path rather than retrying with another identity.
+
 ### 2.3 Canonical issue review, rereview, and the solve readiness gate
 
 - **Owning source:** `src/Kanban/Review.hs` and the focused modules behind
@@ -1566,6 +1593,7 @@ reimplement the removal, and `--check` remains read-only.
 
 | Dependency | Mandatory | Why |
 | --- | --- | --- |
+| `pchat` | No | Optional local IRC identities and retained output for background PR reviewers. |
 | `codex`, `claude` | No | Only needed to exercise an AI action (solve, review, revise, repair). |
 | `script` | No | Only needed to poll Claude's usage snapshot (`src/Kanban/Claude.hs`). |
 | `gh`, signed in via `gh auth login` | Yes | The board's GitHub data and every write action depend on it. |
@@ -2908,6 +2936,7 @@ by the same rule and is listed per copy, because that surface is scanned per
 file rather than per definition.
 
 ```text
+project-chat | executable | pchat | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py | external | supported | no
 codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
 claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no

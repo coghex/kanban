@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import contextvars
 import sys
 import tarfile
 import tempfile
@@ -152,6 +153,12 @@ CODEX_REVIEWER = Reviewer("codex", "Codex")
 CLAUDE_REVIEWER = Reviewer("claude", "Claude")
 
 
+# Scoped to one independent reviewer invocation; other commands remain untouched.
+CHAT_REVIEW_COMMAND: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "chat_reviewer_command", default=None
+)
+
+
 def run(
     args: list[str],
     *,
@@ -160,6 +167,12 @@ def run(
     timeout: int = 120,
     ok_codes: tuple[int, ...] = (0,),
 ) -> subprocess.CompletedProcess[str]:
+    chat_command = CHAT_REVIEW_COMMAND.get()
+    if chat_command and args and args[0] in ("codex", "claude"):
+        prefix = list(chat_command)
+        if args[0] == "codex" and "-o" in args:
+            prefix += ["--result-file", args[args.index("-o") + 1]]
+        args = prefix + ["--"] + args
     try:
         proc = subprocess.run(
             args,
@@ -1085,6 +1098,7 @@ def collect_context(
     reviews, excluded_reviews = partition_comments(pr.get("reviews"))
     issues = [issue_context(root, repo, number) for number in issue_numbers]
     context = {
+        "repository": repo,
         "trusted_comment_authors": sorted(TRUSTED_COMMENT_AUTHORS),
         "pull_request": {**pr, "reviews": reviews},
         "excluded_reviews": excluded_reviews,
@@ -1475,6 +1489,45 @@ def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any
     return invoke_claude(reviewer, prompt, cwd)
 
 
+def chat_reviewer_command(context: dict[str, Any], reviewer: Reviewer) -> list[str]:
+    """Optional owner-local chat integration; absent/unconfigured pchat is inert.
+
+    Ask the local identity registry for the exact resolved repository's chat
+    context. Never use the extraction directory or PR author's fork as scope.
+    The wrapper only identifies and records the subprocess; this coordinator
+    still validates and publishes the canonical review verdict.
+    """
+    executable = shutil.which("pchat")
+    repo = context.get("repository")
+    if not executable or not repo:
+        return []
+    try:
+        probe = subprocess.run(
+            [executable, "agent", "review-context", "--repo", repo, "--json"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if probe.returncode:
+            return []  # also supports older pchat installations
+        value = json.loads(probe.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return []
+    project, channel = value.get("project"), value.get("channel")
+    if not isinstance(project, str) or not project or not isinstance(channel, str) or not channel.startswith("#"):
+        raise WorkflowError("pchat returned an invalid reviewer identity context")
+    command = [executable, "agent", "run", "--project", project,
+               "--role", "reviewer", "--brand", reviewer.key, "--channel", channel,
+               "--task", f"PR #{context['pull_request']['number']}",
+               "--timeout", str(max(1, REVIEW_TIMEOUT_SECONDS - 60))]
+    for option, key in (("--parent", "parent"), ("--re", "request")):
+        if value.get(key):
+            if not isinstance(value[key], str):
+                raise WorkflowError("pchat returned an invalid reviewer identity context")
+            command += [option, value[key]]
+    return command
+
+
 def run_reviews(
     reviewers: list[Reviewer],
     context: dict[str, Any],
@@ -1494,7 +1547,11 @@ def run_reviews(
         source = extract()
         try:
             prompt = prepare_review_prompt(context, item, rereview, source)
-            results[item.key] = invoke_reviewer(item, prompt, source)
+            token = CHAT_REVIEW_COMMAND.set(chat_reviewer_command(context, item))
+            try:
+                results[item.key] = invoke_reviewer(item, prompt, source)
+            finally:
+                CHAT_REVIEW_COMMAND.reset(token)
         except Exception as exc:
             raise WorkflowError(f"{item.display_name} review failed: {exc}") from exc
         finally:
