@@ -13,10 +13,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import contextvars
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import tomllib
 import urllib.parse
 from dataclasses import dataclass
@@ -199,6 +203,121 @@ CODEX_REVIEWER = Reviewer("codex", "Codex")
 CLAUDE_REVIEWER = Reviewer("claude", "Claude")
 
 
+# Scoped to one independent reviewer invocation; other commands remain untouched.
+CHAT_REVIEW_COMMAND: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "chat_reviewer_command", default=None
+)
+
+
+# The wrapper may detach its child or die before cleaning it up. Register the
+# reviewer's own process group before allowing exec, so cleanup never depends
+# on wrapper signal forwarding. This inline launcher needs no extracted files.
+_REVIEW_LAUNCHER = """
+import os, pathlib, sys, time
+folder = pathlib.Path(sys.argv[1])
+if os.getpgrp() != os.getpid():
+    os.setsid()
+(folder / 'pending-pid').write_text(str(os.getpid()))
+(folder / 'pending-pid').replace(folder / 'pid')
+deadline = time.monotonic() + 10
+while not (folder / 'go').exists():
+    if (folder / 'stop').exists() or time.monotonic() >= deadline:
+        sys.exit(125)
+    time.sleep(0.01)
+if (folder / 'stop').exists():
+    sys.exit(125)
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def run_chat_reviewer(
+    prefix: list[str], args: list[str], *, cwd: Path,
+    input_text: str | None, timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Own the detached reviewer group until it ends, on every exit path."""
+    # Temporary handlers make coordinator-only SIGTERM unwind through cleanup,
+    # too. A terminal interrupt cannot kill the wrapper before we register its
+    # reviewer: the wrapper runs in a separate session.
+    handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        def interrupt(signum, frame):
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SystemExit(128 + signum)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(sig, interrupt)
+    try:
+        with tempfile.TemporaryDirectory(prefix="kanban-review-lifetime-") as directory:
+            folder = Path(directory)
+            command = prefix + ["--", sys.executable, "-c", _REVIEW_LAUNCHER,
+                                directory, *args]
+            proc = None
+            reviewer_pid = None
+            try:
+                proc = subprocess.Popen(
+                    command, cwd=cwd, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, start_new_session=True,
+                )
+                deadline = time.monotonic() + timeout
+                first = True
+                while True:
+                    if reviewer_pid is None and (folder / "pid").exists():
+                        reviewer_pid = int((folder / "pid").read_text())
+                        (folder / "go").touch()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        out, err = proc.communicate(
+                            input_text if first else None,
+                            timeout=remaining if reviewer_pid is not None else min(0.05, remaining),
+                        )
+                        return subprocess.CompletedProcess(command, proc.returncode, out, err)
+                    except subprocess.TimeoutExpired:
+                        first = False
+            finally:
+                # Repeated interrupts must not cut cleanup short. Signals become
+                # pending and are delivered after cleanup and handler restoration.
+                blocked = signal.pthread_sigmask(
+                    signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+                )
+                try:
+                    (folder / "stop").touch()
+                    if reviewer_pid is None and (folder / "pid").exists():
+                        reviewer_pid = int((folder / "pid").read_text())
+                    if reviewer_pid is not None:
+                        try:
+                            os.killpg(reviewer_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if proc is not None:
+                        # Let pchat reap the child, retain output and retire its
+                        # identity. Even a broken wrapper cannot keep the reviewer
+                        # alive; its group has already been killed independently.
+                        if proc.poll() is None:
+                            try:
+                                os.killpg(proc.pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        try:
+                            proc.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            proc.communicate()
+                finally:
+                    for sig, handler in handlers.items():
+                        signal.signal(sig, handler)
+                    handlers.clear()
+                    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
 def run(
     args: list[str],
     *,
@@ -207,16 +326,26 @@ def run(
     timeout: int = 120,
     ok_codes: tuple[int, ...] = (0,),
 ) -> subprocess.CompletedProcess[str]:
+    chat_command = CHAT_REVIEW_COMMAND.get()
+    wrapped = bool(chat_command and args and args[0] in ("codex", "claude"))
     try:
-        proc = subprocess.run(
-            args,
-            cwd=cwd,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
+        if wrapped:
+            prefix = list(chat_command)
+            if args[0] == "codex" and "-o" in args:
+                prefix += ["--result-file", args[args.index("-o") + 1]]
+            proc = run_chat_reviewer(
+                prefix, args, cwd=cwd, input_text=input_text, timeout=timeout,
+            )
+        else:
+            proc = subprocess.run(
+                args,
+                cwd=cwd,
+                input=input_text,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
     except subprocess.TimeoutExpired as exc:
         raise WorkflowError(f"{' '.join(args[:4])} timed out after {timeout}s") from exc
     except OSError as exc:
@@ -1132,6 +1261,7 @@ def collect_context(
     reviews, excluded_reviews = partition_comments(pr.get("reviews"))
     issues = [issue_context(root, repo, number) for number in issue_numbers]
     context = {
+        "repository": repo,
         "trusted_comment_authors": sorted(TRUSTED_COMMENT_AUTHORS),
         "pull_request": {**pr, "reviews": reviews},
         "excluded_reviews": excluded_reviews,
@@ -1532,6 +1662,45 @@ def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any
     return invoke_claude(reviewer, prompt, cwd)
 
 
+def chat_reviewer_command(context: dict[str, Any], reviewer: Reviewer) -> list[str]:
+    """Optional owner-local chat integration; absent/unconfigured pchat is inert.
+
+    Ask the local identity registry for the exact resolved repository's chat
+    context. Never use the extraction directory or PR author's fork as scope.
+    The wrapper only identifies and records the subprocess; this coordinator
+    still validates and publishes the canonical review verdict.
+    """
+    executable = shutil.which("pchat")
+    repo = context.get("repository")
+    if not executable or not repo:
+        return []
+    try:
+        probe = subprocess.run(
+            [executable, "agent", "review-context", "--repo", repo, "--json"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if probe.returncode:
+            return []  # also supports older pchat installations
+        value = json.loads(probe.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return []
+    project, channel = value.get("project"), value.get("channel")
+    if not isinstance(project, str) or not project or not isinstance(channel, str) or not channel.startswith("#"):
+        raise WorkflowError("pchat returned an invalid reviewer identity context")
+    command = [executable, "agent", "run", "--project", project,
+               "--role", "reviewer", "--brand", reviewer.key, "--channel", channel,
+               "--task", f"PR #{context['pull_request']['number']}",
+               "--timeout", str(max(1, REVIEW_TIMEOUT_SECONDS - 60))]
+    for option, key in (("--parent", "parent"), ("--re", "request")):
+        if value.get(key):
+            if not isinstance(value[key], str):
+                raise WorkflowError("pchat returned an invalid reviewer identity context")
+            command += [option, value[key]]
+    return command
+
+
 def run_reviews(
     reviewers: list[Reviewer],
     context: dict[str, Any],
@@ -1551,7 +1720,11 @@ def run_reviews(
         source = extract()
         try:
             prompt = prepare_review_prompt(context, item, rereview, source)
-            results[item.key] = invoke_reviewer(item, prompt, source)
+            token = CHAT_REVIEW_COMMAND.set(chat_reviewer_command(context, item))
+            try:
+                results[item.key] = invoke_reviewer(item, prompt, source)
+            finally:
+                CHAT_REVIEW_COMMAND.reset(token)
         except Exception as exc:
             raise WorkflowError(f"{item.display_name} review failed: {exc}") from exc
         finally:

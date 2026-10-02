@@ -1672,11 +1672,14 @@ PYTHON_COMMAND_CALL_RE = re.compile(
 
 def discovered_python_commands(content):
     """Every external command a packaged Python asset's own source invokes as
-    the first element of a literal `run`-family argument list. Deliberately does
+    the first element of a literal `run`-family argument list, or resolves with
+    a literal `shutil.which`. Deliberately does
     not match a dynamically-resolved first argument like `sys.executable` (no
     leading string literal there) — that path is python3, already covered via
     the SKILL.md bash surface that invokes this script with `python3 ...`."""
-    return {match.group("name") for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
+    invoked = {match.group("name") for match in PYTHON_COMMAND_CALL_RE.finditer(content)}
+    resolved = set(re.findall(r'shutil\.which\(["\']([^"\']+)["\']\)', content))
+    return invoked | resolved
 
 
 def discovered_commands_for_plugin_file(relative_path, content):
@@ -2060,7 +2063,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # not just via the generic loop above.
         content = (REPO_ROOT / "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_every_claude_plugin_bash_command_is_documented(self):
         executable_tokens = {
@@ -2084,7 +2087,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # Codex copy is pinned above.
         content = (REPO_ROOT / "claude-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_every_grok_plugin_bash_command_is_documented(self):
         executable_rows = {
@@ -2115,21 +2118,21 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # way the Codex and Claude copies are pinned above.
         content = (REPO_ROOT / "grok-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_kimi_review_pr_coordinator_command_invocations_are_documented(self):
         # The Kimi plugin bundles a fourth coordinator copy for the same
         # reason the Grok one does; pin its command surface identically.
         content = (REPO_ROOT / "kimi-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_google_review_pr_coordinator_command_invocations_are_documented(self):
         # The Google plugin bundles a fifth coordinator copy for the same
         # reason the Grok and Kimi ones do; pin its command surface identically.
         content = (REPO_ROOT / "google-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_claude_copilot_review_pr_coordinator_command_invocations_are_documented(self):
         # The Claude-on-Copilot bundle ships a sixth coordinator copy for the
@@ -2137,7 +2140,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
         # surface identically.
         content = (REPO_ROOT / "claude-copilot-plugin/plugins/kanban/scripts/review_pr.py").read_text(encoding="utf-8")
         found = discovered_python_commands(content)
-        self.assertEqual(found, {"gh", "git", "codex", "claude"})
+        self.assertEqual(found, {"gh", "git", "codex", "claude", "pchat"})
 
     def test_every_trusted_issue_spec_helper_is_scanned_and_declared(self):
         # Issue #238's review requirement: the vendored helpers must reach a
