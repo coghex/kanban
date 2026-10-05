@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import drain_prs
@@ -5587,6 +5588,23 @@ class QueueOrderTests(ProcessPrFixture):
             [incident["status"] for incident in self._incidents()], ["resolved"]
         )
         self.assertIsNone(self._read_state()["prs"]["7"]["missing_check_since"])
+
+    def test_polling_reconciliation_keeps_an_incident_when_its_read_fails(self):
+        original = self._record_missing_check_incident(7, "b" * 40)
+        before = Path(original["path"]).read_bytes()
+        self._write_state({"7": self._entry("b" * 40, missing_check_since=self._expired())})
+        state_before = self.state_path.read_bytes()
+        with self._drainer(), mock.patch.object(
+            drain_prs, "get_pr", side_effect=drain_prs.DrainError("unconfirmed PR read")
+        ) as read:
+            state = drain_prs.load_drain_state(self.ctx)
+            drain_prs.reconcile_missing_check_incidents(
+                self.ctx, state, self._gates(), dry_run=False
+            )
+
+        read.assert_called_once_with(self.ctx, 7)
+        self.assertEqual(Path(original["path"]).read_bytes(), before)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
 
     def test_a_new_head_restarts_the_grace_period_and_supersedes_the_incident(self):
         old_head = "a" * 40

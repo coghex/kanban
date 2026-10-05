@@ -2075,5 +2075,464 @@ class SinglePrRealInterruptTests(SinglePrCliFixture):
         self.assertIn("post-merge cleanup", stderr)
 
 
+class SinglePrMissingCheckReconciliationTests(SinglePrCliFixture):
+    """Issue #776: a bounded run retires only its own ended condition."""
+
+    def setUp(self):
+        super().setUp()
+        # In-process fault injection uses the already imported controller;
+        # its roots, as well as subprocess environment, must be fixture-owned.
+        for name, value in [
+            ("RUNTIME_ROOT", self.install_dir / "runtime"),
+            ("LOG_ROOT", self.log_dir),
+            ("NTFY_URL", None),
+        ]:
+            patch = mock.patch.object(drain_prs_service, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def expired_observation(self, head=None):
+        return {
+            "head": head or self.head_sha,
+            "observed_at": time.time() - drain_prs.MISSING_CHECK_GRACE_SECONDS - 60,
+        }
+
+    def seed_state(self, *, observation=None):
+        self.write_state(
+            {
+                "version": drain_prs.STATE_VERSION,
+                "attempt_counter": 19,
+                "active_pr": 7,
+                "prs": {
+                    "42": {
+                        **self.state_entry(self.head_sha),
+                        "missing_check_since": observation or self.expired_observation(),
+                    },
+                    "7": self.state_entry("b" * 40),
+                },
+            }
+        )
+
+    def assert_resolved(self, original):
+        recorded = json.loads(Path(original["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(recorded["status"], "resolved")
+        self.assertTrue(recorded["resolution"])
+        self.assertTrue(recorded["resolved_at"])
+        for key, value in original.items():
+            if key != "status":
+                self.assertEqual(recorded[key], value, key)
+        return recorded
+
+    def record_incident(self, *, number=42, head=None):
+        with mock.patch.dict(
+            os.environ,
+            {
+                **self.fake.environ_overrides(),
+                "KANBAN_DRAINER_INSTALL_DIR": str(self.install_dir),
+            },
+        ), mock.patch.object(drain_prs_service, "NTFY_URL", None):
+            return drain_prs_service.record_missing_check_incident(
+                repo_path=self.main.resolve(),
+                pull_request=number,
+                head=head or self.head_sha,
+                checks=[drain_prs.DEFAULT_REQUIRED_CI_CHECK],
+            )
+
+    def test_an_expired_incident_resolves_after_a_bounded_merge(self):
+        self.seed_state()
+        missing = {"statusCheckRollup": [], "mergeStateStatus": "BLOCKED"}
+        self.script_pr_view(missing)
+        result, proc = self.run_single()
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "checks_missing")
+        original, = self.open_incidents()
+
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(result["merged"])
+        self.assert_resolved(original)
+        self.assertEqual(self.gh_calls("pr", "list"), [])
+        self.assertEqual(self.gh_calls("pr", "view", "7"), [])
+        self.assertEqual(self.label_edits(), [])
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["attempt_counter"], 19)
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(state["prs"]["7"], self.state_entry("b" * 40))
+
+    def test_reported_pending_checks_resolve_and_reset_grace_across_restart(self):
+        self.seed_state()
+        original = self.record_incident()
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        rollup[0] = {**rollup[0], "status": "IN_PROGRESS", "conclusion": None}
+        self.script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BLOCKED"})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, proc.stderr)
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertFalse(result["merged"])
+        self.assert_resolved(original)
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIsNone(state["prs"]["42"]["missing_check_since"])
+
+        # A new subprocess reloads the persisted state, then sees the check
+        # disappear again on the same head. It owes a fresh grace window.
+        self.script_pr_view({"statusCheckRollup": [], "mergeStateStatus": "BLOCKED"})
+        started = time.time()
+        result, proc = self.run_single()
+        self.assertEqual(result["reason"], "checks_pending", proc.stderr)
+        observed = json.loads(self.state_path.read_text())["prs"]["42"]["missing_check_since"]
+        self.assertEqual(observed["head"], self.head_sha)
+        self.assertGreaterEqual(observed["observed_at"], started)
+        self.assertEqual(self.open_incidents(), [])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_reported_failed_checks_resolve_without_merging(self):
+        self.seed_state()
+        original = self.record_incident()
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        rollup[0] = {**rollup[0], "conclusion": "FAILURE"}
+        self.script_pr_view({"statusCheckRollup": rollup})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, proc.stderr)
+        self.assertEqual(result["reason"], "checks_failed")
+        self.assertFalse(result["merged"])
+        self.assert_resolved(original)
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        # With no rerunnable Actions attempt, process_pr raises DrainError
+        # after classifying checks_failed; reconciliation still completes.
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+
+    def test_ineligible_targets_resolve_their_incident(self):
+        cases = [
+            ({"state": "MERGED"}, "not_eligible", "no longer open"),
+            ({"state": "CLOSED"}, "not_eligible", "no longer open"),
+            ({"labels": []}, "not_approved", "no longer approved"),
+            ({"labels": [{"name": drain_prs.CHANGES_LABEL}]}, "changes_requested", "no longer approved"),
+        ]
+        for fields, reason, note in cases:
+            with self.subTest(fields=fields):
+                self.setUp()
+                self.seed_state()
+                original = self.record_incident()
+                self.script_pr_view({**fields, "statusCheckRollup": []})
+
+                result, proc = self.run_single()
+
+                self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, proc.stderr)
+                self.assertEqual(result["reason"], reason)
+                self.assertIn(note, self.assert_resolved(original)["resolution"])
+                self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_a_new_head_resolves_the_old_incident_and_starts_its_own_grace(self):
+        self.seed_state()
+        original = self.record_incident()
+        new_head = "c" * 40
+        state = json.loads(self.state_path.read_text())
+        state["prs"]["42"]["approved_head"] = new_head
+        self.write_state(state)
+        self.script_pr_view({"headRefOid": new_head, "statusCheckRollup": [], "mergeStateStatus": "BLOCKED"})
+        started = time.time()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_pending", proc.stderr)
+        self.assertIn("head moved", self.assert_resolved(original)["resolution"])
+        observed = json.loads(self.state_path.read_text())["prs"]["42"]["missing_check_since"]
+        self.assertEqual(observed["head"], new_head)
+        self.assertGreaterEqual(observed["observed_at"], started)
+
+    def test_a_still_missing_check_keeps_the_incident_open(self):
+        self.seed_state()
+        original = self.record_incident()
+        # Only CI is missing, matching the incident's original payload.
+        rollup = self.base_pr_json()["statusCheckRollup"][1:]
+        self.script_pr_view({"statusCheckRollup": rollup, "mergeStateStatus": "BLOCKED"})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_missing", proc.stderr)
+        self.assertEqual([i["incident_id"] for i in self.open_incidents()], [original["incident_id"]])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_unconfirmed_reads_leave_the_incident_open(self):
+        self.seed_state()
+        original = self.record_incident()
+        before = Path(original["path"]).read_bytes()
+        self.fake.script("gh", ["pr", "view", "42"], stderr="cannot read PR", exit_code=1)
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR)
+        self.assertFalse(result["merged"])
+        self.assertEqual(Path(original["path"]).read_bytes(), before)
+        self.assertEqual(self.gh_calls("pr", "list"), [])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
+    def test_other_prs_kinds_and_repositories_are_untouched(self):
+        self.seed_state()
+        original = self.record_incident()
+        other = self.record_incident(number=7, head="b" * 40)
+        other_path = Path(other["path"])
+        foreign_path = self.incident_dir / "incident-20260718T000000Z-1-pr42.json"
+        foreign_path.write_text(json.dumps({**other, "repository": "acme/other", "pull_request": 42}))
+        conflict_path = self.incident_dir / "incident-20260718T000000Z-2-pr42.json"
+        conflict_path.write_text(json.dumps({**original, "kind": drain_prs_service.CONFLICT_INCIDENT_KIND}))
+        before = {p: p.read_bytes() for p in [other_path, foreign_path, conflict_path]}
+        self.script_pr_view({"labels": []})
+
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "not_approved", proc.stderr)
+        self.assert_resolved(original)
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(self.gh_calls("pr", "view", "7"), [])
+        self.assertEqual(self.gh_calls("pr", "list"), [])
+        self.assertEqual(self.label_edits(), [])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state["prs"]["7"], self.state_entry("b" * 40))
+        self.assertEqual(state["attempt_counter"], 19)
+        self.assertEqual(state["active_pr"], 7)
+
+    def test_a_dry_run_resolves_nothing_and_changes_no_state(self):
+        self.seed_state()
+        original = self.record_incident()
+        other = self.record_incident(number=7)
+        before = snapshot_tree(self.install_dir)
+        state_before = self.state_path.read_bytes()
+        self.script_pr_view({"labels": []})
+
+        result, proc = self.run_single("--dry-run")
+
+        self.assertEqual(result["reason"], "not_approved", proc.stderr)
+        self.assertEqual(snapshot_tree(self.install_dir), before)
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+        self.assertEqual(len(self.open_incidents()), 2)
+
+
+    # Reuse the existing real main() harness to inject failures at the exact
+    # boundary, while still exercising its one-document result contract.
+    run_main = SinglePrStartupAndInterruptTests.run_main
+
+    def test_an_incident_that_ends_during_processing_resolves_after_merge(self):
+        self.seed_state()
+        original = self.record_incident()
+        # Reconciliation first sees the unresolved condition; the queue's
+        # safeguards and merge reads see the checks report moments later.
+        self.script_pr_view({"statusCheckRollup": []}, {})
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(result["merged"])
+        self.assert_resolved(original)
+
+    def test_reconciliation_failure_after_merge_keeps_the_merge_in_one_json(self):
+        self.seed_state()
+        original = self.record_incident()
+        self.script_pr_view({"statusCheckRollup": []}, {})
+        self.script_merge_and_cleanup()
+        reconcile = drain_prs.reconcile_missing_check_incidents
+
+        def fail_after_merge(*args, **kwargs):
+            if self.gh_calls("pr", "merge", "42"):
+                raise OSError("injected incident write failure")
+            return reconcile(*args, **kwargs)
+
+        with mock.patch.object(drain_prs, "reconcile_missing_check_incidents", side_effect=fail_after_merge):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(Path(original["path"]).read_text())["status"], "open")
+
+    def test_state_write_failure_after_merge_keeps_the_merge_in_one_json(self):
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+        save = drain_prs.save_drain_state
+
+        def fail_after_merge(*args, **kwargs):
+            if self.gh_calls("pr", "merge", "42"):
+                raise OSError("injected state write failure")
+            return save(*args, **kwargs)
+
+        with mock.patch.object(drain_prs, "save_drain_state", side_effect=fail_after_merge):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertTrue(result["merged"])
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+
+    def test_non_io_reconciliation_failure_after_merge_keeps_the_json_result(self):
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+        reconcile = drain_prs.reconcile_missing_check_incidents
+        log = drain_prs.log
+
+        def fail_after_merge(*args, **kwargs):
+            if self.gh_calls("pr", "merge", "42"):
+                raise TypeError("injected bookkeeping error")
+            return reconcile(*args, **kwargs)
+
+        def fail_diagnostic_write(message):
+            if "missing-check reconciliation failed" in message:
+                raise OSError("the diagnostic log is unwritable too")
+            return log(message)
+
+        with mock.patch.object(drain_prs, "reconcile_missing_check_incidents", side_effect=fail_after_merge), mock.patch.object(drain_prs, "log", side_effect=fail_diagnostic_write):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+
+    def test_non_io_state_write_failure_after_merge_keeps_the_json_result(self):
+        self.script_pr_view()
+        self.script_merge_and_cleanup()
+        save = drain_prs.save_drain_state
+
+        def fail_after_merge(*args, **kwargs):
+            if self.gh_calls("pr", "merge", "42"):
+                raise TypeError("injected state serialization error")
+            return save(*args, **kwargs)
+
+        with mock.patch.object(drain_prs, "save_drain_state", side_effect=fail_after_merge):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertTrue(result["merged"])
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+
+    def test_post_merge_audit_failure_resolves_an_independently_confirmed_condition(self):
+        self.seed_state()
+        original = self.record_incident()
+        self.script_pr_view({"statusCheckRollup": []}, {}, {}, {}, {"labels": []})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR, proc.stderr)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "post_merge_audit_failed")
+        self.assert_resolved(original)
+
+    def test_post_merge_audit_read_failure_keeps_an_unconfirmed_incident_open(self):
+        self.seed_state()
+        original = self.record_incident()
+        before = Path(original["path"]).read_bytes()
+        self.script_pr_view({"statusCheckRollup": []}, {}, {}, {})
+        # The audit and subsequent reconciliation cannot obtain a confirmed
+        # reading. The successful merge call alone must not resolve it.
+        self.fake.script("gh", ["pr", "view", "42"], stderr="audit unreadable", exit_code=1)
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR, proc.stderr)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "post_merge_audit_failed")
+        self.assertEqual(Path(original["path"]).read_bytes(), before)
+        self.assertEqual(len(proc.stdout.strip().splitlines()), 1)
+
+    def test_post_merge_audit_violation_keeps_a_still_missing_incident_open(self):
+        self.seed_state()
+        original = self.record_incident()
+        before = Path(original["path"]).read_bytes()
+        self.script_pr_view({"statusCheckRollup": []}, {}, {}, {}, {"statusCheckRollup": []})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR, proc.stderr)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "post_merge_audit_failed")
+        self.assertEqual(Path(original["path"]).read_bytes(), before)
+        self.assertEqual(len(proc.stdout.strip().splitlines()), 1)
+
+    def test_unexpected_cleanup_bookkeeping_failure_keeps_the_landed_merge(self):
+        self.seed_state()
+        original = self.record_incident()
+        self.script_pr_view({"statusCheckRollup": []}, {})
+        self.fake.script("gh", ["pr", "merge", "42"], stdout="")
+        with mock.patch.object(drain_prs, "plan_cleanup", side_effect=TypeError("injected cleanup bookkeeping failure")):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+        self.assert_resolved(original)
+
+    def test_observation_is_durable_before_incident_resolution(self):
+        self.seed_state()
+        original = self.record_incident()
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        rollup[0] = {**rollup[0], "status": "IN_PROGRESS", "conclusion": None}
+        # The first reconciliation still sees the missing check. process_pr
+        # then clears the observation in memory before its pending return;
+        # the second reconciliation must persist that clear before resolving.
+        self.script_pr_view({"statusCheckRollup": []}, {"statusCheckRollup": rollup})
+        resolve = drain_prs_service.resolve_missing_check_incident
+
+        def check_persisted_before_resolution(*args, **kwargs):
+            state = json.loads(self.state_path.read_text())
+            self.assertIsNone(state["prs"]["42"]["missing_check_since"])
+            return resolve(*args, **kwargs)
+
+        with mock.patch.object(drain_prs_service, "resolve_missing_check_incident", side_effect=check_persisted_before_resolution):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_NO_ACTION)
+        self.assert_resolved(original)
+
+    def test_failed_observation_write_does_not_resolve_the_incident(self):
+        self.seed_state()
+        original = self.record_incident()
+        before = Path(original["path"]).read_bytes()
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        rollup[0] = {**rollup[0], "status": "IN_PROGRESS", "conclusion": None}
+        self.script_pr_view({"statusCheckRollup": rollup})
+
+        with mock.patch.object(drain_prs, "save_drain_state", side_effect=OSError("state is unwritable")):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertFalse(result["merged"])
+        self.assertEqual(Path(original["path"]).read_bytes(), before)
+
+    def test_final_save_failure_after_resolution_keeps_the_grace_reset_durable(self):
+        self.seed_state()
+        original = self.record_incident()
+        rollup = self.base_pr_json()["statusCheckRollup"]
+        rollup[0] = {**rollup[0], "status": "IN_PROGRESS", "conclusion": None}
+        self.script_pr_view({"statusCheckRollup": []}, {"statusCheckRollup": rollup})
+        save = drain_prs.save_drain_state
+
+        def fail_after_resolution(*args, **kwargs):
+            if json.loads(Path(original["path"]).read_text())["status"] == "resolved":
+                raise OSError("injected final state-save failure")
+            return save(*args, **kwargs)
+
+        with mock.patch.object(drain_prs, "save_drain_state", side_effect=fail_after_resolution):
+            result, code = self.run_main("--pr", "42")
+
+        self.assertEqual(code, drain_prs.EXIT_ERROR)
+        self.assertFalse(result["merged"])
+        self.assert_resolved(original)
+        reloaded = json.loads(self.state_path.read_text())
+        self.assertIsNone(reloaded["prs"]["42"]["missing_check_since"])
+        self.assertEqual(len(self.raw_stdout.strip().splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
