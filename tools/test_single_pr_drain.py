@@ -1204,6 +1204,33 @@ class SinglePrStaleApprovalTests(SinglePrCliFixture):
         self.assertEqual(result["reason"], "approved_head_changed")
         self.assert_isolated()
 
+    def test_a_moved_behind_head_is_refused_before_any_branch_update(self):
+        self.script_pr_view({}, {
+            "headRefOid": "e" * 40,
+            "mergeStateStatus": "BEHIND",
+        })
+        self.script_review_comments([self.approval_comment()])
+        # If the first-read guard is missing, BEHIND acts before the final
+        # re-read. Record and refuse that update without waiting for it to land.
+        self.fake.script(
+            "gh", ["api", "-X", "PUT", "repos/acme/widgets/pulls/42/update-branch"],
+            exit_code=1, stderr="fixture refuses update of the unreviewed head",
+        )
+
+        result, proc = self.run_single()
+
+        updates = [call for call in self.gh_calls("api") if any(
+            arg.endswith("/update-branch") for arg in call["args"]
+        )]
+        self.assertEqual(updates, [])
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+        self.assertEqual(list(self.incident_dir.glob("incident-*.json")), [])
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "approved_head_changed")
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assert_isolated()
+
     def assert_unsettled_record_refused(self, key, record):
         self.before_state["prs"]["42"][key] = record
         self.write_state(self.before_state)
