@@ -4862,6 +4862,38 @@ class QueueOrderTests(ProcessPrFixture):
             if args[:1] == ["api"] and any("update-branch" in arg for arg in args)
         ]
 
+    def test_a_polling_candidate_that_moves_at_either_processing_read_is_refused(self):
+        for boundary in ("first", "final"):
+            with self.subTest(boundary=boundary):
+                if boundary == "final":
+                    self.setUp()
+                approved = self._base_pr_json()
+                moved = {**approved, "headRefOid": "e" * 40}
+                # Recovery and queue selection still see the approved head.
+                snapshots = [approved, moved] if boundary == "first" else [
+                    approved, approved, moved,
+                ]
+                self._script_pr(42, *snapshots)
+                self._script_pr_list([self._queued(42, self.head_sha)])
+                self._write_state({"42": self._entry(self.head_sha)})
+                report = drain_prs.new_single_pr_report(42)
+                process = drain_prs.process_pr
+
+                def observe(*args, **kwargs):
+                    try:
+                        return process(*args, **kwargs)
+                    finally:
+                        report.update(kwargs["report"])
+
+                with mock.patch.object(drain_prs, "process_pr", side_effect=observe):
+                    self._run_loop()
+
+                self.assertEqual(report["reason"], "approved_head_changed")
+                self.assertFalse(report["merged"])
+                self.assertEqual(self._advancing_gh_calls(), [])
+                self.assertEqual(self._read_state()["prs"]["42"]["approved_head"],
+                                 self.head_sha)
+
     def test_the_lowest_number_goes_first_whatever_last_attempt_says(self):
         # Fair rotation would have taken #42: it was attempted least recently,
         # and it is the one that would merge. Lowest-number-first stops at #7.
