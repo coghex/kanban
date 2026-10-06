@@ -601,7 +601,7 @@ graphqlQuery scope withSubIssues =
         "            totalCount",
         "            nodes {",
         "              __typename",
-        "              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { slug } } }",
+        "              ... on CheckRun { name status conclusion startedAt completedAt checkSuite { app { slug } workflowRun { runNumber event workflow { id } } } }",
         "              ... on StatusContext { context state createdAt creator { login } }",
         "            }",
         "          }",

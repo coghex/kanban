@@ -45,6 +45,7 @@ import Spec.Support.Json
     githubRerunResponse,
     githubResponse,
     graphqlErrorsOnly,
+    inWorkflowRun,
     issueNodeJson,
     issueNodeJsonInState,
     namelessCheckRunJson,
@@ -52,12 +53,14 @@ import Spec.Support.Json
     pullRequestNodeJsonInState,
     queuedCheckRunJson,
     rollupJson,
+    runningCheckRunJson,
     statusContextJson,
     subIssueConnectionJson,
     subIssueNodeJson,
     subIssueSummaryJson,
     subIssuesJson,
-    undatedCheckRunJson
+    undatedCheckRunJson,
+    withWorkflowRunJson
   )
 import System.IO.Error
   ( doesNotExistErrorType,
@@ -217,6 +220,138 @@ spec = do
         Left message -> expectationFailure message
         Right ([], [pullRequest]) -> pullRequest.pullRequestChecks `shouldBe` ChecksPassed 1
         Right values -> expectationFailure ("unexpected decoded values: " <> show values)
+
+    -- #767: a workflow run a newer run of the same workflow and event
+    -- replaced on the head is not current, even for checks no name in the
+    -- newer run matches. Every case is decoded in both payload orders, since
+    -- which run is newer comes from the run number, never from position.
+    describe "superseded workflow runs" $ do
+      let ci = inWorkflowRun "W_ci" "pull_request"
+          checksOf nodes = case decodeGitHubItems (LazyByteString.pack (githubChecksResponse (length nodes) nodes)) of
+            Left message -> Left message
+            Right ([], [pullRequest]) -> Right (pullRequest.pullRequestChecks, pullRequest.pullRequestDataGaps)
+            Right values -> Left ("unexpected decoded values: " <> show values)
+          inBothOrders nodes expected = do
+            checksOf nodes `shouldBe` Right (expected, [])
+            checksOf (reverse nodes) `shouldBe` Right (expected, [])
+          matrixPlaceholder = "group/${{ matrix.group }}"
+
+      it "drops every check of a replaced run, including a name the newer run never reported" $
+        inBothOrders
+          [ ci 51 (checkRunJson "plan" "CANCELLED" "2026-09-30T07:11:31Z"),
+            ci 51 (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:32Z"),
+            ci 51 (checkRunJson matrixPlaceholder "CANCELLED" "2026-09-30T07:11:33Z"),
+            ci 52 (checkRunJson "plan" "SUCCESS" "2026-09-30T07:11:37Z"),
+            ci 52 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:38Z"),
+            ci 52 (checkRunJson "group/check.static" "SUCCESS" "2026-09-30T07:11:39Z"),
+            ci 52 (checkRunJson "group/test.workflow" "SUCCESS" "2026-09-30T07:11:39Z"),
+            ci 52 (checkRunJson "group/test.package" "SUCCESS" "2026-09-30T07:11:39Z")
+          ]
+          (ChecksPassed 5)
+
+      it "keeps a lone cancelled run red" $
+        inBothOrders
+          [ ci 51 (checkRunJson "plan" "SUCCESS" "2026-09-30T07:11:31Z"),
+            ci 51 (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:32Z")
+          ]
+          (ChecksFailed 1 2 [CheckDetail "build-test" CheckFailed])
+
+      it "never hides a failure in the newest run behind a success in an older one" $
+        inBothOrders
+          [ ci 51 (checkRunJson "plan" "SUCCESS" "2026-09-30T07:11:31Z"),
+            ci 51 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:32Z"),
+            ci 52 (checkRunJson "plan" "SUCCESS" "2026-09-30T07:11:37Z"),
+            ci 52 (checkRunJson "build-test" "FAILURE" "2026-09-30T07:11:38Z")
+          ]
+          (ChecksFailed 1 2 [CheckDetail "build-test" CheckFailed])
+
+      it "reads a newest run still in progress as pending and lists nothing from the run it replaced" $
+        inBothOrders
+          [ ci 51 (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:31Z"),
+            ci 51 (checkRunJson matrixPlaceholder "CANCELLED" "2026-09-30T07:11:32Z"),
+            ci 52 (runningCheckRunJson "build-test" "2026-09-30T07:11:38Z")
+          ]
+          (ChecksPending 0 1 [CheckDetail "build-test" CheckPending])
+
+      it "lets a failure in another retained run outrank the newest run's pending check" $
+        inBothOrders
+          [ ci 51 (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:31Z"),
+            ci 52 (runningCheckRunJson "build-test" "2026-09-30T07:11:38Z"),
+            inWorkflowRun "W_lint" "pull_request" 9 (checkRunJson "lint" "FAILURE" "2026-09-30T07:11:35Z")
+          ]
+          (ChecksFailed 0 2 [CheckDetail "build-test" CheckPending, CheckDetail "lint" CheckFailed])
+
+      it "keeps a same-named check from a different event, even when that run is older" $
+        inBothOrders
+          [ inWorkflowRun "W_ci" "push" 51 (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:31Z"),
+            ci 52 (checkRunJson "plan" "SUCCESS" "2026-09-30T07:11:37Z"),
+            ci 52 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:38Z")
+          ]
+          (ChecksFailed 2 3 [CheckDetail "build-test" CheckFailed])
+
+      it "keeps a same-named check from a different workflow, even when it is older" $
+        inBothOrders
+          [ inWorkflowRun "W_lint" "pull_request" 3 (checkRunJson "build" "FAILURE" "2026-09-30T07:11:31Z"),
+            inWorkflowRun "W_ci" "pull_request" 52 (checkRunJson "build" "SUCCESS" "2026-09-30T07:11:38Z")
+          ]
+          (ChecksFailed 1 2 [CheckDetail "build" CheckFailed])
+
+      it "still lets a queued rerun with no timestamps supersede the failure it replaces within one run" $
+        inBothOrders
+          [ ci 51 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:31Z"),
+            ci 52 (checkRunJson "build-test" "FAILURE" "2026-09-30T07:11:38Z"),
+            ci 52 (queuedCheckRunJson "build-test")
+          ]
+          (ChecksPending 0 1 [CheckDetail "build-test" CheckPending])
+
+      it "does not let a check with no workflow run erase one that has a run" $
+        inBothOrders
+          [ ci 52 (checkRunJson "build-test" "FAILURE" "2026-09-30T07:11:38Z"),
+            checkRunJson "build-test" "SUCCESS" "2026-09-30T07:20:00Z"
+          ]
+          (ChecksFailed 1 2 [CheckDetail "build-test" CheckFailed])
+
+      -- An absent or null workflow run is how every other app's check run
+      -- looks, and both keep the key-and-recency dedup they always had.
+      it "deduplicates check runs with an absent or null workflow run by key and recency as before" $ do
+        inBothOrders
+          [ withWorkflowRunJson "null" (checkRunJson "build-test" "FAILURE" "2026-09-30T07:11:31Z"),
+            checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:38Z"
+          ]
+          (ChecksPassed 1)
+        inBothOrders
+          [ checkRunJson "build-test" "FAILURE" "2026-09-30T07:11:38Z",
+            withWorkflowRunJson "null" (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:31Z")
+          ]
+          (ChecksFailed 0 1 [CheckDetail "build-test" CheckFailed])
+
+      -- A present workflow run the decoder cannot identify must not quietly
+      -- take the legacy path, and must not be discarded as superseded before
+      -- anyone noticed it was unreadable.
+      it "fails a present but malformed workflow run closed as undecodable" $
+        for_
+          [ "{\"event\":\"pull_request\",\"workflow\":{\"id\":\"W_ci\"}}",
+            "{\"runNumber\":\"51\",\"event\":\"pull_request\",\"workflow\":{\"id\":\"W_ci\"}}",
+            "{\"runNumber\":51,\"workflow\":{\"id\":\"W_ci\"}}",
+            "{\"runNumber\":51,\"event\":\"pull_request\"}",
+            "{\"runNumber\":51,\"event\":\"pull_request\",\"workflow\":{}}",
+            "\"W_ci\""
+          ]
+          $ \malformed ->
+            for_
+              [ [ withWorkflowRunJson malformed (checkRunJson "build-test" "CANCELLED" "2026-09-30T07:11:31Z"),
+                  ci 52 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:38Z")
+                ],
+                [withWorkflowRunJson malformed (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:31Z")]
+              ]
+              $ \nodes -> checksOf nodes `shouldBe` Right (ChecksUnknown, [ChecksUndecodable])
+
+      it "fails a malformed context closed even when its run was superseded" $
+        checksOf
+          [ "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"CANCELLED\",\"startedAt\":\"2026-09-30T07:11:31Z\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"},\"workflowRun\":{\"runNumber\":51,\"event\":\"pull_request\",\"workflow\":{\"id\":\"W_ci\"}}}}",
+            ci 52 (checkRunJson "build-test" "SUCCESS" "2026-09-30T07:11:38Z")
+          ]
+          `shouldBe` Right (ChecksUnknown, [ChecksUndecodable])
 
     it "keeps a rollup past the context cap unknown rather than retaining the partial nodes it saw" $ do
       case decodeGitHubItems (LazyByteString.pack githubCappedChecksResponse) of
@@ -785,6 +920,9 @@ spec = do
       query `shouldSatisfy` isInfixOf "repository { nameWithOwner }"
       query `shouldSatisfy` isInfixOf "subIssuesSummary { total completed }"
       query `shouldSatisfy` isInfixOf "nameWithOwner\n    issues("
+      -- #767's workflow-run identity rides the same bounded rollup selection.
+      query `shouldSatisfy` isInfixOf "contexts(first: 100)"
+      query `shouldSatisfy` isInfixOf "checkSuite { app { slug } workflowRun { runNumber event workflow { id } } }"
 
     -- A field the schema does not have is rejected at validation, so the only
     -- way to keep refreshing such a deployment is to stop asking for it.
