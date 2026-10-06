@@ -71,11 +71,30 @@ data GitHubPage = GitHubPage
 -- reported so the details overlay can list it.
 data CheckContext = CheckContext
   { checkContextKey :: Text,
+    -- | The GitHub Actions workflow run a check run belongs to, when GitHub
+    -- reported one. A status context, another app's check run, and a check
+    -- run whose suite carries no workflow run all have none, and keep the
+    -- key-and-recency deduplication alone.
+    checkContextRun :: Maybe WorkflowRunRef,
     checkContextName :: Text,
     checkContextRecency :: CheckRecency,
     checkContextState :: CheckState
   }
   deriving stock (Eq, Show)
+
+-- | The identity of the workflow run a check run belongs to (§13). Two runs
+-- supersede one another only when they are runs of the same workflow
+-- triggered by the same event, and the higher run number is the newer: GitHub
+-- numbers one workflow's runs in strictly increasing order of creation, across
+-- every event, so the number also identifies the run within its workflow.
+data WorkflowRunRef = WorkflowRunRef
+  { -- | GitHub's stable node id for the workflow, not its display name, which
+    -- a rename would change between two runs on the same head.
+    workflowRunWorkflow :: Text,
+    workflowRunEvent :: Text,
+    workflowRunNumber :: Int
+  }
+  deriving stock (Eq, Ord, Show)
 
 -- | Where a rollup context ranks among the others sharing its dedup key, from
 -- oldest to newest. A missing timestamp gets a rank of its own rather than the
@@ -401,10 +420,11 @@ parseCheckContext = withObject "status check context" $ \context -> do
       conclusion <- context .:? "conclusion"
       startedAt <- optionalTimestamp <$> context .:? "startedAt"
       completedAt <- optionalTimestamp <$> context .:? "completedAt"
-      app <- parseCheckRunApp context
+      (app, run) <- parseCheckRunSuite context
       pure
         CheckContext
           { checkContextKey = "check:" <> app <> ":" <> name,
+            checkContextRun = run,
             checkContextName = name,
             -- A run reporting only @completedAt@ has still run, so that
             -- timestamp stays its effective one; only a run with neither is
@@ -420,6 +440,7 @@ parseCheckContext = withObject "status check context" $ \context -> do
       pure
         CheckContext
           { checkContextKey = "status:" <> creator <> ":" <> name,
+            checkContextRun = Nothing,
             checkContextName = name,
             checkContextRecency = maybe RecencyUndated RecencyAt createdAt,
             checkContextState = classifyStatusContext state
@@ -433,18 +454,28 @@ optionalTimestamp :: Maybe Text -> Maybe Text
 optionalTimestamp (Just timestamp) | not (Text.null timestamp) = Just timestamp
 optionalTimestamp _ = Nothing
 
-parseCheckRunApp :: Object -> Parser Text
-parseCheckRunApp context = do
+-- | A check run's app slug and, when its suite belongs to a GitHub Actions
+-- workflow run, that run's identity. An absent or null @workflowRun@ is the
+-- ordinary answer for every other app and takes the legacy path; a present one
+-- missing or mistyping a field its identity needs fails the context, and with
+-- it the rollup, closed (§13), rather than quietly taking that path instead.
+parseCheckRunSuite :: Object -> Parser (Text, Maybe WorkflowRunRef)
+parseCheckRunSuite context = do
   suite <- context .:? "checkSuite"
   case suite of
-    Nothing -> pure "unknown"
+    Nothing -> pure ("unknown", Nothing)
     Just value -> withObject "check suite" parseSuite value
   where
     parseSuite suite = do
       app <- suite .:? "app"
-      case app of
+      slug <- case app of
         Nothing -> pure "unknown"
         Just value -> withObject "check app" (\object -> object .:? "slug" .!= "unknown") value
+      run <- suite .:? "workflowRun"
+      (,) slug <$> traverse (withObject "workflow run" parseRun) run
+    parseRun run = do
+      workflow <- withObject "workflow" (.: "id") =<< run .: "workflow"
+      WorkflowRunRef workflow <$> run .: "event" <*> run .: "runNumber"
 
 parseStatusCreator :: Object -> Parser Text
 parseStatusCreator context = do
@@ -469,6 +500,15 @@ classifyStatusContext _ = CheckFailed
 -- the deduplicated checks that did not pass so the details overlay can name
 -- them. Detail comes from exactly the same @latest@ selection as the counts,
 -- so a superseded failure can never be listed beside a passing aggregate.
+--
+-- A check run from a workflow run that a newer run of the same workflow and
+-- event replaced on this head is dropped first, whatever its name: a run
+-- cancelled before its jobs reported under their final names leaves checks no
+-- name-based dedup can match (#767). Only runs that have a context in this
+-- rollup can supersede anything. The rest are then deduplicated by key within
+-- their own run, and the contexts with no workflow run among themselves, so a
+-- job name shared by two retained runs, or by a run and a check with no run,
+-- is never collapsed into one.
 summarizeChecks :: [CheckContext] -> CheckSummary
 summarizeChecks [] = ChecksNone
 summarizeChecks contexts
@@ -476,7 +516,16 @@ summarizeChecks contexts
   | any ((== CheckPending) . (.checkContextState)) latest = ChecksPending passed total outstanding
   | otherwise = ChecksPassed total
   where
-    latest = Map.elems (Map.fromListWith latestContext [(context.checkContextKey, context) | context <- contexts])
+    newestRuns =
+      Map.fromListWith
+        max
+        [ ((run.workflowRunWorkflow, run.workflowRunEvent), run.workflowRunNumber)
+          | Just run <- map (.checkContextRun) contexts
+        ]
+    current context = case context.checkContextRun of
+      Nothing -> True
+      Just run -> Map.lookup (run.workflowRunWorkflow, run.workflowRunEvent) newestRuns == Just run.workflowRunNumber
+    latest = Map.elems (Map.fromListWith latestContext [((context.checkContextRun, context.checkContextKey), context) | context <- contexts, current context])
     total = length latest
     passed = length (filter ((== CheckPassed) . (.checkContextState)) latest)
     outstanding =

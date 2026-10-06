@@ -30,6 +30,8 @@ module Spec.Support.Json
     undatedCheckRunJson,
     statusContextJson,
     runningCheckRunJson,
+    inWorkflowRun,
+    withWorkflowRunJson,
     versionTwoCacheFile,
     versionThreeCacheFile,
     versionFourCacheFile,
@@ -461,6 +463,36 @@ runningCheckRunJson name startedAt =
     <> "\",\"status\":\"IN_PROGRESS\",\"conclusion\":null,\"startedAt\":\""
     <> startedAt
     <> "\",\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}}"
+
+-- | Place a check-run fixture in a GitHub Actions workflow run, as GitHub
+-- reports the run on the check run's suite: the workflow's node id, the event
+-- that triggered the run, and its run number.
+inWorkflowRun :: String -> String -> Int -> String -> String
+inWorkflowRun workflow event runNumber =
+  withWorkflowRunJson
+    ( "{\"runNumber\":"
+        <> show runNumber
+        <> ",\"event\":\""
+        <> event
+        <> "\",\"workflow\":{\"id\":\""
+        <> workflow
+        <> "\"}}"
+    )
+
+-- | Give a check-run fixture's suite a raw @workflowRun@ value, so a test can
+-- hand the decoder a null or malformed one as easily as a well-formed one.
+-- Every check-run fixture here reports its suite one way; one that does not
+-- is a broken fixture, and says so rather than silently keeping no run.
+withWorkflowRunJson :: String -> String -> String
+withWorkflowRunJson workflowRun checkRun =
+  case Data.Text.breakOn suite (Data.Text.pack checkRun) of
+    (before, rest)
+      | not (Data.Text.null rest) ->
+          Data.Text.unpack (before <> suitePrefix <> ",\"workflowRun\":" <> Data.Text.pack workflowRun <> Data.Text.drop (Data.Text.length suitePrefix) rest)
+    _ -> error ("check-run fixture reports no github-actions suite: " <> checkRun)
+  where
+    suite = Data.Text.pack "\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}}"
+    suitePrefix = Data.Text.pack "\"checkSuite\":{\"app\":{\"slug\":\"github-actions\"}"
 
 -- | A cache file exactly as version 2 wrote one: the current envelope shape,
 -- but with a check summary carrying only its two aggregate counts. Everything
