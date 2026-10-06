@@ -1231,8 +1231,9 @@ reimplement the removal, and `--check` remains read-only.
   stale-head rereview no loaded provider can run, described above. A
   missing-check incident says a healthy drainer skipped one pull request
   because a required check reported nothing for its current head for longer
-  than the drainer's ten-minute grace period, so it stopped holding the queue
-  (issue #758); it carries that pull-request number, the head, and the missing
+  than the drainer's ten-minute grace period, which runs only once no check
+  run on that head is still in flight (issue #765), so it stopped holding the
+  queue (issue #758); it carries that pull-request number, the head, and the missing
   checks, is unique per open (repository, pull request), changes no label, and
   resolves itself once every required check has reported for that head or the
   pull request is closed, merged, no longer approved, or on a new head. Only

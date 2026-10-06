@@ -2517,6 +2517,59 @@ class SinglePrMissingCheckReconciliationTests(SinglePrCliFixture):
         self.assertEqual(self.open_incidents(), [])
         self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
 
+    def test_running_sibling_work_holds_an_absent_aggregate_check_across_restart(self):
+        # Issue #765: build-test is created only once the jobs it needs finish,
+        # so an observation older than the grace period still waits while
+        # one of them runs, and a later run measures from its completion.
+        self.seed_state()
+        review = {
+            "__typename": "CheckRun",
+            **self.base_pr_json()["statusCheckRollup"][1],
+        }
+
+        def sibling(status, completed_at):
+            return {
+                "__typename": "CheckRun",
+                "name": "haskell",
+                "status": status,
+                "conclusion": "SUCCESS" if status == "COMPLETED" else "",
+                "startedAt": "2026-07-18T00:00:00Z",
+                "completedAt": completed_at,
+            }
+
+        self.script_pr_view(
+            {
+                "statusCheckRollup": [review, sibling("IN_PROGRESS", "0001-01-01T00:00:00Z")],
+                "mergeStateStatus": "BLOCKED",
+            }
+        )
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, proc.stderr)
+        self.assertEqual(result["reason"], "checks_pending")
+        self.assertEqual(self.open_incidents(), [])
+        observed = json.loads(self.state_path.read_text())["prs"]["42"]["missing_check_since"]
+        self.assertIsNone(observed["settled_at"])
+
+        # A new subprocess reloads that state; the sibling finished long ago
+        # and build-test never appeared, so #758's skip now applies.
+        long_ago = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(time.time() - drain_prs.MISSING_CHECK_GRACE_SECONDS - 60),
+        )
+        self.script_pr_view(
+            {
+                "statusCheckRollup": [review, sibling("COMPLETED", long_ago)],
+                "mergeStateStatus": "BLOCKED",
+            }
+        )
+        result, proc = self.run_single()
+
+        self.assertEqual(result["reason"], "checks_missing", proc.stderr)
+        incident, = self.open_incidents()
+        self.assertEqual(incident["checks"], [drain_prs.DEFAULT_REQUIRED_CI_CHECK])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+
     def test_reported_failed_checks_resolve_without_merging(self):
         self.seed_state()
         original = self.record_incident()

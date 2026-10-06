@@ -6,6 +6,7 @@ Run with: python3 -m unittest discover -s tools -p 'test_*.py'
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -630,18 +631,19 @@ class MissingCheckGraceTests(unittest.TestCase):
     def _state(self, **entry):
         return {"attempt_counter": 1, "prs": {"42": {"approved_head": self.HEAD, **entry}}}
 
-    def _pr(self, head=HEAD):
-        return {"number": 42, "headRefOid": head}
+    def _pr(self, head=HEAD, rollup=()):
+        return {"number": 42, "headRefOid": head, "statusCheckRollup": list(rollup)}
 
-    def _expired_at(self, state, now, build="missing", review="success"):
+    def _expired_at(self, state, now, build="missing", review="success", rollup=()):
+        pr = self._pr(rollup=rollup)
         with mock.patch("time.time", return_value=now):
             since = drain_prs.observe_missing_checks(
                 state,
-                self._pr(),
+                pr,
                 drain_prs.missing_required_checks(self.GATES, build, review),
             )
             return drain_prs.missing_check_grace_expired(
-                state, self._pr(), since, build, review
+                state, pr, since, build, review
             )
 
     def test_the_grace_period_expires_only_after_it_has_fully_passed(self):
@@ -699,6 +701,186 @@ class MissingCheckGraceTests(unittest.TestCase):
         state = self._state(missing_check_since={"head": self.HEAD, "observed_at": 1.0})
         self.assertFalse(self._expired_at(state, 5000.0, build="pending"))
         self.assertIsNone(state["prs"]["42"]["missing_check_since"])
+
+    # Issue #765: an aggregate required check such as `build-test` is created
+    # only once the jobs it needs finish, so a check run still in flight on the
+    # head keeps the grace period from running, and the period is measured
+    # from when that work completed.
+
+    T0 = 1_800_000_000.0
+    GRACE = drain_prs.MISSING_CHECK_GRACE_SECONDS
+
+    @staticmethod
+    def _iso(moment):
+        return (
+            datetime.fromtimestamp(moment, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    def _run(self, name, status="COMPLETED", completed=None):
+        """One check run of the head's rollup, shaped as `gh pr view` gives it.
+
+        `completed` is when it finished; an unfinished run, or a finished one
+        given `completed=None`, carries GitHub's unset year-1 `completedAt`.
+        """
+        return {
+            "__typename": "CheckRun",
+            "name": name,
+            "status": status,
+            "conclusion": "SUCCESS" if status == "COMPLETED" else "",
+            "startedAt": self._iso(self.T0 - 3600),
+            "completedAt": (
+                self._iso(completed) if completed is not None else "0001-01-01T00:00:00Z"
+            ),
+            "workflowName": "CI",
+        }
+
+    def test_an_absent_aggregate_beside_running_work_never_expires(self):
+        for status in ("IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"):
+            with self.subTest(status=status):
+                state = self._state()
+                rollup = [self._run("haskell", status), self._run("python", completed=self.T0)]
+                self.assertFalse(self._expired_at(state, self.T0, rollup=rollup))
+                self.assertFalse(
+                    self._expired_at(state, self.T0 + 1_000_000.0, rollup=rollup)
+                )
+
+    def test_once_the_work_completes_the_grace_runs_from_its_completion(self):
+        state = self._state()
+        self.assertFalse(
+            self._expired_at(state, self.T0, rollup=[self._run("haskell", "IN_PROGRESS")])
+        )
+        # It finished between two polls; the period counts from when it did,
+        # not from the poll that noticed, and not from the first observation.
+        done = [self._run("haskell", completed=self.T0 + 1200)]
+        self.assertFalse(self._expired_at(state, self.T0 + 1500, rollup=done))
+        self.assertFalse(self._expired_at(state, self.T0 + 1200 + self.GRACE, rollup=done))
+        self.assertTrue(
+            self._expired_at(state, self.T0 + 1200 + self.GRACE + 0.001, rollup=done)
+        )
+        self.assertEqual(state["prs"]["42"]["missing_check_since"]["observed_at"], self.T0)
+
+    def test_work_that_completed_before_the_episode_counts_from_the_first_observation(self):
+        state = self._state()
+        done = [self._run("haskell", completed=self.T0 - 5000)]
+        self.assertFalse(self._expired_at(state, self.T0, rollup=done))
+        self.assertFalse(self._expired_at(state, self.T0 + self.GRACE, rollup=done))
+        self.assertTrue(self._expired_at(state, self.T0 + self.GRACE + 0.001, rollup=done))
+        # Nothing was ever in flight, so the record is #758's own shape.
+        self.assertEqual(
+            state["prs"]["42"]["missing_check_since"],
+            {"head": self.HEAD, "observed_at": self.T0},
+        )
+
+    def test_renewed_work_on_the_same_head_reopens_the_window(self):
+        state = self._state()
+        first = self._run("haskell", completed=self.T0 + 100)
+        self.assertFalse(self._expired_at(state, self.T0 + 200, rollup=[first]))
+        rerun = [first, self._run("haskell", "IN_PROGRESS")]
+        self.assertFalse(self._expired_at(state, self.T0 + 800, rollup=rerun))
+        self.assertFalse(self._expired_at(state, self.T0 + 50_000, rollup=rerun))
+        finished = [first, self._run("haskell", completed=self.T0 + 60_000)]
+        self.assertFalse(self._expired_at(state, self.T0 + 60_000 + self.GRACE, rollup=finished))
+        self.assertTrue(
+            self._expired_at(state, self.T0 + 60_000 + self.GRACE + 0.001, rollup=finished)
+        )
+
+    def test_without_completion_times_the_window_starts_when_the_work_was_seen_finished(self):
+        for completion in ("0001-01-01T00:00:00Z", None, "not a time", "2026-09-30T04:41:46"):
+            with self.subTest(completion=completion):
+                state = self._state()
+                running = [self._run("haskell", "IN_PROGRESS")]
+                self.assertFalse(self._expired_at(state, self.T0, rollup=running))
+                finished = self._run("haskell")
+                if completion is None:
+                    del finished["completedAt"]
+                else:
+                    finished["completedAt"] = completion
+                self.assertFalse(self._expired_at(state, self.T0 + 300, rollup=[finished]))
+                self.assertEqual(
+                    state["prs"]["42"]["missing_check_since"]["settled_at"], self.T0 + 300
+                )
+                self.assertFalse(
+                    self._expired_at(state, self.T0 + 300 + self.GRACE, rollup=[finished])
+                )
+                self.assertTrue(
+                    self._expired_at(
+                        state, self.T0 + 300 + self.GRACE + 0.001, rollup=[finished]
+                    )
+                )
+
+    def test_a_completion_later_than_now_is_not_a_reading(self):
+        state = self._state()
+        future = [self._run("haskell", completed=self.T0 + 1_000_000)]
+        self.assertFalse(self._expired_at(state, self.T0, rollup=future))
+        self.assertTrue(self._expired_at(state, self.T0 + self.GRACE + 0.001, rollup=future))
+
+    def test_a_restart_keeps_the_measured_start(self):
+        def restarted(state):
+            return json.loads(json.dumps(state))
+
+        # Completion read off GitHub: it finished while the drainer was down.
+        state = self._state()
+        self.assertFalse(
+            self._expired_at(state, self.T0, rollup=[self._run("haskell", "IN_PROGRESS")])
+        )
+        state = restarted(state)
+        done = [self._run("haskell", completed=self.T0 + 1000)]
+        self.assertFalse(self._expired_at(state, self.T0 + 1000 + self.GRACE, rollup=done))
+        self.assertTrue(self._expired_at(state, self.T0 + 2000, rollup=done))
+
+        # No completion time: the persisted first quiet observation is kept.
+        state = self._state()
+        self._expired_at(state, self.T0, rollup=[self._run("haskell", "IN_PROGRESS")])
+        undated = [self._run("haskell")]
+        self.assertFalse(self._expired_at(state, self.T0 + 100, rollup=undated))
+        state = restarted(state)
+        self.assertFalse(self._expired_at(state, self.T0 + 100 + self.GRACE, rollup=undated))
+        self.assertTrue(
+            self._expired_at(state, self.T0 + 100 + self.GRACE + 0.001, rollup=undated)
+        )
+
+    def test_status_contexts_neither_hold_nor_time_the_grace_period(self):
+        for context_state in ("SUCCESS", "PENDING"):
+            with self.subTest(state=context_state):
+                state = self._state()
+                legacy = [
+                    {
+                        "__typename": "StatusContext",
+                        "context": "ci/legacy",
+                        "state": context_state,
+                        "startedAt": self._iso(self.T0 + 300),
+                        "targetUrl": "https://ci.example/1",
+                    }
+                ]
+                self.assertFalse(self._expired_at(state, self.T0, rollup=legacy))
+                self.assertTrue(
+                    self._expired_at(state, self.T0 + self.GRACE + 0.001, rollup=legacy)
+                )
+
+    def test_a_record_predating_the_rule_keeps_its_first_observation(self):
+        # Written by #758's drainer, which never recorded settled work.
+        state = self._state(missing_check_since={"head": self.HEAD, "observed_at": self.T0})
+        undated = [self._run("haskell")]
+        self.assertFalse(self._expired_at(state, self.T0 + self.GRACE, rollup=undated))
+        self.assertTrue(
+            self._expired_at(state, self.T0 + self.GRACE + 0.001, rollup=undated)
+        )
+        self.assertEqual(
+            state["prs"]["42"]["missing_check_since"],
+            {"head": self.HEAD, "observed_at": self.T0},
+        )
+
+    def test_a_new_head_drops_the_old_heads_settled_work(self):
+        state = self._state(
+            missing_check_since={"head": "b" * 40, "observed_at": 1.0, "settled_at": None}
+        )
+        self.assertFalse(self._expired_at(state, self.T0, rollup=[self._run("haskell")]))
+        self.assertEqual(
+            state["prs"]["42"]["missing_check_since"],
+            {"head": self.HEAD, "observed_at": self.T0},
+        )
 
     def test_a_pull_request_with_no_queue_entry_records_nothing(self):
         state = {"attempt_counter": 1, "prs": {}}

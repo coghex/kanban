@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -70,9 +71,13 @@ UPDATE_BRANCH_POLL_SECONDS = 3
 # head before it stops holding the queue (issue #758). Within it a missing check
 # is a barrier like a pending one, so the moments between a push and GitHub
 # registering its checks cannot let a later pull request advance; past it the
-# candidate is skipped and recorded as a `missing-check` incident. Measured from
-# the first pass that observed the check missing on that head, and persisted in
-# the queue state so a drainer restart does not restart it.
+# candidate is skipped and recorded as a `missing-check` incident. It does not
+# run while any check run on the head is still in flight -- an aggregate check
+# such as `build-test` is created only once the jobs it needs finish (issue
+# #765) -- and is measured from the last moment that head's check runs
+# completed, never earlier than the first pass that observed the check missing.
+# What it needs is persisted in the queue state so a drainer restart does not
+# restart it.
 MISSING_CHECK_GRACE_SECONDS = 600
 # How long GitHub is given to record a pull request the drainer merged by
 # advancing the default branch onto its head, rather than through the
@@ -5743,16 +5748,62 @@ def missing_required_checks(
     ]
 
 
+def check_runs(pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """The head's GitHub check runs, without its legacy status contexts.
+
+    Only a check run says whether GitHub still has work in flight: a status
+    context carries a `state` rather than a `status`, so one that has long
+    since succeeded must not read as unfinished (issue #765).
+    """
+    return [
+        item
+        for item in pr.get("statusCheckRollup", [])
+        if isinstance(item, dict) and item.get("__typename") == "CheckRun"
+    ]
+
+
+def check_run_completed_at(item: dict[str, Any]) -> float | None:
+    """When one completed check run finished, or None if that is unreadable.
+
+    GitHub fills an unset `completedAt` with the year 1, which is no time a
+    grace period can be measured from.
+    """
+    value = item.get("completedAt")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        completed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if completed.tzinfo is None:
+        return None
+    timestamp = completed.timestamp()
+    return timestamp if timestamp > 0 else None
+
+
 def observe_missing_checks(
     state: dict[str, Any], pr: dict[str, Any], missing: list[str]
 ) -> float | None:
-    """When a configured check was first seen missing on this head, if it is.
+    """When a missing configured check's grace period started on this head.
+
+    None when no configured check is missing, and also while any check run on
+    the head is still in flight (issue #765): GitHub has work under way that
+    can create the missing check, so nothing is measured yet. Otherwise the
+    period starts when the head's check runs last completed, read from their
+    own `completedAt` so completion between polls or across a restart counts
+    from when it happened -- but never earlier than the first observation of
+    this missing-check episode. Where any completed run gives no readable
+    time, or one later than now, it starts instead at the first pass that saw the in-flight work
+    finished, or, if none was ever seen, at that first observation. A head
+    with no check runs keeps that first-observation rule.
 
     The observation is keyed to the head it was made on and kept in the queue
     state, so it survives polls and restarts, a new head starts a fresh one,
-    and it is cleared the first time no configured check is missing. An entry
-    written before the field existed, or one holding anything unreadable,
-    simply starts a fresh grace period now.
+    and it is cleared the first time no configured check is missing. Its
+    `settled_at` exists only once in-flight work has been seen this episode:
+    None while it is in flight, then the first pass that found it finished.
+    An entry written before the field existed, or one holding anything
+    unreadable, simply starts a fresh grace period now.
     """
     entry = state["prs"].get(str(pr["number"]))
     if entry is None:
@@ -5761,17 +5812,39 @@ def observe_missing_checks(
         if entry.get("missing_check_since") is not None:
             entry["missing_check_since"] = None
         return None
+    now = time.time()
     head = pr["headRefOid"]
     recorded = entry.get("missing_check_since")
+    observation: dict[str, Any] | None = None
     if isinstance(recorded, dict) and recorded.get("head") == head:
         observed_at = recorded.get("observed_at")
         if isinstance(observed_at, (int, float)) and not isinstance(
             observed_at, bool
         ):
-            return float(observed_at)
-    observed_at = time.time()
-    entry["missing_check_since"] = {"head": head, "observed_at": observed_at}
-    return observed_at
+            observation = recorded
+    if observation is None:
+        observation = {"head": head, "observed_at": now}
+        entry["missing_check_since"] = observation
+    observed_at = float(observation["observed_at"])
+    runs = check_runs(pr)
+    if any(item.get("status") != "COMPLETED" for item in runs):
+        observation["settled_at"] = None
+        return None
+    settled_at = observation.get("settled_at", observed_at)
+    if not isinstance(settled_at, (int, float)) or isinstance(settled_at, bool):
+        settled_at = now
+        observation["settled_at"] = settled_at
+    # A completion later than now is no reading either: measured from it, the
+    # period would not have started yet.
+    completions = [
+        completed
+        if completed is not None and completed <= now
+        else None
+        for completed in map(check_run_completed_at, runs)
+    ]
+    if completions and None not in completions:
+        return max(observed_at, *(c for c in completions if c is not None))
+    return max(observed_at, float(settled_at))
 
 
 def missing_check_grace_expired(
@@ -5783,10 +5856,12 @@ def missing_check_grace_expired(
 ) -> bool:
     """Whether a missing check has stopped being a wait (issue #758).
 
-    Only a check that has reported nothing expires. A queued or running check
-    beside it keeps the barrier whatever its age, and so does an automatic CI
-    rerun this drainer requested for this head: both are work GitHub has in
-    flight, and the grace period is no claim about either.
+    Only a check that has reported nothing expires. A queued or running
+    configured check beside it keeps the barrier whatever its age, and so does
+    an automatic CI rerun this drainer requested for this head: both are work
+    GitHub has in flight, and the grace period is no claim about either. Any
+    other check run still in flight on the head does too, through
+    `observe_missing_checks` measuring nothing while it runs (issue #765).
     """
     if missing_since is None or "pending" in (build_state, review_state):
         return False
@@ -5995,8 +6070,9 @@ def process_pr(
     # caller shown one blocking gate is never left guessing about the other.
     gate_detail = describe_check_gates(gates, build_state, review_state)
     # Observed before the failed-check paths return, so a check missing beside
-    # a failed or rerunning one starts its grace period now rather than only
-    # once the failure clears. Those paths still decide this pass's outcome.
+    # a failed or rerunning one is first observed now rather than only once the
+    # failure clears. Those paths still decide this pass's outcome. None while
+    # nothing is missing or while any check run on the head is in flight.
     missing_checks = missing_required_checks(gates, build_state, review_state)
     missing_since = observe_missing_checks(state, pr, missing_checks)
     if build_state == "failure":

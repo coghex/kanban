@@ -736,8 +736,8 @@ vocabulary:
 | `would_merge` | Dry run only: every gate passed, so a real run would merge it. |
 | `not_approved` | The approval label is missing. |
 | `changes_requested` | Changes were requested on this head: the changes-requested label is attached, which takes precedence when both labels are, or a review marker naming the current head requested changes, as [above](#which-review-verdict-wins). The message names which. |
-| `checks_pending` | A required check has not reported a result yet: it is queued or running, or it is `missing` — has not run at all — and still inside its ten-minute grace period. The message names each configured check and its state. |
-| `checks_missing` | A required check has reported nothing for the pull request's current head for longer than the ten-minute grace period, so it no longer holds the queue. It was recorded as a `missing-check` incident and left alone, as [below](#required-checks-that-never-report). |
+| `checks_pending` | A required check has not reported a result yet: it is queued or running, or it is `missing` — has not run at all — while other check runs on the head are still in flight or within its ten-minute grace period. The message names each configured check and its state. |
+| `checks_missing` | A required check has reported nothing for the pull request's current head for longer than the ten-minute grace period after the head's check runs completed, so it no longer holds the queue. It was recorded as a `missing-check` incident and left alone, as [below](#required-checks-that-never-report). |
 | `checks_failed` | A required check failed. |
 | `merge_conflict` | The pull request conflicts with the default branch. It was recorded as an incident and left alone. |
 | `behind_base` | The branch was behind the default branch. The update was requested; merging waits for a later run. |
@@ -962,17 +962,19 @@ A candidate's turn ends in one of three ways.
   incident, as below), has a required check that failed with every automatic
   rerun of that head already spent, has a required check that has reported
   nothing for its current head for longer than the ten-minute grace period
-  (recorded as an incident, as [below](#required-checks-that-never-report)),
+  after its check runs completed (recorded as an incident, as [below](#required-checks-that-never-report)),
   has moved to a head no review has cleared, or is still cooling down after a
   failed attempt.
 - **A barrier ends the pass with nothing else touched.** A candidate whose
   required CI or review check is queued, pending, or in progress — including
   the replacement checks a branch update or an automatic CI rerun just
   started — is waiting, not blocked, however long that takes. So is one whose
-  required check is missing — has reported nothing at all — within its
-  ten-minute grace period, which covers the moments between a push and GitHub
-  registering its checks; a check still missing afterwards stops holding the
-  lane and is a skip instead. So is one whose required CI check
+  required check is missing — has reported nothing at all — while any check
+  run on its head is still in flight, or within the ten-minute grace period
+  after they complete, which covers an aggregate check created only once the
+  jobs it needs finish and the moments between a push and GitHub registering
+  its checks; a check still missing afterwards stops holding the lane and is a
+  skip instead. So is one whose required CI check
   still reads as the failure an automatic rerun was already requested against,
   as below. No later pull request is updated, rerun, or merged while it waits;
   the pass ends and the next ordinary poll looks at that candidate again.
@@ -1303,16 +1305,33 @@ indefinitely and strand every approved pull request behind it.
 
 So a missing check is a wait only for a grace period of ten minutes
 (`MISSING_CHECK_GRACE_SECONDS` in `tools/drain_prs.py`, not configurable).
-The period is measured per pull request per head, from the first pass that
-observed a configured check missing on that head — including a pass where
-another required check has failed or is being rerun automatically, which
-still decides that pass's outcome. The observation is kept in the queue state,
-so a drainer restart continues it rather than starting over; a new head starts
-a fresh one; and it is cleared on the first pass that finds no configured
-check missing, or by the poll or named-PR invocation that resolves its incident
-because every required check has reported, even while another candidate holds
-the lane. A queue-state file written before the drainer recorded it simply gives
-a missing check a fresh grace period. A disabled gate is never missing.
+The period is measured per pull request per head. It does not run at all while
+any check run on that head — required or not — is still queued, waiting, or in
+progress: an aggregate required check such as `build-test` is created only once
+the jobs it depends on finish, so it reports nothing for as long as they run,
+and GitHub still has work in flight that can create it (issue #765). Only check
+runs count; a legacy commit status neither holds the period open nor times it.
+Once every check run on the head has completed, the period is measured from the
+latest `completedAt` among them, so work that finished between two polls, or
+while the drainer was stopped, counts from when it finished — but never from
+earlier than the first pass that observed a configured check missing on that
+head, which is where a head with no check runs at all measures from. That first
+observation includes a pass where another required check has failed or is
+being rerun automatically, which still decides that pass's outcome. If any
+completed check run carries no readable completion time, the period instead
+starts at the first pass that found the work finished, or at that first
+observation if no work was ever seen in flight. New work starting on the same
+head reopens the window. A check still absent once the period has passed
+expires on the next pass that examines the candidate: the drainer polls, so
+that is the first evaluation after ten minutes, not an exact deadline.
+
+The observation is kept in the queue state, so a drainer restart continues it
+rather than starting over; a new head starts a fresh one; and it is cleared on
+the first pass that finds no configured check missing, or by the poll or
+named-PR invocation that resolves its incident because every required check
+has reported, even while another candidate holds the lane. A queue-state file
+written before the drainer recorded it simply gives a missing check a fresh
+grace period. A disabled gate is never missing.
 
 Within the grace period the candidate is a barrier exactly like a pending one.
 Afterwards the drainer:
@@ -1329,7 +1348,9 @@ Afterwards the drainer:
 Only a check that has reported *nothing* ages out. A required check that is
 queued or in progress, and a failed check awaiting an automatic rerun, keep
 their barrier however old they are — including when another required check
-beside them is missing past its grace period.
+beside them is missing past its grace period. Any other check run still in
+flight on the head keeps a missing check's barrier too, since its grace period
+has not started.
 
 The incident resolves itself on the first poll or non-dry `--pr` invocation for
 that pull request that finds every required check reported for the head it
