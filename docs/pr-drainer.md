@@ -1318,9 +1318,9 @@ earlier than the first pass that observed a configured check missing on that
 head, which is where a head with no check runs at all measures from. That first
 observation includes a pass where another required check has failed or is
 being rerun automatically, which still decides that pass's outcome. If any
-completed check run carries no readable completion time, the period instead
-starts at the first pass that found the work finished, or at that first
-observation if no work was ever seen in flight. New work starting on the same
+completed check run carries no readable completion time, the period also starts
+no earlier than the first pass that found the in-flight work finished, when any
+was seen; the other runs' readable completion times still count. New work starting on the same
 head reopens the window. A check still absent once the period has passed
 expires on the next pass that examines the candidate: the drainer polls, so
 that is the first evaluation after ten minutes, not an exact deadline.

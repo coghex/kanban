@@ -5793,9 +5793,10 @@ def observe_missing_checks(
     own `completedAt` so completion between polls or across a restart counts
     from when it happened -- but never earlier than the first observation of
     this missing-check episode. Where any completed run gives no readable
-    time, or one later than now, it starts instead at the first pass that saw the in-flight work
-    finished, or, if none was ever seen, at that first observation. A head
-    with no check runs keeps that first-observation rule.
+    time, or one later than now, it also starts no earlier than the first pass
+    that saw the in-flight work finished, if any was ever seen in flight; the
+    other runs' readable completions still count. A head with no check runs
+    keeps that first-observation rule.
 
     The observation is keyed to the head it was made on and kept in the queue
     state, so it survives polls and restarts, a new head starts a fresh one,
@@ -5842,9 +5843,13 @@ def observe_missing_checks(
         else None
         for completed in map(check_run_completed_at, runs)
     ]
-    if completions and None not in completions:
-        return max(observed_at, *(c for c in completions if c is not None))
-    return max(observed_at, float(settled_at))
+    # Every readable completion bounds the start, so one undated run never
+    # discards when another finished; only where some run gives no reading
+    # does the pass that saw the work finished bound it too.
+    start = max([observed_at, *(c for c in completions if c is not None)])
+    if None in completions:
+        start = max(start, float(settled_at))
+    return start
 
 
 def missing_check_grace_expired(

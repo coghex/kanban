@@ -810,6 +810,32 @@ class MissingCheckGraceTests(unittest.TestCase):
                     )
                 )
 
+    def test_an_undated_run_does_not_discard_another_runs_completion(self):
+        # Round 1's blocker: renewed work finished while the drainer was down,
+        # beside an older run GitHub gives no completion time for.
+        state = self._state()
+        self._expired_at(state, self.T0, rollup=[self._run("haskell", "IN_PROGRESS")])
+        undated = self._run("haskell")
+        self.assertFalse(self._expired_at(state, self.T0 + 100, rollup=[undated]))
+        self.assertEqual(state["prs"]["42"]["missing_check_since"]["settled_at"], self.T0 + 100)
+        state = json.loads(json.dumps(state))
+        renewed = [undated, self._run("python", completed=self.T0 + 1000)]
+        self.assertFalse(self._expired_at(state, self.T0 + 1100, rollup=renewed))
+        self.assertFalse(self._expired_at(state, self.T0 + 1000 + self.GRACE, rollup=renewed))
+        self.assertTrue(
+            self._expired_at(state, self.T0 + 1000 + self.GRACE + 0.001, rollup=renewed)
+        )
+
+    def test_an_undated_run_still_bounds_the_start_by_when_the_work_was_seen_finished(self):
+        state = self._state()
+        self._expired_at(state, self.T0, rollup=[self._run("haskell", "IN_PROGRESS")])
+        # The dated run finished before the poll that found everything done;
+        # the undated one may have finished as late as that poll.
+        mixed = [self._run("haskell"), self._run("python", completed=self.T0 + 200)]
+        self.assertFalse(self._expired_at(state, self.T0 + 500, rollup=mixed))
+        self.assertFalse(self._expired_at(state, self.T0 + 500 + self.GRACE, rollup=mixed))
+        self.assertTrue(self._expired_at(state, self.T0 + 500 + self.GRACE + 0.001, rollup=mixed))
+
     def test_a_completion_later_than_now_is_not_a_reading(self):
         state = self._state()
         future = [self._run("haskell", completed=self.T0 + 1_000_000)]
