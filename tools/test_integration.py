@@ -316,6 +316,65 @@ class ProcessPrTemplateIsolationTests(
         run_git(["push", "-q", "-f", "origin", "master"], cwd=self.upstream_sim)
 
 
+class ProcessPrMissingApprovedHeadTests(ProcessPrFixture):
+    def assert_missing_entry_refused(self, boundary):
+        state = {"version": drain_prs.STATE_VERSION, "prs": {}}
+        if boundary == "final":
+            drain_prs.remember_approved_head(state, 42, self.head_sha)
+        self._script_pr_view({
+            "mergeStateStatus": "BEHIND" if boundary == "first" else "CLEAN",
+        })
+        self._ensure_marker_reads()
+        report = drain_prs.new_single_pr_report(42)
+        gates = drain_prs.GateConfig(
+            required_ci_check=drain_prs.DEFAULT_REQUIRED_CI_CHECK,
+            required_review_check=drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+        )
+        get_pr = drain_prs.get_pr
+        reads = 0
+
+        def read_without_entry(*args, **kwargs):
+            nonlocal reads
+            pr = get_pr(*args, **kwargs)
+            reads += 1
+            if boundary == "final" and reads == 2:
+                # The first guard sees an established head. Only the final
+                # read loses its entry, so this tests that guard independently.
+                state["prs"].pop("42")
+            return pr
+
+        with mock.patch.dict(os.environ, self.fake.environ_overrides()), \
+                mock.patch.object(drain_prs, "get_pr", side_effect=read_without_entry), \
+                mock.patch.object(drain_prs, "update_branch", return_value=None) as update, \
+                mock.patch.object(drain_prs, "merge_pr", return_value=False) as merge:
+            result = drain_prs.process_pr(
+                self.ctx, 42, dry_run=False, state=state, gates=gates, report=report,
+            )
+
+        self.assertTrue(result)
+        update.assert_not_called()
+        merge.assert_not_called()
+        self.assertEqual(reads, 1 if boundary == "first" else 2)
+        self.assertEqual(report["reason"], "approved_head_changed")
+        self.assertIn("no approved head was established", report["message"])
+        self.assertFalse(report["merged"])
+        self.assertEqual(state["prs"], {})
+        self.assertEqual(self._pr_merge_calls(), [])
+        self.assertFalse(any(
+            "update-branch" in arg
+            for call in self.fake.calls("gh") for arg in call["args"]
+        ))
+        self.assertFalse(any(
+            call["args"][:2] == ["run", "rerun"] for call in self.fake.calls("gh")
+        ))
+
+    def test_a_missing_entry_at_the_first_processing_read_is_refused(self):
+        self.assert_missing_entry_refused("first")
+
+    def test_a_missing_entry_at_the_final_processing_read_is_refused(self):
+        self.assert_missing_entry_refused("final")
+
+
 class HappyPathDrainCycleTest(ProcessPrFixture):
     """Exercises process_pr() end-to-end: an approved, green PR gets merged,
     its linked issue closed, its worktree/branches removed, and the local
@@ -4861,6 +4920,38 @@ class QueueOrderTests(ProcessPrFixture):
             for args in self._advancing_gh_calls()
             if args[:1] == ["api"] and any("update-branch" in arg for arg in args)
         ]
+
+    def test_a_polling_candidate_that_moves_at_either_processing_read_is_refused(self):
+        for boundary in ("first", "final"):
+            with self.subTest(boundary=boundary):
+                if boundary == "final":
+                    self.setUp()
+                approved = self._base_pr_json()
+                moved = {**approved, "headRefOid": "e" * 40}
+                # Recovery and queue selection still see the approved head.
+                snapshots = [approved, moved] if boundary == "first" else [
+                    approved, approved, moved,
+                ]
+                self._script_pr(42, *snapshots)
+                self._script_pr_list([self._queued(42, self.head_sha)])
+                self._write_state({"42": self._entry(self.head_sha)})
+                report = drain_prs.new_single_pr_report(42)
+                process = drain_prs.process_pr
+
+                def observe(*args, **kwargs):
+                    try:
+                        return process(*args, **kwargs)
+                    finally:
+                        report.update(kwargs["report"])
+
+                with mock.patch.object(drain_prs, "process_pr", side_effect=observe):
+                    self._run_loop()
+
+                self.assertEqual(report["reason"], "approved_head_changed")
+                self.assertFalse(report["merged"])
+                self.assertEqual(self._advancing_gh_calls(), [])
+                self.assertEqual(self._read_state()["prs"]["42"]["approved_head"],
+                                 self.head_sha)
 
     def test_the_lowest_number_goes_first_whatever_last_attempt_says(self):
         # Fair rotation would have taken #42: it was attempted least recently,
