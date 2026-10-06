@@ -1682,6 +1682,11 @@ Priority from strongest to weakest:
 6. Green: approval exists, the PR is cleanly mergeable/current (including a
    `MERGEABLE` head reported `BLOCKED` only by repository policy and handled by
    the configured admin drainer), and the latest unique checks are successful.
+   The latest unique checks are the rollup after §13's selection: checks from
+   a GitHub Actions workflow run that a newer run of the same workflow and
+   event replaced on the head do not count, and the rest are deduplicated to
+   their newest rerun. A cancelled check in a replaced run is not priority 2's
+   cancelled CI; one in the newest run is.
 7. Green: approval exists and the PR is cleanly mergeable/current when the
    repository has no checks configured.
 
@@ -2479,11 +2484,27 @@ as `3/2 complete` or as `0/0 complete` above visible children. A total
 incomplete — a sub-issue in a repository the token cannot see is counted by
 GitHub and absent from the node list — so it is kept and counted among the
 children that did not arrive. The
-status-check rollup requests up to 100 context nodes and deduplicates reruns by
-check app/name (or status creator/context), retaining the newest entry and
-breaking a tie in favor of the one GitHub listed last. A check run GitHub has
-been asked for but has neither started nor completed carries no timestamp yet
-and ranks newest under its key, so a queued rerun supersedes the failure it
+status-check rollup requests up to 100 context nodes. A check run whose suite
+belongs to a GitHub Actions workflow run carries that run's workflow node id,
+triggering event, and run number, read from the same rollup selection with no
+further connection or request. Runs of one workflow triggered by one event on
+the head supersede each other: only the run with the highest run number among
+those with a context in this rollup counts, and every check of an older run
+is dropped whatever its name, because a run cancelled before its jobs
+reported under their final names (an unexpanded matrix job, a skipped
+conditional one) leaves checks no newer job name can match. Runs of one
+workflow triggered by different events, such as `push` and `pull_request`, do
+not supersede each other. The remaining contexts are deduplicated to one per
+check app/name within each retained workflow run, and to one per check
+app/name (or status creator/context) among the contexts with no workflow run
+— status contexts, other apps' check runs, and check runs whose `workflowRun`
+GitHub reports absent or null — retaining the newest entry and breaking a tie
+in favor of the one GitHub listed last. A job name shared by two retained runs,
+or by a retained run and a context with no run, stays two checks. A present
+`workflowRun` missing or mistyping its run number, event, or workflow id is an
+undecodable context below, checked before any run is dropped as superseded.
+A check run GitHub has been asked for but has neither started nor completed
+carries no timestamp yet and ranks newest under its key, so a queued rerun supersedes the failure it
 replaces immediately rather than once it starts; a status context missing its
 `createdAt` says nothing about its age and ranks oldest, so it cannot displace a
 timestamped context of the same key. This avoids treating superseded failures as
