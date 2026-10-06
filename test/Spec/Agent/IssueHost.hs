@@ -9,7 +9,7 @@
 module Spec.Agent.IssueHost (spec) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, onException, try)
 import Control.Monad (forM_, join, unless, void, when)
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (find, findIndex, intercalate, isInfixOf, nub)
@@ -115,14 +115,15 @@ import Kanban.Worker
     undeliveredReviewCommands,
     workerDirectory,
   )
-import Spec.Support.Env (withEnvironmentValue, withTemporaryCacheRoot)
+import Spec.Support.Env (permissionsOf, withEnvironmentValue, withFileCreationMask, withTemporaryCacheRoot)
 import Spec.Support.Preflight (BackendFixture (..), fullyProvisionedFakes, realProcessSnapshotTool, withPreflightMachine)
 import Spec.Support.Process (identityForProcess, managedProcessFor, shouldHaveBeenSwept, withManagedShell)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeFile)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.Posix.IO (OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd)
-import System.Posix.IO.ByteString (fdRead)
+import System.Posix.Files (setFdMode, setFileMode)
+import System.Posix.IO (OpenFileFlags (append, creat), OpenMode (ReadOnly, WriteOnly), closeFd, defaultFileFlags, openFd)
+import System.Posix.IO.ByteString (fdRead, fdWrite)
 import Test.Hspec
 
 spec :: Spec
@@ -417,6 +418,41 @@ lifecycleSpec = describe "one running host" $ do
       acknowledgementFor feedback.reviewCommandId settled
         `shouldSatisfy` maybe False (reviewCommandSettled . (.acknowledgedOutcome))
       owedBy child `shouldReturn` []
+
+  -- Issue #780. The settled-child example writes its late command through
+  -- the fixture's descriptor append, which stands in for a dashboard only
+  -- while it leaves exactly the bytes and the mode the production append
+  -- does: on a new ledger, and on an existing one an earlier writer left
+  -- loose, whose bytes must survive.
+  it "has the fixture's descriptor append write exactly what the production append writes" $
+    withIssueAction $ \descriptor -> do
+      command <- commandNumbered 1 descriptor (SendReviewFeedback "look again")
+      let directory = takeDirectory descriptor.workerDescriptorCommandPath
+          ledger name = descriptor {workerDescriptorCommandPath = directory </> name}
+          production = ledger "production.commands.jsonl"
+          fixture = ledger "fixture.commands.jsonl"
+          contents = ByteString.readFile . (.workerDescriptorCommandPath)
+          mode = permissionsOf . (.workerDescriptorCommandPath)
+      -- An open umask, so only the append itself can make a new ledger
+      -- user-only.
+      withFileCreationMask 0 $ do
+        appendReviewCommand production command `shouldReturn` Right ()
+        appendCommandThroughDescriptor fixture command `shouldReturn` Right ()
+      created <- contents production
+      contents fixture `shouldReturn` created
+      ByteString.length created `shouldSatisfy` (> 0)
+      mode production `shouldReturn` 0o600
+      mode fixture `shouldReturn` 0o600
+      let earlier = "{\"earlier\":true}\n"
+      forM_ [production, fixture] $ \existing -> do
+        ByteString.writeFile existing.workerDescriptorCommandPath earlier
+        setFileMode existing.workerDescriptorCommandPath 0o644
+      appendReviewCommand production command `shouldReturn` Right ()
+      appendCommandThroughDescriptor fixture command `shouldReturn` Right ()
+      contents production `shouldReturn` (earlier <> created)
+      contents fixture `shouldReturn` (earlier <> created)
+      mode production `shouldReturn` 0o600
+      mode fixture `shouldReturn` 0o600
 
   -- The same ledger, read the way a host restarted mid-delivery reads it: a
   -- command carrying only a claim is not owed, so the provider operation is
@@ -1010,9 +1046,11 @@ lifecycleSpec = describe "one running host" $ do
       endChild child
       _ <- awaitState child (\state -> terminalState state.workerStateStatus)
       -- Written after the settle, the way a dashboard still holding a live
-      -- session writes it.
+      -- session writes it. Through a descriptor rather than
+      -- 'appendReviewCommand': the host still reads this settled child's
+      -- ledger on every poll, in this same process (issue #780).
       late <- commandNumbered 1 child (SendReviewFeedback "look again")
-      Right () <- appendReviewCommand child late
+      appendCommandThroughDescriptor child late >>= either (fail . Text.unpack) pure
       -- Its own acknowledgement, not the termination's: that one settled
       -- first and would satisfy a plain count.
       outcome <- awaitJust "the late command was never answered" $ do
@@ -3127,6 +3165,40 @@ readLogBytes path =
         Right bytes
           | ByteString.null bytes -> pure []
           | otherwise -> (bytes :) <$> readChunks descriptor
+
+-- | One command appended to a child's ledger through a POSIX descriptor, byte
+-- for byte and mode for mode what 'appendReviewCommand' leaves.
+--
+-- Not 'appendReviewCommand' itself, for a write that races the forked host:
+-- its 'Handle' falls under the same per-process lock 'readLogBytes' describes,
+-- and the host reads a child's ledger on every poll, so the open is refused
+-- whenever the two overlap. Production never meets that, since the host runs
+-- in its own supervisor process. One @write(2)@ carries the whole record, and
+-- a short one is reported rather than resumed, as
+-- 'Kanban.Mission.Journal.appendMissionEvent' does.
+appendCommandThroughDescriptor :: WorkerDescriptor -> ReviewCommand -> IO (Either Text ())
+appendCommandThroughDescriptor descriptor command = do
+  let path = descriptor.workerDescriptorCommandPath
+      line = LazyByteString.toStrict (encode command) <> "\n"
+  result <- try @IOException (bracket (openPrivateAppend path) closeFd (`fdWrite` line))
+  pure $ case result of
+    Left exception -> Left (Text.pack (show exception))
+    Right written
+      | fromIntegral written == ByteString.length line -> Right ()
+      | otherwise ->
+          Left
+            ( "only "
+                <> Text.pack (show (toInteger written))
+                <> " of "
+                <> Text.pack (show (ByteString.length line))
+                <> " bytes of a command reached "
+                <> Text.pack path
+            )
+  where
+    openPrivateAppend path = do
+      appended <- openFd path WriteOnly defaultFileFlags {append = True, creat = Just 0o600}
+      onException (setFdMode appended 0o600) (closeFd appended)
+      pure appended
 
 terminalState :: WorkerStatus -> Bool
 terminalState (WorkerTerminal _) = True
