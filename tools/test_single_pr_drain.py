@@ -1238,7 +1238,13 @@ class SinglePrStaleApprovalTests(SinglePrCliFixture):
         self.script_pr_view()
         self.script_review_comments([self.approval_comment()])
 
-        self.assert_stale_refused(*self.run_single())
+        result, proc = self.run_single()
+        self.assert_stale_refused(result, proc)
+        self.assertIn(key, result["message"])
+        self.assertIn(
+            "the polling drainer's interrupted-merge settlement must settle it first",
+            result["message"],
+        )
 
         # No recovery or settlement: keep every recorded field for polling.
         self.assertEqual(self.state_path.read_bytes(), before)

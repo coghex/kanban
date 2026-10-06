@@ -5869,10 +5869,12 @@ def process_pr(
     pr = get_pr(ctx, number)
 
     entry = state["prs"].get(str(number))
-    if entry is not None and entry["approved_head"] != pr["headRefOid"]:
+    if entry is None or entry["approved_head"] != pr["headRefOid"]:
         set_outcome(
             report,
             "approved_head_changed",
+            f"PR #{number}: no approved head was established before processing."
+            if entry is None else
             f"PR #{number}: its head moved away from the approved commit "
             f"{entry['approved_head'][:12]} before processing; it needs a fresh review.",
         )
@@ -6067,10 +6069,12 @@ def process_pr(
     # match what was just checked here.
     pr = get_pr(ctx, number)
     entry = state["prs"].get(str(number))
-    if entry is not None and entry["approved_head"] != pr["headRefOid"]:
+    if entry is None or entry["approved_head"] != pr["headRefOid"]:
         set_outcome(
             report,
             "approved_head_changed",
+            f"PR #{number}: no approved head was established before the merge."
+            if entry is None else
             f"PR #{number}: its head moved away from the approved commit "
             f"{entry['approved_head'][:12]} before the merge; it needs a fresh review.",
         )
@@ -7050,11 +7054,19 @@ def prepare_single_pr(
         # Polling settles these records before recovering approval. A named
         # run leaves that debt intact for settlement instead of rebuilding
         # the entry and losing an unknown merge outcome or an unaudited merge.
-        if (
-            entry.get("merge_attempt") is None
-            and entry.get("pending_audit") is None
-            and recover_current_head_approval(ctx, state, number, pr["headRefOid"])
-        ):
+        unsettled = [
+            key for key in ("merge_attempt", "pending_audit")
+            if entry.get(key) is not None
+        ]
+        if unsettled:
+            message = (
+                f"PR #{number}: {', '.join(unsettled)} is unsettled; the polling "
+                "drainer's interrupted-merge settlement must settle it first."
+            )
+            log(message)
+            set_outcome(report, "approved_head_changed", message)
+            return False
+        if recover_current_head_approval(ctx, state, number, pr["headRefOid"]):
             return True
         log(
             f"PR #{number}: approved label is still attached to an unexpected "
