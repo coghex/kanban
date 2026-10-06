@@ -986,6 +986,301 @@ class SinglePrFinalGateTests(SinglePrCliFixture):
         self.assertFalse(result["merged"])
 
 
+class SinglePrStaleApprovalTests(SinglePrCliFixture):
+    """The hetoimasia #404 shape: stale stored head, fresh canonical review.
+
+    The old head comes from the reported refusal; the current head is a real
+    commit in the temporary repository so the CLI also exercises merge audit
+    and cleanup. All markers, state and commands belong to this fixture.
+    """
+
+    OLD_HEAD = "1f2c19fe80155b655d564e63dcf109da9311ddfd"
+
+    def setUp(self):
+        super().setUp()
+        self.config_home = self.root / "config"
+        rooted = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config_home)})
+        rooted.start()
+        self.addCleanup(rooted.stop)
+        for provider in ("codex", "claude"):
+            self.fake.install(provider)
+        self.before_state = {
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 3217,
+            "active_pr": 7,
+            "prs": {
+                "42": self.state_entry(self.OLD_HEAD),
+                "7": {
+                    **self.state_entry("b" * 40),
+                    "consecutive_failures": 3,
+                    "retry_after_attempt": 3240,
+                    "last_attempt": 3200,
+                    "last_error": "unrelated failure",
+                },
+            },
+        }
+        self.write_state(self.before_state)
+
+    def approval_comment(self, *, head=None, reviewers="codex", author=PUBLISHER,
+                         verdict="APPROVE", comment_id=6001983524):
+        return self.review_marker_comment(
+            f"<!-- pr-review:v2 reviewers={reviewers} models=unspecified "
+            f"head={head or self.head_sha} verdict={verdict} -->",
+            comment_id=comment_id,
+            created_at="2026-10-05T22:00:00Z",
+            author=author,
+        )
+
+    def assert_isolated(self):
+        after = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(after["attempt_counter"], self.before_state["attempt_counter"])
+        self.assertEqual(after["active_pr"], self.before_state["active_pr"])
+        self.assertEqual(after["prs"]["7"], self.before_state["prs"]["7"])
+        self.assertEqual(self.gh_calls("pr", "list"), [])
+        self.assertEqual(self.gh_calls("pr", "view", "7"), [])
+        self.assertFalse(any("/issues/7/" in str(call) for call in self.fake.calls("gh")))
+        self.assertEqual(self.label_edits(), [])
+        for provider in ("codex", "claude"):
+            self.assertEqual(self.fake.calls(provider), [])
+
+    def assert_stale_refused(self, result, proc):
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assert_result(
+            result, outcome="no_action", reason="approved_head_changed",
+            merged=False, would_merge=False, dry_run=False,
+        )
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        after = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(after["prs"]["42"]["approved_head"], self.OLD_HEAD)
+        self.assert_isolated()
+
+    def test_a_fresh_canonical_approval_recovers_the_stored_head_and_merges(self):
+        self.script_pr_view()
+        # Also exercise the complete paginated feed used by queue recovery.
+        self.script_review_comments([], [self.approval_comment()])
+        self.script_merge_and_cleanup()
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_MERGED, result)
+        self.assert_result(
+            result, outcome="merged", reason="merged", merged=True,
+            would_merge=True, dry_run=False,
+        )
+        merges = self.gh_calls("pr", "merge", "42")
+        self.assertEqual(len(merges), 1)
+        args = merges[0]["args"]
+        self.assertEqual(args[args.index("--match-head-commit") + 1], self.head_sha)
+        self.assertEqual(run_git(["rev-parse", "master"], cwd=self.main),
+                         self.merge_commit_sha)
+        self.assertFalse(self.feature_wt.exists())
+        self.assertEqual(len(self.gh_calls("issue", "close", "99")), 1)
+        self.assert_isolated()
+
+    def test_no_marker_still_refuses_even_with_a_successful_stale_check(self):
+        checks = self.base_pr_json()["statusCheckRollup"] + [{
+            "name": drain_prs.STALE_APPROVAL_CHECK,
+            "status": "COMPLETED", "conclusion": "SUCCESS",
+        }]
+        self.script_pr_view({"statusCheckRollup": checks})
+
+        self.assert_stale_refused(*self.run_single())
+
+    def test_another_publishers_current_head_marker_does_not_recover(self):
+        self.script_pr_view()
+        self.script_review_comments([self.approval_comment(author="outsider")])
+
+        self.assert_stale_refused(*self.run_single())
+
+    def test_a_marker_for_another_head_does_not_recover(self):
+        self.script_pr_view()
+        self.script_review_comments([self.approval_comment(head=self.OLD_HEAD)])
+
+        self.assert_stale_refused(*self.run_single())
+
+    def test_a_changes_requested_marker_does_not_recover(self):
+        self.script_pr_view()
+        self.script_review_comments([self.approval_comment(verdict="CHANGES_REQUESTED")])
+
+        self.assert_stale_refused(*self.run_single())
+
+    def test_an_unaccepted_provider_does_not_recover(self):
+        roster = self.config_home / "kanban" / "models.toml"
+        roster.parent.mkdir(parents=True)
+        roster.write_text(
+            (TOOLS_DIR.parent / "models.toml.example").read_text(encoding="utf-8")
+            .replace('agents = ["codex", "claude"]', 'agents = ["claude"]'),
+            encoding="utf-8",
+        )
+        self.script_pr_view()
+        self.script_review_comments([self.approval_comment(reviewers="codex")])
+
+        self.assert_stale_refused(*self.run_single())
+
+    def test_a_failed_gate_still_refuses_after_recovery(self):
+        checks = self.base_pr_json()["statusCheckRollup"]
+        checks[1] = {**checks[1], "conclusion": "FAILURE"}
+        self.script_pr_view({"statusCheckRollup": checks})
+        self.script_review_comments([self.approval_comment()])
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "checks_failed")
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        after = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(after["prs"]["42"]["approved_head"], self.head_sha)
+        self.assert_isolated()
+
+    def test_a_rejection_of_the_current_head_still_vetoes_a_later_approval(self):
+        self.script_pr_view()
+        self.script_review_comments([
+            self.approval_comment(verdict="CHANGES_REQUESTED", comment_id=1),
+            self.approval_comment(),
+        ])
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "changes_requested")
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assert_isolated()
+
+    def test_a_head_moving_during_merge_after_recovery_is_still_refused(self):
+        self.script_pr_view({}, {}, {}, {"headRefOid": "e" * 40})
+        self.script_review_comments([self.approval_comment()])
+        self.fake.script(
+            "gh", ["pr", "merge", "42"], exit_code=1, stderr="head mismatch",
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "approved_head_changed")
+        self.assertFalse(result["merged"])
+        merges = self.gh_calls("pr", "merge", "42")
+        self.assertEqual(len(merges), 1)
+        args = merges[0]["args"]
+        self.assertEqual(args[args.index("--match-head-commit") + 1], self.head_sha)
+        self.assert_isolated()
+
+    def test_a_head_moving_between_preparation_and_processing_is_refused(self):
+        """The first processing read must still name the recovered approval.
+
+        --match-head-commit only protects the later merge boundary; this
+        fixture covers the earlier preparation-to-processing window.
+        """
+        self.script_pr_view({}, {"headRefOid": "e" * 40})
+        self.script_review_comments([self.approval_comment()])
+        # The fake CLI prevents any merge, while recording the attempted head.
+        self.fake.script(
+            "gh", ["pr", "merge", "42"], exit_code=1,
+            stderr="fixture prevents merging the unreviewed head",
+        )
+
+        result, proc = self.run_single()
+
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION)
+        self.assertEqual(result["reason"], "approved_head_changed")
+        self.assert_isolated()
+
+    def test_a_head_moving_at_the_final_processing_read_is_refused(self):
+        self.script_pr_view({}, {}, {"headRefOid": "e" * 40})
+        self.script_review_comments([self.approval_comment()])
+        self.fake.script(
+            "gh", ["pr", "merge", "42"], exit_code=1,
+            stderr="fixture prevents merging the unreviewed head",
+        )
+
+        result, proc = self.run_single()
+
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "approved_head_changed")
+        self.assert_isolated()
+
+    def test_a_moved_behind_head_is_refused_before_any_branch_update(self):
+        self.script_pr_view({}, {
+            "headRefOid": "e" * 40,
+            "mergeStateStatus": "BEHIND",
+        })
+        self.script_review_comments([self.approval_comment()])
+        # If the first-read guard is missing, BEHIND acts before the final
+        # re-read. Record and refuse that update without waiting for it to land.
+        self.fake.script(
+            "gh", ["api", "-X", "PUT", "repos/acme/widgets/pulls/42/update-branch"],
+            exit_code=1, stderr="fixture refuses update of the unreviewed head",
+        )
+
+        result, proc = self.run_single()
+
+        updates = [call for call in self.gh_calls("api") if any(
+            arg.endswith("/update-branch") for arg in call["args"]
+        )]
+        self.assertEqual(updates, [])
+        self.assertEqual(self.gh_calls("run", "rerun"), [])
+        self.assertEqual(list(self.incident_dir.glob("incident-*.json")), [])
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assertEqual(result["reason"], "approved_head_changed")
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assert_isolated()
+
+    def assert_unsettled_record_refused(self, key, record):
+        self.before_state["prs"]["42"][key] = record
+        self.write_state(self.before_state)
+        before = self.state_path.read_bytes()
+        self.script_pr_view()
+        self.script_review_comments([self.approval_comment()])
+
+        result, proc = self.run_single()
+        self.assert_stale_refused(result, proc)
+        self.assertIn(key, result["message"])
+        self.assertIn(
+            "the polling drainer's interrupted-merge settlement must settle it first",
+            result["message"],
+        )
+
+        # No recovery or settlement: keep every recorded field for polling.
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.gh_calls("api", "--paginate", "--slurp"), [])
+
+    def test_an_unsettled_merge_attempt_is_not_erased_by_recovery(self):
+        self.assert_unsettled_record_refused("merge_attempt", {
+            "head": self.OLD_HEAD,
+            "merge_commit": self.merge_commit_sha,
+        })
+
+    def test_an_unsettled_audit_is_not_erased_by_recovery(self):
+        self.assert_unsettled_record_refused("pending_audit", {
+            "head": self.OLD_HEAD,
+            "confirm_merged": True,
+            "cleanup_after_confirm": True,
+        })
+
+    def test_an_unreadable_marker_feed_does_not_recover(self):
+        self.script_pr_view()
+        self.fake.script(
+            "gh", ["api", "--paginate", "--slurp", COMMENTS_ENDPOINT],
+            exit_code=1, stderr="cannot read comments",
+        )
+
+        result, proc = self.run_single()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_ERROR, result)
+        self.assertEqual(result["reason"], "operational_error")
+        self.assertFalse(result["merged"])
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        after = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(after["prs"]["42"]["approved_head"], self.OLD_HEAD)
+        self.assert_isolated()
+
+
 class SinglePrErrorTests(SinglePrCliFixture):
     """Errors: exit 1, and a merge that already landed is still reported."""
 
@@ -1838,6 +2133,38 @@ class SinglePrDryRunPurityTests(SinglePrCliFixture):
         self.assertTrue(self.feature_wt.exists())
         self.assertFalse(self.lock_path.exists())
         self.assertFalse(self.state_path.exists())
+
+    def test_a_dry_run_with_a_fresh_approval_and_stale_state_makes_no_mutation(self):
+        self.write_state({
+            "version": drain_prs.STATE_VERSION,
+            "attempt_counter": 3217,
+            "active_pr": 7,
+            "prs": {
+                "42": self.state_entry(SinglePrStaleApprovalTests.OLD_HEAD),
+                "7": self.state_entry("b" * 40),
+            },
+        })
+        self.script_pr_view()
+        self.script_review_comments([self.review_marker_comment(
+            f"<!-- pr-review:v2 reviewers=codex models=unspecified "
+            f"head={self.head_sha} verdict=APPROVE -->",
+            comment_id=6001983524, created_at="2026-10-05T22:00:00Z",
+        )])
+        self.fake.script("gh", ["issue", "view", "99"],
+                         stdout=json.dumps({"state": "OPEN"}))
+
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "config")}):
+            result, proc = self.run_pure()
+
+        self.assertEqual(proc.returncode, drain_prs.EXIT_NO_ACTION, result)
+        self.assert_result(
+            result, outcome="no_action", reason="would_merge", merged=False,
+            would_merge=True, dry_run=True,
+        )
+        self.assertEqual(self.gh_calls("pr", "merge", "42"), [])
+        self.assertEqual(self.gh_calls("issue", "close", "99"), [])
+        self.assertEqual(self.gh_calls("pr", "list"), [])
+        self.assertEqual(self.label_edits(), [])
 
     def test_a_dry_run_against_a_dirty_checkout_makes_no_mutation(self):
         # The removed gate needed --no-optional-locks to keep its `git status`

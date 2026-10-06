@@ -675,6 +675,18 @@ still carries `merged: true`; it never reports that landed merge as unmerged.
 
 `--pr` and `--once` are mutually exclusive.
 
+When the stored approved head differs from the current head, `--pr` recognizes
+a current-head approval marker, including a canonical review, using the same
+authenticated-publisher and accepted-reviewer/provider checks as polling. It
+does not apply polling's content-safe `dismiss-stale-approval` carry. If a
+`merge_attempt` or `pending_audit` record still awaits settlement, the named
+run refuses that mismatch and preserves the record for polling to settle.
+
+Both polling and named runs compare the stored approved head with the first
+processing read and the final re-read before merging. If either read observes
+a different head, the run refuses with `approved_head_changed`; the later
+`--match-head-commit` guard still protects the merge call itself.
+
 Kanban's `m` key drives exactly this entry point for the selected Done card;
 see [the user guide](user-guide.md). It refuses while *any* open incident
 stands, whatever its kind and whichever pull request it names. A
@@ -730,7 +742,7 @@ vocabulary:
 | `merge_conflict` | The pull request conflicts with the default branch. It was recorded as an incident and left alone. |
 | `behind_base` | The branch was behind the default branch. The update was requested; merging waits for a later run. |
 | `mergeability_computing` | GitHub has not finished computing mergeability. |
-| `approved_head_changed` | The approval belongs to an older head. The pull request needs a fresh review. |
+| `approved_head_changed` | The stored approval belongs to an older head and no accepted current-head approval marker exists, recovery is deferred while an interrupted merge awaits settlement, or the head moved after approval was established. The pull request is left unmerged. |
 | `not_eligible` | The pull request is closed, still a draft, or targets another branch. |
 | `run_locked` | Another drainer run holds the repository. The message names it. |
 | `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the unfinished-operation refusal and the default-branch requirement above. |

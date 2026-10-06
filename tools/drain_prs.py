@@ -3522,6 +3522,33 @@ def rereview_pr_with_model(
         remove_worktree(ctx, review_path, dry_run=False, allow_dirty_force=True)
 
 
+def recover_current_head_approval(
+    ctx: RepoContext, state: dict[str, Any], number: int, current_head: str
+) -> bool:
+    """Recover a stored approval from the publisher's accepted current-head review.
+
+    Shared by polling and named-PR preparation, after checking the approval
+    label. This only updates approval bookkeeping; process_pr() still applies
+    every merge gate, including current-head rejections and the merge-time
+    head guard.
+    """
+    # Keep the reviewer set: a marker from a provider this installation no
+    # longer loads cannot recover a stale approval.
+    details = latest_review_details(ctx, number)
+    if (
+        details is None
+        or details[1:] != (current_head.lower(), "APPROVE")
+        or not marker_provider_accepted(details[0])
+    ):
+        return False
+    log(
+        f"PR #{number}: found an approved {details[0]} review marker "
+        f"for the new head {current_head[:12]}"
+    )
+    remember_approved_head(state, number, current_head)
+    return True
+
+
 def recover_stale_approval(
     ctx: RepoContext,
     state: dict[str, Any],
@@ -3588,20 +3615,7 @@ def recover_stale_approval(
             continue
 
         if has_label(pr, APPROVE_LABEL):
-            # Read through latest_review_details, not latest_review_marker: the
-            # brand that published the marker decides whether it counts here,
-            # and discarding it is what let a review from a provider this
-            # installation no longer loads recover a stale approval.
-            details = latest_review_details(ctx, number)
-            if details is not None and details[1:] == (
-                current_head.lower(),
-                "APPROVE",
-            ) and marker_provider_accepted(details[0]):
-                log(
-                    f"PR #{number}: found an approved {details[0]} review marker "
-                    f"for the new head {current_head[:12]}"
-                )
-                remember_approved_head(state, number, current_head)
+            if recover_current_head_approval(ctx, state, number, current_head):
                 return True
             # review-gate.yml's dismiss-stale-approval job deliberately KEEPS
             # this label when a synchronize push touched none of this PR's own
@@ -5879,6 +5893,18 @@ def process_pr(
 ) -> bool:
     pr = get_pr(ctx, number)
 
+    entry = state["prs"].get(str(number))
+    if entry is None or entry["approved_head"] != pr["headRefOid"]:
+        set_outcome(
+            report,
+            "approved_head_changed",
+            f"PR #{number}: no approved head was established before processing."
+            if entry is None else
+            f"PR #{number}: its head moved away from the approved commit "
+            f"{entry['approved_head'][:12]} before processing; it needs a fresh review.",
+        )
+        return True
+
     if pr["state"] != "OPEN":
         log(f"PR #{number}: no longer open; skipping")
         set_outcome(
@@ -6067,6 +6093,17 @@ def process_pr(
     # successful merge and raises a fatal PostMergeAuditError if it doesn't
     # match what was just checked here.
     pr = get_pr(ctx, number)
+    entry = state["prs"].get(str(number))
+    if entry is None or entry["approved_head"] != pr["headRefOid"]:
+        set_outcome(
+            report,
+            "approved_head_changed",
+            f"PR #{number}: no approved head was established before the merge."
+            if entry is None else
+            f"PR #{number}: its head moved away from the approved commit "
+            f"{entry['approved_head'][:12]} before the merge; it needs a fresh review.",
+        )
+        return True
     regression = gate_regression(ctx, pr, gates)
     if regression is not None:
         reason, message, note = regression
@@ -7039,6 +7076,23 @@ def prepare_single_pr(
     if entry is None:
         remember_approved_head(state, number, pr["headRefOid"])
     elif entry["approved_head"] != pr["headRefOid"]:
+        # Polling settles these records before recovering approval. A named
+        # run leaves that debt intact for settlement instead of rebuilding
+        # the entry and losing an unknown merge outcome or an unaudited merge.
+        unsettled = [
+            key for key in ("merge_attempt", "pending_audit")
+            if entry.get(key) is not None
+        ]
+        if unsettled:
+            message = (
+                f"PR #{number}: {', '.join(unsettled)} is unsettled; the polling "
+                "drainer's interrupted-merge settlement must settle it first."
+            )
+            log(message)
+            set_outcome(report, "approved_head_changed", message)
+            return False
+        if recover_current_head_approval(ctx, state, number, pr["headRefOid"]):
+            return True
         log(
             f"PR #{number}: approved label is still attached to an unexpected "
             "new head; waiting for invalidation"
