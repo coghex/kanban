@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -5898,6 +5899,116 @@ class QueueOrderTests(ProcessPrFixture):
         # #7 was skipped and #42 reached, with no merge, incident or write.
         self.assertTrue(self._views_of(42))
         self.assertEqual(self._advancing_gh_calls(), [])
+        self.assertEqual(self._incidents(), [])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    # Issue #765: an aggregate required check such as `build-test` is created
+    # only after the jobs it needs finish, so sibling work still in flight
+    # keeps an absent one a barrier, past any age of its observation.
+
+    def _sibling_run(self, name, *, completed_ago=None):
+        """One sibling check run: in progress, or completed that long ago."""
+        run = {
+            "__typename": "CheckRun",
+            "name": name,
+            "status": "IN_PROGRESS",
+            "conclusion": "",
+            "startedAt": "2026-07-18T00:00:00Z",
+            "completedAt": "0001-01-01T00:00:00Z",
+            "workflowName": "CI",
+        }
+        if completed_ago is not None:
+            finished = datetime.fromtimestamp(time.time() - completed_ago, tz=timezone.utc)
+            run.update(
+                status="COMPLETED",
+                conclusion="SUCCESS",
+                completedAt=finished.isoformat().replace("+00:00", "Z"),
+            )
+        return run
+
+    def _aggregate_missing_pr(self, *siblings):
+        """#7 with `review-approved` green and `build-test` not yet created."""
+        review = {
+            "__typename": "CheckRun",
+            "name": drain_prs.DEFAULT_REQUIRED_REVIEW_CHECK,
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-07-18T00:00:00Z",
+            "completedAt": "2026-07-18T00:00:05Z",
+            "workflowName": "Review gate",
+        }
+        return self._missing_checks_pr(statusCheckRollup=[review, *siblings])
+
+    def test_sibling_work_in_flight_holds_an_absent_aggregate_check_until_it_completes(self):
+        self._script_pr(7, self._aggregate_missing_pr(self._sibling_run("haskell")))
+        self._script_merge_of_42()
+        queue = [self._queued(7, "b" * 40), self._queued(42, self.head_sha)]
+        self._script_pr_list(queue, queue, queue)
+        expired = self._expired()
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=expired),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+
+        # Observed missing far longer than the grace period, but CI is still
+        # running: no incident, and #42 does not advance past it.
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+        state = self._read_state()
+        self.assertEqual(state["active_pr"], 7)
+        self.assertEqual(
+            state["prs"]["7"]["missing_check_since"], {**expired, "settled_at": None}
+        )
+
+        # The run finished only a minute ago and build-test is still absent: a
+        # barrier still, measured from that completion.
+        self._script_pr(7, self._aggregate_missing_pr(self._sibling_run("haskell", completed_ago=60)))
+        self._run_loop()
+
+        self._assert_42_got_no_turn()
+        self.assertEqual(self._incidents(), [])
+
+        # Past the grace period since the work completed: #758's skip applies,
+        # and #42 merges in the same pass.
+        self._script_pr(
+            7,
+            self._aggregate_missing_pr(
+                self._sibling_run(
+                    "haskell", completed_ago=drain_prs.MISSING_CHECK_GRACE_SECONDS + 60
+                )
+            ),
+        )
+        self._run_loop()
+
+        self.assertEqual(self._merged_numbers(), ["42"])
+        incidents = self._incidents(open_only=True)
+        self.assertEqual(
+            [(incident["pull_request"], incident["checks"]) for incident in incidents],
+            [(7, [drain_prs.DEFAULT_REQUIRED_CI_CHECK])],
+        )
+        self.assertIsNone(self._read_state()["active_pr"])
+
+    def test_a_dry_run_holds_an_absent_aggregate_check_beside_running_work_and_writes_nothing(self):
+        self._script_pr(7, self._aggregate_missing_pr(self._sibling_run("haskell")))
+        self._script_merge_of_42()
+        self._script_pr_list([self._queued(7, "b" * 40), self._queued(42, self.head_sha)])
+        self._write_state(
+            {
+                "7": self._entry("b" * 40, missing_check_since=self._expired()),
+                "42": self._entry(self.head_sha),
+            },
+            active_pr=7,
+        )
+        before = self.state_path.read_bytes()
+
+        self._run_loop(dry_run=True)
+
+        self._assert_42_got_no_turn()
         self.assertEqual(self._incidents(), [])
         self.assertEqual(self.state_path.read_bytes(), before)
 
