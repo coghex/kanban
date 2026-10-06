@@ -5487,7 +5487,12 @@ def record_missing_check(
 
 
 def reconcile_missing_check_incidents(
-    ctx: RepoContext, state: dict[str, Any], gates: GateConfig, *, dry_run: bool
+    ctx: RepoContext,
+    state: dict[str, Any],
+    gates: GateConfig,
+    *,
+    dry_run: bool,
+    pull_request: int | None = None,
 ) -> None:
     """Resolve missing-check incidents whose condition has ended.
 
@@ -5500,10 +5505,17 @@ def reconcile_missing_check_incidents(
     observation, so a check that goes missing again gets a fresh grace period
     even when another candidate's lane keeps this one from being examined.
     Only a confirmed reading closes one: a read that fails keeps it open.
+    A named-PR run uses the keyed lookup instead of enumerating the queue or
+    reading other pull requests, including when its target is ineligible.
     """
     if dry_run:
         return
-    for incident in drain_prs_service.open_missing_check_incidents(ctx.path):
+    if pull_request is None:
+        incidents = drain_prs_service.open_missing_check_incidents(ctx.path)
+    else:
+        found = drain_prs_service.find_open_missing_check_incident(ctx.path, pull_request)
+        incidents = [found[1]] if found is not None else []
+    for incident in incidents:
         number = incident.get("pull_request")
         if not isinstance(number, int):
             log(
@@ -5540,12 +5552,25 @@ def reconcile_missing_check_incidents(
             note = f"Every required check has reported for PR #{number}'s head."
             entry = state["prs"].get(str(number))
             observed = entry.get("missing_check_since") if entry else None
-            if isinstance(observed, dict) and observed.get("head") == pr["headRefOid"]:
+            clear_observation = (
+                isinstance(observed, dict) and observed.get("head") == pr["headRefOid"]
+            )
+            if clear_observation:
                 entry["missing_check_since"] = None
+            if clear_observation or pull_request is not None:
                 # Durable before the incident closes: a later step of this poll
                 # can fail before the loop's own save, and a restart must not
                 # reload an expired observation for a condition already over.
-                save_drain_state(ctx, state, dry_run=False)
+                # Named processing may have already cleared it in memory
+                # without reaching its state write, so persist that clear too.
+                try:
+                    save_drain_state(ctx, state, dry_run=False)
+                except BaseException:
+                    # A later named-PR reconciliation may retry in this same
+                    # run. Never mistake an unpersisted clear for a durable one.
+                    if clear_observation:
+                        entry["missing_check_since"] = observed
+                    raise
         else:
             continue
         resolved = drain_prs_service.resolve_missing_check_incident(
@@ -7121,6 +7146,9 @@ def drain_one_pr(
     state: dict[str, Any] | None = None
     try:
         state = load_drain_state(ctx)
+        reconcile_missing_check_incidents(
+            ctx, state, gates, dry_run=dry_run, pull_request=number
+        )
         if prepare_single_pr(ctx, number, state, dry_run=dry_run, report=report):
             process_pr(
                 ctx,
@@ -7136,13 +7164,13 @@ def drain_one_pr(
         report["reason"] = "post_merge_audit_failed"
         report["message"] = str(exc)
         report["merged"] = True
-    except DrainError as exc:
+    except (DrainError, drain_prs_service.ServiceError) as exc:
         # A refusal process_pr() classified on its way out keeps that
         # classification; anything else is an operational failure.
         if report["reason"] not in NO_ACTION_REASONS:
             report["reason"] = "operational_error"
             report["message"] = str(exc)
-    except OSError as exc:
+    except Exception as exc:
         report["reason"] = "operational_error"
         report["message"] = f"PR #{number}: {exc}"
     except KeyboardInterrupt:
@@ -7155,12 +7183,34 @@ def drain_one_pr(
         report["reason"] = "operational_error"
         report["message"] = f"PR #{number}: interrupted before the run finished."
 
+    # Checks or eligibility can change during processing, and even a failed
+    # post-merge audit/cleanup cannot leave an ended incident behind. This
+    # bookkeeping never resets the merge fact recorded by process_pr().
+    if state is not None and not report["interrupted"]:
+        try:
+            reconcile_missing_check_incidents(
+                ctx, state, gates, dry_run=dry_run, pull_request=number
+            )
+        except Exception as exc:
+            # A failed diagnostic write must not lose the result either.
+            with contextlib.suppress(Exception):
+                log(f"PR #{number}: missing-check reconciliation failed: {exc}")
+            if report["reason"] not in ERROR_REASONS:
+                report["reason"] = "operational_error"
+                report["message"] = (
+                    f"PR #{number}: could not reconcile its missing-check incident: {exc}"
+                )
+        except KeyboardInterrupt:
+            report["interrupted"] = True
+            report["reason"] = "operational_error"
+            report["message"] = f"PR #{number}: interrupted during missing-check reconciliation."
+
     # Persisted last and separately so a state-write failure can never mask
     # what already happened on GitHub -- above all a merge that landed.
     if state is not None:
         try:
             save_drain_state(ctx, state, dry_run=dry_run)
-        except OSError as exc:
+        except Exception as exc:
             if report["reason"] not in ERROR_REASONS:
                 report["reason"] = "operational_error"
                 report["message"] = (

@@ -662,6 +662,17 @@ named pull request: no other pull request is listed or recovered, no pass
 counter moves, and neither the [queue order](#queue-order) nor its active
 candidate is consulted or changed.
 
+Before and after processing, a non-dry named run reconciles that pull request's
+stored `missing-check` incident from confirmed current PR/check readings, even
+when the pull request is already closed or no longer eligible. It uses the
+same ended-condition rules as polling, preserves the incident and its history,
+and records why it resolved. An unresolved condition or an unavailable reading
+leaves it open. No other pull request or incident kind is reconciled. Clearing
+the head's missing-check observation is persisted before resolving its incident,
+so a check that later disappears gets a fresh grace period after a restart.
+A bookkeeping or reconciliation failure after a merge is an error result that
+still carries `merged: true`; it never reports that landed merge as unmerged.
+
 `--pr` and `--once` are mutually exclusive.
 
 When the stored approved head differs from the current head, `--pr` recognizes
@@ -737,15 +748,15 @@ vocabulary:
 | `repository_precondition_failed` | The checkout, remote, or drainer configuration is unusable — including the unfinished-operation refusal and the default-branch requirement above. |
 | `post_merge_audit_failed` | The merge landed but the post-merge audit found a gate violation. `merged` is `true`. |
 | `post_merge_cleanup_failed` | The merge landed but its post-merge cleanup is still outstanding. The message names the remaining steps, the drainer keeps retrying them, and `merged` is `true`. |
-| `operational_error` | Anything else went wrong. |
+| `operational_error` | Anything else went wrong, including incident reconciliation or a queue-state write. A merge that already landed still reports `merged: true`. |
 
 ### Exit status
 
 | Status | Meaning |
 | --- | --- |
 | `0` | A merge completed. |
-| `2` | No merge happened. A non-dry run may still have updated a branch behind its base or recorded a conflict or missing-check incident. |
-| `1` | An error. `merged` may still be `true` if the merge landed before the failure. |
+| `2` | No merge happened. A non-dry run may still have updated a branch behind its base, recorded an incident, or resolved the named PR's ended missing-check incident. |
+| `1` | An error, including reconciliation or state bookkeeping. `merged` may still be `true` if the merge landed before the failure. |
 
 A usage error exits `2` with nothing on stdout, so treat empty stdout as a
 startup failure rather than as a no-merge result.
@@ -1298,10 +1309,10 @@ another required check has failed or is being rerun automatically, which
 still decides that pass's outcome. The observation is kept in the queue state,
 so a drainer restart continues it rather than starting over; a new head starts
 a fresh one; and it is cleared on the first pass that finds no configured
-check missing, or by the poll that resolves its incident because every
-required check has reported, even while another candidate holds the lane. A queue-state file written before the drainer
-recorded it simply gives a missing check a fresh grace period. A disabled gate
-is never missing.
+check missing, or by the poll or named-PR invocation that resolves its incident
+because every required check has reported, even while another candidate holds
+the lane. A queue-state file written before the drainer recorded it simply gives
+a missing check a fresh grace period. A disabled gate is never missing.
 
 Within the grace period the candidate is a barrier exactly like a pending one.
 Afterwards the drainer:
@@ -1320,13 +1331,18 @@ queued or in progress, and a failed check awaiting an automatic rerun, keep
 their barrier however old they are — including when another required check
 beside them is missing past its grace period.
 
-The incident resolves itself on the first poll that finds every required
-check reported for the head it names — pending, failed and passed all count as
+The incident resolves itself on the first poll or non-dry `--pr` invocation for
+that pull request that finds every required check reported for the head it
+names — pending, failed and passed all count as
 reported — or finds the pull request closed, merged, or no longer approved. A
 new head supersedes it: that head gets a grace period of its own. This
 reconciliation reads the stored incidents rather than the queue, so it clears
 even while another candidate holds the lane; a read that fails keeps the
-incident open. Stopping the drainer does not clear it, and `ack` does: an
+incident open. Named-PR reconciliation reads only its target PR and does not
+enumerate the approval queue or reconcile other PRs' incidents. It runs even if
+the target has left that queue, and again after processing so a condition that
+ends during the bounded run is retired before it finishes. Stopping the drainer
+does not clear it, and `ack` does: an
 acknowledgement satisfies no check, so a condition that continues opens a new
 incident on a later pass.
 
