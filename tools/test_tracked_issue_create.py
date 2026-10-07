@@ -85,6 +85,9 @@ def issue_json(repo, issue):
     return entry
 
 
+REQUEST_TITLE_SHOUTED = {title!r}
+
+
 def duplicate_number_key(text):
     return text.replace('"number": ', '"number": 1, "number": ', 1)
 
@@ -174,6 +177,23 @@ with open(state_path + ".lock", "w") as lock:
         # A successful `gh` whose evidence is incomplete or malformed.
         if mode == "unstable" and state["listing_passes"] % 2 == 0:
             found = found[:-1]
+        # Content that changed between the two reads of one recovery: the
+        # first read is a stale copy that alone would look like absence.
+        if mode.startswith("drift-") and state["listing_passes"] % 2 == 1:
+            for entry in found:
+                if mode == "drift-title-body":
+                    entry.update(title="Unrelated", body="unrelated\\n")
+                elif mode == "drift-title":
+                    entry["title"] = REQUEST_TITLE_SHOUTED
+                elif mode == "drift-labels":
+                    entry["labels"] = []
+                elif mode == "drift-created-at":
+                    entry["created_at"] = "2001-01-01T00:00:00Z"
+                elif mode == "drift-pull-request":
+                    entry["html_url"] = entry["html_url"].replace(
+                        "/issues/", "/pull/"
+                    )
+                    entry["pull_request"] = {{"html_url": entry["html_url"]}}
         if mode == "non-object-entry":
             found.append("an issue")
         if mode == "pr-stub":
@@ -288,7 +308,9 @@ class TrackedIssueFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
         bin_dir = Path(self.state_dir.name) / "bin"
         bin_dir.mkdir()
         self.gh_path = bin_dir / "gh"
-        self.gh_path.write_text(FAKE_GH.format(python=sys.executable))
+        self.gh_path.write_text(FAKE_GH.format(
+            python=sys.executable, title=REQUEST["title"].upper()
+        ))
         self.gh_path.chmod(0o755)
         self.state_path = Path(self.state_dir.name) / "gh-state.json"
         self.write_state({"issues": []})
@@ -878,6 +900,30 @@ class IncompleteEvidenceTests(TrackedIssueFixture):
                 self.assert_creation_blocked(1)
 
                 # Complete evidence then finds the one issue it already made.
+                self.set_state(listing_mode="ok")
+                self.assertEqual(self.authorize_retry()["status"], "retry-refused")
+                self.assertEqual(self.reconcile(number)["status"], "reconciled")
+                self.assertEqual(self.create()["status"], "already-created")
+                self.assertEqual(self.creates(), 1)
+
+    def test_content_that_changes_between_reads_is_not_evidence(self):
+        # Same numbers in both reads, different content. The stale read alone
+        # says absent for title-body, created-at and pull-request drift (and
+        # similar or not exact for the others), so judging it would authorize
+        # a retry that creates the issue again.
+        for mode in ("drift-title-body", "drift-title", "drift-labels",
+                     "drift-created-at", "drift-pull-request"):
+            with self.subTest(listing=mode):
+                self.write_state({"issues": []})
+                self.fx = Fixture(self.checkout_git_template())
+                number = self.uncertain_creation()
+                self.set_state(listing_mode=mode)
+
+                self.assert_retains_intent(self.inspect())
+                self.assert_retains_intent(self.authorize_retry())
+                self.assert_retains_intent(self.reconcile(number))
+                self.assert_creation_blocked(1)
+
                 self.set_state(listing_mode="ok")
                 self.assertEqual(self.authorize_retry()["status"], "retry-refused")
                 self.assertEqual(self.reconcile(number)["status"], "reconciled")

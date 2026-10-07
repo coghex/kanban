@@ -69,7 +69,8 @@ Recovery decides on GitHub's evidence only when that evidence is complete.
 The listing is paged in ascending creation order to a conclusive short page
 and read twice; every row, pull requests included, must carry a valid number,
 canonical URL in the repository, title, body (null is legitimate; omitted is
-not), labels, and creation time; and every JSON value, here as in the request
+not), labels, and creation time, and both reads must agree on every one of
+them; and every JSON value, here as in the request
 and the create response, must parse strictly, without duplicate keys. Anything
 else — empty output, a stub row, a truncated or repeated page, a listing that
 does not end or changes between reads — is refused as `evidence-incomplete`:
@@ -358,10 +359,13 @@ class GhCli:
         offsets are not a snapshot — an issue deleted or transferred mid-read
         shifts every later entry back one, silently skipping one — so the
         listing is read twice and both passes must name the same issues in
-        the same order."""
+        the same order, with the same content: an issue edited mid-read could
+        otherwise be judged on its stale copy."""
         first = self._one_pass(repository, since)
         second = self._one_pass(repository, since)
-        if [item["number"] for item in first] != [item["number"] for item in second]:
+        if [evidence_view(item) for item in first] != [
+            evidence_view(item) for item in second
+        ]:
             raise GitHubError(
                 "the issue listing changed between two complete reads; it is "
                 "not a consistent view of what exists"
@@ -464,6 +468,25 @@ def listing_entry(repository: str, item) -> dict:
         raise GitHubError(f"#{number} is not a well-formed pull request of {repository}")
     _content_fields(item, number)
     return {"kind": "pull", "number": number}
+
+
+def evidence_view(item: dict) -> dict:
+    """Every field of a validated listing row that recovery reads: identity,
+    pull-request exclusion, the creation-window filter, and the match. Two
+    reads of the listing agree only when these all agree."""
+    pull = item.get("pull_request", _MISSING)
+    return {
+        "number": item["number"],
+        "html_url": item["html_url"],
+        "pull_request": None if pull is _MISSING else pull.get("html_url"),
+        "title": item["title"],
+        "body": item["body"],
+        "labels": sorted(
+            label["name"] if isinstance(label, dict) else label
+            for label in item["labels"]
+        ),
+        "created_at": item["created_at"],
+    }
 
 
 def issue_evidence(repository: str, issue) -> dict:
