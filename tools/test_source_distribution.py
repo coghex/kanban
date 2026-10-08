@@ -314,7 +314,10 @@ PROVIDER_MANIFESTS = (
 # census without that sibling would resolve no drainer at all. The Codex bundle
 # needs its own second copy of `kanban_config.py` because it has no shared
 # scripts root -- each skill carries what it loads.
-# Fifteen modules: five in the Claude bundle, six in the Codex bundle, and
+# The tracked issue-creation tool joins them beside the transaction module it
+# loads from beside itself: the processing workflows create every tracked issue
+# through it, so a bundle without it cannot create one at all.
+# Seventeen modules: six in the Claude bundle, seven in the Codex bundle, and
 # the Grok, Kimi, Google, and Claude-on-Copilot coordinators' roster readers.
 BUNDLED_MECHANISM_MODULES = (
     "claude-copilot-plugin/plugins/kanban/scripts/kanban_models.py",
@@ -323,6 +326,7 @@ BUNDLED_MECHANISM_MODULES = (
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
     "google-plugin/plugins/kanban/scripts/kanban_models.py",
     "grok-plugin/plugins/kanban/scripts/kanban_models.py",
     "kimi-plugin/plugins/kanban/scripts/kanban_models.py",
@@ -332,6 +336,7 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",
 )
 
 # The project-review workflow's durable-state mechanisms, asserted for the same

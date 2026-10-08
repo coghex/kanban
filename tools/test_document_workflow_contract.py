@@ -437,6 +437,16 @@ CONTRACT_STATEMENTS = {
     "transaction-confirmation-needs-the-begin-token": (
         "Only the run that performed a mutation may confirm it"
     ),
+    "transaction-issue-creation-is-one-operation": (
+        "Creating an issue is one operation, not a chain"
+    ),
+    "transaction-issue-creation-records-intent-first": (
+        "makes no GitHub request unless the step's intent was recorded"
+    ),
+    "transaction-issue-creation-uncertainty-is-recovered-by-the-tool": (
+        "the same tool's read-only --inspect, approved --reconcile, and approved "
+        "--authorize-retry are the only way out of it"
+    ),
     "transaction-identity-must-agree-with-itself": (
         "A confirmed identity is the one its own kind of mutation has, and it "
         "must agree with itself"
@@ -1056,8 +1066,9 @@ TRANSACTION_CLAUSES = {
 # These three branches exist in all four processing assets.
 TRANSACTION_BRANCH_CLAUSES = {
     "child-issue-creation": (
-        "begin it before that call and confirm it with the number and url it "
-        "returned"
+        "is a checkpointed step created through one tracked issue operation, "
+        "which begins it, creates the issue, and confirms it with the number "
+        "and url github returned"
     ),
     "child-issue-linking": (
         "linking an issue that already exists mutates nothing by itself"
@@ -1078,8 +1089,8 @@ TRANSACTION_EPIC_BRANCH_CLAUSES = {
         "the exact label name and metadata it created"
     ),
     "epic-creation": (
-        "begin it before gh issue create -r \"$doc_repo\" and confirm it with "
-        "the epic number and url"
+        "creating the umbrella epic is a checkpointed epic-create step created "
+        "through one tracked issue operation"
     ),
     "epic-adoption-edit": (
         "confirm it with the target issue identity and the verified post-edit "
@@ -1109,6 +1120,86 @@ TRANSACTION_INVOCATIONS = (
 TRANSACTION_MODULE_INVOCATION = (
     'python3 "$TRACKER_TX" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+)
+
+# The moskophoros#64 incident: a processing run's `--begin-step` failed, the run
+# created the issue anyway, and the issue existed with no recorded intent. An
+# issue-creating step is therefore one invocation of
+# tools/tracked_issue_create.py, never a begin, a `gh issue create`, and a
+# confirm chained by the asset. These are the policy clauses every processing
+# asset states about that operation and the result it consumes.
+TRACKED_ISSUE_CLAUSES = {
+    "creation-is-not-a-chain": (
+        "is never walked as separate begin, create, and confirm commands"
+    ),
+    "no-request-without-recorded-intent": (
+        "makes no github request unless that record was written"
+    ),
+    "the-tool-confirms-the-step": (
+        "confirms the step with that identity itself"
+    ),
+    "the-fingerprint-comes-from-the-tool": (
+        "take the step's payload_fingerprint for the plan above from the tool "
+        "rather than computing one"
+    ),
+    "the-target-must-name-the-repository": (
+        "a target that names another repository, several, or none is refused "
+        "before anything is recorded"
+    ),
+    "the-result-is-read-first": (
+        "read it before doing anything else, whatever the exit status"
+    ),
+    "success-is-never-created-again": (
+        "go on to the next step. never create the issue again"
+    ),
+    "a-refusal-has-no-fallback": (
+        "never fall back to creating the issue any other way"
+    ),
+    "an-uncertain-outcome-stays-ambiguous": (
+        "the step stays ambiguous in the record, and a later --create for it is "
+        "refused"
+    ),
+    "an-uncertain-outcome-is-never-retried": (
+        "never retry it, create it another way, advance past it, publish, or "
+        "clear the record. stop and report"
+    ),
+    "recovery-goes-through-the-tool": (
+        "recovered through the same tool, never by hand and never by "
+        "--confirm-step"
+    ),
+    "recovery-needs-explicit-approval": (
+        "only on the user's explicit approval does --reconcile --issue <number> "
+        "--approved bind the step"
+    ),
+    "incomplete-evidence-is-not-absence": (
+        "is never evidence that the issue is absent"
+    ),
+    "preflight-ambiguity-points-at-the-tool": (
+        "for an issue-create or epic-create step, that verification, the "
+        "binding, and the retry are the tracked issue tool's"
+    ),
+}
+
+# The tool's own invocations, as the assets spell them after whitespace
+# normalization. The repository/root/path prefix is the same binding the
+# transaction module's invocations carry, so the two cannot be pointed at
+# different records.
+TRACKED_ISSUE_INVOCATIONS = (
+    'python3 "$TRACKED_ISSUE" --fingerprint --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKED_ISSUE" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--step <N> --create --approved --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKED_ISSUE" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--step <N> --inspect --request "$ISSUE_REQUEST"',
+)
+
+# What an asset may no longer carry: the GitHub CLI's own create command, in any
+# spelling the gh-invocation scan recognizes, and an issue-creating identity
+# confirmed by hand through the transaction module's `--confirm-step`.
+FORBIDDEN_ISSUE_CREATE_RE = re.compile(r"\bgh\s+issue\s+create\b")
+HAND_CONFIRMED_ISSUE_RE = re.compile(
+    r"--confirm-step[^\n]*<<'IDENTITY'\n[^\n]*\"kind\":\s*\"(?:issue|epic)-create\""
 )
 
 # Requirement 14: both process-design-doc variants used to direct a partially
@@ -1516,10 +1607,11 @@ def contract_text() -> str:
 # that was true of all six for as long as they resolved it from $DOC_ROOT.
 #
 # `tools/` stays the source. Each bundle carries a byte-identical copy, held
-# identical below, and the three-file set is one unit: the two mechanism
-# modules load each other from beside themselves and the publication module
-# loads the configuration reader from beside itself, so a bundle carrying part
-# of the set carries none of it.
+# identical below, and the four-file set is one unit: the two mechanism
+# modules load each other from beside themselves, the publication module
+# loads the configuration reader from beside itself, and the tracked
+# issue-creation tool loads the transaction module from beside itself, so a
+# bundle carrying part of the set carries none of it.
 MECHANISM_SOURCE_DIR = REPO_ROOT / "tools"
 BUNDLE_ROOTS = {
     "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban",
@@ -1533,6 +1625,7 @@ MECHANISM_MODULES = (
     "publish_coordination_doc.py",
     "tracker_transaction.py",
     "kanban_config.py",
+    "tracked_issue_create.py",
 )
 
 # Issue #574's janitor census is not a member of the set above: it has no
@@ -2375,7 +2468,7 @@ class OwningRepositoryTests(unittest.TestCase):
                     )
 
     def test_every_gh_invocation_binds_to_the_resolved_owner(self):
-        # Requirement 4: the four processing assets carry the ten tracker
+        # Requirement 4: the four processing assets carry the tracker
         # operations this issue scopes; the three capture assets carry only the
         # ownership block's own `gh repo view` calls, bound by $DOC_ROOT's own
         # remote. Both shapes are checked the same way, so a tracker mutation
@@ -2390,13 +2483,14 @@ class OwningRepositoryTests(unittest.TestCase):
                     f"directory rather than to $DOC_REPO: {unbound}",
                 )
 
-    def test_the_ten_scoped_tracker_operations_are_all_present(self):
+    def test_the_scoped_tracker_operations_are_all_present(self):
         # Pins what the scan above actually recovers. Without this, deleting
         # every `gh issue` command would leave the check with nothing to find
-        # and still pass. The design pair names two more than it did before
-        # issue #327: its EPIC path states the epic-creation call where the
-        # ordered steps are listed and again where that branch's checkpoint
-        # is stated, and both spellings are owner-bound.
+        # and still pass. What remains are the read-only issue listings: every
+        # issue and epic the processing assets create now goes through
+        # tools/tracked_issue_create.py, which is bound to $DOC_REPO by its own
+        # --repo, so no asset spells a `gh issue create` any more and
+        # TrackedIssueCreationContractTests forbids one coming back.
         recovered = {}
         for path in sorted(self.declared):
             recovered[path] = len(
@@ -2408,13 +2502,13 @@ class OwningRepositoryTests(unittest.TestCase):
                 "claude-plugin/plugins/kanban/commands/design-epic.md": 0,
                 "claude-plugin/plugins/kanban/commands/draft-report.md": 0,
                 "claude-plugin/plugins/kanban/commands/note-problem.md": 0,
-                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 4,
-                "claude-plugin/plugins/kanban/commands/process-report.md": 3,
+                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 1,
+                "claude-plugin/plugins/kanban/commands/process-report.md": 2,
                 "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": 0,
-                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 4,
-                "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 3,
+                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 1,
+                "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 2,
             },
         )
 
@@ -2424,13 +2518,14 @@ class OwningRepositoryTests(unittest.TestCase):
         for path in DISPOSITION_APPLYING_ASSETS:
             with self.subTest(path=path):
                 reverted = self.asset_text(path).replace(
-                    'gh issue create -R "$DOC_REPO" --body-file',
-                    "gh issue create --body-file",
+                    'gh issue list -R "$DOC_REPO" --state open',
+                    "gh issue list --state open",
                     1,
                 )
-                self.assertEqual(
-                    unbound_gh_invocations(reverted),
-                    ["gh issue create --body-file"],
+                unbound = unbound_gh_invocations(reverted)
+                self.assertEqual(len(unbound), 1, unbound)
+                self.assertTrue(
+                    unbound[0].startswith("gh issue list --state open"), unbound
                 )
 
     def test_an_unrelated_repo_scope_does_not_count_as_owner_bound(self):
@@ -3087,6 +3182,121 @@ class TrackerTransactionContractTests(unittest.TestCase):
     def test_the_contract_names_the_module_that_owns_the_transaction(self):
         self.assertIn("tools/tracker_transaction.py", contract_text())
         self.assertIn("tools/test_tracker_transaction.py", contract_text())
+
+
+def missing_tracked_issue_clauses(text):
+    """The tracked issue-creation clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in TRACKED_ISSUE_CLAUSES.items() if clause not in asset
+    )
+
+
+def chained_issue_creation(text):
+    """Every way `text` still creates an issue outside the one operation: a
+    `gh issue create`, or an issue-creating identity confirmed by hand."""
+    return FORBIDDEN_ISSUE_CREATE_RE.findall(text) + [
+        match.group(0) for match in HAND_CONFIRMED_ISSUE_RE.finditer(text)
+    ]
+
+
+class TrackedIssueCreationContractTests(unittest.TestCase):
+    """The moskophoros#64 incident, at the level of the assets that caused it.
+
+    A processing run drove the tracker transaction as three commands — begin,
+    `gh issue create`, confirm — and when the begin failed it ran the create
+    anyway. tools/tracked_issue_create.py makes the issue-creating step one
+    operation; what is asserted here is that every processing asset uses it for
+    every issue it creates, consumes its result the way the tool's statuses
+    require, and cannot drift back to the chain.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_every_processing_asset_states_how_to_consume_the_result(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_tracked_issue_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states how a tracked issue creation is "
+                    f"run and its result consumed: {missing}",
+                )
+
+    def test_removing_any_tracked_issue_clause_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in TRACKED_ISSUE_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_tracked_issue_clauses(asset.replace(clause, "")),
+                        [key],
+                    )
+
+    def test_every_processing_asset_invokes_the_tool(self):
+        for path in PROCESSING_ASSETS:
+            body = normalized(self.asset_text(path))
+            for invocation in TRACKED_ISSUE_INVOCATIONS:
+                with self.subTest(path=path, invocation=invocation):
+                    self.assertIn(invocation, body, path)
+
+    def test_no_processing_asset_creates_an_issue_outside_the_tool(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                chained = chained_issue_creation(self.asset_text(path))
+                self.assertEqual(
+                    chained,
+                    [],
+                    f"{path} creates an issue outside tracked_issue_create.py, "
+                    f"the chain moskophoros#64 half-applied: {chained}",
+                )
+
+    def test_reintroducing_the_chain_is_reported(self):
+        # The planted violations, so the check above cannot pass by finding
+        # nothing: the old CLI call, and the old hand-confirmed identity.
+        create = 'gh issue create -R "$DOC_REPO" --body-file "$BODY"'
+        confirmed = (
+            '  --confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity - '
+            "<<'IDENTITY'\n"
+            '{"kind": "issue-create", "id": "<number>", "url": "<url>",\n'
+        )
+        epic = confirmed.replace("issue-create", "epic-create")
+        for path in PROCESSING_ASSETS:
+            asset = self.asset_text(path)
+            for planted in (create, confirmed, epic):
+                with self.subTest(path=path, planted=planted[:20]):
+                    self.assertEqual(
+                        len(chained_issue_creation(f"{asset}\n{planted}")), 1
+                    )
+        # A non-issue step confirmed by hand is the ordinary walk, not a chain.
+        self.assertEqual(
+            chained_issue_creation(confirmed.replace("issue-create", "issue-comment")),
+            [],
+        )
+
+    def test_the_generic_walk_example_is_not_an_issue_creation(self):
+        # The begin/confirm example every asset still carries is for the step
+        # kinds the tool does not own; were it an issue creation again, the
+        # example would teach the chain this tool replaced.
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    '{"kind": "issue-comment", "id": "<comment id>"',
+                    self.asset_text(path),
+                )
+
+    def test_no_non_processing_asset_runs_the_tool(self):
+        for path in DRAFTING_ASSETS + NOTE_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "tracked_issue_create.py", self.asset_text(path), path
+                )
+
+    def test_the_contract_names_the_tool_and_its_tests(self):
+        self.assertIn("tools/tracked_issue_create.py", contract_text())
+        self.assertIn("tools/test_tracked_issue_create.py", contract_text())
 
 
 class SharedStatusVocabularyTests(unittest.TestCase):

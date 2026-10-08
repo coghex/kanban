@@ -215,7 +215,12 @@ as the PR-flow skills' search for the coordinator — and never resolve them fro
 the repository being worked, which tracks none of them. That was issue #370: the
 skills shipped and the modules they require did not, so all three failed closed
 in every repository but Kanban's own, which is the opposite of what this plugin
-is for. The three modules travel as a unit because each loads its siblings from
+is for. `$process-report` and `$process-design-doc` also locate
+`skills/process-report/scripts/tracked_issue_create.py`, a byte-identical copy
+of `tools/tracked_issue_create.py`: every issue or epic they create is one
+invocation of it, which records the step's intent, creates the issue only if
+that record was written, and confirms it, so a failed checkpoint can never be
+followed by an untracked creation. The three modules travel as a unit because each loads its siblings from
 beside itself, and `tools/test_document_workflow_contract.py` holds the copies
 identical to their sources, holds each skill's lookup to a bundled path, and
 runs that `find` against a simulated install. An edit to a `tools/` module
