@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -126,6 +127,8 @@ with open(state_path + ".lock", "w") as lock:
             sys.stderr.write("HTTP 502: Bad Gateway\\n")
             sys.exit(1)
         if mode == "slow":
+            # The request is visible in flight before it lands.
+            save()
             fcntl.flock(lock, fcntl.LOCK_UN)
             time.sleep(state.get("sleep", 0.5))
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -156,6 +159,37 @@ with open(state_path + ".lock", "w") as lock:
         sys.exit(0)
 
     save()
+    if args[:3] == ["api", "--method", "GET"] and "/events?" in args[3]:
+        path, _, query = args[3].partition("?")
+        repo, _, rest = path[len("repos/"):].partition("/issues/")
+        number = int(rest[:-len("/events")])
+        params = dict(part.split("=", 1) for part in query.split("&"))
+        size, page = int(params["per_page"]), int(params["page"])
+        issue = next(i for i in state["issues"] if i["number"] == number)
+        events = [dict(e) for e in issue.get("events", [])]
+        mode = state.get("events_mode", "ok")
+        if mode == "fails":
+            sys.stderr.write("HTTP 502: Bad Gateway\\n")
+            sys.exit(1)
+        if mode == "first-rename-lost":
+            renamed = [e for e in events if e["event"] == "renamed"]
+            events.remove(renamed[0])
+        if mode == "last-rename-lost":
+            renamed = [e for e in events if e["event"] == "renamed"]
+            events.remove(renamed[-1])
+        if mode == "rename-without-titles":
+            for e in events:
+                if e["event"] == "renamed":
+                    e.pop("rename")
+        if mode == "missing-id":
+            for e in events:
+                e.pop("id")
+        chunk = events[(page - 1) * size:page * size]
+        text = json.dumps(chunk)
+        if mode == "truncated":
+            text = text[:-1]
+        print(text)
+        sys.exit(0)
     if args[:3] == ["api", "--method", "GET"]:
         path, _, query = args[3].partition("?")
         repo = path[len("repos/"):-len("/issues")]
@@ -361,6 +395,26 @@ class TrackedIssueFixture(git_fixture.GitTemplateMixin, unittest.TestCase):
     def creates(self):
         return self.state().get("creates", 0)
 
+    def edit(self, number, *, title=None, body=None):
+        """A person's later edit of issue `number`: a new title is recorded
+        as a `renamed` event, between unrelated ones, as GitHub records it."""
+        state = self.state()
+        issue = next(i for i in state["issues"] if i["number"] == number)
+        events = issue.setdefault("events", [])
+
+        def event(kind, **extra):
+            state["event_seq"] = state.get("event_seq", 9000) + 1
+            events.append({"id": state["event_seq"], "event": kind} | extra)
+
+        event("labeled", label={"name": "triage"})
+        if title is not None and title != issue["title"]:
+            event("renamed", rename={"from": issue["title"], "to": title})
+            issue["title"] = title
+        if body is not None:
+            issue["body"] = body
+        issue["updated_at"] = utc()
+        self.write_state(state)
+
     # -- the operation -----------------------------------------------------------
 
     def acquire(self, body=None):
@@ -493,9 +547,9 @@ class CreateTests(TrackedIssueFixture):
         seen = {}
 
         class Watching(tool.GhCli):
-            def create_issue(inner, repository, request):
+            def create_issue(inner, repository, request, **kwargs):
                 seen["state"] = self.step_state()["state"]
-                return super().create_issue(repository, request)
+                return super().create_issue(repository, request, **kwargs)
 
         outcome = self.create(github=Watching(str(self.gh_path)))
         self.assertEqual(outcome["status"], "created", outcome)
@@ -761,7 +815,7 @@ class UncertainOutcomeTests(TrackedIssueFixture):
         self.acquire()
 
         class Killed(tool.GhCli):
-            def create_issue(inner, repository, request):
+            def create_issue(inner, repository, request, **kwargs):
                 raise Interrupted()
 
         with self.assertRaises(Interrupted):
@@ -777,8 +831,8 @@ class UncertainOutcomeTests(TrackedIssueFixture):
         self.acquire()
 
         class KilledAfter(tool.GhCli):
-            def create_issue(inner, repository, request):
-                super().create_issue(repository, request)
+            def create_issue(inner, repository, request, **kwargs):
+                super().create_issue(repository, request, **kwargs)
                 raise Interrupted()
 
         with self.assertRaises(Interrupted):
@@ -809,6 +863,23 @@ class UncertainOutcomeTests(TrackedIssueFixture):
         self.assertEqual(self.reconcile(similar)["status"], "candidates-not-unique")
         self.assertEqual(self.authorize_retry()["status"], "retry-refused")
         self.assertEqual(self.step_state()["state"], "intent")
+
+    def test_every_rename_is_walked_back_to_the_created_title(self):
+        self.acquire()
+        self.set_mode("fail-after")
+        self.create()
+        self.set_mode("ok")
+        number = self.state()["issues"][0]["number"]
+        self.edit(number, title="First rename", body="rewritten\n")
+        self.edit(number, title="Second rename")
+        found = self.inspect()
+        self.assertEqual(
+            [(c["number"], c["created_title"]) for c in found["candidates"]["similar"]],
+            [(number, REQUEST["title"])], found,
+        )
+        self.assertEqual(self.authorize_retry()["status"], "retry-refused")
+        self.assertEqual(self.create()["status"], "step-ambiguous")
+        self.assertEqual(self.creates(), 1)
 
     def test_issues_from_before_the_step_began_are_not_candidates(self):
         self.seed(REQUEST["title"], REQUEST["body"], created_at=utc(-2 * 86400))
@@ -952,6 +1023,66 @@ class IncompleteEvidenceTests(TrackedIssueFixture):
         self.assertEqual(self.step_state()["state"], "intent")
         self.assert_creation_blocked(1)
 
+    def test_an_issue_edited_out_of_resemblance_is_never_absence(self):
+        # Both fields edited before either listing read: current content alone
+        # says absent, and a retry would create the issue a second time.
+        number = self.uncertain_creation()
+        self.edit(
+            number, title=REQUEST["title"] + " (triaged)",
+            body=REQUEST["body"] + "\nTriage: confirmed on 1.72.\n",
+        )
+        found = self.inspect()
+        self.assertEqual(found["candidates"]["evidence"], "ambiguous", found)
+        self.assertEqual(found["candidates"]["exact"], [])
+        [similar] = found["candidates"]["similar"]
+        self.assertEqual(similar["number"], number)
+        self.assertEqual(similar["created_title"], REQUEST["title"])
+        self.assertEqual(self.authorize_retry()["status"], "retry-refused")
+        self.assertEqual(self.reconcile(number)["status"], "candidates-not-unique")
+        self.assertEqual(self.step_state()["state"], "intent")
+        self.assert_creation_blocked(1)
+
+    def test_an_issue_created_with_another_title_does_not_block_a_retry(self):
+        # The negative control: the history check rules out what it can show
+        # is not this step's, edited or not, so a retry stays reachable.
+        self.acquire()
+        self.set_mode("fail-before")
+        self.create()
+        renamed = self.seed("Unrelated report", "unrelated\n")
+        self.edit(renamed, title="Unrelated report (triaged)", body="still unrelated\n")
+        self.seed("Another unrelated report", "other\n")
+        found = self.inspect()
+        self.assertEqual(found["candidates"]["evidence"], "absent", found)
+        self.assertEqual(self.authorize_retry()["status"], "retry-authorized")
+        self.set_mode("ok")
+        self.assertEqual(self.create()["status"], "created")
+        self.assertEqual(self.creates(), 1)
+
+    def test_a_rename_history_that_cannot_be_read_whole_is_not_absence(self):
+        # Two renames, so a history missing its newest one still names a
+        # title, just not the one the issue carries.
+        limit = unittest.mock.patch.object(tool, "LISTING_PAGE_LIMIT", 10)
+        limit.start()
+        self.addCleanup(limit.stop)
+        for mode in ("fails", "truncated", "missing-id", "rename-without-titles",
+                     "last-rename-lost"):
+            with self.subTest(events=mode):
+                self.write_state({"issues": []})
+                self.fx = Fixture(self.checkout_git_template())
+                number = self.uncertain_creation()
+                self.edit(number, title="Renamed by a person", body="rewritten\n")
+                self.edit(number, title="Renamed again")
+                self.set_state(events_mode=mode)
+
+                self.assert_retains_intent(self.inspect())
+                self.assert_retains_intent(self.authorize_retry())
+                self.assert_retains_intent(self.reconcile(number))
+                self.assert_creation_blocked(1)
+
+                self.set_state(events_mode="ok")
+                self.assertEqual(self.authorize_retry()["status"], "retry-refused")
+                self.assert_creation_blocked(1)
+
     def test_a_legitimately_null_body_is_evidence_not_damage(self):
         self.acquire()
         self.set_mode("fail-before")
@@ -1026,8 +1157,8 @@ class IncompleteEvidenceTests(TrackedIssueFixture):
                 self.set_mode(mode)
 
                 class Damaged(tool.GhCli):
-                    def create_issue(inner, repository, request):
-                        proc = super().create_issue(repository, request)
+                    def create_issue(inner, repository, request, **kwargs):
+                        proc = super().create_issue(repository, request, **kwargs)
                         if damage is None:
                             return proc
                         created = json.loads(proc.stdout)
@@ -1070,7 +1201,9 @@ class ConcurrencyTests(TrackedIssueFixture):
                 continue
             self.assertEqual(other["github_mutation"], "none", other)
             self.assertIn(
-                other["status"], ("begin-failed", "step-ambiguous", "already-created")
+                other["status"],
+                ("operation-in-progress", "begin-failed", "step-ambiguous",
+                 "already-created"),
             )
         self.assertEqual(self.creates(), 1)
         self.assertEqual(self.step_state()["state"], "confirmed")
@@ -1094,6 +1227,103 @@ class ConcurrencyTests(TrackedIssueFixture):
             sum(o["status"] == "created" for o in outcomes), 1,
             [o["status"] for o in outcomes],
         )
+        self.assertEqual(self.creates(), 1)
+
+
+class LiveCreatorTests(TrackedIssueFixture):
+    """`intent` is both an interrupted creation and one still running. While a
+    creator holds the step — from before its begin until its request can no
+    longer land — every other action on the transaction is refused without
+    reading GitHub or moving the record."""
+
+    def assert_in_progress(self, outcome):
+        self.assertFalse(outcome["ok"], outcome)
+        self.assertEqual(outcome["status"], "operation-in-progress", outcome)
+        self.assertEqual(outcome["github_mutation"], "none", outcome)
+
+    def recovery_while_paused(self, mode):
+        """Pause the creator just after its durable begin, try every other
+        action, then let the creator's request go out."""
+        self.acquire()
+        self.set_mode(mode)
+        seen = {}
+
+        class Paused(tool.GhCli):
+            def create_issue(inner, repository, request, **kwargs):
+                seen["state"] = self.step_state()["state"]
+                listings = len(self.state().get("calls", []))
+                seen["outcomes"] = [
+                    self.inspect(), self.authorize_retry(), self.reconcile(101),
+                    self.create(),
+                ]
+                seen["reads"] = len(self.state().get("calls", [])) - listings
+                seen["state_after"] = self.step_state()["state"]
+                return super().create_issue(repository, request, **kwargs)
+
+        outcome = self.create(github=Paused(str(self.gh_path)))
+        self.assertEqual(seen["state"], "intent")
+        for refused in seen["outcomes"]:
+            self.assert_in_progress(refused)
+        self.assertEqual(seen["reads"], 0, "a refused action read GitHub")
+        self.assertEqual(seen["state_after"], "intent")
+        return outcome
+
+    def test_recovery_is_refused_while_the_creator_is_live(self):
+        # The reproduced interleaving: inspect, retry, and a replacement
+        # creation while the original is between its begin and its request.
+        outcome = self.recovery_while_paused("ok")
+        self.assertEqual(outcome["status"], "created", outcome)
+        self.assertEqual(self.creates(), 1)
+        self.assertEqual(self.step_state()["state"], "confirmed")
+
+    def test_a_live_creator_that_ends_uncertain_leaves_its_issue_as_evidence(self):
+        outcome = self.recovery_while_paused("fail-after")
+        self.assertEqual(outcome["github_mutation"], "unknown", outcome)
+        # Once the creator is gone, recovery runs, and finds what it made.
+        self.set_mode("ok")
+        number = self.state()["issues"][0]["number"]
+        self.assertEqual(self.inspect()["candidates"]["evidence"], "unique-exact")
+        self.assertEqual(self.authorize_retry()["status"], "retry-refused")
+        self.assertEqual(self.reconcile(number)["status"], "reconciled")
+        self.assertEqual(self.create()["status"], "already-created")
+        self.assertEqual(self.creates(), 1)
+
+    def test_a_killed_creator_s_request_still_fences_recovery(self):
+        # The creating process dies while its gh request is in flight. gh
+        # inherited the lock, so recovery waits for that request too, rather
+        # than authorizing a retry that races it.
+        self.acquire()
+        self.set_mode("slow", sleep=3)
+        request = Path(self.state_dir.name) / "request.json"
+        request.write_text(json.dumps(REQUEST))
+        creator = subprocess.Popen(
+            [sys.executable, str(REPO_ROOT / "tools" / "tracked_issue_create.py"),
+             "--repo", REPOSITORY, "--root", str(self.fx.docs), "--path", DOCUMENT,
+             "--step", "0", "--request", str(request), "--create", "--approved"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(creator.wait)
+        deadline = time.monotonic() + 30
+        while not self.posts():
+            self.assertLess(time.monotonic(), deadline, "the request never went out")
+            time.sleep(0.05)
+        creator.kill()
+        creator.wait()
+        self.assertEqual(self.creates(), 0, "the request landed before the check")
+
+        self.assert_in_progress(self.inspect())
+        self.assert_in_progress(self.authorize_retry())
+        self.assertEqual(self.step_state()["state"], "intent")
+
+        while self.creates() == 0:
+            self.assertLess(time.monotonic(), deadline, "the request never landed")
+            time.sleep(0.05)
+        deadline = time.monotonic() + 30
+        while (found := self.inspect())["status"] == "operation-in-progress":
+            self.assertLess(time.monotonic(), deadline, "the lock was never released")
+            time.sleep(0.05)
+        self.assertEqual(found["candidates"]["evidence"], "unique-exact", found)
+        self.assertEqual(self.authorize_retry()["status"], "retry-refused")
         self.assertEqual(self.creates(), 1)
 
 

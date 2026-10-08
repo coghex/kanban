@@ -52,15 +52,17 @@ interrupted or uncertain creation leaves its step in `intent`, which
 `tracker_transaction.py` already treats as ambiguous and refuses to advance. A
 later `--create` for that step refuses before any request. `--inspect` reports,
 read-only, every issue created in the repository since the step began whose
-title or body matches the request, and from that evidence a human may approve
-exactly one of the two recovery transitions issue #327 permits:
+title or body matches the request, or whose title did when it was created, and
+from that evidence a human may approve exactly one of the two recovery
+transitions issue #327 permits:
 
 - `--reconcile --issue N --approved` binds the step to issue `N` only when `N`
   is the one exact match and nothing else is even similar; it goes through
   `action_reconcile`, so the record's own target and fingerprint checks apply;
 - `--authorize-retry --approved` returns the step to `planned` only when
-  nothing created since the step began matches or resembles the request; it
-  goes through `action_authorize_retry`, and creates nothing itself.
+  nothing created since the step began matches or resembles the request, or
+  was created with its title; it goes through `action_authorize_retry`, and
+  creates nothing itself.
 
 A confirmed step is never created again: `--create` for it verifies the
 recorded issue still exists and reports `already-created`.
@@ -82,15 +84,44 @@ only the user's explicit approval returns the step to planned.
 The window `--inspect` searches starts at the commit time of the record's
 current value — while a step is ambiguous, no other transition can have moved
 it, so that is when the step began — less a clock-skew margin.
+
+## Current content is not creation content
+
+People edit issues. An issue this step created, then retitled and annotated
+before anyone recovered the step, neither matches nor resembles the request any
+longer, and judging it on its current content alone would read it as absence and
+authorize the duplicate. So an issue in the window whose current content does
+not resemble the request is ruled out only by GitHub's own history: its complete
+rename events, which must lead from the title it was created with to the title
+the listing shows. This step's POST sends exactly the request's title, so an
+issue created with any other title is not this step's; one created with it is
+similar, and blocks both binding and retry. A history that cannot be read whole,
+or does not end at the current title, is incomplete evidence like any other.
+
+## One operation at a time per transaction
+
+`intent` means both "interrupted" and "still running", and nothing in the record
+can tell them apart. So every action that reads or moves an issue-creating step
+first takes an exclusive, non-blocking `flock` on a file under the repository's
+common Git directory, keyed by the transaction reference, and holds it to the
+end: `--create` from before its begin through its confirmation, recovery
+through its evidence read and its transition. The `gh` process that sends the
+create request inherits the lock, so it stays held for as long as that request
+can still land, even if this process is killed first. An action that finds it
+held refuses as `operation-in-progress` without reading GitHub or moving the
+record; a lock is released by its holders' exit, however they exit, so a dead
+creator never blocks recovery.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -113,6 +144,10 @@ CLOCK_SKEW_SECONDS = 900
 # refusing the listing as one it cannot read whole.
 LISTING_PAGE_SIZE = 100
 LISTING_PAGE_LIMIT = 50
+
+# Where, under the repository's common Git directory, the per-transaction
+# operation locks live.
+LOCK_DIRECTORY = "kanban-tracked-issue-create"
 
 CREATE_TIMEOUT_SECONDS = 120
 READ_TIMEOUT_SECONDS = 60
@@ -257,7 +292,8 @@ def _github_json(text: str, what: str):
 
 
 class GhCli:
-    """The three GitHub calls this operation makes, through `gh api`."""
+    """The four GitHub calls this operation makes, through `gh api`: create,
+    read back, list, and read an issue's events."""
 
     def __init__(self, executable: str | None = None):
         self.executable = (
@@ -267,22 +303,25 @@ class GhCli:
     def available(self) -> bool:
         return bool(self.executable)
 
-    def _run(self, command, *, input_text=None, timeout):
+    def _run(self, command, *, input_text=None, timeout, pass_fds=()):
         """Run `command`, a `["gh", ...]` list, with the resolved `gh`."""
         if not self.executable:
             raise OSError("gh is not on PATH")
         return subprocess.run(
             [self.executable, *command[1:]], input=input_text, capture_output=True,
-            text=True, timeout=timeout,
+            text=True, timeout=timeout, pass_fds=tuple(pass_fds),
         )
 
-    def create_issue(self, repository: str, request: dict):
+    def create_issue(self, repository: str, request: dict, *, hold=()):
         """The completed `gh api` process; raises OSError when it could not be
-        started and subprocess.TimeoutExpired when it did not finish."""
+        started and subprocess.TimeoutExpired when it did not finish. `hold`
+        are descriptors `gh` inherits — the operation lock, which must outlive
+        this process for as long as the request it sends can still land."""
         return self._run(
             ["gh", "api", "--method", "POST", f"repos/{repository}/issues",
              "--input", "-"],
             input_text=json.dumps(request), timeout=CREATE_TIMEOUT_SECONDS,
+            pass_fds=hold,
         )
 
     def _read(self, command):
@@ -347,6 +386,54 @@ class GhCli:
                 return entries
         raise GitHubError(
             f"the issue listing did not end within {LISTING_PAGE_LIMIT} pages"
+        )
+
+    def renames(self, repository: str, number: int) -> list[tuple[str, str]]:
+        """Every `(from, to)` rename of issue `number`, oldest first, from its
+        complete event history, or a GitHubError."""
+        renames, seen = [], set()
+        for page in range(1, LISTING_PAGE_LIMIT + 1):
+            what = f"#{number}'s event page {page}"
+            items = _github_json(self._read([
+                "gh", "api", "--method", "GET",
+                f"repos/{repository}/issues/{number}/events"
+                f"?per_page={LISTING_PAGE_SIZE}&page={page}",
+            ]), what)
+            if not isinstance(items, list):
+                raise GitHubError(f"{what} is not a JSON array")
+            if len(items) > LISTING_PAGE_SIZE:
+                raise GitHubError(
+                    f"{what} holds {len(items)} entries, more than the "
+                    f"{LISTING_PAGE_SIZE} requested"
+                )
+            for offset, item in enumerate(items):
+                where = f"{what} entry {offset}"
+                ident = item.get("id") if isinstance(item, dict) else None
+                if (
+                    not isinstance(ident, int) or isinstance(ident, bool)
+                    or ident <= 0 or not isinstance(item.get("event"), str)
+                ):
+                    raise GitHubError(f"{where} is not an issue event")
+                if ident in seen:
+                    raise GitHubError(
+                        f"{where} repeats event {ident}: the pages shifted while "
+                        "they were read"
+                    )
+                seen.add(ident)
+                if item["event"] != "renamed":
+                    continue
+                rename = item.get("rename")
+                if not (
+                    isinstance(rename, dict)
+                    and isinstance(rename.get("from"), str)
+                    and isinstance(rename.get("to"), str)
+                ):
+                    raise GitHubError(f"{where} is a rename without its titles")
+                renames.append((ident, rename["from"], rename["to"]))
+            if len(items) < LISTING_PAGE_SIZE:
+                return [(before, after) for _, before, after in sorted(renames)]
+        raise GitHubError(
+            f"#{number}'s event history did not end within {LISTING_PAGE_LIMIT} pages"
         )
 
     def issues_since(self, repository: str, since: str) -> list[dict]:
@@ -515,13 +602,93 @@ def issue_matches(issue: dict, request: dict) -> bool:
     )
 
 
+def title_key(title: str) -> str:
+    """A title as resemblance compares it: case and runs of whitespace are not
+    differences, so nothing GitHub might normalize can separate two titles."""
+    return " ".join(title.split()).casefold()
+
+
 def issue_resembles(issue: dict, request: dict) -> bool:
-    title = issue["title"].strip().casefold()
     body = (issue["body"] or "").replace("\r\n", "\n").strip()
-    return title == request["title"].casefold() or body == request["body"].strip()
+    return (
+        title_key(issue["title"]) == title_key(request["title"])
+        or body == request["body"].strip()
+    )
+
+
+def created_title(issue: dict, renames: list[tuple[str, str]]) -> str:
+    """The title `issue` was created with: its rename history walked back from
+    the title it carries now. A history that does not lead to that title is
+    not the whole history, so it is refused rather than trusted."""
+    title = issue["title"]
+    for before, after in reversed(renames):
+        if after != title:
+            raise GitHubError(
+                f"#{issue['number']}'s rename history does not lead to its current "
+                "title; it is not the whole history"
+            )
+        title = before
+    return title
 
 
 # --------------------------------------------------------------- operation --
+
+
+class OperationLock:
+    """The exclusive per-transaction lock every action on an issue-creating
+    step holds while it runs. A `flock` belongs to its open file description,
+    so two holders conflict whether they are processes or threads, and it is
+    released only when every descriptor sharing it is closed: by this process
+    and by the `gh` it handed the descriptor to, however either exits."""
+
+    def __init__(self, ctx: "Context"):
+        common = Path(tracker.git_out(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=ctx.root,
+        ))
+        digest = hashlib.sha256(ctx.ref.encode()).hexdigest()
+        self.path = common / LOCK_DIRECTORY / f"{digest}.lock"
+        self.fd = None
+
+    def acquire(self) -> "OperationLock":
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as error:
+            raise OperationError(
+                "lock-unavailable",
+                f"the operation lock {self.path} could not be opened ({error}); "
+                "nothing was read or changed",
+            ) from error
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            os.close(fd)
+            if isinstance(error, BlockingIOError):
+                raise OperationError(
+                    "operation-in-progress",
+                    "another tracked_issue_create.py action on this transaction is "
+                    "still running, or the gh request it sent has not finished; "
+                    "nothing was read or changed",
+                ) from error
+            raise OperationError(
+                "lock-unavailable",
+                f"the operation lock {self.path} could not be taken ({error}); "
+                "nothing was read or changed",
+            ) from error
+        self.fd = fd
+        return self
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def __enter__(self) -> "OperationLock":
+        return self.acquire()
+
+    def __exit__(self, *_exc) -> None:
+        self.release()
 
 
 def creation_target_refusal(step: dict, repository: str):
@@ -736,10 +903,32 @@ def _uncertain(ctx, status, message, github_mutation, issue=None, **extra) -> di
 
 def create(root, repository, document, index, raw_request, *, approved,
            github=None) -> dict:
+    """Create the step's issue while holding the transaction's operation lock
+    from before its begin to the end of its confirmation, so no recovery can
+    judge the step while this request may still land."""
     github = github or GhCli()
-    ctx = None
+    ctx, lock = None, None
     try:
-        ctx = Context(root, repository, document, index, raw_request)
+        try:
+            ctx = Context(root, repository, document, index, raw_request)
+            lock = OperationLock(ctx).acquire()
+            # What was read before the lock may since have moved.
+            ctx.reload()
+        except (OperationError, GitHubError, tracker.TransactionError) as error:
+            return refusal(error, ctx)
+        except Exception as error:  # noqa: BLE001 - nothing was sent yet
+            return refusal(
+                OperationError("internal-error", f"{type(error).__name__}: {error}"),
+                ctx,
+            )
+        return _create_locked(ctx, index, approved, github, lock)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _create_locked(ctx, index, approved, github, lock) -> dict:
+    try:
         state = ctx.step["state"]
         if state == tracker.STEP_CONFIRMED:
             return verify_confirmed(ctx, github)
@@ -782,7 +971,9 @@ def create(root, repository, document, index, raw_request, *, approved,
     begin_commit = ctx.observed
     try:
         try:
-            proc = github.create_issue(ctx.repository, ctx.request)
+            proc = github.create_issue(
+                ctx.repository, ctx.request, hold=(lock.fd,)
+            )
         except OSError as error:
             return _uncertain(
                 ctx, "create-not-sent",
@@ -865,7 +1056,8 @@ def window_start(ctx: Context) -> str:
 
 def candidates(ctx: Context, github) -> dict:
     """Every issue created since the ambiguous step began that is the request's
-    exact issue, or merely resembles it. Read-only."""
+    exact issue, or merely resembles it — now, or by the title it was created
+    with. Read-only."""
     since = window_start(ctx)
     start = parse_timestamp(since)
     exact, similar = [], []
@@ -883,6 +1075,14 @@ def candidates(ctx: Context, github) -> dict:
             exact.append(entry)
         elif issue_resembles(item, ctx.request):
             similar.append(entry)
+        else:
+            # Current content is what people made of the issue since. Only the
+            # title it was created with can rule out that this step made it.
+            original = created_title(
+                item, github.renames(ctx.repository, identity["number"])
+            )
+            if title_key(original) == title_key(ctx.request["title"]):
+                similar.append(entry | {"created_title": original})
     if not exact and not similar:
         evidence = EVIDENCE_ABSENT
     elif len(exact) == 1 and not similar:
@@ -910,23 +1110,25 @@ def evidence_refusal(ctx: Context, error: GitHubError) -> dict:
     )
 
 
-def _ambiguous_context(root, repository, document, index, raw_request):
-    ctx = Context(root, repository, document, index, raw_request)
+def _require_ambiguous(ctx: Context, index) -> None:
+    """Re-read under the operation lock, then require the step ambiguous."""
+    ctx.reload()
     if ctx.step["state"] != tracker.STEP_INTENT:
         raise OperationError(
             "step-not-ambiguous",
             f"step {index} is {ctx.step['state']}, not ambiguous; there is nothing "
             "to recover",
         )
-    return ctx
 
 
 def inspect(root, repository, document, index, raw_request, *, github=None) -> dict:
     github = github or GhCli()
     ctx = None
     try:
-        ctx = _ambiguous_context(root, repository, document, index, raw_request)
-        found = candidates(ctx, github)
+        ctx = Context(root, repository, document, index, raw_request)
+        with OperationLock(ctx):
+            _require_ambiguous(ctx, index)
+            found = candidates(ctx, github)
     except GitHubError as error:
         return evidence_refusal(ctx, error)
     except (OperationError, tracker.TransactionError) as error:
@@ -934,7 +1136,8 @@ def inspect(root, repository, document, index, raw_request, *, github=None) -> d
     permitted = {
         EVIDENCE_ABSENT: (
             "nothing created since the step began matches or resembles the "
-            "request. With the user's explicit approval, --authorize-retry "
+            "request, or was created with its title. With the user's explicit "
+            "approval, --authorize-retry "
             "--approved returns the step to planned"
         ),
         EVIDENCE_UNIQUE: (
@@ -944,8 +1147,9 @@ def inspect(root, repository, document, index, raw_request, *, github=None) -> d
             if found["exact"] else ""
         ),
         EVIDENCE_AMBIGUOUS: (
-            "more than one issue matches or resembles the request; neither binding "
-            "nor retry is permitted. Stop and report the candidates to the user"
+            "more than one issue matches or resembles the request, now or by the "
+            "title it was created with; neither binding nor retry is permitted. "
+            "Stop and report the candidates to the user"
         ),
     }[found["evidence"]]
     return result(
@@ -960,40 +1164,42 @@ def reconcile(root, repository, document, index, raw_request, issue_number, *,
     github = github or GhCli()
     ctx = None
     try:
-        ctx = _ambiguous_context(root, repository, document, index, raw_request)
-        if not approved:
-            raise OperationError(
-                "approval-required",
-                "--approved is required: an ambiguous step is bound only on the "
-                "user's explicit approval of that exact issue",
+        ctx = Context(root, repository, document, index, raw_request)
+        with OperationLock(ctx):
+            _require_ambiguous(ctx, index)
+            if not approved:
+                raise OperationError(
+                    "approval-required",
+                    "--approved is required: an ambiguous step is bound only on the "
+                    "user's explicit approval of that exact issue",
+                )
+            found = candidates(ctx, github)
+            numbers = [entry["number"] for entry in found["exact"]]
+            if found["evidence"] != EVIDENCE_UNIQUE or numbers != [issue_number]:
+                return result(
+                    "candidates-not-unique", ok=False, github_mutation=MUTATION_NONE,
+                    ctx=ctx, candidates=found,
+                    message=f"issue #{issue_number} is not the one exact match for "
+                    f"step {index} (exact: {numbers}, similar: "
+                    f"{[entry['number'] for entry in found['similar']]}); the step "
+                    "stays ambiguous",
+                    next_action="stop and report the candidates to the user; a "
+                    "similarly titled issue is never sufficient evidence",
+                )
+            issue = {"number": issue_number, "url": found["exact"][0]["url"]}
+            identity = {
+                "kind": ctx.step["kind"],
+                "id": str(issue_number),
+                "url": issue["url"],
+                "document_token": f"[#{issue_number}]",
+                "postcondition_verified": True,
+                "matched_target": ctx.step["target"],
+                "matched_payload_fingerprint": ctx.step["payload_fingerprint"],
+            }
+            outcome = tracker.action_reconcile(
+                ctx.root, ctx.ref, ctx.record, ctx.observed, index, identity, 1
             )
-        found = candidates(ctx, github)
-        numbers = [entry["number"] for entry in found["exact"]]
-        if found["evidence"] != EVIDENCE_UNIQUE or numbers != [issue_number]:
-            return result(
-                "candidates-not-unique", ok=False, github_mutation=MUTATION_NONE,
-                ctx=ctx, candidates=found,
-                message=f"issue #{issue_number} is not the one exact match for step "
-                f"{index} (exact: {numbers}, similar: "
-                f"{[entry['number'] for entry in found['similar']]}); the step "
-                "stays ambiguous",
-                next_action="stop and report the candidates to the user; a "
-                "similarly titled issue is never sufficient evidence",
-            )
-        issue = {"number": issue_number, "url": found["exact"][0]["url"]}
-        identity = {
-            "kind": ctx.step["kind"],
-            "id": str(issue_number),
-            "url": issue["url"],
-            "document_token": f"[#{issue_number}]",
-            "postcondition_verified": True,
-            "matched_target": ctx.step["target"],
-            "matched_payload_fingerprint": ctx.step["payload_fingerprint"],
-        }
-        outcome = tracker.action_reconcile(
-            ctx.root, ctx.ref, ctx.record, ctx.observed, index, identity, 1
-        )
-        ctx.observed = outcome["transaction_commit"]
+            ctx.observed = outcome["transaction_commit"]
     except GitHubError as error:
         return evidence_refusal(ctx, error)
     except (OperationError, tracker.TransactionError) as error:
@@ -1010,25 +1216,28 @@ def authorize_retry(root, repository, document, index, raw_request, *,
     github = github or GhCli()
     ctx = None
     try:
-        ctx = _ambiguous_context(root, repository, document, index, raw_request)
-        if not approved:
-            raise OperationError(
-                "approval-required",
-                "--approved is required: a retry is authorized only by the user",
+        ctx = Context(root, repository, document, index, raw_request)
+        with OperationLock(ctx):
+            _require_ambiguous(ctx, index)
+            if not approved:
+                raise OperationError(
+                    "approval-required",
+                    "--approved is required: a retry is authorized only by the user",
+                )
+            found = candidates(ctx, github)
+            if found["evidence"] != EVIDENCE_ABSENT:
+                return result(
+                    "retry-refused", ok=False, github_mutation=MUTATION_NONE, ctx=ctx,
+                    candidates=found,
+                    message=f"step {index}'s issue may exist: something created "
+                    "since it began matches or resembles the request, or was "
+                    "created with its title",
+                    next_action="stop and report the candidates to the user",
+                )
+            outcome = tracker.action_authorize_retry(
+                ctx.root, ctx.ref, ctx.record, ctx.observed, index
             )
-        found = candidates(ctx, github)
-        if found["evidence"] != EVIDENCE_ABSENT:
-            return result(
-                "retry-refused", ok=False, github_mutation=MUTATION_NONE, ctx=ctx,
-                candidates=found,
-                message=f"step {index}'s issue may exist: something created since "
-                "it began matches or resembles the request",
-                next_action="stop and report the candidates to the user",
-            )
-        outcome = tracker.action_authorize_retry(
-            ctx.root, ctx.ref, ctx.record, ctx.observed, index
-        )
-        ctx.observed = outcome["transaction_commit"]
+            ctx.observed = outcome["transaction_commit"]
     except GitHubError as error:
         return evidence_refusal(ctx, error)
     except (OperationError, tracker.TransactionError) as error:

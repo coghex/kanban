@@ -1098,8 +1098,13 @@ the first mutation: a Codex cache holding more than one Kanban version, or a
 bundle missing any of them, is refused rather than mixed. An uncertain outcome leaves the step ambiguous, and the same tool's
 read-only `--inspect`, approved `--reconcile`, and approved `--authorize-retry`
 are the only way out of it; a listing it cannot read whole, or that changes
-between reads, is never evidence that the issue is absent. Every other step
-kind keeps the begin and confirm transitions above.
+between reads, is never evidence that the issue is absent. Nor is an issue's
+current content: one edited since it was created is ruled out only when GitHub's
+complete rename history shows it was created with a different title. And since
+an ambiguous step may be one whose creator is still running, every action of
+the tool on a transaction holds one exclusive lock, which the create request's
+`gh` process inherits, and refuses as `operation-in-progress` while another
+holds it. Every other step kind keeps the begin and confirm transitions above.
 
 **A confirmed identity is the one its own kind of mutation has, and it must
 agree with itself.** A created issue or epic records its number, its canonical GitHub

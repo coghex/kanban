@@ -1174,6 +1174,17 @@ TRACKED_ISSUE_CLAUSES = {
     "incomplete-evidence-is-not-absence": (
         "is never evidence that the issue is absent"
     ),
+    "a-live-creator-is-not-evidence": (
+        "operation-in-progress, or verification-failed leaves the step ambiguous "
+        "and stops the run"
+    ),
+    "a-live-creator-is-never-waited-out": (
+        "a step another run is still creating is not yet evidence of anything"
+    ),
+    "edits-do-not-hide-a-created-issue": (
+        "that match or resemble the request, now or by the title it was created "
+        "with"
+    ),
     "github-mutation-describes-this-invocation-only": (
         "github_mutation describes this invocation only: none means this "
         "invocation sent github no create request, never that no issue exists "
@@ -3391,6 +3402,12 @@ RESULT_CASES = (
       "transaction": {"ambiguous_step": None}}, None, "Refused"),
     ({"ok": False, "status": "payload-mismatch", "github_mutation": "none",
       "transaction": None}, {"ambiguous_step": None}, "Refused"),
+    # Another run holds the transaction. Once it has begun, the record shows
+    # the step ambiguous, so the refusal is never read as nothing-created.
+    ({"ok": False, "status": "operation-in-progress", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "operation-in-progress", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Refused"),
 )
 
 

@@ -558,7 +558,8 @@ order, and never by `github_mutation` alone:
    exactly as an unresolved step.
 5. **Refused.** Anything else is a refusal before this invocation sent any
    request: `begin-failed`, `target-mismatch`, `target-unverifiable`,
-   `payload-mismatch`, `approval-required`, `gh-unavailable`, and the rest.
+   `payload-mismatch`, `approval-required`, `gh-unavailable`,
+   `operation-in-progress`, and the rest.
    This invocation created nothing. Stop and report the status and message.
    Never fall back to creating the issue any other way, with the GitHub CLI or
    otherwise; a corrected request or plan is a new proposal that needs its own
@@ -575,16 +576,18 @@ python3 "$TRACKED_ISSUE" \
 
 `--inspect` is read-only, and its `ok` true means only that the read succeeded:
 it never confirms the step. It reports the issues created in `$DOC_REPO` since
-the step began that match or resemble the request, and its `candidates.evidence`
-is `unique-exact`, `absent`, or `ambiguous`. Present that evidence and stop.
-Only on the user's explicit approval does `--reconcile --issue <number>
---approved` bind the step to the one exact match, or `--authorize-retry
---approved` return the step to planned when a complete listing shows nothing
-that matches or resembles the request; only after that may a fresh `--create`
-run. A result of `evidence-incomplete`, `candidates-not-unique`,
-`retry-refused`, or `verification-failed` leaves the step ambiguous and stops
-the run: a listing that could not be read whole, or that changed between reads,
-is never evidence that the issue is absent.
+the step began that match or resemble the request, now or by the title it was
+created with, and its `candidates.evidence` is `unique-exact`, `absent`, or
+`ambiguous`. Present that evidence and stop. Only on the user's explicit
+approval does `--reconcile --issue <number> --approved` bind the step to the
+one exact match, or `--authorize-retry --approved` return the step to planned
+when a complete listing shows nothing that matches or resembles the request;
+only after that may a fresh `--create` run. A result of `evidence-incomplete`,
+`candidates-not-unique`, `retry-refused`, `operation-in-progress`, or
+`verification-failed` leaves the step ambiguous and stops the run: a listing
+that could not be read whole, or that changed between reads, is never evidence
+that the issue is absent, and a step another run is still creating is not yet
+evidence of anything.
 
 ### Walk the ordered steps
 

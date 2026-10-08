@@ -27,7 +27,11 @@ created above it.
   uncertain creation is never retried blindly: it is recovered only through the
   tool's `--inspect` and the user's approved `--reconcile` or
   `--authorize-retry`, and incomplete or changing GitHub evidence never counts
-  as proof that the issue is absent. Because `github_mutation` describes only
+  as proof that the issue is absent. Neither does an issue edited out of
+  resemblance after it was created: it is judged by the title its rename
+  history says it was created with. Recovery is refused as
+  `operation-in-progress` while the creating run, or the `gh` request it sent,
+  may still be running. Because `github_mutation` describes only
   the invocation that returned it, the commands classify each result by
   ordered rules, so a `step-ambiguous` result whose `none` follows an earlier
   uncertain creation is handled as unresolved, never as a refusal that created
