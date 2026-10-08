@@ -388,16 +388,19 @@ against this plugin's install location and never against `$DOC_ROOT`:
 PUBLISH_DOC="${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py"
 TRACKER_TX="${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py"
 TRACKED_ISSUE="${CLAUDE_PLUGIN_ROOT}/scripts/tracked_issue_create.py"
-[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ]
+KANBAN_CONFIG="${CLAUDE_PLUGIN_ROOT}/scripts/kanban_config.py"
+[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] \
+  && [ -f "$KANBAN_CONFIG" ]
 ```
 
 Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` to this plugin's own install
 location regardless of the invoking working directory, which is what lets this
-workflow run in a repository that tracks none of these files. The three
-resolve as one unit — the publication and transaction modules each load the
-other from beside themselves, and the issue-creation tool loads the transaction
-module from beside itself — so a bundle carrying only some of them carries
-none, and an unresolvable helper stops the run here rather than after the first
+workflow run in a repository that tracks none of these files. The four modules
+are one unit, all four checked here in the one directory `${CLAUDE_PLUGIN_ROOT}`
+names: the publication and transaction modules each load the other from beside
+themselves, the publication module reads `kanban_config.py` from beside itself,
+and the issue-creation tool loads the transaction module from beside itself. A
+bundle missing any of them stops the run here rather than after the first
 mutation. The lookup rule this follows is stated in full with the publication
 step below.
 
@@ -556,22 +559,47 @@ approval this disposition already received for exactly that request; it never
 stands in for one.
 
 The command prints one JSON result. Read it before doing anything else,
-whatever the exit status, and act on `ok`, `status`, and `github_mutation`:
+whatever the exit status. `github_mutation` describes this invocation only:
+`none` means this invocation sent GitHub no create request, never that no issue
+exists for the step — an earlier attempt at the same step may have created one.
+When the result's `transaction` is null — a refusal made before the tool read
+the step's record — read the record yourself, read-only, before classifying:
 
-- `ok` true, with `status` `created` — or `already-created` for a step an
-  earlier run confirmed — means the step is confirmed. Its `issue` carries the
-  number and URL, and that number is the `[#N]` marker. Go on to the next step.
-  Never create the issue again.
-- `ok` false with `github_mutation` `none` is a refusal before any GitHub
-  request: `begin-failed`, `target-mismatch`, `target-unverifiable`,
-  `payload-mismatch`, `approval-required`, `gh-unavailable`, and the rest.
-  Nothing was created. Stop and report the status and message. Never fall back
-  to creating the issue any other way, with the GitHub CLI or otherwise; a
-  corrected request or plan is a new proposal that needs its own approval.
-- `ok` false with `github_mutation` `unknown` or `performed`, or `status`
-  `step-ambiguous`, means the issue may exist. The step stays ambiguous in the
-  record, and a later `--create` for it is refused. Never retry it, create it
-  another way, advance past it, publish, or clear the record. Stop and report.
+```bash
+python3 "$TRACKER_TX" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --check
+```
+
+Then classify the result by the first of these rules that applies, in this
+order, and never by `github_mutation` alone:
+
+1. **Confirmed, but unverified.** `status` `verification-failed` or
+   `confirmed-artifact-missing`: an earlier run confirmed this step, and
+   GitHub's read-back did not show that issue whole. Never create the issue
+   again. Stop and report the status, the message, and `issue`.
+2. **Unresolved.** `status` `step-ambiguous`, `create-not-sent`,
+   `outcome-uncertain`, `created-mismatch`, or `created-unconfirmed`; or the
+   record shows this step ambiguous — the result's `transaction.ambiguous_step`,
+   or, when its `transaction` is null, the `ambiguous_step` that `--check`
+   reports. The issue may exist whatever `github_mutation` says. The step stays
+   ambiguous in the record, and a later `--create` for it is refused. Never
+   retry it, create it another way, advance past it, publish, or clear the
+   record. Stop and report, and recover only as described below.
+3. **Confirmed.** `ok` true with `status` `created`, or `already-created` for a
+   step an earlier run confirmed: the step is confirmed. Its `issue` carries
+   the number and URL, and that number is the `[#N]` marker. Go on to the next
+   step. Never create the issue again.
+4. **Possibly created.** Any other result whose `github_mutation` is `unknown`
+   or `performed`: this invocation may have created the issue. Treat it
+   exactly as an unresolved step.
+5. **Refused.** Anything else is a refusal before this invocation sent any
+   request: `begin-failed`, `target-mismatch`, `target-unverifiable`,
+   `payload-mismatch`, `approval-required`, `gh-unavailable`, and the rest.
+   This invocation created nothing. Stop and report the status and message.
+   Never fall back to creating the issue any other way, with the GitHub CLI or
+   otherwise; a corrected request or plan is a new proposal that needs its own
+   approval.
 
 An ambiguous issue-creating step is recovered through the same tool, never by
 hand and never by `--confirm-step`:
@@ -582,17 +610,18 @@ python3 "$TRACKED_ISSUE" \
   --step <N> --inspect --request "$ISSUE_REQUEST"
 ```
 
-`--inspect` is read-only. It reports the issues created in `$DOC_REPO` since the
-step began that match or resemble the request, and its `candidates.evidence` is
-`unique-exact`, `absent`, or `ambiguous`. Present that evidence and stop. Only
-on the user's explicit approval does `--reconcile --issue <number> --approved`
-bind the step to the one exact match, or `--authorize-retry --approved` return
-the step to planned when a complete listing shows nothing that matches or
-resembles the request; only after that may a fresh `--create` run. A result of
-`evidence-incomplete`, `candidates-not-unique`, `retry-refused`, or
-`verification-failed` leaves the step ambiguous and stops the run: a listing
-that could not be read whole, or that changed between reads, is never evidence
-that the issue is absent.
+`--inspect` is read-only, and its `ok` true means only that the read succeeded:
+it never confirms the step. It reports the issues created in `$DOC_REPO` since
+the step began that match or resemble the request, and its `candidates.evidence`
+is `unique-exact`, `absent`, or `ambiguous`. Present that evidence and stop.
+Only on the user's explicit approval does `--reconcile --issue <number>
+--approved` bind the step to the one exact match, or `--authorize-retry
+--approved` return the step to planned when a complete listing shows nothing
+that matches or resembles the request; only after that may a fresh `--create`
+run. A result of `evidence-incomplete`, `candidates-not-unique`,
+`retry-refused`, or `verification-failed` leaves the step ambiguous and stops
+the run: a listing that could not be read whole, or that changed between reads,
+is never evidence that the issue is absent.
 
 ### Walk the ordered steps
 

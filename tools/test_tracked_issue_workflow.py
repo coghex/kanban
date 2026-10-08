@@ -15,13 +15,20 @@ This module does, for all four processing assets, and asserts what reaches the
 fake GitHub:
 
 - the lookup resolves the tool out of the simulated install, byte-identical to
-  `tools/`, beside the transaction module it loads, and fails closed without it;
+  `tools/`, beside the transaction module it loads, all four mechanism modules
+  from one bundle directory; it fails closed when that bundle lacks any of
+  them, and, for Codex, when the cache holds more than one Kanban version,
+  complete or partial, rather than mixing modules across versions;
 - the asset's fingerprint, create, and inspect fences drive one creation to a
   confirmed step and make one POST, and running create again makes none;
 - a checkpoint begin that fails makes no GitHub request at all;
 - an uncertain outcome leaves the step ambiguous, and the asset's own create
   fence run again — which is the blind retry the incident was — makes no
-  request; and
+  request, and its `step-ambiguous`/`none` result is classified unresolved by
+  the asset's own ordered rules, never as a refusal that created nothing;
+- a refusal made before the record was read (`transaction` null), after an
+  uncertain creation, is classified unresolved through the asset's own
+  read-only `--check` fence; and
 - a recorded target naming another repository makes no GitHub request.
 """
 
@@ -31,6 +38,7 @@ import filecmp
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -40,6 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import test_consuming_repository_documents as consuming
+import test_document_workflow_contract as contract
 import test_tracked_issue_create as unit
 
 CONSUMING_REPOSITORY = consuming.CONSUMING_REPOSITORY
@@ -58,6 +67,14 @@ PROCESSING_ASSETS = (
     ("codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md", "codex", "epic-create"),
 )
 
+# The four modules a processing asset's lookup resolves as one unit.
+MECHANISM_MODULES = (
+    "publish_coordination_doc.py",
+    "tracker_transaction.py",
+    "tracked_issue_create.py",
+    "kanban_config.py",
+)
+
 PLACEHOLDER_WRITE_RE = re.compile(r"^# write .*\"\$ISSUE_REQUEST\"$", re.MULTILINE)
 
 
@@ -70,6 +87,21 @@ def tracked_issue_fence(text, marker):
     ]
     if len(found) != 1:
         raise AssertionError(f"expected one fence running {marker}, found {len(found)}")
+    return found[0]
+
+
+def record_check_fence(text):
+    """The asset's read-only `--check` of the record, which its result rules
+    read when the tool's result carries no transaction."""
+    start = text.index("describes this invocation only")
+    section = text[start:text.index(contract.RESULT_RULES_START, start)]
+    found = [
+        match.group("body")
+        for match in consuming.BASH_FENCE_RE.finditer(section)
+        if '"$TRACKER_TX"' in match.group("body") and "--check" in match.group("body")
+    ]
+    if len(found) != 1:
+        raise AssertionError(f"expected one record --check fence, found {len(found)}")
     return found[0]
 
 
@@ -151,6 +183,28 @@ class TrackedIssueWorkflowTests(unittest.TestCase):
             ["bash", "-c", script], capture_output=True, text=True, timeout=60,
             env=self.lookup_environment(brand, install_root, plugin_root),
         ), install_root
+
+    def uninstall(self, brand):
+        shutil.rmtree(self.root / f"{brand}-install", ignore_errors=True)
+
+    def classify(self, relative_path, outcome, check=None):
+        """The rule the asset's own ordered result rules apply to `outcome`."""
+        rules = contract.tracked_issue_result_rules(self.asset_text(relative_path))
+        return contract.classify_tracked_issue_result(rules, outcome, check)
+
+    def run_check_fence(self, relative_path, tracker):
+        environment = dict(
+            self.environment,
+            TRACKER_TX=tracker,
+            DOC_REPO=CONSUMING_REPOSITORY,
+            DOCS_WT=str(self.fixture.docs),
+            DOC_RELATIVE_PATH=DOCUMENT,
+        )
+        proc = subprocess.run(
+            ["bash", "-c", record_check_fence(self.asset_text(relative_path))],
+            capture_output=True, text=True, timeout=180, env=environment,
+        )
+        return json.loads(proc.stdout)
 
     def resolve(self, relative_path, brand):
         """$TRACKED_ISSUE and $TRACKER_TX, as the asset's own lookup sets them."""
@@ -268,18 +322,65 @@ class TrackedIssueWorkflowTests(unittest.TestCase):
                 # the copy it runs is the one this asset's lookup also resolved.
                 self.assertEqual(Path(tool).parent, Path(tracker).parent)
 
-    def test_the_lookup_fails_closed_when_the_bundle_lacks_the_tool(self):
+    def test_every_processing_asset_resolves_all_four_modules_from_one_bundle(self):
         for relative_path, brand, _kind in PROCESSING_ASSETS:
             with self.subTest(asset=relative_path):
                 self.build_repository()
+                proc, _install_root = self.run_lookup(relative_path, brand)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
                 _install_root, plugin_root = self.install(brand)
-                bundled = next(plugin_root.rglob("tracked_issue_create.py"))
-                bundled.unlink()
-                try:
+                tool = Path(proc.stdout.splitlines()[0])
+                for module in MECHANISM_MODULES:
+                    self.assertTrue((tool.parent / module).is_file(), module)
+                self.assertTrue(tool.is_relative_to(plugin_root), tool)
+
+    def test_the_lookup_fails_closed_when_the_bundle_lacks_any_module(self):
+        for relative_path, brand, _kind in PROCESSING_ASSETS:
+            for module in MECHANISM_MODULES:
+                with self.subTest(asset=relative_path, missing=module):
+                    self.build_repository()
+                    self.uninstall(brand)
+                    _install_root, plugin_root = self.install(brand)
+                    bundled = [
+                        path for path in plugin_root.rglob(module)
+                        if path.parent.name == "scripts"
+                        and path.parent.parent.name == (
+                            "process-report" if brand == "codex" else "kanban"
+                        )
+                    ]
+                    self.assertEqual(len(bundled), 1, bundled)
+                    bundled[0].unlink()
                     proc, _ = self.run_lookup(relative_path, brand)
-                finally:
-                    bundled.write_bytes(SOURCE.read_bytes())
-                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                    self.uninstall(brand)
+                    self.assertNotEqual(proc.returncode, 0, proc.stdout)
+
+    def test_a_codex_cache_holding_two_versions_fails_closed(self):
+        # A second Kanban version beside the first, complete or partial. Each
+        # helper searched for on its own would resolve from whichever version
+        # find lists first, so one run could record intent through one
+        # version's transaction module and create through another's tool. The
+        # lookup refuses rather than choosing, before any GitHub request.
+        for relative_path, brand, _kind in PROCESSING_ASSETS:
+            if brand != "codex":
+                continue
+            for other in ("complete", "partial-without-tool", "partial-only-tool"):
+                with self.subTest(asset=relative_path, other=other):
+                    self.build_repository()
+                    self.reset_github()
+                    self.uninstall(brand)
+                    _install_root, plugin_root = self.install(brand)
+                    older = plugin_root.with_name("1.3.0")
+                    shutil.copytree(plugin_root, older)
+                    scripts = older / "skills" / "process-report" / "scripts"
+                    if other == "partial-without-tool":
+                        (scripts / "tracked_issue_create.py").unlink()
+                    elif other == "partial-only-tool":
+                        for module in MECHANISM_MODULES[:2] + MECHANISM_MODULES[3:]:
+                            (scripts / module).unlink()
+                    proc, _ = self.run_lookup(relative_path, brand)
+                    self.uninstall(brand)
+                    self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                    self.assertEqual(self.calls(), [])
 
     # -- the asset drives one creation ---------------------------------------------
 
@@ -358,6 +459,15 @@ class TrackedIssueWorkflowTests(unittest.TestCase):
                     self.assertEqual(retried["github_mutation"], "none", retried)
                     self.assertEqual(len(self.posts()), 1, self.calls())
                     self.assertEqual(len(self.github()["issues"]), 1)
+                    # `none` describes the retry alone. The asset's rules read
+                    # the status before the mutation field, so the step is
+                    # unresolved — never "refused, nothing was created".
+                    self.assertEqual(
+                        self.classify(relative_path, uncertain), "Unresolved"
+                    )
+                    self.assertEqual(
+                        self.classify(relative_path, retried), "Unresolved"
+                    )
 
                     # The asset's own recovery fence is read-only and finds the
                     # one issue; binding it still needs explicit approval.
@@ -370,6 +480,44 @@ class TrackedIssueWorkflowTests(unittest.TestCase):
                     )
                     self.assertEqual(len(self.posts()), 1, self.calls())
                     self.assert_ambiguous(tracker)
+
+    def test_a_refusal_without_a_transaction_after_an_uncertain_creation(self):
+        # The step was left ambiguous by an uncertain creation; a later
+        # --create with a different request is refused before the tool reads
+        # the record, so its result carries no transaction and says nothing
+        # about the earlier attempt. The asset's rules read the record through
+        # its own --check fence, and classify the step unresolved.
+        for relative_path, brand, kind in PROCESSING_ASSETS:
+            with self.subTest(asset=relative_path):
+                self.approved_request.write_text(json.dumps(REQUEST), encoding="utf-8")
+                tool, tracker = self.prepare(relative_path, brand, kind)
+                self.set_github(create_mode="fail-after")
+                uncertain = self.run_fence(relative_path, "--create", tool, expect=1)
+                self.assertEqual(uncertain["github_mutation"], "unknown", uncertain)
+                self.assertEqual(len(self.posts()), 1, self.calls())
+                self.set_github(create_mode="ok")
+
+                self.approved_request.write_text(
+                    json.dumps(dict(REQUEST, title=REQUEST["title"] + " (edited)")),
+                    encoding="utf-8",
+                )
+                refused = self.run_fence(relative_path, "--create", tool, expect=1)
+                self.assertEqual(refused["status"], "payload-mismatch", refused)
+                self.assertEqual(refused["github_mutation"], "none", refused)
+                self.assertIsNone(refused["transaction"], refused)
+                self.assertEqual(len(self.posts()), 1, self.calls())
+
+                checked = self.run_check_fence(relative_path, tracker)
+                self.assertEqual(checked["ambiguous_step"]["index"], 0, checked)
+                self.assertEqual(
+                    self.classify(relative_path, refused, checked), "Unresolved"
+                )
+                # Without the record, the same result reads as a plain refusal:
+                # the --check is what the classification depends on.
+                self.assertEqual(self.classify(relative_path, refused), "Refused")
+                self.assert_ambiguous(tracker)
+                self.assertEqual(len(self.github()["issues"]), 1)
+        self.approved_request.write_text(json.dumps(REQUEST), encoding="utf-8")
 
     # -- the creation target --------------------------------------------------------------
 

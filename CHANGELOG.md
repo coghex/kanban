@@ -27,7 +27,13 @@ created above it.
   uncertain creation is never retried blindly: it is recovered only through the
   tool's `--inspect` and the user's approved `--reconcile` or
   `--authorize-retry`, and incomplete or changing GitHub evidence never counts
-  as proof that the issue is absent.
+  as proof that the issue is absent. Because `github_mutation` describes only
+  the invocation that returned it, the commands classify each result by
+  ordered rules, so a `step-ambiguous` result whose `none` follows an earlier
+  uncertain creation is handled as unresolved, never as a refusal that created
+  nothing. The four modules a processing run needs are resolved from one
+  installed bundle and checked before the first mutation; a Codex cache holding
+  more than one Kanban version is refused rather than mixed.
 
 - The canonical issue reviewer can now approve a documentation-only issue that
   lands directly through the repository's own documentation lane and then

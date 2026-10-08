@@ -387,7 +387,12 @@ parses §2 and fails if:
   issue-creating identity confirmed by hand through `--confirm-step` — or drops
   any of the clauses that tell it how to consume that tool's result: proceed
   only on `ok`, stop without a fallback on a refusal, and never retry an
-  uncertain outcome except through the tool's own approved recovery;
+  uncertain outcome except through the tool's own approved recovery; states
+  its result rules out of order, so that a `step-ambiguous` result with
+  `github_mutation` `none` reads as a refusal that created nothing, or leaves
+  any uncertain or unverified status the tool returns unnamed; or resolves its
+  four mechanism modules other than as one unit from one bundle, checked before
+  the first mutation;
 - either `process-design-doc` variant reintroduces the instruction to write
   partial-failure recovery information into the document, which contradicts the
   publication module being that document's only writer;
@@ -1076,8 +1081,21 @@ recorded target names the owning repository, makes no GitHub request unless the
 step's intent was recorded, checks the identity GitHub returned against the
 request, and confirms the step itself with a begin token that never leaves its
 process. It returns one structured result whose `github_mutation` — `none`,
-`performed`, or `unknown` — tells the caller whether anything may have been
-created. An uncertain outcome leaves the step ambiguous, and the same tool's
+`performed`, or `unknown` — describes that invocation alone: `none` means it
+sent GitHub no create request, never that no issue exists for the step, since
+an earlier attempt may have created one. A caller therefore classifies the
+result by ordered rules, never by `github_mutation` alone: a confirmed step
+whose read-back failed first, then an unresolved step — an uncertain status,
+`step-ambiguous` included, or a record that shows the step ambiguous, read
+through the transaction module's read-only `--check` when a refusal came before
+the tool read the record and so carries no transaction — then a confirmed step,
+then any other result that may have mutated, and only then a refusal that
+created nothing. The four modules the processing assets run —
+`tracked_issue_create.py`, `tracker_transaction.py`,
+`publish_coordination_doc.py`, and the `kanban_config.py` they load — are
+resolved as one unit from one installed bundle, and all four are checked before
+the first mutation: a Codex cache holding more than one Kanban version, or a
+bundle missing any of them, is refused rather than mixed. An uncertain outcome leaves the step ambiguous, and the same tool's
 read-only `--inspect`, approved `--reconcile`, and approved `--authorize-retry`
 are the only way out of it; a listing it cannot read whole, or that changes
 between reads, is never evidence that the issue is absent. Every other step

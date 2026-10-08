@@ -105,12 +105,18 @@ def run(args, cwd=None, **kwargs):
 
 
 def lookup_fence(text):
-    """The asset's own helper-resolution block, as shell."""
-    for match in BASH_FENCE_RE.finditer(text):
-        body = match.group("body")
-        if body.lstrip().startswith("PUBLISH_DOC="):
-            return body
-    raise AssertionError("the asset carries no PUBLISH_DOC resolution fence")
+    """The asset's own helper-resolution block, as shell: the one fence that
+    assigns PUBLISH_DOC, whether first or after the bundle directory it joins
+    onto."""
+    fences = [
+        match.group("body") for match in BASH_FENCE_RE.finditer(text)
+        if re.search(r"^PUBLISH_DOC=", match.group("body"), re.MULTILINE)
+    ]
+    if len(fences) != 1:
+        raise AssertionError(
+            f"expected one PUBLISH_DOC resolution fence, found {len(fences)}"
+        )
+    return fences[0]
 
 
 class ConsumingRepositoryFixture:

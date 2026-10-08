@@ -220,12 +220,19 @@ is for. `$process-report` and `$process-design-doc` also locate
 of `tools/tracked_issue_create.py`: every issue or epic they create is one
 invocation of it, which records the step's intent, creates the issue only if
 that record was written, and confirms it, so a failed checkpoint can never be
-followed by an untracked creation. The three modules travel as a unit because each loads its siblings from
-beside itself, and `tools/test_document_workflow_contract.py` holds the copies
-identical to their sources, holds each skill's lookup to a bundled path, and
-runs that `find` against a simulated install. An edit to a `tools/` module
-therefore has to be copied into both bundles in the same change; the drift
-failure names the exact `cp` that repairs it.
+followed by an untracked creation. Its result's `github_mutation` describes that
+invocation alone, so the skills classify the result by ordered rules — an
+unresolved step before any refusal — and never by that field alone. The four
+modules — the three above and `tracked_issue_create.py` — are resolved as one
+unit: the skills find the one installed `skills/process-report/scripts`
+directory, refuse a cache holding more than one Kanban version rather than
+mixing modules across versions, and check all four before the first mutation.
+They travel as a unit because each loads its siblings from beside itself, and
+`tools/test_document_workflow_contract.py` holds the copies identical to their
+sources, holds each skill's lookup to a bundled path, and runs that `find`
+against a simulated install. An edit to a `tools/` module therefore has to be
+copied into both bundles in the same change; the drift failure names the exact
+`cp` that repairs it.
 
 Eligibility does not travel with the mechanism. For `coghex/kanban` it stays
 [agent-workflow-contract.md §7](../docs/agent-workflow-contract.md#7-document-publication-classification)

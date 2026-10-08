@@ -1174,6 +1174,27 @@ TRACKED_ISSUE_CLAUSES = {
     "incomplete-evidence-is-not-absence": (
         "is never evidence that the issue is absent"
     ),
+    "github-mutation-describes-this-invocation-only": (
+        "github_mutation describes this invocation only: none means this "
+        "invocation sent github no create request, never that no issue exists "
+        "for the step"
+    ),
+    "the-record-is-read-when-the-result-has-none": (
+        "when the result's transaction is null — a refusal made before the tool "
+        "read the step's record — read the record yourself, read-only, before "
+        "classifying"
+    ),
+    "results-are-classified-by-ordered-rules": (
+        "classify the result by the first of these rules that applies, in this "
+        "order, and never by github_mutation alone"
+    ),
+    "inspect-never-confirms": (
+        "its ok true means only that the read succeeded: it never confirms the "
+        "step"
+    ),
+    "one-bundle-not-separate-searches": (
+        "the four modules are one unit"
+    ),
     "preflight-ambiguity-points-at-the-tool": (
         "for an issue-create or epic-create step, that verification, the "
         "binding, and the retry are the tracked issue tool's"
@@ -1192,7 +1213,54 @@ TRACKED_ISSUE_INVOCATIONS = (
     'python3 "$TRACKED_ISSUE" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
     '--step <N> --inspect --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKER_TX" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--check Then classify the result',
 )
+
+# Each brand's resolution of the four mechanism modules a processing asset
+# depends on, as one unit from one bundle: every helper it runs, and the
+# configuration module the publication helper loads beside itself, checked
+# before the first mutation. Codex finds one cache directory and refuses a
+# second rather than choosing; Claude's root is one directory by construction.
+SINGLE_BUNDLE_LOOKUPS = {
+    "claude": (
+        'KANBAN_CONFIG="${CLAUDE_PLUGIN_ROOT}/scripts/kanban_config.py"',
+        '[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] '
+        '\\ && [ -f "$KANBAN_CONFIG" ]',
+    ),
+    "codex": (
+        'KANBAN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+        "-type d -path '*/kanban/*/skills/process-report/scripts' 2>/dev/null "
+        '| head -n2)"',
+        'PUBLISH_DOC="$KANBAN_SCRIPTS/publish_coordination_doc.py"',
+        'TRACKER_TX="$KANBAN_SCRIPTS/tracker_transaction.py"',
+        'TRACKED_ISSUE="$KANBAN_SCRIPTS/tracked_issue_create.py"',
+        'KANBAN_CONFIG="$KANBAN_SCRIPTS/kanban_config.py"',
+        '[ -n "$KANBAN_SCRIPTS" ] \\ '
+        '&& [ "$KANBAN_SCRIPTS" = "$(head -n1 <<<"$KANBAN_SCRIPTS")" ] '
+        '\\ && [ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] '
+        '\\ && [ -f "$KANBAN_CONFIG" ]',
+    ),
+}
+PER_FILE_MECHANISM_LOOKUP_RE = re.compile(
+    r"-path '\*/kanban/\*/skills/process-report/scripts/[\w.]+\.py'"
+)
+
+# The result rules, in the order each processing asset states them. Order is
+# the contract: `github_mutation` describes one invocation, so a rule keyed on
+# it alone would read `step-ambiguous` (an earlier attempt may have created the
+# issue; this one sent nothing) as a refusal that created nothing.
+TRACKED_ISSUE_RESULT_RULES = (
+    "Confirmed, but unverified",
+    "Unresolved",
+    "Confirmed",
+    "Possibly created",
+    "Refused",
+)
+RESULT_RULES_START = "Then classify the result by the first of these rules"
+RESULT_RULES_END = "An ambiguous issue-creating step is recovered"
+RESULT_STATUS_TOKEN_RE = re.compile(r"`([a-z]+(?:-[a-z]+)*)`")
 
 # What an asset may no longer carry: the GitHub CLI's own create command, in any
 # spelling the gh-invocation scan recognizes, and an issue-creating identity
@@ -1672,6 +1740,58 @@ BUNDLE_LOOKUP_RES = {
         re.MULTILINE,
     ),
 }
+
+# The processing assets' Codex lookup, which finds the one installed bundle
+# directory their four mechanism modules share and joins each helper onto it.
+# A per-file search, like the form above, picks each file's first match on its
+# own, so with two cached versions one run could record intent through one
+# version's transaction module and create through another's tool. `head -n2`
+# is deliberate: the guard after it refuses a second match rather than
+# choosing one.
+BUNDLE_DIRECTORY_LOOKUP_RES = {
+    "claude": re.compile(r"(?!)"),
+    "codex": re.compile(
+        r'^(?P<var>[A-Z][A-Z0-9_]*)="\$\(find "\$\{CODEX_HOME:-\$HOME/\.codex\}'
+        r'/plugins/cache" -type d -path \'\*/kanban/\*/(?P<relative>[^\']+)\' '
+        r'2>/dev/null \| head -n2\)"$',
+        re.MULTILINE,
+    ),
+}
+DIRECTORY_JOIN_RE = re.compile(
+    r'^(?P<var>[A-Z][A-Z0-9_]*)="\$(?P<directory>[A-Z][A-Z0-9_]*)/(?P<name>[\w.]+)"$',
+    re.MULTILINE,
+)
+
+
+def lookup_fence_of(text):
+    """The one bash fence that resolves the tracked-issue tool."""
+    fences = [
+        fence for fence in re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+        if re.search(r"^TRACKED_ISSUE=", fence, re.MULTILINE)
+    ]
+    if len(fences) != 1:
+        raise AssertionError(f"expected one lookup fence, found {len(fences)}")
+    return fences[0]
+
+
+def bundle_lookups(text, bundle):
+    """Every helper variable `text` resolves from its bundle, by either form,
+    mapped to the bundle-relative path it names."""
+    defined = {
+        match.group("var"): match.group("relative")
+        for match in BUNDLE_LOOKUP_RES[bundle].finditer(text)
+    }
+    directories = {
+        match.group("var"): match.group("relative")
+        for match in BUNDLE_DIRECTORY_LOOKUP_RES[bundle].finditer(text)
+    }
+    for match in DIRECTORY_JOIN_RE.finditer(text):
+        if match.group("directory") in directories:
+            defined[match.group("var")] = (
+                f"{directories[match.group('directory')]}/{match.group('name')}"
+            )
+    return defined
+
 
 # The lookup root issue #370 removed. Named as forbidden text so the fix cannot
 # be undone one asset at a time.
@@ -3184,6 +3304,104 @@ class TrackerTransactionContractTests(unittest.TestCase):
         self.assertIn("tools/test_tracker_transaction.py", contract_text())
 
 
+def tracked_issue_result_rules(text):
+    """The asset's ordered result rules: (label, normalized body, the status
+    names it spells)."""
+    start = text.index(RESULT_RULES_START)
+    section = text[start:text.index(RESULT_RULES_END, start)]
+    rules = []
+    for item in re.split(r"^\d+\.\s+", section, flags=re.MULTILINE)[1:]:
+        label = re.match(r"\*\*(?P<label>.+?)\.\*\*", item)
+        if label is None:
+            raise AssertionError(f"an unlabelled result rule: {item[:60]!r}")
+        rules.append((
+            label.group("label"),
+            normalized(item),
+            set(RESULT_STATUS_TOKEN_RE.findall(item)),
+        ))
+    return rules
+
+
+def classify_tracked_issue_result(rules, outcome, check=None):
+    """What an agent following `rules` does with `outcome`: the label of the
+    first rule that applies. `check` is the transaction module's `--check`
+    report, which the rules read when the result carries no transaction."""
+    transaction = outcome.get("transaction")
+    record = transaction if transaction is not None else (check or {})
+    ambiguous = record.get("ambiguous_step") is not None
+    for label, body, statuses in rules:
+        status = outcome["status"]
+        if label == "Confirmed, but unverified" and status in statuses:
+            return label
+        if label == "Unresolved":
+            reads_record = "transaction.ambiguous_step" in body and (
+                transaction is not None or "--check" in body
+            )
+            if status in statuses or (ambiguous and reads_record):
+                return label
+        if label == "Confirmed" and outcome["ok"] and status in statuses:
+            return label
+        if (
+            label == "Possibly created"
+            and "unknown or performed" in body
+            and outcome["github_mutation"] in ("unknown", "performed")
+        ):
+            return label
+        if label == "Refused":
+            return label
+    return None
+
+
+def tool_result_statuses():
+    """What tools/tracked_issue_create.py can answer `--create` with that is
+    not a refusal: every uncertain status, and every non-ok verification of a
+    confirmed step, read out of the source so a new one has to be classified."""
+    source = (REPO_ROOT / "tools" / "tracked_issue_create.py").read_text(
+        encoding="utf-8"
+    )
+    uncertain = set(re.findall(r'_uncertain\(\s*ctx,\s*"([a-z-]+)"', source))
+    verify = source[source.index("def verify_confirmed"):source.index("def _uncertain")]
+    unverified = set(re.findall(r'result\(\s*"([a-z-]+)",\s*ok=False', verify))
+    return uncertain, unverified
+
+
+# (outcome, --check report, the rule that must decide it). The first three are
+# the reviewed blocker: no request from this invocation, an issue that may
+# exist anyway.
+RESULT_CASES = (
+    ({"ok": False, "status": "step-ambiguous", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "step-ambiguous", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Unresolved"),
+    ({"ok": False, "status": "create-not-sent", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "payload-mismatch", "github_mutation": "none",
+      "transaction": None}, {"ambiguous_step": {"index": 0}}, "Unresolved"),
+    ({"ok": False, "status": "verification-failed", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed, but unverified"),
+    ({"ok": False, "status": "outcome-uncertain", "github_mutation": "unknown",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": True, "status": "created", "github_mutation": "performed",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed"),
+    ({"ok": True, "status": "already-created", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed"),
+    ({"ok": False, "status": "some-future-status", "github_mutation": "performed",
+      "transaction": {"ambiguous_step": None}}, None, "Possibly created"),
+    ({"ok": False, "status": "begin-failed", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Refused"),
+    ({"ok": False, "status": "payload-mismatch", "github_mutation": "none",
+      "transaction": None}, {"ambiguous_step": None}, "Refused"),
+)
+
+
+def misclassified_results(rules):
+    return [
+        (outcome["status"], expected, found)
+        for outcome, check, expected in RESULT_CASES
+        if (found := classify_tracked_issue_result(rules, outcome, check)) != expected
+    ]
+
+
 def missing_tracked_issue_clauses(text):
     """The tracked issue-creation clauses `text` no longer states, by key."""
     asset = canonical(text)
@@ -3293,6 +3511,96 @@ class TrackedIssueCreationContractTests(unittest.TestCase):
                 self.assertNotIn(
                     "tracked_issue_create.py", self.asset_text(path), path
                 )
+
+    def test_every_processing_asset_resolves_one_complete_bundle(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                text = self.asset_text(path)
+                fence = normalized(lookup_fence_of(text))
+                for line in SINGLE_BUNDLE_LOOKUPS[bundle_of(path)]:
+                    self.assertIn(normalized(line), fence, path)
+                self.assertEqual(
+                    PER_FILE_MECHANISM_LOOKUP_RE.findall(text), [], path
+                )
+
+    def test_reverting_to_per_file_searches_is_reported(self):
+        # The planted violation: the lookup commit 74a4d22b shipped, which
+        # could resolve each helper from a different cached version.
+        per_file = (
+            'TRACKER_TX="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+            "-path '*/kanban/*/skills/process-report/scripts/tracker_transaction.py' "
+            '2>/dev/null | head -n1)"'
+        )
+        for path in PROCESSING_ASSETS:
+            if bundle_of(path) != "codex":
+                continue
+            with self.subTest(path=path):
+                reverted = self.asset_text(path).replace(
+                    'TRACKER_TX="$KANBAN_SCRIPTS/tracker_transaction.py"', per_file
+                )
+                self.assertEqual(len(PER_FILE_MECHANISM_LOOKUP_RE.findall(reverted)), 1)
+                self.assertNotIn(
+                    normalized(SINGLE_BUNDLE_LOOKUPS["codex"][2]),
+                    normalized(lookup_fence_of(reverted)),
+                )
+
+    def test_every_processing_asset_orders_its_result_rules(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                rules = tracked_issue_result_rules(self.asset_text(path))
+                self.assertEqual(
+                    tuple(label for label, _body, _statuses in rules),
+                    TRACKED_ISSUE_RESULT_RULES,
+                )
+                self.assertEqual(misclassified_results(rules), [], path)
+
+    def test_every_uncertain_or_unverified_status_the_tool_returns_is_named(self):
+        uncertain, unverified = tool_result_statuses()
+        # Not vacuous: the reviewed tool's five uncertain outcomes and two
+        # verification failures.
+        self.assertEqual(
+            uncertain,
+            {"step-ambiguous", "create-not-sent", "outcome-uncertain",
+             "created-mismatch", "created-unconfirmed"},
+        )
+        self.assertEqual(unverified, {"verification-failed", "confirmed-artifact-missing"})
+        for path in PROCESSING_ASSETS:
+            rules = tracked_issue_result_rules(self.asset_text(path))
+            for status in sorted(uncertain | unverified):
+                with self.subTest(path=path, status=status):
+                    # Classified as GitHub reports these: with no mutation by
+                    # this invocation, and no ambiguity in the result.
+                    found = classify_tracked_issue_result(rules, {
+                        "ok": False, "status": status, "github_mutation": "none",
+                        "transaction": {"ambiguous_step": None},
+                    })
+                    self.assertEqual(
+                        found,
+                        "Unresolved" if status in uncertain else "Confirmed, but unverified",
+                    )
+
+    def test_a_misordered_or_incomplete_rule_set_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            text = self.asset_text(path)
+            rules = tracked_issue_result_rules(text)
+            start = text.index(RESULT_RULES_START)
+
+            def in_rules(old, new):
+                return text[:start] + text[start:].replace(old, new, 1)
+
+            mutations = {
+                "generic-first": rules[-1:] + rules[:-1],
+                "mutation-before-status": [rules[3]] + rules[:3] + rules[4:],
+                "step-ambiguous-dropped": tracked_issue_result_rules(
+                    in_rules("`step-ambiguous`, ", "")
+                ),
+                "record-not-read": tracked_issue_result_rules(
+                    in_rules("`transaction.ambiguous_step`", "`transaction`")
+                ),
+            }
+            for name, mutated in mutations.items():
+                with self.subTest(path=path, mutation=name):
+                    self.assertNotEqual(misclassified_results(mutated), [])
 
     def test_the_contract_names_the_tool_and_its_tests(self):
         self.assertIn("tools/tracked_issue_create.py", contract_text())
@@ -3558,10 +3866,7 @@ class BundledMechanismTests(unittest.TestCase):
             with self.subTest(path=path):
                 bundle = bundle_of(path)
                 text = self.asset_text(path)
-                defined = {
-                    match.group("var"): match.group("relative")
-                    for match in BUNDLE_LOOKUP_RES[bundle].finditer(text)
-                }
+                defined = bundle_lookups(text, bundle)
                 invoked = set(HELPER_INVOCATION_RE.findall(text))
                 self.assertTrue(invoked, f"{path} invokes no resolved helper")
                 self.assertEqual(
@@ -3617,6 +3922,19 @@ class BundledMechanismTests(unittest.TestCase):
                         installed = self.plant(Path(temp), bundle, relative)
                         self.assertEqual(
                             self.resolve(Path(temp), bundle, relative), [str(installed)]
+                        )
+            for match in BUNDLE_DIRECTORY_LOOKUP_RES[bundle].finditer(text):
+                relative = match.group("relative")
+                with self.subTest(path=path, directory=relative):
+                    with tempfile.TemporaryDirectory() as temp:
+                        installed = self.plant(Path(temp), bundle, f"{relative}/x.py")
+                        proc = subprocess.run(
+                            ["find", str(Path(temp) / "plugins" / "cache"),
+                             "-type", "d", "-path", f"*/kanban/*/{relative}"],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        self.assertEqual(
+                            proc.stdout.split(), [str(installed.parent)]
                         )
 
     def plant(self, temp, bundle, relative):
