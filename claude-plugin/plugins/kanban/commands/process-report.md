@@ -336,23 +336,29 @@ the `/design-epic` command; its slices are filed later through
 
 ## 5. Apply the approved disposition
 
-**Resolve this bundle's own mechanism first.** Both helpers ship with this
+**Resolve this bundle's own mechanism first.** All three helpers ship with this
 plugin rather than with the repository being worked, so they are resolved
 against this plugin's install location and never against `$DOC_ROOT`:
 
 ```bash
 PUBLISH_DOC="${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py"
 TRACKER_TX="${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py"
-[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ]
+TRACKED_ISSUE="${CLAUDE_PLUGIN_ROOT}/scripts/tracked_issue_create.py"
+KANBAN_CONFIG="${CLAUDE_PLUGIN_ROOT}/scripts/kanban_config.py"
+[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] \
+  && [ -f "$KANBAN_CONFIG" ]
 ```
 
 Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` to this plugin's own install
 location regardless of the invoking working directory, which is what lets this
-workflow run in a repository that tracks neither file. The two resolve as one
-unit — each loads the other from beside itself — so a bundle carrying one
-without the other carries neither, and an unresolvable helper stops the run
-here rather than after the first mutation. The lookup rule this follows is
-stated in full with the publication step below.
+workflow run in a repository that tracks none of these files. The four modules
+are one unit, all four checked here in the one directory `${CLAUDE_PLUGIN_ROOT}`
+names: the publication and transaction modules each load the other from beside
+themselves, the publication module reads `kanban_config.py` from beside itself,
+and the issue-creation tool loads the transaction module from beside itself. A
+bundle missing any of them stops the run here rather than after the first
+mutation. The lookup rule this follows is stated in full with the publication
+step below.
 
 **First, before any tracker mutation, check for an outstanding publication or
 tracker transaction.**
@@ -426,7 +432,10 @@ exact artifact or authorize a retry — one whose repository, target, immutable
 identity or URL, approved payload, and observable postcondition all match what
 was recorded. Absent, mismatched, conflicting, or more than one plausible
 candidate leaves the record unresolved and stops the run. A similarly titled
-artifact is never sufficient evidence.
+artifact is never sufficient evidence. For an `issue-create` or `epic-create`
+step, that verification, the binding, and the retry are the tracked issue
+tool's `--inspect`, `--reconcile`, and `--authorize-retry` described with the
+issue-creation operation below — never a hand-assembled identity.
 
 ### Acquire the tracker transaction before the first mutation
 
@@ -442,8 +451,8 @@ python3 "$TRACKER_TX" \
 {"entry_key": "<the selected finding key>",
  "disposition": "<the approved disposition kind>",
  "steps": [{"kind": "issue-create",
-            "target": "<the exact approved target>",
-            "payload_fingerprint": "<digest of the approved body>",
+            "target": "new issue in <the owner/name $DOC_REPO names>",
+            "payload_fingerprint": "<what --fingerprint prints for the approved request>",
             "postcondition": "<what is observably true once it lands>",
             "provides_marker": true}]}
 PLAN
@@ -473,12 +482,122 @@ transaction outstanding. Acquiring one for them would block every later finding
 in this report behind a record nothing could ever clear, and an `Epic`
 disposition's would stay open across a separate human-led drafting workflow.
 
+### Create each tracked issue through one operation
+
+An issue-creating step — `issue-create` for a child issue, `epic-create` for
+the umbrella epic — is never walked as separate begin, create, and confirm
+commands. A chain of commands is something a run can half-apply: one
+run's begin failed, it created the issue anyway, and that issue existed with no
+recorded intent. `tracked_issue_create.py` is the one operation that does all
+of it. It refuses unless the request is the step's approved payload and the
+step's recorded target names `$DOC_REPO`; it records the step's intent through
+the transaction module and makes no GitHub request unless that record was
+written; and it creates the issue, checks the identity GitHub returned against
+the request, and confirms the step with that identity itself, holding the begin
+token inside its own process.
+
+Write the approved request — the exact title, the exact body, and only the
+approved existing labels — as JSON to a temporary file, and take the step's
+`payload_fingerprint` for the plan above from the tool rather than computing
+one. The step's `target` names `$DOC_REPO`'s actual owner/name slug, as in
+`new issue in <owner>/<name>`; a target that names another repository, several,
+or none is refused before anything is recorded.
+
+```bash
+ISSUE_REQUEST="$(mktemp)"
+# write {"title": ..., "body": ..., "labels": [...]} to "$ISSUE_REQUEST"
+python3 "$TRACKED_ISSUE" --fingerprint --request "$ISSUE_REQUEST"
+```
+
+Then, at that step's turn in the ordered walk below, create it:
+
+```bash
+python3 "$TRACKED_ISSUE" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --step <N> --create --approved --request "$ISSUE_REQUEST"
+```
+
+`<N>` is the step's index in the plan. `--approved` records the explicit
+approval this disposition already received for exactly that request; it never
+stands in for one.
+
+The command prints one JSON result. Read it before doing anything else,
+whatever the exit status. `github_mutation` describes this invocation only:
+`none` means this invocation sent GitHub no create request, never that no issue
+exists for the step — an earlier attempt at the same step may have created one.
+When the result's `transaction` is null — a refusal made before the tool read
+the step's record — read the record yourself, read-only, before classifying:
+
+```bash
+python3 "$TRACKER_TX" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --check
+```
+
+Then classify the result by the first of these rules that applies, in this
+order, and never by `github_mutation` alone:
+
+1. **Confirmed, but unverified.** `status` `verification-failed` or
+   `confirmed-artifact-missing`: an earlier run confirmed this step, and
+   GitHub's read-back did not show that issue whole. Never create the issue
+   again. Stop and report the status, the message, and `issue`.
+2. **Unresolved.** `status` `step-ambiguous`, `create-not-sent`,
+   `outcome-uncertain`, `created-mismatch`, or `created-unconfirmed`; or the
+   record shows this step ambiguous — the result's `transaction.ambiguous_step`,
+   or, when its `transaction` is null, the `ambiguous_step` that `--check`
+   reports. The issue may exist whatever `github_mutation` says. The step stays
+   ambiguous in the record, and a later `--create` for it is refused. Never
+   retry it, create it another way, advance past it, publish, or clear the
+   record. Stop and report, and recover only as described below.
+3. **Confirmed.** `ok` true with `status` `created`, or `already-created` for a
+   step an earlier run confirmed: the step is confirmed. Its `issue` carries
+   the number and URL, and that number is the `[#N]` marker. Go on to the next
+   step. Never create the issue again.
+4. **Possibly created.** Any other result whose `github_mutation` is `unknown`
+   or `performed`: this invocation may have created the issue. Treat it
+   exactly as an unresolved step.
+5. **Refused.** Anything else is a refusal before this invocation sent any
+   request: `begin-failed`, `target-mismatch`, `target-unverifiable`,
+   `payload-mismatch`, `approval-required`, `gh-unavailable`,
+   `operation-in-progress`, and the rest.
+   This invocation created nothing. Stop and report the status and message.
+   Never fall back to creating the issue any other way, with the GitHub CLI or
+   otherwise; a corrected request or plan is a new proposal that needs its own
+   approval.
+
+An ambiguous issue-creating step is recovered through the same tool, never by
+hand and never by `--confirm-step`:
+
+```bash
+python3 "$TRACKED_ISSUE" \
+  --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
+  --step <N> --inspect --request "$ISSUE_REQUEST"
+```
+
+`--inspect` is read-only, and its `ok` true means only that the read succeeded:
+it never confirms the step. It reports the issues created in `$DOC_REPO` since
+the step began that match or resemble the request, now or by the title it was
+created with, and its `candidates.evidence` is `unique-exact`, `absent`, or
+`ambiguous`. Present that evidence and stop. Only on the user's explicit
+approval does `--reconcile --issue <number> --approved` bind the step to the
+one exact match, or `--authorize-retry --approved` return the step to planned
+when a complete listing shows nothing that matches or resembles the request;
+only after that may a fresh `--create` run. A result of `evidence-incomplete`,
+`candidates-not-unique`, `retry-refused`, `operation-in-progress`, or
+`verification-failed` leaves the step ambiguous and stops the run: a listing
+that could not be read whole, or that changed between reads, is never evidence
+that the issue is absent, and a step another run is still creating is not yet
+evidence of anything.
+
 ### Walk the ordered steps
 
 Every approved tracker mutation is its own ordered step. Begin a step before its
 external mutation runs and confirm it with the exact identity that mutation
 returned before the next step starts; that gap is the only window in which a
 mutation can be unaccounted for, and closing it is what this record is for.
+Every step except an issue-creating one is walked with the two commands below;
+an `issue-create` or `epic-create` step is the one operation above, which
+begins and confirms it itself.
 
 ```bash
 python3 "$TRACKER_TX" \
@@ -488,8 +607,8 @@ python3 "$TRACKER_TX" \
 python3 "$TRACKER_TX" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity - <<'IDENTITY'
-{"kind": "issue-create", "id": "<number>", "url": "<url>",
- "document_token": "[#<number>]", "postcondition_verified": true}
+{"kind": "issue-comment", "id": "<comment id>", "url": "<comment url>",
+ "postcondition_verified": true}
 IDENTITY
 ```
 
@@ -529,10 +648,11 @@ verified post-edit fingerprint.
 
 Then, only after explicit approval and a `"clear"` preflight:
 
-- **Child issue creation.** Writing the approved body to a temporary file and
-  creating it with `gh issue create -R "$DOC_REPO" --body-file`, applying only
-  approved existing labels, is a checkpointed step: begin it before that call
-  and confirm it with the number and URL it returned.
+- **Child issue creation.** Creating the approved title, body, and approved
+  existing labels is a checkpointed step created through one tracked issue
+  operation, which begins it, creates the issue, and confirms it with the
+  number and URL GitHub returned: run `python3 "$TRACKED_ISSUE"` with
+  `--create` for that step as described above, never a direct GitHub call.
 - **Child issue linking.** Linking an issue that already exists mutates nothing
   by itself. With an approved comment, that comment is the transaction's one
   step and `marker_target` names the issue being linked; with none, there is no

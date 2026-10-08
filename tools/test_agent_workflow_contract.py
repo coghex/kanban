@@ -433,6 +433,7 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
     "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
@@ -476,6 +477,7 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py",
+    "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
     "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
@@ -533,7 +535,7 @@ TRUSTED_SPEC_SURFACE_FILES = {
 
 # Issue #370's vendored document mechanism, covered exactly the way the
 # trusted-comment helper above is. Each bundle carries a byte-identical copy of
-# the three tools/ modules the document workflows invoke, so each copy's own
+# the four tools/ modules the document workflows invoke, so each copy's own
 # external commands are reconciled against the manifest rather than inheriting
 # the tracked original's row. Issue #483's model-roster reader is vendored the
 # same way and covered here with them; since issue #572 every coordinator
@@ -553,15 +555,21 @@ TRUSTED_SPEC_SURFACE_FILES = {
 # the argument list, which is not a string literal, so
 # CENSUS_DYNAMIC_EXECUTABLES below pins those separately rather than letting
 # them pass as "nothing discovered".
+#
+# The tracked issue-creation tool is the fourth module: it spawns `gh` itself
+# to create and read issues, and reaches `git` only through the transaction
+# module it loads, so its own row is `gh` alone.
 DOCUMENT_MECHANISM_SURFACE_FILES = {
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py": {"git"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py": {"git"},
+    "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py": {"gh"},
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py": set(),
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py": set(),
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py": {"git", "gh"},
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py": {"git"},
     "claude-plugin/plugins/kanban/scripts/tracker_transaction.py": {"git"},
+    "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py": {"gh"},
     "claude-plugin/plugins/kanban/scripts/kanban_config.py": set(),
     "claude-plugin/plugins/kanban/scripts/kanban_models.py": set(),
     "claude-plugin/plugins/kanban/scripts/census.py": {"git", "gh"},
@@ -982,28 +990,31 @@ DOCUMENT_SURFACE_FILES = [
 # bundle's installed copy under $CODEX_HOME exactly as the PR-flow skills locate
 # review_pr.py. The Claude commands reach the same copies through the
 # substitution and so still invoke neither.
+# The four processing assets also invoke `mktemp`: an issue-creating step is one
+# run of tracked_issue_create.py, which reads the approved request from a file,
+# and each asset makes that file with `mktemp`.
 DOCUMENT_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/design-epic.md": {"git", "awk", "gh"},
     "claude-plugin/plugins/kanban/commands/process-design-doc.md": {
-        "git", "awk", "gh", "python3",
+        "git", "awk", "gh", "python3", "mktemp",
     },
     "claude-plugin/plugins/kanban/commands/draft-report.md": {"git", "awk", "gh"},
     "claude-plugin/plugins/kanban/commands/note-problem.md": {
         "git", "awk", "gh", "python3",
     },
     "claude-plugin/plugins/kanban/commands/process-report.md": {
-        "git", "awk", "gh", "rg", "python3",
+        "git", "awk", "gh", "rg", "python3", "mktemp",
     },
     "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": {
-        "git", "awk", "gh", "python3", "find", "head",
+        "git", "awk", "gh", "python3", "find", "head", "mktemp",
     },
     "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": {"git", "awk", "gh"},
     "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": {
         "git", "awk", "gh", "python3", "find", "head",
     },
     "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": {
-        "git", "awk", "gh", "python3", "find", "head",
+        "git", "awk", "gh", "python3", "find", "head", "mktemp",
     },
 }
 

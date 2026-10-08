@@ -437,6 +437,16 @@ CONTRACT_STATEMENTS = {
     "transaction-confirmation-needs-the-begin-token": (
         "Only the run that performed a mutation may confirm it"
     ),
+    "transaction-issue-creation-is-one-operation": (
+        "Creating an issue is one operation, not a chain"
+    ),
+    "transaction-issue-creation-records-intent-first": (
+        "makes no GitHub request unless the step's intent was recorded"
+    ),
+    "transaction-issue-creation-uncertainty-is-recovered-by-the-tool": (
+        "the same tool's read-only --inspect, approved --reconcile, and approved "
+        "--authorize-retry are the only way out of it"
+    ),
     "transaction-identity-must-agree-with-itself": (
         "A confirmed identity is the one its own kind of mutation has, and it "
         "must agree with itself"
@@ -1056,8 +1066,9 @@ TRANSACTION_CLAUSES = {
 # These three branches exist in all four processing assets.
 TRANSACTION_BRANCH_CLAUSES = {
     "child-issue-creation": (
-        "begin it before that call and confirm it with the number and url it "
-        "returned"
+        "is a checkpointed step created through one tracked issue operation, "
+        "which begins it, creates the issue, and confirms it with the number "
+        "and url github returned"
     ),
     "child-issue-linking": (
         "linking an issue that already exists mutates nothing by itself"
@@ -1078,8 +1089,8 @@ TRANSACTION_EPIC_BRANCH_CLAUSES = {
         "the exact label name and metadata it created"
     ),
     "epic-creation": (
-        "begin it before gh issue create -r \"$doc_repo\" and confirm it with "
-        "the epic number and url"
+        "creating the umbrella epic is a checkpointed epic-create step created "
+        "through one tracked issue operation"
     ),
     "epic-adoption-edit": (
         "confirm it with the target issue identity and the verified post-edit "
@@ -1109,6 +1120,165 @@ TRANSACTION_INVOCATIONS = (
 TRANSACTION_MODULE_INVOCATION = (
     'python3 "$TRACKER_TX" \\ '
     '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+)
+
+# The moskophoros#64 incident: a processing run's `--begin-step` failed, the run
+# created the issue anyway, and the issue existed with no recorded intent. An
+# issue-creating step is therefore one invocation of
+# tools/tracked_issue_create.py, never a begin, a `gh issue create`, and a
+# confirm chained by the asset. These are the policy clauses every processing
+# asset states about that operation and the result it consumes.
+TRACKED_ISSUE_CLAUSES = {
+    "creation-is-not-a-chain": (
+        "is never walked as separate begin, create, and confirm commands"
+    ),
+    "no-request-without-recorded-intent": (
+        "makes no github request unless that record was written"
+    ),
+    "the-tool-confirms-the-step": (
+        "confirms the step with that identity itself"
+    ),
+    "the-fingerprint-comes-from-the-tool": (
+        "take the step's payload_fingerprint for the plan above from the tool "
+        "rather than computing one"
+    ),
+    "the-target-must-name-the-repository": (
+        "a target that names another repository, several, or none is refused "
+        "before anything is recorded"
+    ),
+    "the-result-is-read-first": (
+        "read it before doing anything else, whatever the exit status"
+    ),
+    "success-is-never-created-again": (
+        "go on to the next step. never create the issue again"
+    ),
+    "a-refusal-has-no-fallback": (
+        "never fall back to creating the issue any other way"
+    ),
+    "an-uncertain-outcome-stays-ambiguous": (
+        "the step stays ambiguous in the record, and a later --create for it is "
+        "refused"
+    ),
+    "an-uncertain-outcome-is-never-retried": (
+        "never retry it, create it another way, advance past it, publish, or "
+        "clear the record. stop and report"
+    ),
+    "recovery-goes-through-the-tool": (
+        "recovered through the same tool, never by hand and never by "
+        "--confirm-step"
+    ),
+    "recovery-needs-explicit-approval": (
+        "only on the user's explicit approval does --reconcile --issue <number> "
+        "--approved bind the step"
+    ),
+    "incomplete-evidence-is-not-absence": (
+        "is never evidence that the issue is absent"
+    ),
+    "a-live-creator-is-not-evidence": (
+        "operation-in-progress, or verification-failed leaves the step ambiguous "
+        "and stops the run"
+    ),
+    "a-live-creator-is-never-waited-out": (
+        "a step another run is still creating is not yet evidence of anything"
+    ),
+    "edits-do-not-hide-a-created-issue": (
+        "that match or resemble the request, now or by the title it was created "
+        "with"
+    ),
+    "github-mutation-describes-this-invocation-only": (
+        "github_mutation describes this invocation only: none means this "
+        "invocation sent github no create request, never that no issue exists "
+        "for the step"
+    ),
+    "the-record-is-read-when-the-result-has-none": (
+        "when the result's transaction is null — a refusal made before the tool "
+        "read the step's record — read the record yourself, read-only, before "
+        "classifying"
+    ),
+    "results-are-classified-by-ordered-rules": (
+        "classify the result by the first of these rules that applies, in this "
+        "order, and never by github_mutation alone"
+    ),
+    "inspect-never-confirms": (
+        "its ok true means only that the read succeeded: it never confirms the "
+        "step"
+    ),
+    "one-bundle-not-separate-searches": (
+        "the four modules are one unit"
+    ),
+    "preflight-ambiguity-points-at-the-tool": (
+        "for an issue-create or epic-create step, that verification, the "
+        "binding, and the retry are the tracked issue tool's"
+    ),
+}
+
+# The tool's own invocations, as the assets spell them after whitespace
+# normalization. The repository/root/path prefix is the same binding the
+# transaction module's invocations carry, so the two cannot be pointed at
+# different records.
+TRACKED_ISSUE_INVOCATIONS = (
+    'python3 "$TRACKED_ISSUE" --fingerprint --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKED_ISSUE" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--step <N> --create --approved --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKED_ISSUE" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--step <N> --inspect --request "$ISSUE_REQUEST"',
+    'python3 "$TRACKER_TX" \\ '
+    '--repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \\ '
+    '--check Then classify the result',
+)
+
+# Each brand's resolution of the four mechanism modules a processing asset
+# depends on, as one unit from one bundle: every helper it runs, and the
+# configuration module the publication helper loads beside itself, checked
+# before the first mutation. Codex finds one cache directory and refuses a
+# second rather than choosing; Claude's root is one directory by construction.
+SINGLE_BUNDLE_LOOKUPS = {
+    "claude": (
+        'KANBAN_CONFIG="${CLAUDE_PLUGIN_ROOT}/scripts/kanban_config.py"',
+        '[ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] '
+        '\\ && [ -f "$KANBAN_CONFIG" ]',
+    ),
+    "codex": (
+        'KANBAN_SCRIPTS="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+        "-type d -path '*/kanban/*/skills/process-report/scripts' 2>/dev/null "
+        '| head -n2)"',
+        'PUBLISH_DOC="$KANBAN_SCRIPTS/publish_coordination_doc.py"',
+        'TRACKER_TX="$KANBAN_SCRIPTS/tracker_transaction.py"',
+        'TRACKED_ISSUE="$KANBAN_SCRIPTS/tracked_issue_create.py"',
+        'KANBAN_CONFIG="$KANBAN_SCRIPTS/kanban_config.py"',
+        '[ -n "$KANBAN_SCRIPTS" ] \\ '
+        '&& [ "$KANBAN_SCRIPTS" = "$(head -n1 <<<"$KANBAN_SCRIPTS")" ] '
+        '\\ && [ -f "$PUBLISH_DOC" ] && [ -f "$TRACKER_TX" ] && [ -f "$TRACKED_ISSUE" ] '
+        '\\ && [ -f "$KANBAN_CONFIG" ]',
+    ),
+}
+PER_FILE_MECHANISM_LOOKUP_RE = re.compile(
+    r"-path '\*/kanban/\*/skills/process-report/scripts/[\w.]+\.py'"
+)
+
+# The result rules, in the order each processing asset states them. Order is
+# the contract: `github_mutation` describes one invocation, so a rule keyed on
+# it alone would read `step-ambiguous` (an earlier attempt may have created the
+# issue; this one sent nothing) as a refusal that created nothing.
+TRACKED_ISSUE_RESULT_RULES = (
+    "Confirmed, but unverified",
+    "Unresolved",
+    "Confirmed",
+    "Possibly created",
+    "Refused",
+)
+RESULT_RULES_START = "Then classify the result by the first of these rules"
+RESULT_RULES_END = "An ambiguous issue-creating step is recovered"
+RESULT_STATUS_TOKEN_RE = re.compile(r"`([a-z]+(?:-[a-z]+)*)`")
+
+# What an asset may no longer carry: the GitHub CLI's own create command, in any
+# spelling the gh-invocation scan recognizes, and an issue-creating identity
+# confirmed by hand through the transaction module's `--confirm-step`.
+FORBIDDEN_ISSUE_CREATE_RE = re.compile(r"\bgh\s+issue\s+create\b")
+HAND_CONFIRMED_ISSUE_RE = re.compile(
+    r"--confirm-step[^\n]*<<'IDENTITY'\n[^\n]*\"kind\":\s*\"(?:issue|epic)-create\""
 )
 
 # Requirement 14: both process-design-doc variants used to direct a partially
@@ -1516,10 +1686,11 @@ def contract_text() -> str:
 # that was true of all six for as long as they resolved it from $DOC_ROOT.
 #
 # `tools/` stays the source. Each bundle carries a byte-identical copy, held
-# identical below, and the three-file set is one unit: the two mechanism
-# modules load each other from beside themselves and the publication module
-# loads the configuration reader from beside itself, so a bundle carrying part
-# of the set carries none of it.
+# identical below, and the four-file set is one unit: the two mechanism
+# modules load each other from beside themselves, the publication module
+# loads the configuration reader from beside itself, and the tracked
+# issue-creation tool loads the transaction module from beside itself, so a
+# bundle carrying part of the set carries none of it.
 MECHANISM_SOURCE_DIR = REPO_ROOT / "tools"
 BUNDLE_ROOTS = {
     "claude": REPO_ROOT / "claude-plugin" / "plugins" / "kanban",
@@ -1533,6 +1704,7 @@ MECHANISM_MODULES = (
     "publish_coordination_doc.py",
     "tracker_transaction.py",
     "kanban_config.py",
+    "tracked_issue_create.py",
 )
 
 # Issue #574's janitor census is not a member of the set above: it has no
@@ -1579,6 +1751,58 @@ BUNDLE_LOOKUP_RES = {
         re.MULTILINE,
     ),
 }
+
+# The processing assets' Codex lookup, which finds the one installed bundle
+# directory their four mechanism modules share and joins each helper onto it.
+# A per-file search, like the form above, picks each file's first match on its
+# own, so with two cached versions one run could record intent through one
+# version's transaction module and create through another's tool. `head -n2`
+# is deliberate: the guard after it refuses a second match rather than
+# choosing one.
+BUNDLE_DIRECTORY_LOOKUP_RES = {
+    "claude": re.compile(r"(?!)"),
+    "codex": re.compile(
+        r'^(?P<var>[A-Z][A-Z0-9_]*)="\$\(find "\$\{CODEX_HOME:-\$HOME/\.codex\}'
+        r'/plugins/cache" -type d -path \'\*/kanban/\*/(?P<relative>[^\']+)\' '
+        r'2>/dev/null \| head -n2\)"$',
+        re.MULTILINE,
+    ),
+}
+DIRECTORY_JOIN_RE = re.compile(
+    r'^(?P<var>[A-Z][A-Z0-9_]*)="\$(?P<directory>[A-Z][A-Z0-9_]*)/(?P<name>[\w.]+)"$',
+    re.MULTILINE,
+)
+
+
+def lookup_fence_of(text):
+    """The one bash fence that resolves the tracked-issue tool."""
+    fences = [
+        fence for fence in re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+        if re.search(r"^TRACKED_ISSUE=", fence, re.MULTILINE)
+    ]
+    if len(fences) != 1:
+        raise AssertionError(f"expected one lookup fence, found {len(fences)}")
+    return fences[0]
+
+
+def bundle_lookups(text, bundle):
+    """Every helper variable `text` resolves from its bundle, by either form,
+    mapped to the bundle-relative path it names."""
+    defined = {
+        match.group("var"): match.group("relative")
+        for match in BUNDLE_LOOKUP_RES[bundle].finditer(text)
+    }
+    directories = {
+        match.group("var"): match.group("relative")
+        for match in BUNDLE_DIRECTORY_LOOKUP_RES[bundle].finditer(text)
+    }
+    for match in DIRECTORY_JOIN_RE.finditer(text):
+        if match.group("directory") in directories:
+            defined[match.group("var")] = (
+                f"{directories[match.group('directory')]}/{match.group('name')}"
+            )
+    return defined
+
 
 # The lookup root issue #370 removed. Named as forbidden text so the fix cannot
 # be undone one asset at a time.
@@ -2375,7 +2599,7 @@ class OwningRepositoryTests(unittest.TestCase):
                     )
 
     def test_every_gh_invocation_binds_to_the_resolved_owner(self):
-        # Requirement 4: the four processing assets carry the ten tracker
+        # Requirement 4: the four processing assets carry the tracker
         # operations this issue scopes; the three capture assets carry only the
         # ownership block's own `gh repo view` calls, bound by $DOC_ROOT's own
         # remote. Both shapes are checked the same way, so a tracker mutation
@@ -2390,13 +2614,14 @@ class OwningRepositoryTests(unittest.TestCase):
                     f"directory rather than to $DOC_REPO: {unbound}",
                 )
 
-    def test_the_ten_scoped_tracker_operations_are_all_present(self):
+    def test_the_scoped_tracker_operations_are_all_present(self):
         # Pins what the scan above actually recovers. Without this, deleting
         # every `gh issue` command would leave the check with nothing to find
-        # and still pass. The design pair names two more than it did before
-        # issue #327: its EPIC path states the epic-creation call where the
-        # ordered steps are listed and again where that branch's checkpoint
-        # is stated, and both spellings are owner-bound.
+        # and still pass. What remains are the read-only issue listings: every
+        # issue and epic the processing assets create now goes through
+        # tools/tracked_issue_create.py, which is bound to $DOC_REPO by its own
+        # --repo, so no asset spells a `gh issue create` any more and
+        # TrackedIssueCreationContractTests forbids one coming back.
         recovered = {}
         for path in sorted(self.declared):
             recovered[path] = len(
@@ -2408,13 +2633,13 @@ class OwningRepositoryTests(unittest.TestCase):
                 "claude-plugin/plugins/kanban/commands/design-epic.md": 0,
                 "claude-plugin/plugins/kanban/commands/draft-report.md": 0,
                 "claude-plugin/plugins/kanban/commands/note-problem.md": 0,
-                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 4,
-                "claude-plugin/plugins/kanban/commands/process-report.md": 3,
+                "claude-plugin/plugins/kanban/commands/process-design-doc.md": 1,
+                "claude-plugin/plugins/kanban/commands/process-report.md": 2,
                 "codex-plugin/plugins/kanban/skills/design-epic/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/draft-report/SKILL.md": 0,
                 "codex-plugin/plugins/kanban/skills/note-problem/SKILL.md": 0,
-                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 4,
-                "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 3,
+                "codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md": 1,
+                "codex-plugin/plugins/kanban/skills/process-report/SKILL.md": 2,
             },
         )
 
@@ -2424,13 +2649,14 @@ class OwningRepositoryTests(unittest.TestCase):
         for path in DISPOSITION_APPLYING_ASSETS:
             with self.subTest(path=path):
                 reverted = self.asset_text(path).replace(
-                    'gh issue create -R "$DOC_REPO" --body-file',
-                    "gh issue create --body-file",
+                    'gh issue list -R "$DOC_REPO" --state open',
+                    "gh issue list --state open",
                     1,
                 )
-                self.assertEqual(
-                    unbound_gh_invocations(reverted),
-                    ["gh issue create --body-file"],
+                unbound = unbound_gh_invocations(reverted)
+                self.assertEqual(len(unbound), 1, unbound)
+                self.assertTrue(
+                    unbound[0].startswith("gh issue list --state open"), unbound
                 )
 
     def test_an_unrelated_repo_scope_does_not_count_as_owner_bound(self):
@@ -3089,6 +3315,315 @@ class TrackerTransactionContractTests(unittest.TestCase):
         self.assertIn("tools/test_tracker_transaction.py", contract_text())
 
 
+def tracked_issue_result_rules(text):
+    """The asset's ordered result rules: (label, normalized body, the status
+    names it spells)."""
+    start = text.index(RESULT_RULES_START)
+    section = text[start:text.index(RESULT_RULES_END, start)]
+    rules = []
+    for item in re.split(r"^\d+\.\s+", section, flags=re.MULTILINE)[1:]:
+        label = re.match(r"\*\*(?P<label>.+?)\.\*\*", item)
+        if label is None:
+            raise AssertionError(f"an unlabelled result rule: {item[:60]!r}")
+        rules.append((
+            label.group("label"),
+            normalized(item),
+            set(RESULT_STATUS_TOKEN_RE.findall(item)),
+        ))
+    return rules
+
+
+def classify_tracked_issue_result(rules, outcome, check=None):
+    """What an agent following `rules` does with `outcome`: the label of the
+    first rule that applies. `check` is the transaction module's `--check`
+    report, which the rules read when the result carries no transaction."""
+    transaction = outcome.get("transaction")
+    record = transaction if transaction is not None else (check or {})
+    ambiguous = record.get("ambiguous_step") is not None
+    for label, body, statuses in rules:
+        status = outcome["status"]
+        if label == "Confirmed, but unverified" and status in statuses:
+            return label
+        if label == "Unresolved":
+            reads_record = "transaction.ambiguous_step" in body and (
+                transaction is not None or "--check" in body
+            )
+            if status in statuses or (ambiguous and reads_record):
+                return label
+        if label == "Confirmed" and outcome["ok"] and status in statuses:
+            return label
+        if (
+            label == "Possibly created"
+            and "unknown or performed" in body
+            and outcome["github_mutation"] in ("unknown", "performed")
+        ):
+            return label
+        if label == "Refused":
+            return label
+    return None
+
+
+def tool_result_statuses():
+    """What tools/tracked_issue_create.py can answer `--create` with that is
+    not a refusal: every uncertain status, and every non-ok verification of a
+    confirmed step, read out of the source so a new one has to be classified."""
+    source = (REPO_ROOT / "tools" / "tracked_issue_create.py").read_text(
+        encoding="utf-8"
+    )
+    uncertain = set(re.findall(r'_uncertain\(\s*ctx,\s*"([a-z-]+)"', source))
+    verify = source[source.index("def verify_confirmed"):source.index("def _uncertain")]
+    unverified = set(re.findall(r'result\(\s*"([a-z-]+)",\s*ok=False', verify))
+    return uncertain, unverified
+
+
+# (outcome, --check report, the rule that must decide it). The first three are
+# the reviewed blocker: no request from this invocation, an issue that may
+# exist anyway.
+RESULT_CASES = (
+    ({"ok": False, "status": "step-ambiguous", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "step-ambiguous", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Unresolved"),
+    ({"ok": False, "status": "create-not-sent", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "payload-mismatch", "github_mutation": "none",
+      "transaction": None}, {"ambiguous_step": {"index": 0}}, "Unresolved"),
+    ({"ok": False, "status": "verification-failed", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed, but unverified"),
+    ({"ok": False, "status": "outcome-uncertain", "github_mutation": "unknown",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": True, "status": "created", "github_mutation": "performed",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed"),
+    ({"ok": True, "status": "already-created", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Confirmed"),
+    ({"ok": False, "status": "some-future-status", "github_mutation": "performed",
+      "transaction": {"ambiguous_step": None}}, None, "Possibly created"),
+    ({"ok": False, "status": "begin-failed", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Refused"),
+    ({"ok": False, "status": "payload-mismatch", "github_mutation": "none",
+      "transaction": None}, {"ambiguous_step": None}, "Refused"),
+    # Another run holds the transaction. Once it has begun, the record shows
+    # the step ambiguous, so the refusal is never read as nothing-created.
+    ({"ok": False, "status": "operation-in-progress", "github_mutation": "none",
+      "transaction": {"ambiguous_step": {"index": 0}}}, None, "Unresolved"),
+    ({"ok": False, "status": "operation-in-progress", "github_mutation": "none",
+      "transaction": {"ambiguous_step": None}}, None, "Refused"),
+)
+
+
+def misclassified_results(rules):
+    return [
+        (outcome["status"], expected, found)
+        for outcome, check, expected in RESULT_CASES
+        if (found := classify_tracked_issue_result(rules, outcome, check)) != expected
+    ]
+
+
+def missing_tracked_issue_clauses(text):
+    """The tracked issue-creation clauses `text` no longer states, by key."""
+    asset = canonical(text)
+    return sorted(
+        key for key, clause in TRACKED_ISSUE_CLAUSES.items() if clause not in asset
+    )
+
+
+def chained_issue_creation(text):
+    """Every way `text` still creates an issue outside the one operation: a
+    `gh issue create`, or an issue-creating identity confirmed by hand."""
+    return FORBIDDEN_ISSUE_CREATE_RE.findall(text) + [
+        match.group(0) for match in HAND_CONFIRMED_ISSUE_RE.finditer(text)
+    ]
+
+
+class TrackedIssueCreationContractTests(unittest.TestCase):
+    """The moskophoros#64 incident, at the level of the assets that caused it.
+
+    A processing run drove the tracker transaction as three commands — begin,
+    `gh issue create`, confirm — and when the begin failed it ran the create
+    anyway. tools/tracked_issue_create.py makes the issue-creating step one
+    operation; what is asserted here is that every processing asset uses it for
+    every issue it creates, consumes its result the way the tool's statuses
+    require, and cannot drift back to the chain.
+    """
+
+    def asset_text(self, path):
+        return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+    def test_every_processing_asset_states_how_to_consume_the_result(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                missing = missing_tracked_issue_clauses(self.asset_text(path))
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"{path} no longer states how a tracked issue creation is "
+                    f"run and its result consumed: {missing}",
+                )
+
+    def test_removing_any_tracked_issue_clause_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            asset = canonical(self.asset_text(path))
+            for key, clause in TRACKED_ISSUE_CLAUSES.items():
+                with self.subTest(path=path, clause=key):
+                    self.assertEqual(
+                        missing_tracked_issue_clauses(asset.replace(clause, "")),
+                        [key],
+                    )
+
+    def test_every_processing_asset_invokes_the_tool(self):
+        for path in PROCESSING_ASSETS:
+            body = normalized(self.asset_text(path))
+            for invocation in TRACKED_ISSUE_INVOCATIONS:
+                with self.subTest(path=path, invocation=invocation):
+                    self.assertIn(invocation, body, path)
+
+    def test_no_processing_asset_creates_an_issue_outside_the_tool(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                chained = chained_issue_creation(self.asset_text(path))
+                self.assertEqual(
+                    chained,
+                    [],
+                    f"{path} creates an issue outside tracked_issue_create.py, "
+                    f"the chain moskophoros#64 half-applied: {chained}",
+                )
+
+    def test_reintroducing_the_chain_is_reported(self):
+        # The planted violations, so the check above cannot pass by finding
+        # nothing: the old CLI call, and the old hand-confirmed identity.
+        create = 'gh issue create -R "$DOC_REPO" --body-file "$BODY"'
+        confirmed = (
+            '  --confirm-step 0 --begin-token "$BEGIN_TOKEN" --identity - '
+            "<<'IDENTITY'\n"
+            '{"kind": "issue-create", "id": "<number>", "url": "<url>",\n'
+        )
+        epic = confirmed.replace("issue-create", "epic-create")
+        for path in PROCESSING_ASSETS:
+            asset = self.asset_text(path)
+            for planted in (create, confirmed, epic):
+                with self.subTest(path=path, planted=planted[:20]):
+                    self.assertEqual(
+                        len(chained_issue_creation(f"{asset}\n{planted}")), 1
+                    )
+        # A non-issue step confirmed by hand is the ordinary walk, not a chain.
+        self.assertEqual(
+            chained_issue_creation(confirmed.replace("issue-create", "issue-comment")),
+            [],
+        )
+
+    def test_the_generic_walk_example_is_not_an_issue_creation(self):
+        # The begin/confirm example every asset still carries is for the step
+        # kinds the tool does not own; were it an issue creation again, the
+        # example would teach the chain this tool replaced.
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                self.assertIn(
+                    '{"kind": "issue-comment", "id": "<comment id>"',
+                    self.asset_text(path),
+                )
+
+    def test_no_non_processing_asset_runs_the_tool(self):
+        for path in DRAFTING_ASSETS + NOTE_ASSETS:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "tracked_issue_create.py", self.asset_text(path), path
+                )
+
+    def test_every_processing_asset_resolves_one_complete_bundle(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                text = self.asset_text(path)
+                fence = normalized(lookup_fence_of(text))
+                for line in SINGLE_BUNDLE_LOOKUPS[bundle_of(path)]:
+                    self.assertIn(normalized(line), fence, path)
+                self.assertEqual(
+                    PER_FILE_MECHANISM_LOOKUP_RE.findall(text), [], path
+                )
+
+    def test_reverting_to_per_file_searches_is_reported(self):
+        # The planted violation: the lookup commit 74a4d22b shipped, which
+        # could resolve each helper from a different cached version.
+        per_file = (
+            'TRACKER_TX="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache" '
+            "-path '*/kanban/*/skills/process-report/scripts/tracker_transaction.py' "
+            '2>/dev/null | head -n1)"'
+        )
+        for path in PROCESSING_ASSETS:
+            if bundle_of(path) != "codex":
+                continue
+            with self.subTest(path=path):
+                reverted = self.asset_text(path).replace(
+                    'TRACKER_TX="$KANBAN_SCRIPTS/tracker_transaction.py"', per_file
+                )
+                self.assertEqual(len(PER_FILE_MECHANISM_LOOKUP_RE.findall(reverted)), 1)
+                self.assertNotIn(
+                    normalized(SINGLE_BUNDLE_LOOKUPS["codex"][2]),
+                    normalized(lookup_fence_of(reverted)),
+                )
+
+    def test_every_processing_asset_orders_its_result_rules(self):
+        for path in PROCESSING_ASSETS:
+            with self.subTest(path=path):
+                rules = tracked_issue_result_rules(self.asset_text(path))
+                self.assertEqual(
+                    tuple(label for label, _body, _statuses in rules),
+                    TRACKED_ISSUE_RESULT_RULES,
+                )
+                self.assertEqual(misclassified_results(rules), [], path)
+
+    def test_every_uncertain_or_unverified_status_the_tool_returns_is_named(self):
+        uncertain, unverified = tool_result_statuses()
+        # Not vacuous: the reviewed tool's five uncertain outcomes and two
+        # verification failures.
+        self.assertEqual(
+            uncertain,
+            {"step-ambiguous", "create-not-sent", "outcome-uncertain",
+             "created-mismatch", "created-unconfirmed"},
+        )
+        self.assertEqual(unverified, {"verification-failed", "confirmed-artifact-missing"})
+        for path in PROCESSING_ASSETS:
+            rules = tracked_issue_result_rules(self.asset_text(path))
+            for status in sorted(uncertain | unverified):
+                with self.subTest(path=path, status=status):
+                    # Classified as GitHub reports these: with no mutation by
+                    # this invocation, and no ambiguity in the result.
+                    found = classify_tracked_issue_result(rules, {
+                        "ok": False, "status": status, "github_mutation": "none",
+                        "transaction": {"ambiguous_step": None},
+                    })
+                    self.assertEqual(
+                        found,
+                        "Unresolved" if status in uncertain else "Confirmed, but unverified",
+                    )
+
+    def test_a_misordered_or_incomplete_rule_set_is_reported(self):
+        for path in PROCESSING_ASSETS:
+            text = self.asset_text(path)
+            rules = tracked_issue_result_rules(text)
+            start = text.index(RESULT_RULES_START)
+
+            def in_rules(old, new):
+                return text[:start] + text[start:].replace(old, new, 1)
+
+            mutations = {
+                "generic-first": rules[-1:] + rules[:-1],
+                "mutation-before-status": [rules[3]] + rules[:3] + rules[4:],
+                "step-ambiguous-dropped": tracked_issue_result_rules(
+                    in_rules("`step-ambiguous`, ", "")
+                ),
+                "record-not-read": tracked_issue_result_rules(
+                    in_rules("`transaction.ambiguous_step`", "`transaction`")
+                ),
+            }
+            for name, mutated in mutations.items():
+                with self.subTest(path=path, mutation=name):
+                    self.assertNotEqual(misclassified_results(mutated), [])
+
+    def test_the_contract_names_the_tool_and_its_tests(self):
+        self.assertIn("tools/tracked_issue_create.py", contract_text())
+        self.assertIn("tools/test_tracked_issue_create.py", contract_text())
+
+
 class SharedStatusVocabularyTests(unittest.TestCase):
     """Requirement 5 of issue #229: the marker vocabulary is the compatibility
     surface between two runs, two brands, and two sessions, so it is asserted
@@ -3348,10 +3883,7 @@ class BundledMechanismTests(unittest.TestCase):
             with self.subTest(path=path):
                 bundle = bundle_of(path)
                 text = self.asset_text(path)
-                defined = {
-                    match.group("var"): match.group("relative")
-                    for match in BUNDLE_LOOKUP_RES[bundle].finditer(text)
-                }
+                defined = bundle_lookups(text, bundle)
                 invoked = set(HELPER_INVOCATION_RE.findall(text))
                 self.assertTrue(invoked, f"{path} invokes no resolved helper")
                 self.assertEqual(
@@ -3407,6 +3939,19 @@ class BundledMechanismTests(unittest.TestCase):
                         installed = self.plant(Path(temp), bundle, relative)
                         self.assertEqual(
                             self.resolve(Path(temp), bundle, relative), [str(installed)]
+                        )
+            for match in BUNDLE_DIRECTORY_LOOKUP_RES[bundle].finditer(text):
+                relative = match.group("relative")
+                with self.subTest(path=path, directory=relative):
+                    with tempfile.TemporaryDirectory() as temp:
+                        installed = self.plant(Path(temp), bundle, f"{relative}/x.py")
+                        proc = subprocess.run(
+                            ["find", str(Path(temp) / "plugins" / "cache"),
+                             "-type", "d", "-path", f"*/kanban/*/{relative}"],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        self.assertEqual(
+                            proc.stdout.split(), [str(installed.parent)]
                         )
 
     def plant(self, temp, bundle, relative):

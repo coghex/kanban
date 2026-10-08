@@ -346,7 +346,7 @@ parses §2 and fails if:
   separation of repository routing from the publication lane, or its statement
   that `docs/agent-workflow-contract.md` §7 classifies Kanban paths only;
 - a `gh` invocation in any declared asset stops binding to the resolved owner —
-  the check that keeps the ten tracker operations in `/process-report`,
+  the check that keeps the tracker operations in `/process-report`,
   `$process-report`, `/process-design-doc`, and `$process-design-doc` from
   reverting to the unscoped form that binds them to the shell's current
   directory;
@@ -382,6 +382,17 @@ parses §2 and fails if:
 - a processing asset carries any part of the transaction mechanism itself
   rather than invoking `tools/tracker_transaction.py`, or a drafting asset or
   `note-problem` variant invokes it at all;
+- a processing asset creates an issue or epic other than through one
+  invocation of `tools/tracked_issue_create.py` — a `gh issue create`, or an
+  issue-creating identity confirmed by hand through `--confirm-step` — or drops
+  any of the clauses that tell it how to consume that tool's result: proceed
+  only on `ok`, stop without a fallback on a refusal, and never retry an
+  uncertain outcome except through the tool's own approved recovery; states
+  its result rules out of order, so that a `step-ambiguous` result with
+  `github_mutation` `none` reads as a refusal that created nothing, or leaves
+  any uncertain or unverified status the tool returns unnamed; or resolves its
+  four mechanism modules other than as one unit from one bundle, checked before
+  the first mutation;
 - either `process-design-doc` variant reintroduces the instruction to write
   partial-failure recovery information into the document, which contradicts the
   publication module being that document's only writer;
@@ -1059,6 +1070,42 @@ adoption of an interrupted step onto the reconciliation path below, where an
 exact artifact must be approved and matched. Losing the token costs a
 reconciliation, which is the safe direction to fail.
 
+**Creating an issue is one operation, not a chain.** An `issue-create` or
+`epic-create` step is begun, created, and confirmed by a single invocation of
+`tools/tracked_issue_create.py`, never by separate begin, `gh issue create`,
+and confirm commands an asset chains together. A chain is something a caller
+can half-apply, and one did: a processing run's begin failed, the run created
+the issue regardless, and that issue existed with no recorded intent. The tool
+refuses unless the request is the step's approved payload and the step's
+recorded target names the owning repository, makes no GitHub request unless the
+step's intent was recorded, checks the identity GitHub returned against the
+request, and confirms the step itself with a begin token that never leaves its
+process. It returns one structured result whose `github_mutation` — `none`,
+`performed`, or `unknown` — describes that invocation alone: `none` means it
+sent GitHub no create request, never that no issue exists for the step, since
+an earlier attempt may have created one. A caller therefore classifies the
+result by ordered rules, never by `github_mutation` alone: a confirmed step
+whose read-back failed first, then an unresolved step — an uncertain status,
+`step-ambiguous` included, or a record that shows the step ambiguous, read
+through the transaction module's read-only `--check` when a refusal came before
+the tool read the record and so carries no transaction — then a confirmed step,
+then any other result that may have mutated, and only then a refusal that
+created nothing. The four modules the processing assets run —
+`tracked_issue_create.py`, `tracker_transaction.py`,
+`publish_coordination_doc.py`, and the `kanban_config.py` they load — are
+resolved as one unit from one installed bundle, and all four are checked before
+the first mutation: a Codex cache holding more than one Kanban version, or a
+bundle missing any of them, is refused rather than mixed. An uncertain outcome leaves the step ambiguous, and the same tool's
+read-only `--inspect`, approved `--reconcile`, and approved `--authorize-retry`
+are the only way out of it; a listing it cannot read whole, or that changes
+between reads, is never evidence that the issue is absent. Nor is an issue's
+current content: one edited since it was created is ruled out only when GitHub's
+complete rename history shows it was created with a different title. And since
+an ambiguous step may be one whose creator is still running, every action of
+the tool on a transaction holds one exclusive lock, which the create request's
+`gh` process inherits, and refuses as `operation-in-progress` while another
+holds it. Every other step kind keeps the begin and confirm transitions above.
+
 **A confirmed identity is the one its own kind of mutation has, and it must
 agree with itself.** A created issue or epic records its number, its canonical GitHub
 URL naming that number *in the owning repository*, and the `[#N]` token the
@@ -1188,7 +1235,8 @@ resolution check, for the same reason `tools/publish_coordination_doc.py` owns
 the publication sequence: a sequence written as shell inside a Markdown asset is
 a chain a reader can reorder or half-apply, and nothing in the tree can execute
 it to find the next defect. `tools/test_tracker_transaction.py` drives it
-against temporary Git repositories. The assets keep the policy this section
+against temporary Git repositories, and `tools/test_tracked_issue_create.py`
+drives the issue-creation operation built on it against a fake GitHub. The assets keep the policy this section
 states — when to acquire, what needs approval, what to report — and invoke the
 module.
 

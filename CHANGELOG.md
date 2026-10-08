@@ -15,6 +15,30 @@ created above it.
 
 ### Unreleased
 
+- `/process-report`, `$process-report`, `/process-design-doc`, and
+  `$process-design-doc` now create every child issue and umbrella epic through
+  one invocation of the bundled `tracked_issue_create.py`, instead of chaining
+  a checkpoint begin, a `gh issue create`, and a checkpoint confirm. A
+  processing run in coghex/moskophoros (#64) had its begin fail, created the
+  issue anyway, and left it with no recorded intent; the tool makes no GitHub
+  request unless that intent was recorded, refuses a step whose recorded target
+  is a different repository, and returns a structured result whose
+  `github_mutation` tells the run whether anything may have been created. An
+  uncertain creation is never retried blindly: it is recovered only through the
+  tool's `--inspect` and the user's approved `--reconcile` or
+  `--authorize-retry`, and incomplete or changing GitHub evidence never counts
+  as proof that the issue is absent. Neither does an issue edited out of
+  resemblance after it was created: it is judged by the title its rename
+  history says it was created with. Recovery is refused as
+  `operation-in-progress` while the creating run, or the `gh` request it sent,
+  may still be running. Because `github_mutation` describes only
+  the invocation that returned it, the commands classify each result by
+  ordered rules, so a `step-ambiguous` result whose `none` follows an earlier
+  uncertain creation is handled as unresolved, never as a refusal that created
+  nothing. The four modules a processing run needs are resolved from one
+  installed bundle and checked before the first mutation; a Codex cache holding
+  more than one Kanban version is refused rather than mixed.
+
 - The canonical issue reviewer can now approve a documentation-only issue that
   lands directly through the repository's own documentation lane and then
   closes, instead of through a pull request. Its prompt used to frame every
