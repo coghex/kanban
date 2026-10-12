@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -382,7 +383,12 @@ REVIEW_SCHEMA: dict[str, Any] = {
     "properties": {
         "verdict": {
             "type": "string",
-            "enum": ["APPROVE", "CHANGES_REQUESTED", "INVALID"],
+            "enum": ["APPROVE", "CHANGES_REQUESTED", "INVALID", "STOPPED"],
+            "description": (
+                "STOPPED only after a denied tool, command, file access or "
+                "permission operation: name the denied operation in summary and "
+                "leave every list empty."
+            ),
         },
         "summary": {"type": "string"},
         "corrections": {"type": "array", "items": {"type": "string"}},
@@ -706,7 +712,8 @@ def get_issue(ctx: RepoContext, number: int) -> dict[str, Any]:
     # Enforced HERE, at the single fetch funnel, rather than at each entry
     # point: --check, --review and --rereview all pass through this call, so
     # neither they nor any future number-taking mode can forget the guard. It
-    # also lands before a review reaches clear_verdict_labels, which is what
+    # also lands before a review reaches any label write (clear_verdict_labels
+    # now waits for a publishable verdict), which is what
     # makes it safe rather than merely tidy -- pointed at a pull request, this
     # backend used to strip that pull request's `reviewed:approve` about a
     # second in (failing its branch-protection gate), publish an
@@ -2002,9 +2009,53 @@ def review_dossier(
     }
 
 
-def review_prompt(
-    reviewer: Reviewer, dossier: dict[str, Any], *, mode: str
-) -> str:
+# Two fixed blocks, appended to the instructions of every reviewer prompt --
+# initial and rereview, Codex and Claude alike -- and deliberately OUTSIDE the
+# untrusted DOSSIER JSON, so nothing an issue body or comment says can edit or
+# shadow them. REVIEWER_STOP_RULES is the reviewer-side half of the fail-closed
+# contract in docs/agent-workflow-contract.md section 2.3: a denial ends the
+# session with the verdict STOPPED, which validate_review turns into a
+# ReviewerStopped failure that publishes nothing. The forced output schema
+# requires a verdict, so "return no verdict" was never an answer a reviewer
+# could give; without an explicit STOPPED it picked the least harmful real
+# verdict and the gate published it. REVIEWER_ENVIRONMENT_RULES keeps a
+# reviewer from provoking the denials these read-only sandboxes issue anyway.
+REVIEWER_ENVIRONMENT_RULES = (
+    "Environment rules: this environment is read-only by design. Run no command "
+    "that writes anything, temporary files included. Every one of these needs a "
+    "writable file and is denied: here-documents and here-strings (`<<`, "
+    "`<<<`), output redirection to a file (`>`, `>>`, `tee`), process "
+    "substitution (`<(...)`), `mktemp`, test runners and builds, and anything "
+    "that writes caches, such as Python bytecode. Prefer reading files (`rg`, "
+    "`sed -n`, `cat`); if you must run Python, use `python3 -B -c '<code>'` with "
+    "no here-document. Verify only within the "
+    "current working directory, which is the repository. A fact located outside "
+    "it, for example `~/.config/docs-push.json` or the owner's global "
+    "instructions, is a stated premise that cannot be verified: do not try to "
+    "read it, and flag it only when the repository itself contradicts it."
+)
+
+REVIEWER_STOP_RULES = (
+    "Stop rules: if any tool, command, file access, sandbox, network, approval, "
+    "or permission operation is denied or refused for security, permission, or "
+    "access reasons, STOP immediately. After a denial do not retry it, do not "
+    "substitute another tool, command, path, binary, or backend, do not take an "
+    "alternate route, and do not ask for escalation or a broader permission. "
+    "Return the verdict STOPPED, name the denied operation in `summary`, leave "
+    "every list empty, and return no other verdict. An ordinary failure that is "
+    "not a security, permission, or access denial, such as a file that does not "
+    "exist, is not a STOP condition: report it as an ordinary diagnostic and "
+    "continue the review."
+)
+
+
+def review_instructions(reviewer: Reviewer, mode: str) -> str:
+    """The fixed instruction text of a review prompt, without any dossier.
+
+    `brief_sha256` in the pre-spawn receipt is the hash of exactly this text,
+    so two reviews of different issues under the same reviewer and mode carry
+    the same brief hash while their whole-prompt hashes differ.
+    """
     mode_instruction = (
         "Audit the issue as the implementation contract for one delivery unit"
         if mode == "initial"
@@ -2028,48 +2079,160 @@ Verdicts:
 
 Every list item must stand alone and include its evidence or grounding pointer. `open_decisions` and `recommended_disposition` must both be empty for APPROVE. `recommended_disposition` must be non-empty for INVALID. Return only the schema-conforming result.
 
+{REVIEWER_ENVIRONMENT_RULES}
+
+{REVIEWER_STOP_RULES}"""
+
+
+def brief_sha256(reviewer: Reviewer, mode: str) -> str:
+    return hashlib.sha256(review_instructions(reviewer, mode).encode("utf-8")).hexdigest()
+
+
+def review_prompt(
+    reviewer: Reviewer, dossier: dict[str, Any], *, mode: str
+) -> str:
+    return f"""{review_instructions(reviewer, mode)}
+
 DOSSIER:
 {json.dumps(dossier, indent=2, ensure_ascii=False)}
 """
 
 
+REJECTED_SUMMARY_LIMIT = 500
+
+
+def one_line_summary(value: Any, limit: int = REJECTED_SUMMARY_LIMIT) -> str:
+    """A reviewer's summary squeezed onto one line and cut to `limit` characters.
+
+    Control characters and every run of whitespace, newlines included, become
+    one space, so a hostile or merely long summary can neither forge a log line
+    nor flood the log.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = " ".join("".join(" " if ch.isspace() or not ch.isprintable() else ch for ch in value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+class ReviewerStopped(ApproveError):
+    """A reviewer reported a denial and returned the STOPPED verdict.
+
+    STOPPED exists only in a reviewer's raw result. It is raised here, as a
+    failure, and never reaches a review record, the aggregate verdict, a
+    published marker or the review-queue result. `receipt` is attached by
+    invoke_reviewer once the pre-spawn receipt exists.
+    """
+
+    def __init__(self, reviewer: "Reviewer", summary: str) -> None:
+        self.reviewer = reviewer
+        self.summary = summary
+        self.receipt: dict[str, Any] | None = None
+        super().__init__(
+            f"{reviewer.display_name} stopped on a denial and returned no "
+            f"review: {summary}"
+        )
+
+
+UNAVAILABLE = "<unavailable>"
+
+
+def unavailable(value: Any) -> str:
+    """A placeholder naming only the TYPE of a field that cannot be shown."""
+    if value is None:
+        return UNAVAILABLE
+    if isinstance(value, str):
+        return "<unavailable: empty>"  # the only str that reaches here is blank
+    return f"<unavailable: {type(value).__name__}>"
+
+
+def review_diagnostic(value: Any) -> str:
+    """`verdict=..., summary=...` for any reviewer output, parsed or not.
+
+    Scalar-only and bounded: a string verdict or summary is squeezed to one
+    line (a verdict to 64 characters, a summary to 500); anything else -- a
+    missing field, a list, an object, a number, output that never parsed -- is
+    replaced by a placeholder, so no container and no raw output can reach a
+    failure message or the log.
+    """
+    verdict = value.get("verdict") if isinstance(value, dict) else None
+    summary = value.get("summary") if isinstance(value, dict) else None
+    verdict_text = (
+        repr(one_line_summary(verdict, 64))
+        if isinstance(verdict, str) and verdict.strip()
+        else unavailable(verdict)
+    )
+    summary_text = (
+        repr(one_line_summary(summary))
+        if isinstance(summary, str) and summary.strip()
+        else unavailable(summary)
+    )
+    return f"verdict={verdict_text}, summary={summary_text}"
+
+
+def rejected_review(reviewer: Reviewer, reason: str, value: Any) -> ApproveError:
+    """The failure for a result validate_review (or its parsers) refuses.
+
+    The raw output is retained nowhere, so the text itself carries the verdict
+    and a bounded one-line summary: enough to tell a STOP expressed as INVALID
+    from a real INVALID. Never the prompt, the dossier, a list or raw output.
+    """
+    return ApproveError(f"{reviewer.display_name} {reason} ({review_diagnostic(value)})")
+
+
 def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ApproveError(f"{reviewer.display_name} returned a non-object review")
+        raise rejected_review(reviewer, "returned a non-object review", value)
     expected = set(REVIEW_SCHEMA["required"])
     if set(value) != expected:
-        raise ApproveError(
-            f"{reviewer.display_name} returned unexpected fields: {sorted(value)}"
+        missing = ", ".join(sorted(expected - set(value))) or "none"
+        extra = ", ".join(sorted(str(key) for key in set(value) - expected)) or "none"
+        raise rejected_review(
+            reviewer,
+            "returned unexpected fields "
+            f"(missing: {one_line_summary(missing, 200)}; "
+            f"extra: {one_line_summary(extra, 200)})",
+            value,
         )
     verdict = value.get("verdict")
-    if verdict not in {"APPROVE", "CHANGES_REQUESTED", "INVALID"}:
-        raise ApproveError(f"{reviewer.display_name} returned invalid verdict {verdict!r}")
+    if not isinstance(verdict, str) or verdict not in {
+        "APPROVE",
+        "CHANGES_REQUESTED",
+        "INVALID",
+        "STOPPED",
+    }:
+        raise rejected_review(reviewer, "returned an invalid verdict", value)
     summary = value.get("summary")
     if not isinstance(summary, str) or not summary.strip():
-        raise ApproveError(f"{reviewer.display_name} returned an empty summary")
+        raise rejected_review(reviewer, "returned an empty summary", value)
     result: dict[str, Any] = {"verdict": verdict, "summary": summary.strip()}
     for key in expected - {"verdict", "summary"}:
         items = value.get(key)
         if not isinstance(items, list) or not all(
             isinstance(item, str) and item.strip() for item in items
         ):
-            raise ApproveError(f"{reviewer.display_name} returned invalid {key}")
+            raise rejected_review(reviewer, f"returned invalid {key}", value)
         result[key] = [item.strip() for item in items]
+    if verdict == "STOPPED":
+        if any(result[key] for key in expected - {"verdict", "summary"}):
+            raise rejected_review(
+                reviewer, "returned STOPPED with a non-empty list", value
+            )
+        raise ReviewerStopped(reviewer, one_line_summary(summary))
     if verdict == "APPROVE" and (
         result["open_decisions"] or result["recommended_disposition"]
     ):
-        raise ApproveError(
-            f"{reviewer.display_name} approved while leaving a blocking decision/disposition"
+        raise rejected_review(
+            reviewer, "approved while leaving a blocking decision/disposition", value
         )
     if verdict == "CHANGES_REQUESTED" and not (
         result["open_decisions"] or result["recommended_disposition"]
     ):
-        raise ApproveError(
-            f"{reviewer.display_name} requested changes without a human-action blocker"
+        raise rejected_review(
+            reviewer, "requested changes without a human-action blocker", value
         )
     if verdict == "INVALID" and not result["recommended_disposition"]:
-        raise ApproveError(
-            f"{reviewer.display_name} marked INVALID without a recommended disposition"
+        raise rejected_review(
+            reviewer, "marked INVALID without a recommended disposition", value
         )
     result["reviewer"] = reviewer
     return result
@@ -2079,9 +2242,16 @@ def parse_claude_output(stdout: str) -> Any:
     try:
         outer = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise ApproveError(f"Claude returned invalid JSON: {stdout[-2000:]}") from exc
+        raise ApproveError(
+            f"Claude returned invalid JSON ({exc.msg} at character {exc.pos}; "
+            f"{review_diagnostic(None)})"
+        ) from exc
     if isinstance(outer, dict) and outer.get("is_error"):
-        raise ApproveError(f"Claude reported an error: {outer.get('result')}")
+        reported = outer.get("result")
+        raise ApproveError(
+            "Claude reported an error: "
+            + (one_line_summary(reported) if isinstance(reported, str) else unavailable(reported))
+        )
     value = outer.get("structured_output") if isinstance(outer, dict) else None
     if value is not None:
         return value
@@ -2090,21 +2260,189 @@ def parse_claude_output(stdout: str) -> Any:
         try:
             return json.loads(value)
         except json.JSONDecodeError as exc:
-            raise ApproveError(f"Claude result was not structured JSON: {value[-2000:]}") from exc
+            raise ApproveError(
+                f"Claude result was not structured JSON ({exc.msg} at character "
+                f"{exc.pos}; {review_diagnostic(None)})"
+            ) from exc
     return value
 
 
-def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="approve-issues-codex-") as tmp:
+@dataclass(frozen=True)
+class ReviewProvenance:
+    """What a review run is about, known before any reviewer is spawned.
+
+    Carried by process_issue into invoke_reviewer so the pre-spawn receipt can
+    name the issue, mode, base and spec the reviewer was asked about. Optional
+    at invoke_reviewer: a caller without it (a self-test, a probe) still gets a
+    receipt, with these fields reported as null.
+    """
+
+    issue: int
+    mode: str
+    base_sha: str
+    spec_sha: str
+    brief_sha256: str
+
+
+@dataclass(frozen=True)
+class ReviewerLaunch:
+    """One reviewer spawn, fixed before the model counter moves.
+
+    `stdin` is the exact byte string the reviewer reads and the one whose hash
+    the receipt records; `executable` is the resolved path it is started from,
+    while argv[0] stays the bare `codex` / `claude`. `args` is the complete,
+    already-prepared argv (for Codex that includes the schema and output
+    paths, whose temporary directory exists before the counter moves) and
+    `output_path` is where Codex writes its result.
+    """
+
+    stdin: bytes
+    executable: str
+    receipt: dict[str, Any]
+    args: list[str]
+    output_path: Path | None = None
+
+
+class ReviewerRunError(ApproveError):
+    """A reviewer failure after the receipt was written; carries the receipt.
+
+    Same base class and same message as the plain ApproveError it wraps, so
+    every existing caller handles it as it always has. The receipt is what
+    reviewer_failure_message appends to the failure text.
+    """
+
+    def __init__(self, message: str, receipt: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.receipt = receipt
+
+
+# The one startup diagnostic known to mean a reviewer's own process was denied
+# something before it dispatched any command: the pinned Codex arg0 helper
+# warns, and carries on, when it cannot create its PATH aliases. Source: codex
+# rust-v0.161.0 (commit 979011409de0a60b52f179721948e65531d26144),
+# codex-rs/arg0/src/lib.rs:154-180, format at L175:
+#   "WARNING: proceeding, even though we could not create PATH aliases: {err}"
+# and observed on stderr on 2026-10-11T20:03:29Z as
+#   "WARNING: proceeding, even though we could not create PATH aliases:
+#    Operation not permitted (os error 1)". The prefix below is shorter than
+# that line on purpose; the denial wording must still follow. It is matched
+# narrowly on purpose: only in the leading run of `WARNING:` lines of the
+# reviewer's OWN stderr (never its stdout or result file, which carry model
+# and dossier text), only with the helper's fixed prefix, and only together
+# with a permission-denial wording. Anything else is left to the ordinary exit
+# code and result validation.
+STARTUP_DENIAL_PREFIX = "WARNING: proceeding, even though we could not"
+STARTUP_DENIAL_WORDING = (
+    "operation not permitted",
+    "permission denied",
+    "eperm",
+    "eacces",
+)
+
+
+def reviewer_startup_denial(stderr: str) -> str | None:
+    for line in stderr.splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith("WARNING:"):
+            return None
+        lowered = line.lower()
+        if line.startswith(STARTUP_DENIAL_PREFIX) and any(
+            wording in lowered for wording in STARTUP_DENIAL_WORDING
+        ):
+            return line.strip()[:300]
+    return None
+
+
+def run_reviewer(
+    args: list[str],
+    *,
+    cwd: Path,
+    launch: ReviewerLaunch,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Spawn one reviewer with the launch's exact stdin bytes.
+
+    Reviewer-only: `run` keeps text-mode I/O for `gh`, `git` and everything
+    else. Bytes go in untouched, so no locale decides what the model reads;
+    output is decoded as UTF-8 with replacement because it is only diagnosed
+    or parsed, never re-sent. A failure to start is an ApproveError, and since
+    the model counter already moved it is a charged failure: nothing here
+    retries or falls back to another binary.
+    """
+    try:
+        proc = subprocess.run(
+            args,
+            executable=launch.executable,
+            cwd=str(cwd),
+            capture_output=True,
+            input=launch.stdin,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ApproveError(
+            f"Command timed out after {timeout}s: {' '.join(args)}"
+        ) from exc
+    except OSError as exc:
+        raise ApproveError(
+            f"Reviewer executable could not be started: {args[0]} "
+            f"({launch.executable}): {exc}"
+        ) from exc
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    denial = reviewer_startup_denial(stderr)
+    if denial is not None:
+        raise ApproveError(
+            f"Reviewer startup reported a permission denial ({denial}); treated "
+            f"as a STOP, not as a review: {' '.join(args)}"
+        )
+    if proc.returncode != 0:
+        detail = (stderr or stdout or f"exit code {proc.returncode}").strip()
+        if len(detail) > 6000:
+            detail = detail[-6000:]
+        raise ApproveError(f"Command failed: {' '.join(args)}\n{detail}")
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def reviewer_run_spec(
+    args: list[str], output_path: Path | None = None
+) -> tuple[list[str], Path | None]:
+    """The canonical reviewer argv and, for Codex, its result path.
+
+    Spelled as a run-family call so the argv literals stay where the
+    tool-surface inventory in test_agent_workflow_contract.py reads them: the
+    commands this backend spawns are declared in source, not built at runtime.
+    """
+    return args, output_path
+
+
+def prepare_reviewer_command(
+    reviewer: Reviewer, cwd: Path, stack: contextlib.ExitStack
+) -> tuple[list[str], Path | None]:
+    """Everything reviewer-specific the spawn needs, built before it is counted.
+
+    Codex needs a temporary directory holding the output schema and the result
+    path; `stack` owns that directory so it outlives the spawn and is removed
+    on every exit. Returns the argv and the Codex result path (None for
+    Claude). Raises OSError when a temporary path cannot be made; the caller
+    turns that into a controlled refusal before the model counter moves.
+    """
+    if reviewer.key == "codex":
+        # Keep normal user hook declarations and definition trust together.
+        # Explicit model/effort/read-only pins below override those policy
+        # defaults, but other user configuration still inherits; this is not
+        # full config isolation.
+        tmp = stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="approve-issues-codex-")
+        )
         schema_path = Path(tmp) / "schema.json"
         output_path = Path(tmp) / "result.json"
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-        run(
+        return reviewer_run_spec(
             [
                 "codex",
                 "exec",
                 "--ephemeral",
-                "--ignore-user-config",
                 "-m",
                 reviewer.model,
                 "-c",
@@ -2121,19 +2459,9 @@ def invoke_codex(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
                 "never",
                 "-",
             ],
-            cwd=cwd,
-            input_text=prompt,
-            timeout=REVIEW_TIMEOUT_SECONDS,
+            output_path,
         )
-        try:
-            value = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ApproveError(f"Codex did not write valid structured output: {exc}") from exc
-    return validate_review(value, reviewer)
-
-
-def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
-    proc = run(
+    return reviewer_run_spec(
         [
             "claude",
             "-p",
@@ -2151,8 +2479,38 @@ def invoke_claude(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
             "--json-schema",
             json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
         ],
+    )
+
+
+def invoke_codex(
+    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
+) -> dict[str, Any]:
+    run_reviewer(
+        launch.args,
         cwd=cwd,
-        input_text=prompt,
+        launch=launch,
+        timeout=REVIEW_TIMEOUT_SECONDS,
+    )
+    assert launch.output_path is not None
+    try:
+        value = json.loads(launch.output_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # ValueError covers JSONDecodeError and a UnicodeDecodeError from an
+        # output file that is not UTF-8; neither message quotes the file.
+        raise ApproveError(
+            f"Codex did not write valid structured output ({exc}; "
+            f"{review_diagnostic(None)})"
+        ) from exc
+    return validate_review(value, reviewer)
+
+
+def invoke_claude(
+    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
+) -> dict[str, Any]:
+    proc = run_reviewer(
+        launch.args,
+        cwd=cwd,
+        launch=launch,
         timeout=REVIEW_TIMEOUT_SECONDS,
     )
     return validate_review(parse_claude_output(proc.stdout), reviewer)
@@ -2189,14 +2547,139 @@ def require_model_roster() -> None:
         raise ApproveError(MODEL_ROSTER_ERROR)
 
 
-def invoke_reviewer(reviewer: Reviewer, prompt: str, cwd: Path) -> dict[str, Any]:
+def resolve_reviewer_executable(reviewer: Reviewer) -> str:
+    resolved = shutil.which(reviewer.key)
+    if resolved is None:
+        raise ApproveError(
+            f"{reviewer.display_name}: the `{reviewer.key}` executable was not "
+            "found on PATH; no reviewer was started and no model was invoked"
+        )
+    # shutil.which answers relative to THIS process's working directory when
+    # PATH has a relative (or empty) entry, but the reviewer is spawned with
+    # cwd set to the review worktree. Anchor the answer here, once, so the
+    # receipt records and the spawn runs the same file; argv[0] stays the bare
+    # `codex` / `claude`.
+    return os.path.abspath(resolved)
+
+
+def review_receipt(
+    reviewer: Reviewer,
+    provenance: ReviewProvenance | None,
+    resolved: str,
+    stdin: bytes,
+) -> dict[str, Any]:
+    """The durable pre-spawn record: identity and hashes, never prompt text."""
+    return {
+        "issue": provenance.issue if provenance else None,
+        "mode": provenance.mode if provenance else None,
+        "base": provenance.base_sha if provenance else None,
+        "spec": provenance.spec_sha if provenance else None,
+        "reviewer": reviewer.key,
+        "model": reviewer.model,
+        "effort": reviewer.effort,
+        "executable": reviewer.key,
+        "resolved": resolved,
+        "realpath": os.path.realpath(resolved),
+        "brief_sha256": provenance.brief_sha256 if provenance else None,
+        "prompt_sha256": hashlib.sha256(stdin).hexdigest(),
+    }
+
+
+def write_review_receipt(receipt: dict[str, Any]) -> None:
+    """Emit the receipt through the existing log and make it durable, or refuse.
+
+    The receipt is a precondition of spawning a reviewer, not a courtesy: no
+    log path, or any failure to open, append, flush, or fsync the log, is an
+    ApproveError raised before the model counter moves and before anything is
+    spawned, and it travels the ordinary reviewer failure path (no verdict,
+    label, or comment; no retry or fallback). Containment is here only --
+    log() and append_log_line() keep raising OSError for every other caller.
+    """
+    path = active_log_path()
+    if path is None:
+        raise ApproveError(
+            "no log directory is configured, so the pre-spawn review receipt "
+            "cannot be persisted; no reviewer was started and no model was invoked"
+        )
+    try:
+        log(
+            "Review receipt: "
+            + json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        )
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ApproveError(
+            f"the pre-spawn review receipt could not be persisted to {path} "
+            f"({exc}); no reviewer was started and no model was invoked"
+        ) from exc
+
+
+def invoke_reviewer(
+    reviewer: Reviewer,
+    prompt: str,
+    cwd: Path,
+    provenance: ReviewProvenance | None = None,
+) -> dict[str, Any]:
+    """Run one reviewer. The order below is the contract (section 2.3):
+
+    roster, then executable, then bytes + hashes, then the reviewer-specific
+    command (Codex's schema and output paths), then the receipt, then the
+    model counter immediately before the spawn, then the canonical argv.
+    Everything before the counter can refuse with zero subprocesses and
+    `model_called` false; everything after it is a charged run that is never
+    retried.
+    """
     require_model_roster()
-    # Counted before the call, not after: a model that ran and then failed,
-    # timed out, or returned unparseable output still ran.
-    note_model_invocation()
-    if reviewer.key == "codex":
-        return invoke_codex(reviewer, prompt, cwd)
-    return invoke_claude(reviewer, prompt, cwd)
+    resolved = resolve_reviewer_executable(reviewer)
+    try:
+        stdin = prompt.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ApproveError(
+            f"{reviewer.display_name}: the review prompt is not valid UTF-8 "
+            f"({exc.reason}); no reviewer was started"
+        ) from exc
+    with contextlib.ExitStack() as stack:
+        try:
+            args, output_path = prepare_reviewer_command(reviewer, cwd, stack)
+        except OSError as exc:
+            raise ApproveError(
+                f"{reviewer.display_name}: the reviewer command could not be "
+                f"prepared ({exc}); no reviewer was started and no model was invoked"
+            ) from exc
+        receipt = review_receipt(reviewer, provenance, resolved, stdin)
+        write_review_receipt(receipt)
+        launch = ReviewerLaunch(
+            stdin=stdin,
+            executable=resolved,
+            receipt=receipt,
+            args=args,
+            output_path=output_path,
+        )
+        # Counted before the call, not after: a model that ran and then failed,
+        # timed out, or returned unparseable output still ran. Nothing that can
+        # fail without a spawn sits between this and the spawn.
+        note_model_invocation()
+        try:
+            if reviewer.key == "codex":
+                review = invoke_codex(reviewer, launch, cwd)
+            else:
+                review = invoke_claude(reviewer, launch, cwd)
+        except ReviewerRunError:
+            raise
+        except ReviewerStopped as exc:
+            exc.receipt = receipt
+            raise
+        except ApproveError as exc:
+            raise ReviewerRunError(str(exc), receipt) from exc
+    review["provenance"] = {
+        "brief_sha256": receipt["brief_sha256"],
+        "prompt_sha256": receipt["prompt_sha256"],
+    }
+    return review
 
 
 def reviewer_failure_message(reviewer: Reviewer, error: ApproveError) -> str:
@@ -2206,11 +2689,26 @@ def reviewer_failure_message(reviewer: Reviewer, error: ApproveError) -> str:
     needed to distinguish a model outage from a transport, timeout, or
     structured-output failure without exposing the review prompt itself.
     """
-    return (
-        f"{reviewer.display_name} ({reviewer.model}@{reviewer.effort}) failed; "
-        "no retry or fallback was attempted\n"
-        f"Underlying reviewer error: {error}"
-    )
+    if isinstance(error, ReviewerStopped):
+        message = (
+            f"{reviewer.display_name} ({reviewer.model}@{reviewer.effort}) "
+            "stopped on a denial and returned no review; no retry or fallback "
+            "was attempted and nothing was published\n"
+            f"Denied operation, as the reviewer named it: {error.summary}"
+        )
+    else:
+        message = (
+            f"{reviewer.display_name} ({reviewer.model}@{reviewer.effort}) failed; "
+            "no retry or fallback was attempted\n"
+            f"Underlying reviewer error: {error}"
+        )
+    receipt = getattr(error, "receipt", None)
+    if isinstance(receipt, dict):
+        message += (
+            f"\nReview receipt: brief_sha256={receipt.get('brief_sha256')} "
+            f"prompt_sha256={receipt.get('prompt_sha256')}"
+        )
+    return message
 
 
 def aggregate_verdict(reviews: list[dict[str, Any]]) -> str:
@@ -2253,6 +2751,18 @@ def render_review_comment(
         )
         + ".",
         "",
+        *(
+            line
+            for review in reviews
+            if isinstance(review.get("provenance"), dict)
+            and review["provenance"].get("brief_sha256")
+            for line in (
+                f"Review receipt ({review['reviewer'].key}): "
+                f"brief_sha256 `{review['provenance']['brief_sha256']}`, "
+                f"prompt_sha256 `{review['provenance']['prompt_sha256']}`.",
+                "",
+            )
+        ),
         f"**Verdict: {verdict.replace('_', ' ')}**",
         "",
         "Corrections and spec additions below amend the implementation spec. "
@@ -2383,7 +2893,6 @@ def process_issue(
         f"Issue #{number}: {mode} origin={expected_origin_name(origin)} "
         f"with {reviewer_route(reviewers)} (spec {spec_sha[:12]})"
     )
-    clear_verdict_labels(ctx, issue)
     worktree, base_sha = make_review_worktree(ctx, number)
     reviews: list[dict[str, Any]] = []
     try:
@@ -2397,7 +2906,16 @@ def process_issue(
             )
             try:
                 review = invoke_reviewer(
-                    reviewer, review_prompt(reviewer, dossier, mode=mode), worktree
+                    reviewer,
+                    review_prompt(reviewer, dossier, mode=mode),
+                    worktree,
+                    ReviewProvenance(
+                        issue=number,
+                        mode=mode,
+                        base_sha=base_sha,
+                        spec_sha=spec_sha,
+                        brief_sha256=brief_sha256(reviewer, mode),
+                    ),
                 )
             except ApproveError as exc:
                 failure = reviewer_failure_message(reviewer, exc)
@@ -2435,6 +2953,12 @@ def process_issue(
         parent_spec=parent_spec,
         trigger=trigger,
     )
+    # Every label write waits until a verdict can be published: a reviewer that
+    # fails or stops (or a second reviewer that does after the first
+    # succeeded) leaves the repository's labels exactly as they were, with no
+    # label provisioned and no stale verdict label removed.
+    ensure_verdict_labels(ctx)
+    clear_verdict_labels(ctx, refreshed_issue)
     comment_url = post_comment(ctx, number, body)
     set_verdict_label(ctx, number, verdict)
     log(f"Issue #{number}: published {verdict} at {comment_url}")
@@ -2593,8 +3117,6 @@ def daemon_loop(
     lock = acquire_lock(ctx, mode="daemon")
     queue_failures = 0
     try:
-        if not dry_run:
-            ensure_verdict_labels(ctx)
         while True:
             try:
                 selected = select_candidate(ctx, legacy_policy=legacy_policy)
@@ -2671,6 +3193,9 @@ def _review_one_locked(
                 f"Issue #{number} remains INVALID at {marker.get('comment_url')}"
             )
         log(f"Issue #{number}: current cross-agent review already exists")
+        # Reconciling a current marker is a publication: no reviewer runs, and
+        # the labels it writes must exist.
+        ensure_verdict_labels(ctx)
         set_verdict_label(ctx, number, marker.get("verdict") or "CHANGES_REQUESTED")
     else:
         process_issue(ctx, issue, comments, reviewers)
@@ -2701,7 +3226,6 @@ def review_one(
         raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="single", issue_number=number)
     try:
-        ensure_verdict_labels(ctx)
         return _review_one_locked(ctx, number, legacy_policy=legacy_policy)
     finally:
         release_lock(lock)
@@ -2722,7 +3246,6 @@ def review_batch(
     results: list[dict[str, Any]] = []
     stopped_at: int | None = None
     try:
-        ensure_verdict_labels(ctx)
         for number in numbers:
             status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
             results.append(status)
@@ -2770,7 +3293,6 @@ def rereview_one(
         raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="rereview", issue_number=number)
     try:
-        ensure_verdict_labels(ctx)
         issue = get_issue(ctx, number)
         comments = get_comments(ctx, number)
         origin = issue_origin(issue.get("body") or "")
@@ -3739,7 +4261,6 @@ def review_queue(ctx: RepoContext, *, legacy_policy: str) -> dict[str, Any]:
             return review_queue_barrier_result(locked["issue"], model_called=False)
         number = locked["issue"]
         spec_sha = locked["status"]["spec_sha"]
-        ensure_verdict_labels(ctx)
         status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
     finally:
         release_lock(lock)
@@ -3938,7 +4459,7 @@ def self_test() -> None:
 
 
 def _self_test_body() -> None:
-    global PIPELINE_INCIDENT_DIR
+    global LOG_DIR, PIPELINE_INCIDENT_DIR
     # A pull request must be recognised from `url` alone: every other field
     # get_issue requests looks identical for both kinds.
     assert issue_is_pull_request({"url": "https://github.com/owner/repo/pull/1080"})
@@ -4298,6 +4819,27 @@ def _self_test_body() -> None:
         json.dumps({"is_error": False, "structured_output": valid_review})
     )
     assert validate_review(parsed, CLAUDE_REVIEWER)["verdict"] == "APPROVE"
+    stopped_review = {
+        "verdict": "STOPPED",
+        "summary": "Read of ~/.config/docs-push.json was denied.",
+        "corrections": [],
+        "spec_additions": [],
+        "supporting_context": [],
+        "open_decisions": [],
+        "recommended_disposition": [],
+    }
+    try:
+        validate_review(stopped_review, CLAUDE_REVIEWER)
+    except ReviewerStopped:
+        pass
+    else:
+        raise AssertionError("STOPPED must raise ReviewerStopped, never return a review")
+    try:
+        validate_review({**stopped_review, "open_decisions": ["x"]}, CLAUDE_REVIEWER)
+    except ApproveError as exc:
+        assert not isinstance(exc, ReviewerStopped)
+    else:
+        raise AssertionError("STOPPED with a non-empty list must be rejected")
     assert aggregate_verdict(
         [{"verdict": "APPROVE"}, {"verdict": "CHANGES_REQUESTED"}]
     ) == "CHANGES_REQUESTED"
@@ -4315,16 +4857,44 @@ def _self_test_body() -> None:
         raise ApproveError("model unavailable")
 
     globals()["invoke_codex"] = failing_invoke_codex
-    try:
+    original_path = os.environ.get("PATH")
+    with tempfile.TemporaryDirectory(prefix="approve-issues-self-test-bin-") as bin_tmp:
+        # The executable is resolved before the model counter moves; the stub
+        # above stands in for the spawn, so this file is only ever looked up.
+        stand_in = Path(bin_tmp) / "codex"
+        stand_in.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stand_in.chmod(0o755)
+        os.environ["PATH"] = bin_tmp
+        original_log_dir = LOG_DIR
+        LOG_DIR = Path(bin_tmp) / "logs"
         try:
-            invoke_reviewer(CODEX_REVIEWER, "prompt", Path.cwd())
-        except ApproveError:
-            pass
-        else:
-            raise AssertionError("model failure should propagate")
-    finally:
-        globals()["invoke_codex"] = original_invoke_codex
+            try:
+                invoke_reviewer(CODEX_REVIEWER, "prompt", Path.cwd())
+            except ApproveError as exc:
+                assert isinstance(exc, ReviewerRunError)
+            else:
+                raise AssertionError("model failure should propagate")
+            counted = model_invocation_count()
+            os.environ["PATH"] = ""
+            try:
+                invoke_reviewer(CODEX_REVIEWER, "prompt", Path.cwd())
+            except ApproveError:
+                pass
+            else:
+                raise AssertionError("a missing executable should refuse")
+            assert model_invocation_count() == counted, "refusal must not count"
+        finally:
+            LOG_DIR = original_log_dir
+            globals()["invoke_codex"] = original_invoke_codex
+            if original_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = original_path
     assert model_calls == 1
+    assert REVIEWER_STOP_RULES in review_instructions(CODEX_REVIEWER, "initial")
+    assert REVIEWER_ENVIRONMENT_RULES in review_instructions(CODEX_REVIEWER, "initial")
+    assert REVIEWER_STOP_RULES in review_instructions(CLAUDE_REVIEWER, "rereview")
+    assert REVIEWER_STOP_RULES not in json.dumps({"issue": {}})
     failure_message = reviewer_failure_message(
         CLAUDE_REVIEWER, ApproveError("CLI transport reset")
     )

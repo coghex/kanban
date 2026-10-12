@@ -660,6 +660,26 @@ existing coordinator error path rather than retrying with another identity.
     takes effect without restarting the managed service; a roster it cannot
     read stops that drainer where it stands rather than rereviewing on a
     model it cannot claim.
+  - **Codex user configuration and hook trust:** the nested issue reviewer
+    loads normal user configuration; it does not pass `--ignore-user-config`.
+    Codex 0.162.1 can discover user `hooks.json` while that flag discards the
+    user TOML layer containing the corresponding `hooks.state` trust, leaving
+    unmanaged handlers untrusted. The backend keeps explicit `-m`,
+    `-c model_reasoning_effort=...`, and `-s read-only` assignments, so those
+    review policy values override user defaults while normal hook definitions,
+    enabled state and per-definition trust remain available to Codex.
+    This is not full configuration isolation: provider definitions, MCP/tools,
+    plugins/apps/features, shell/environment preferences, instructions,
+    profiles and other unpinned settings may now inherit. Codex's headless
+    approval defaults and AutoReview fallback still apply; the backend adds no
+    approval-policy or hook-trust override. No hooks are installed, disabled or
+    granted trust by the backend. A supported profile overlays the base user
+    config rather than whitelisting it. The normal-trust launcher and every
+    required current hook definition must be verified separately, including
+    any wrapper-injected arguments; retaining user config does not clear those
+    gates. Offline fake-reviewer fixtures cover the exact argv, policy
+    precedence, state retention and the old flag's negative control, not live
+    hook execution. Direct PR and drainer launchers are separate contracts.
   - **Which provider the backend routes to** comes from the same roster's
     `agents` list, read as the operating mode `src/Kanban/Models.hs` derives
     (issue #572, D-8). Only the loaded providers' `issue_gate` cells are
@@ -737,6 +757,65 @@ existing coordinator error path rather than retrying with another identity.
     the in-process result. Every `issue-review:v2` publication detail is the
     single-issue path's; this mode adds ordering, bounded scope, and a result
     document.
+  - **Reviewer launch.** Every reviewer prompt this backend sends, initial
+    and rereview, Codex and Claude alike, is `review_instructions(reviewer,
+    mode)` followed by the `DOSSIER:` JSON. The instructions end in two fixed
+    blocks, `REVIEWER_ENVIRONMENT_RULES` then `REVIEWER_STOP_RULES`, and both
+    live *outside* the dossier, which is untrusted data and cannot edit or
+    shadow them. The environment rules keep a reviewer from provoking the
+    denials its read-only sandbox issues anyway: the environment is read-only
+    by design, so it runs no command that writes anything, temporary files
+    included — concretely no here-document or here-string (`<<`, `<<<`), no
+    output redirection to a file (`>`, `>>`, `tee`), no process substitution
+    (`<(...)`), no `mktemp`, no test runner or build, and nothing that writes
+    caches such as Python bytecode — preferring to read files (`rg`, `sed -n`,
+    `cat`) and, when it must run Python, using `python3 -B -c '<code>'` with no
+    here-document; it verifies only within the current working directory, which is
+    the repository; and a fact located outside it (for example
+    `~/.config/docs-push.json` or the owner's global instructions) is a stated
+    premise that cannot be verified, which it does not try to read and flags
+    only when the repository itself contradicts it. The stop rule: if any
+    tool, command, file access, sandbox, network, approval, or permission
+    operation is denied or refused for security, permission, or access reasons,
+    the reviewer STOPs immediately — no retry, no substitute tool, command,
+    path, binary, or backend, no alternate route, no request to escalate — and
+    returns the verdict `STOPPED`, naming the denied operation in `summary`
+    with every list empty, and no other verdict. Both backends force an output
+    schema whose `verdict` is required, so "no verdict" is not an answer a
+    reviewer can give; `STOPPED` is the schema's explicit channel for it. The
+    gate treats `STOPPED` as a reviewer failure that publishes nothing (see
+    *Denial fails closed*), so an unchanged spec can simply be reviewed again.
+    An ordinary failure that is not a
+    denial (a file that does not exist) is not a STOP and keeps its ordinary
+    diagnostic. The stdin of the reviewer is the strict UTF-8 encoding of the
+    prompt, built once and sent as those exact bytes with no locale-dependent
+    transcoding, through a reviewer-only spawn path; `gh`, `git`, and every
+    other command keep their text-mode `run`. The order inside one launch is
+    the contract: the model roster is checked; the reviewer executable
+    (`codex` or `claude`) is resolved on `PATH` to an absolute path anchored in the
+    backend's own working directory (a relative `PATH` entry never resolves
+    against the review worktree the reviewer is spawned in); the stdin bytes and the hashes
+    are built; the reviewer-specific command is prepared (for Codex, its
+    temporary directory with the output schema and the result path; removed on
+    every exit); the receipt is written, flushed, and fsynced to the backend
+    log; only then does the actual-model counter move, immediately before the
+    spawn; and the canonical, unchanged bare `codex` / `claude` argv is
+    spawned. A roster refusal, an executable that does not resolve, a
+    prompt that cannot be encoded, a command that cannot be prepared, or a
+    receipt that cannot be persisted is an `ApproveError` with **zero
+    subprocesses and the counter at its prior value** (a preparation failure
+    writes no receipt, since no launch reached the spawn). A spawn-time failure after the count
+    (the resolved file vanished, a bad interpreter) is a *charged* failure and
+    is never retried.
+  - **Preflight versus the actual-model counter.** The counter behind the
+    review queue's `model_called` (`MODEL_INVOCATIONS`, moved by
+    `note_model_invocation`) records that a reviewer launch passed every
+    check above and was handed to the operating system; it is observed, not
+    predicted from classification. A refusal before it is a preflight refusal
+    and reports `model_called: false`. The counter is **not** an external
+    budget: it neither measures nor grants any allowance, and a zero reading
+    (for example from a fake executable in a test) is no ground to retry, to
+    reset a scope budget, or to substitute another route.
   - The solve readiness gate is a separate, **read-only** invocation that
     Kanban's Haskell code does not run itself. The solve prompt
     (`src/Kanban/Solve.hs:251`) explicitly forbids the spawned solving agent
@@ -792,12 +871,71 @@ existing coordinator error path rather than retrying with another identity.
   five outcomes, and a controller would otherwise read the silence as success.
   The document itself is written in a single call, so a caller never reads a
   truncated one.
+- **Denial fails closed.** A reviewer that was denied something is a failure,
+  never a verdict. The backend publishes **no** comment, label, marker, or
+  review record for it and fabricates no `CHANGES_REQUESTED`: it ends through
+  the same terminal reviewer failure as any other model failure, with no retry
+  or fallback inside the run and the model invocation still counted. It also
+  writes **no label**: the stale verdict label is cleared and the repository's
+  verdict labels are provisioned only at publication, after every reviewer of
+  the run (both, in a dual review) has returned a verdict, so a stop or any
+  reviewer failure — including a second reviewer's after the first succeeded,
+  which publishes nothing of the first — leaves the issue's labels and the
+  repository's label set exactly as they were. Reconciling a current marker is
+  a publication and provisions the labels it writes. The
+  reviewer reports the denial as the verdict `STOPPED`. `validate_review`
+  accepts it only with a non-empty `summary` (naming the denied operation) and
+  every list empty — a `STOPPED` with a non-empty list, or with an empty
+  summary, is an ordinary rejected result — and raises `ReviewerStopped`, whose
+  failure text says the reviewer stopped on a denial, that no retry or
+  fallback was attempted and nothing was published, and quotes the denied
+  operation as the reviewer named it. `STOPPED` is valid only in a reviewer's
+  raw result: it is never aggregated, rendered into a comment, written into a
+  `verdicts=` marker (a marker naming it is invalid), or returned by the
+  review queue. No review record exists afterwards, so a later `--review` of
+  the same unchanged spec launches the reviewer again; neither the
+  `--rereview` refusal of an unchanged spec nor the current-review path is
+  reached. A result `validate_review` rejects for any other reason names its
+  verdict and a bounded summary — one line, at most 500 characters, control
+  characters collapsed — in the `ApproveError` text and therefore in the backend
+  log line, never the prompt, the dossier, any list, or raw output, so a
+  rejected `INVALID` is distinguishable from a stop expressed as one. Only
+  strings are ever shown: a missing, blank, or mistyped (number, list, object)
+  field is replaced by an `<unavailable…>` placeholder naming at most its
+  type, and output that never parsed (malformed JSON, a result that is not an
+  object, an output file that is not UTF-8) reports `verdict=<unavailable>,
+  summary=<unavailable>` and never copies the output into the message. That includes one
+  known startup case: a reviewer whose own stderr *begins* with the
+  pinned Codex helper's `WARNING: proceeding, even though we could not …`
+  line carrying a permission-denial wording is a STOP even when it exits zero
+  and writes plausible output. The match is deliberately narrow — the leading
+  `WARNING:` lines of the reviewer's own stderr only, never its stdout, result
+  file, or echoed dossier text — and widens no other command's handling.
 - **Required authority:** the same GitHub write scope as PR review for
   `--review`/`--rereview` and for the one issue `--review-queue` reviews
   (`--check` performs no GitHub write); local read
   access to the canonical backend script.
 - **Durable state:** none Kanban owns beyond the GitHub comment/labels; the
-  backend may keep additional state outside Kanban's tracking.
+  backend may keep additional state outside Kanban's tracking. Its own log
+  (`--log-dir`, one file per day) gains one line per reviewer launch. The receipt is **required and
+  persisted, fail closed**: it is written, flushed, and fsynced **before** the
+  actual-model counter moves and before the reviewer is spawned, and a real
+  backend never starts without it. No log directory, or a failure to open,
+  append, or fsync the log, is a controlled `ApproveError` before the counter
+  and the spawn, ending through the ordinary reviewer failure path with no
+  verdict, label, or comment and no retry or fallback. Only this reviewer
+  preflight contains the `OSError`; `log()`, `gh`, and `run` behave as before.
+  `main()` always sets the log directory (`--log-dir` defaults to the managed
+  one and the approval service passes it), so a CLI run is not affected. The
+  line is: `Review receipt: ` and a JSON object with the issue, mode, base
+  and spec fingerprint, reviewer key, model and effort, the executable's
+  `PATH` resolution and its `realpath`, `brief_sha256` (the instruction text
+  alone, so it is identical across issues for one reviewer and mode) and
+  `prompt_sha256` (the exact stdin bytes). It holds no prompt or dossier text
+  and no secret. The two hashes follow a failure into its message and a
+  successful review into a `Review receipt (<reviewer>)` line of the published
+  comment; neither enters the marker, the spec fingerprint, the approval route,
+  or the review-queue document.
   `--review-queue` takes the canonical `approve_issues.lock` for the one
   issue it reviews and releases it before the process exits on every outcome,
   failures included. That lock lives in the repository's *shared* Git
@@ -814,8 +952,9 @@ existing coordinator error path rather than retrying with another identity.
 A raw `reviewed:approve` label is not evidence that an issue is approved now.
 Canonical approval binds an issue to its current specification fingerprint
 through the latest `issue-review:v2` marker, and the backend removes a stale
-verdict label only once an issue enters `process_issue` — so until review
-begins, a label can advertise readiness to any label-only reader against a
+verdict label only when a review is about to publish a verdict — after every
+reviewer has returned one, immediately before the comment — so until a review
+publishes, a label can advertise readiness to any label-only reader against a
 specification no reviewer saw. `--reconcile-approvals` is the bounded authority
 that corrects that, and it is the only one: label-only consumers do not
 reimplement the removal, and `--check` remains read-only.
