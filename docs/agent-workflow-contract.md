@@ -792,7 +792,9 @@ existing coordinator error path rather than retrying with another identity.
     transcoding, through a reviewer-only spawn path; `gh`, `git`, and every
     other command keep their text-mode `run`. The order inside one launch is
     the contract: the model roster is checked; the reviewer executable
-    (`codex` or `claude`) is resolved on `PATH`; the stdin bytes and the hashes
+    (`codex` or `claude`) is resolved on `PATH` to an absolute path anchored in the
+    backend's own working directory (a relative `PATH` entry never resolves
+    against the review worktree the reviewer is spawned in); the stdin bytes and the hashes
     are built; the reviewer-specific command is prepared (for Codex, its
     temporary directory with the output schema and the result path; removed on
     every exit); the receipt is written, flushed, and fsynced to the backend

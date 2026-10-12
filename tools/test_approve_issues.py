@@ -4891,6 +4891,77 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
             self.invoke(approve_issues.CODEX_REVIEWER, "initial")
         self.assertEqual(order, ["count", "spawn"])
 
+    # -- the executable is anchored where it was resolved ---------------------
+
+    def test_a_relative_path_entry_resolves_to_the_launchers_file_not_the_worktrees(self):
+        launcher = self.root / "launcher"
+        (launcher / "bin").mkdir(parents=True)
+        shutil_copy = (self.bin / "claude").read_bytes()
+        (launcher / "bin" / "claude").write_bytes(shutil_copy)
+        (launcher / "bin" / "claude").chmod(0o755)
+        decoy_mark = self.root / "decoy-ran"
+        (self.work / "bin").mkdir()
+        decoy = self.work / "bin" / "claude"
+        decoy.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            f"Path({str(decoy_mark)!r}).write_text('ran')\n",
+            encoding="utf-8",
+        )
+        decoy.chmod(0o755)
+        prompt = approve_issues.review_prompt(
+            approve_issues.CLAUDE_REVIEWER, self.ISSUE_DOSSIER, mode="initial"
+        )
+        with self.environment(path="bin"), contextlib.chdir(launcher):
+            review = approve_issues.invoke_reviewer(
+                approve_issues.CLAUDE_REVIEWER,
+                prompt,
+                self.work,
+                self.provenance(approve_issues.CLAUDE_REVIEWER, "initial", prompt),
+            )
+        self.assertEqual(review["verdict"], "APPROVE")
+        self.assertFalse(decoy_mark.exists(), "the worktree's bin/claude must not run")
+        self.assertEqual(len(self.invocations()), 1)
+        receipt = self.receipts()[-1]
+        self.assertTrue(os.path.isabs(receipt["resolved"]))
+        self.assertEqual(
+            os.path.realpath(receipt["resolved"]),
+            os.path.realpath(launcher / "bin" / "claude"),
+        )
+
+    def test_a_relative_path_entry_does_not_fail_after_the_count_when_the_worktree_lacks_it(self):
+        launcher = self.root / "launcher"
+        (launcher / "bin").mkdir(parents=True)
+        (launcher / "bin" / "codex").write_bytes((self.bin / "codex").read_bytes())
+        (launcher / "bin" / "codex").chmod(0o755)
+        self.assertFalse((self.work / "bin").exists())
+        prompt = approve_issues.review_prompt(
+            approve_issues.CODEX_REVIEWER, self.ISSUE_DOSSIER, mode="initial"
+        )
+        with self.environment(path="bin"), contextlib.chdir(launcher):
+            review = approve_issues.invoke_reviewer(
+                approve_issues.CODEX_REVIEWER,
+                prompt,
+                self.work,
+                self.provenance(approve_issues.CODEX_REVIEWER, "initial", prompt),
+            )
+        self.assertEqual(review["verdict"], "APPROVE")
+        self.assertTrue(os.path.isabs(self.receipts()[-1]["resolved"]))
+
+    def test_argv_zero_stays_the_bare_command_when_the_path_entry_is_relative(self):
+        launcher = self.root / "launcher"
+        (launcher / "bin").mkdir(parents=True)
+        (launcher / "bin" / "codex").write_bytes((self.bin / "codex").read_bytes())
+        (launcher / "bin" / "codex").chmod(0o755)
+        prompt = approve_issues.review_prompt(
+            approve_issues.CODEX_REVIEWER, self.ISSUE_DOSSIER, mode="initial"
+        )
+        with self.environment(path="bin"), contextlib.chdir(launcher):
+            approve_issues.invoke_reviewer(
+                approve_issues.CODEX_REVIEWER, prompt, self.work,
+                self.provenance(approve_issues.CODEX_REVIEWER, "initial", prompt),
+            )
+        self.assertEqual(self.invocations()[0]["argv"][0], "exec")
+
     # -- C3: hashes and the receipt ----------------------------------------
 
     def test_brief_hash_is_stable_and_separate_from_the_whole_prompt_hash(self):

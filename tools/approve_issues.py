@@ -2554,7 +2554,12 @@ def resolve_reviewer_executable(reviewer: Reviewer) -> str:
             f"{reviewer.display_name}: the `{reviewer.key}` executable was not "
             "found on PATH; no reviewer was started and no model was invoked"
         )
-    return resolved
+    # shutil.which answers relative to THIS process's working directory when
+    # PATH has a relative (or empty) entry, but the reviewer is spawned with
+    # cwd set to the review worktree. Anchor the answer here, once, so the
+    # receipt records and the spawn runs the same file; argv[0] stays the bare
+    # `codex` / `claude`.
+    return os.path.abspath(resolved)
 
 
 def review_receipt(
