@@ -712,7 +712,8 @@ def get_issue(ctx: RepoContext, number: int) -> dict[str, Any]:
     # Enforced HERE, at the single fetch funnel, rather than at each entry
     # point: --check, --review and --rereview all pass through this call, so
     # neither they nor any future number-taking mode can forget the guard. It
-    # also lands before a review reaches clear_verdict_labels, which is what
+    # also lands before a review reaches any label write (clear_verdict_labels
+    # now waits for a publishable verdict), which is what
     # makes it safe rather than merely tidy -- pointed at a pull request, this
     # backend used to strip that pull request's `reviewed:approve` about a
     # second in (failing its branch-protection gate), publish an
@@ -2132,31 +2133,74 @@ class ReviewerStopped(ApproveError):
         )
 
 
+UNAVAILABLE = "<unavailable>"
+
+
+def unavailable(value: Any) -> str:
+    """A placeholder naming only the TYPE of a field that cannot be shown."""
+    if value is None:
+        return UNAVAILABLE
+    if isinstance(value, str):
+        return "<unavailable: empty>"  # the only str that reaches here is blank
+    return f"<unavailable: {type(value).__name__}>"
+
+
+def review_diagnostic(value: Any) -> str:
+    """`verdict=..., summary=...` for any reviewer output, parsed or not.
+
+    Scalar-only and bounded: a string verdict or summary is squeezed to one
+    line (a verdict to 64 characters, a summary to 500); anything else -- a
+    missing field, a list, an object, a number, output that never parsed -- is
+    replaced by a placeholder, so no container and no raw output can reach a
+    failure message or the log.
+    """
+    verdict = value.get("verdict") if isinstance(value, dict) else None
+    summary = value.get("summary") if isinstance(value, dict) else None
+    verdict_text = (
+        repr(one_line_summary(verdict, 64))
+        if isinstance(verdict, str) and verdict.strip()
+        else unavailable(verdict)
+    )
+    summary_text = (
+        repr(one_line_summary(summary))
+        if isinstance(summary, str) and summary.strip()
+        else unavailable(summary)
+    )
+    return f"verdict={verdict_text}, summary={summary_text}"
+
+
 def rejected_review(reviewer: Reviewer, reason: str, value: Any) -> ApproveError:
-    """The failure for a result validate_review refuses.
+    """The failure for a result validate_review (or its parsers) refuses.
 
     The raw output is retained nowhere, so the text itself carries the verdict
     and a bounded one-line summary: enough to tell a STOP expressed as INVALID
-    from a real INVALID. Never the prompt, the dossier or any list.
+    from a real INVALID. Never the prompt, the dossier, a list or raw output.
     """
-    verdict = value.get("verdict") if isinstance(value, dict) else None
-    summary = one_line_summary(value.get("summary") if isinstance(value, dict) else None)
-    return ApproveError(
-        f"{reviewer.display_name} {reason} (verdict={verdict!r}, summary={summary!r})"
-    )
+    return ApproveError(f"{reviewer.display_name} {reason} ({review_diagnostic(value)})")
 
 
 def validate_review(value: Any, reviewer: Reviewer) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ApproveError(f"{reviewer.display_name} returned a non-object review")
+        raise rejected_review(reviewer, "returned a non-object review", value)
     expected = set(REVIEW_SCHEMA["required"])
     if set(value) != expected:
+        missing = ", ".join(sorted(expected - set(value))) or "none"
+        extra = ", ".join(sorted(str(key) for key in set(value) - expected)) or "none"
         raise rejected_review(
-            reviewer, f"returned unexpected fields: {sorted(value)}", value
+            reviewer,
+            "returned unexpected fields "
+            f"(missing: {one_line_summary(missing, 200)}; "
+            f"extra: {one_line_summary(extra, 200)})",
+            value,
         )
     verdict = value.get("verdict")
-    if verdict not in {"APPROVE", "CHANGES_REQUESTED", "INVALID", "STOPPED"}:
-        raise rejected_review(reviewer, f"returned invalid verdict {verdict!r}", value)
+    if not isinstance(verdict, str) or verdict not in {
+        "APPROVE",
+        "CHANGES_REQUESTED",
+        "INVALID",
+        "STOPPED",
+    }:
+        raise rejected_review(reviewer, "returned an invalid verdict", value)
     summary = value.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise rejected_review(reviewer, "returned an empty summary", value)
@@ -2198,9 +2242,16 @@ def parse_claude_output(stdout: str) -> Any:
     try:
         outer = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise ApproveError(f"Claude returned invalid JSON: {stdout[-2000:]}") from exc
+        raise ApproveError(
+            f"Claude returned invalid JSON ({exc.msg} at character {exc.pos}; "
+            f"{review_diagnostic(None)})"
+        ) from exc
     if isinstance(outer, dict) and outer.get("is_error"):
-        raise ApproveError(f"Claude reported an error: {outer.get('result')}")
+        reported = outer.get("result")
+        raise ApproveError(
+            "Claude reported an error: "
+            + (one_line_summary(reported) if isinstance(reported, str) else unavailable(reported))
+        )
     value = outer.get("structured_output") if isinstance(outer, dict) else None
     if value is not None:
         return value
@@ -2209,7 +2260,10 @@ def parse_claude_output(stdout: str) -> Any:
         try:
             return json.loads(value)
         except json.JSONDecodeError as exc:
-            raise ApproveError(f"Claude result was not structured JSON: {value[-2000:]}") from exc
+            raise ApproveError(
+                f"Claude result was not structured JSON ({exc.msg} at character "
+                f"{exc.pos}; {review_diagnostic(None)})"
+            ) from exc
     return value
 
 
@@ -2236,12 +2290,17 @@ class ReviewerLaunch:
 
     `stdin` is the exact byte string the reviewer reads and the one whose hash
     the receipt records; `executable` is the resolved path it is started from,
-    while argv[0] stays the bare `codex` / `claude`.
+    while argv[0] stays the bare `codex` / `claude`. `args` is the complete,
+    already-prepared argv (for Codex that includes the schema and output
+    paths, whose temporary directory exists before the counter moves) and
+    `output_path` is where Codex writes its result.
     """
 
     stdin: bytes
     executable: str
     receipt: dict[str, Any]
+    args: list[str]
+    output_path: Path | None = None
 
 
 class ReviewerRunError(ApproveError):
@@ -2345,17 +2404,41 @@ def run_reviewer(
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
-def invoke_codex(
-    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
-) -> dict[str, Any]:
-    # Keep normal user hook declarations and definition trust together. Explicit
-    # model/effort/read-only pins below override those policy defaults, but other
-    # user configuration still inherits; this is not full config isolation.
-    with tempfile.TemporaryDirectory(prefix="approve-issues-codex-") as tmp:
+def reviewer_run_spec(
+    args: list[str], output_path: Path | None = None
+) -> tuple[list[str], Path | None]:
+    """The canonical reviewer argv and, for Codex, its result path.
+
+    Spelled as a run-family call so the argv literals stay where the
+    tool-surface inventory in test_agent_workflow_contract.py reads them: the
+    commands this backend spawns are declared in source, not built at runtime.
+    """
+    return args, output_path
+
+
+def prepare_reviewer_command(
+    reviewer: Reviewer, cwd: Path, stack: contextlib.ExitStack
+) -> tuple[list[str], Path | None]:
+    """Everything reviewer-specific the spawn needs, built before it is counted.
+
+    Codex needs a temporary directory holding the output schema and the result
+    path; `stack` owns that directory so it outlives the spawn and is removed
+    on every exit. Returns the argv and the Codex result path (None for
+    Claude). Raises OSError when a temporary path cannot be made; the caller
+    turns that into a controlled refusal before the model counter moves.
+    """
+    if reviewer.key == "codex":
+        # Keep normal user hook declarations and definition trust together.
+        # Explicit model/effort/read-only pins below override those policy
+        # defaults, but other user configuration still inherits; this is not
+        # full config isolation.
+        tmp = stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="approve-issues-codex-")
+        )
         schema_path = Path(tmp) / "schema.json"
         output_path = Path(tmp) / "result.json"
         schema_path.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-        run_reviewer(
+        return reviewer_run_spec(
             [
                 "codex",
                 "exec",
@@ -2376,21 +2459,9 @@ def invoke_codex(
                 "never",
                 "-",
             ],
-            cwd=cwd,
-            launch=launch,
-            timeout=REVIEW_TIMEOUT_SECONDS,
+            output_path,
         )
-        try:
-            value = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ApproveError(f"Codex did not write valid structured output: {exc}") from exc
-    return validate_review(value, reviewer)
-
-
-def invoke_claude(
-    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
-) -> dict[str, Any]:
-    proc = run_reviewer(
+    return reviewer_run_spec(
         [
             "claude",
             "-p",
@@ -2408,6 +2479,36 @@ def invoke_claude(
             "--json-schema",
             json.dumps(REVIEW_SCHEMA, separators=(",", ":")),
         ],
+    )
+
+
+def invoke_codex(
+    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
+) -> dict[str, Any]:
+    run_reviewer(
+        launch.args,
+        cwd=cwd,
+        launch=launch,
+        timeout=REVIEW_TIMEOUT_SECONDS,
+    )
+    assert launch.output_path is not None
+    try:
+        value = json.loads(launch.output_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # ValueError covers JSONDecodeError and a UnicodeDecodeError from an
+        # output file that is not UTF-8; neither message quotes the file.
+        raise ApproveError(
+            f"Codex did not write valid structured output ({exc}; "
+            f"{review_diagnostic(None)})"
+        ) from exc
+    return validate_review(value, reviewer)
+
+
+def invoke_claude(
+    reviewer: Reviewer, launch: "ReviewerLaunch", cwd: Path
+) -> dict[str, Any]:
+    proc = run_reviewer(
+        launch.args,
         cwd=cwd,
         launch=launch,
         timeout=REVIEW_TIMEOUT_SECONDS,
@@ -2520,10 +2621,12 @@ def invoke_reviewer(
 ) -> dict[str, Any]:
     """Run one reviewer. The order below is the contract (section 2.3):
 
-    roster, then executable, then bytes + hashes + receipt, then the model
-    counter, then the unchanged canonical argv. Everything before the counter
-    can refuse with zero subprocesses and `model_called` false; everything
-    after it is a charged run that is never retried.
+    roster, then executable, then bytes + hashes, then the reviewer-specific
+    command (Codex's schema and output paths), then the receipt, then the
+    model counter immediately before the spawn, then the canonical argv.
+    Everything before the counter can refuse with zero subprocesses and
+    `model_called` false; everything after it is a charged run that is never
+    retried.
     """
     require_model_roster()
     resolved = resolve_reviewer_executable(reviewer)
@@ -2534,24 +2637,39 @@ def invoke_reviewer(
             f"{reviewer.display_name}: the review prompt is not valid UTF-8 "
             f"({exc.reason}); no reviewer was started"
         ) from exc
-    receipt = review_receipt(reviewer, provenance, resolved, stdin)
-    write_review_receipt(receipt)
-    # Counted before the call, not after: a model that ran and then failed,
-    # timed out, or returned unparseable output still ran.
-    note_model_invocation()
-    launch = ReviewerLaunch(stdin=stdin, executable=resolved, receipt=receipt)
-    try:
-        if reviewer.key == "codex":
-            review = invoke_codex(reviewer, launch, cwd)
-        else:
-            review = invoke_claude(reviewer, launch, cwd)
-    except ReviewerRunError:
-        raise
-    except ReviewerStopped as exc:
-        exc.receipt = receipt
-        raise
-    except ApproveError as exc:
-        raise ReviewerRunError(str(exc), receipt) from exc
+    with contextlib.ExitStack() as stack:
+        try:
+            args, output_path = prepare_reviewer_command(reviewer, cwd, stack)
+        except OSError as exc:
+            raise ApproveError(
+                f"{reviewer.display_name}: the reviewer command could not be "
+                f"prepared ({exc}); no reviewer was started and no model was invoked"
+            ) from exc
+        receipt = review_receipt(reviewer, provenance, resolved, stdin)
+        write_review_receipt(receipt)
+        launch = ReviewerLaunch(
+            stdin=stdin,
+            executable=resolved,
+            receipt=receipt,
+            args=args,
+            output_path=output_path,
+        )
+        # Counted before the call, not after: a model that ran and then failed,
+        # timed out, or returned unparseable output still ran. Nothing that can
+        # fail without a spawn sits between this and the spawn.
+        note_model_invocation()
+        try:
+            if reviewer.key == "codex":
+                review = invoke_codex(reviewer, launch, cwd)
+            else:
+                review = invoke_claude(reviewer, launch, cwd)
+        except ReviewerRunError:
+            raise
+        except ReviewerStopped as exc:
+            exc.receipt = receipt
+            raise
+        except ApproveError as exc:
+            raise ReviewerRunError(str(exc), receipt) from exc
     review["provenance"] = {
         "brief_sha256": receipt["brief_sha256"],
         "prompt_sha256": receipt["prompt_sha256"],
@@ -2770,7 +2888,6 @@ def process_issue(
         f"Issue #{number}: {mode} origin={expected_origin_name(origin)} "
         f"with {reviewer_route(reviewers)} (spec {spec_sha[:12]})"
     )
-    clear_verdict_labels(ctx, issue)
     worktree, base_sha = make_review_worktree(ctx, number)
     reviews: list[dict[str, Any]] = []
     try:
@@ -2831,6 +2948,12 @@ def process_issue(
         parent_spec=parent_spec,
         trigger=trigger,
     )
+    # Every label write waits until a verdict can be published: a reviewer that
+    # fails or stops (or a second reviewer that does after the first
+    # succeeded) leaves the repository's labels exactly as they were, with no
+    # label provisioned and no stale verdict label removed.
+    ensure_verdict_labels(ctx)
+    clear_verdict_labels(ctx, refreshed_issue)
     comment_url = post_comment(ctx, number, body)
     set_verdict_label(ctx, number, verdict)
     log(f"Issue #{number}: published {verdict} at {comment_url}")
@@ -2989,8 +3112,6 @@ def daemon_loop(
     lock = acquire_lock(ctx, mode="daemon")
     queue_failures = 0
     try:
-        if not dry_run:
-            ensure_verdict_labels(ctx)
         while True:
             try:
                 selected = select_candidate(ctx, legacy_policy=legacy_policy)
@@ -3067,6 +3188,9 @@ def _review_one_locked(
                 f"Issue #{number} remains INVALID at {marker.get('comment_url')}"
             )
         log(f"Issue #{number}: current cross-agent review already exists")
+        # Reconciling a current marker is a publication: no reviewer runs, and
+        # the labels it writes must exist.
+        ensure_verdict_labels(ctx)
         set_verdict_label(ctx, number, marker.get("verdict") or "CHANGES_REQUESTED")
     else:
         process_issue(ctx, issue, comments, reviewers)
@@ -3097,7 +3221,6 @@ def review_one(
         raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="single", issue_number=number)
     try:
-        ensure_verdict_labels(ctx)
         return _review_one_locked(ctx, number, legacy_policy=legacy_policy)
     finally:
         release_lock(lock)
@@ -3118,7 +3241,6 @@ def review_batch(
     results: list[dict[str, Any]] = []
     stopped_at: int | None = None
     try:
-        ensure_verdict_labels(ctx)
         for number in numbers:
             status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
             results.append(status)
@@ -3166,7 +3288,6 @@ def rereview_one(
         raise pipeline_halt_error(incident)
     lock = acquire_lock(ctx, mode="rereview", issue_number=number)
     try:
-        ensure_verdict_labels(ctx)
         issue = get_issue(ctx, number)
         comments = get_comments(ctx, number)
         origin = issue_origin(issue.get("body") or "")
@@ -4135,7 +4256,6 @@ def review_queue(ctx: RepoContext, *, legacy_policy: str) -> dict[str, Any]:
             return review_queue_barrier_result(locked["issue"], model_called=False)
         number = locked["issue"]
         spec_sha = locked["status"]["spec_sha"]
-        ensure_verdict_labels(ctx)
         status = _review_one_locked(ctx, number, legacy_policy=legacy_policy)
     finally:
         release_lock(lock)

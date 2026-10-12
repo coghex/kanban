@@ -2419,7 +2419,8 @@ class OrderedReviewBatchTests(unittest.TestCase):
             result = approve_issues.review_batch(
                 self.ctx, numbers, legacy_policy="dual"
             )
-        ensure.assert_called_once_with(self.ctx)
+        # Labels are provisioned when a verdict is published, never at entry.
+        ensure.assert_not_called()
         return result, events
 
     def test_holds_one_lock_while_reviewing_every_issue_in_input_order(self):
@@ -3177,13 +3178,15 @@ class ReviewQueueLockTests(ReviewQueueHarness):
             self.run_queue()
         self.assertEqual(self.kinds()[-1], "release")
 
-    def test_no_label_is_created_before_the_lock_is_held(self):
+    def test_no_label_is_created_before_the_lock_is_held_or_a_verdict_is_published(self):
         self.inventory = [make_issue(7, created_at="2026-01-01T00:00:00Z")]
         self.review_results = {7: self.status(7, approved=True)}
         self.run_queue()
         kinds = self.kinds()
         self.assertLess(kinds.index("acquire"), kinds.index("review"))
-        self.ensure.assert_called_once_with(self.ctx)
+        # The entry point provisions nothing; _review_one_locked (stubbed
+        # here) and process_issue do, at publication.
+        self.ensure.assert_not_called()
 
     def test_the_locked_rescan_replaces_the_pre_scan_candidate(self):
         self.inventory = [
@@ -3975,8 +3978,9 @@ review = {{
     "open_decisions": [],
     "recommended_disposition": [],
 }}
-if os.environ.get("FAKE_REVIEW_JSON"):
-    review = json.loads(os.environ["FAKE_REVIEW_JSON"])
+_override = os.environ.get("FAKE_REVIEW_JSON_" + Path(sys.argv[0]).name.upper()) or os.environ.get("FAKE_REVIEW_JSON")
+if _override:
+    review = json.loads(_override)
 if mode == "warn_then_ok":
     sys.stderr.write("WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)\\n")
 elif mode == "late_warning_then_ok":
@@ -3991,7 +3995,17 @@ elif mode == "denied_exit":
 elif mode == "plain_failure":
     sys.stderr.write("error: no such file or directory: notes/missing.md\\n")
     sys.exit(3)
-if "-o" in sys.argv:
+if mode == "garbage_output":
+    if "-o" in sys.argv:
+        Path(sys.argv[sys.argv.index("-o") + 1]).write_text("SECRET-RAW-OUTPUT not json", encoding="utf-8")
+    else:
+        sys.stdout.write("SECRET-RAW-OUTPUT not json")
+elif mode == "non_utf8_output":
+    if "-o" in sys.argv:
+        Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"\\xff\\xfeSECRET-RAW-OUTPUT")
+    else:
+        sys.stdout.buffer.write(b"\\xff\\xfeSECRET-RAW-OUTPUT")
+elif "-o" in sys.argv:
     Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps(review), encoding="utf-8")
 else:
     sys.stdout.write(json.dumps({{"result": json.dumps(review)}}))
@@ -4047,7 +4061,7 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
         )
 
     @contextlib.contextmanager
-    def environment(self, fake_mode="ok", path=None, fake_review=None):
+    def environment(self, fake_mode="ok", path=None, fake_review=None, fake_reviews=None):
         env = {
             "PATH": str(self.bin) if path is None else path,
             "FAKE_MODE": fake_mode,
@@ -4057,6 +4071,8 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
         }
         if fake_review is not None:
             env["FAKE_REVIEW_JSON"] = json.dumps(fake_review)
+        for key, per_reviewer in (fake_reviews or {}).items():
+            env["FAKE_REVIEW_JSON_" + key.upper()] = json.dumps(per_reviewer)
         with (
             mock.patch.dict(os.environ, env),
             mock.patch.object(approve_issues, "LOG_DIR", self.logdir),
@@ -4285,6 +4301,11 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
                 side_effect=lambda *a: writes.append(("clear_verdict_labels", a)),
             ),
             mock.patch.object(
+                approve_issues,
+                "ensure_verdict_labels",
+                side_effect=lambda *a: writes.append(("ensure_verdict_labels", a)),
+            ),
+            mock.patch.object(
                 approve_issues, "make_review_worktree", return_value=(self.work, "b" * 40)
             ),
             mock.patch.object(approve_issues, "remove_review_worktree"),
@@ -4320,10 +4341,9 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
                 writes, error, notified, invocations = self.process_with_fake_review(
                     reviewer, self.STOPPED_REVIEW
                 )
-                # No comment, label, marker or post-review read: the only
-                # write-shaped call is the stale-label clear process_issue has
-                # always made before any reviewer runs.
-                self.assertEqual(writes, [("clear_verdict_labels", writes[0][1])])
+                # No comment, label, label clear, label provisioning, marker
+                # or post-review read.
+                self.assertEqual(writes, [])
                 self.assertIsInstance(error, approve_issues.ApproveError)
                 self.assertNotIsInstance(error, approve_issues.InvalidIssueError)
                 self.assertIsInstance(error.__cause__, approve_issues.ReviewerStopped)
@@ -4415,7 +4435,16 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
         published = []
         with (
             self.environment(fake_review=review),
-            mock.patch.object(approve_issues, "clear_verdict_labels"),
+            mock.patch.object(
+                approve_issues,
+                "clear_verdict_labels",
+                side_effect=lambda *a: published.append(("clear", a)),
+            ),
+            mock.patch.object(
+                approve_issues,
+                "ensure_verdict_labels",
+                side_effect=lambda *a: published.append(("ensure", a)),
+            ),
             mock.patch.object(
                 approve_issues, "make_review_worktree", return_value=(self.work, "b" * 40)
             ),
@@ -4433,8 +4462,12 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
             approve_issues.process_issue(
                 ctx, issue, [], [approve_issues.CODEX_REVIEWER]
             )
-        self.assertEqual([kind for kind, _ in published], ["comment", "label"])
-        self.assertEqual(published[1][1][1:], (9, "CHANGES_REQUESTED"))
+        # Publication is where the labels are provisioned and the stale one
+        # is cleared, in that order, before the comment and the new label.
+        self.assertEqual(
+            [kind for kind, _ in published], ["ensure", "clear", "comment", "label"]
+        )
+        self.assertEqual(published[3][1][1:], (9, "CHANGES_REQUESTED"))
 
     # -- rejected results name their verdict and a bounded summary ---------
 
@@ -4467,7 +4500,7 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
         writes, error, notified, invocations = self.process_with_fake_review(
             approve_issues.CODEX_REVIEWER, review
         )
-        self.assertEqual([name for name, _ in writes], ["clear_verdict_labels"])
+        self.assertEqual(writes, [])
         self.assertEqual(invocations, 1)
         logged = [
             line
@@ -4510,6 +4543,353 @@ class ReviewerLaunchHardeningTests(unittest.TestCase):
                 with self.assertRaises(approve_issues.ApproveError) as caught:
                     approve_issues.validate_review(value, approve_issues.CODEX_REVIEWER)
                 self.assertIn(expected, str(caught.exception))
+
+    # -- label writes wait for a publishable verdict ------------------------
+
+    VERDICT_LABELS = ("reviewed:approve", "reviewed:changes")
+
+    @contextlib.contextmanager
+    def label_gate(self, reviewers, *, issue_labels=(), repo_labels=(), fake_reviews=None,
+                   fake_review=None):
+        """The real review_one path with every GitHub effect recorded.
+
+        `effects` collects every `gh` write the backend attempts through
+        `run` plus every comment; reads are served from the fixtures.
+        """
+        ctx = approve_issues.RepoContext(
+            path=self.work, repo_slug="coghex/kanban", default_branch="master"
+        )
+        issue = {
+            "number": 9,
+            "title": "t",
+            "body": "body\n<!-- issue-origin:claude -->",
+            "labels": [{"name": name} for name in issue_labels],
+        }
+        effects = []
+
+        def record_run(args, **kwargs):
+            effects.append(tuple(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with (
+            self.environment(fake_review=fake_review, fake_reviews=fake_reviews),
+            mock.patch.object(approve_issues, "MODEL_INVOCATIONS", 0),
+            mock.patch.object(approve_issues, "no_agent_mode", return_value=False),
+            mock.patch.object(approve_issues, "blocking_pipeline_incident", return_value=None),
+            mock.patch.object(approve_issues, "acquire_lock", return_value=object()),
+            mock.patch.object(approve_issues, "release_lock"),
+            mock.patch.object(approve_issues, "get_issue", return_value=issue),
+            mock.patch.object(approve_issues, "get_comments", return_value=[]),
+            mock.patch.object(
+                approve_issues, "repository_label_names", return_value=set(repo_labels)
+            ),
+            mock.patch.object(approve_issues, "run", side_effect=record_run),
+            mock.patch.object(approve_issues, "reviewers_for_origin", return_value=reviewers),
+            mock.patch.object(
+                approve_issues, "make_review_worktree", return_value=(self.work, "b" * 40)
+            ),
+            mock.patch.object(approve_issues, "remove_review_worktree"),
+            mock.patch.object(approve_issues, "review_dossier", return_value={"issue": {}}),
+            mock.patch.object(approve_issues, "notify_model_failure"),
+            mock.patch.object(
+                approve_issues,
+                "post_comment",
+                side_effect=lambda *a: effects.append(("post_comment",)) or "url",
+            ),
+        ):
+            yield ctx, effects
+
+    def test_a_stop_leaves_labels_exactly_as_they_were_on_every_review_entry(self):
+        for reviewer in (approve_issues.CODEX_REVIEWER, approve_issues.CLAUDE_REVIEWER):
+            with self.subTest(reviewer=reviewer.key):
+                # Both verdict labels already present on the issue AND both
+                # missing from the repository: the stop must neither strip the
+                # one nor provision the other.
+                with self.label_gate(
+                    [reviewer],
+                    issue_labels=self.VERDICT_LABELS,
+                    repo_labels=(),
+                    fake_review=self.STOPPED_REVIEW,
+                ) as (ctx, effects):
+                    with self.assertRaises(approve_issues.ApproveError) as caught:
+                        approve_issues.review_one(ctx, 9, legacy_policy="dual")
+                    self.assertIn("stopped on a denial", str(caught.exception))
+                    self.assertEqual(approve_issues.model_invocation_count(), 1)
+                self.assertEqual(effects, [])
+
+    def test_a_stop_in_a_batch_rereview_and_queue_entry_also_writes_no_label(self):
+        reviewer = approve_issues.CODEX_REVIEWER
+        with self.label_gate(
+            [reviewer], issue_labels=self.VERDICT_LABELS, fake_review=self.STOPPED_REVIEW
+        ) as (ctx, effects):
+            with self.assertRaises(approve_issues.ApproveError):
+                approve_issues.review_batch(ctx, [9, 10], legacy_policy="dual")
+        self.assertEqual(effects, [])
+
+    def test_a_dual_review_whose_second_reviewer_stops_publishes_nothing_and_launches_no_third(self):
+        approve = {
+            **self.STOPPED_REVIEW,
+            "verdict": "APPROVE",
+            "summary": "Fine.",
+        }
+        with self.label_gate(
+            [approve_issues.CODEX_REVIEWER, approve_issues.CLAUDE_REVIEWER],
+            issue_labels=self.VERDICT_LABELS,
+            repo_labels=(),
+            fake_reviews={"codex": approve, "claude": self.STOPPED_REVIEW},
+        ) as (ctx, effects):
+            with self.assertRaises(approve_issues.ApproveError) as caught:
+                approve_issues.review_one(ctx, 9, legacy_policy="dual")
+            self.assertIn("stopped on a denial", str(caught.exception))
+            self.assertIn("Claude", str(caught.exception))
+            self.assertEqual(approve_issues.model_invocation_count(), 2)
+        launched = [item["argv"][0] for item in self.invocations()]
+        self.assertEqual(launched, ["exec", "-p"], "codex then claude, no third")
+        self.assertEqual(effects, [], "no partial publication of the first review")
+
+    def test_a_published_verdict_provisions_then_clears_then_comments_in_that_order(self):
+        approve = {**self.STOPPED_REVIEW, "verdict": "APPROVE", "summary": "Fine."}
+        with self.label_gate(
+            [approve_issues.CODEX_REVIEWER],
+            issue_labels=("reviewed:changes",),
+            repo_labels=(),
+            fake_review=approve,
+        ) as (ctx, effects):
+            with mock.patch.object(approve_issues, "set_verdict_label") as set_label:
+                set_label.side_effect = lambda *a: effects.append(("set_verdict_label", a[1:]))
+                approve_issues.process_issue(
+                    ctx,
+                    approve_issues.get_issue(ctx, 9),
+                    [],
+                    [approve_issues.CODEX_REVIEWER],
+                )
+        kinds = [
+            "label-create" if e[:3] == ("gh", "label", "create")
+            else "label-clear" if e[:3] == ("gh", "issue", "edit")
+            else e[0]
+            for e in effects
+        ]
+        self.assertEqual(
+            kinds,
+            ["label-create", "label-create", "label-clear", "post_comment", "set_verdict_label"],
+        )
+        created = sorted(e[3] for e in effects if e[:3] == ("gh", "label", "create"))
+        self.assertEqual(created, sorted(self.VERDICT_LABELS + ("reviewed:revised",))
+                         if "reviewed:revised" in approve_issues.VERDICT_LABEL_SPECS else created)
+        clear = next(e for e in effects if e[:3] == ("gh", "issue", "edit"))
+        self.assertIn("--remove-label", clear)
+        self.assertIn("reviewed:changes", clear)
+
+    def test_reconciling_a_current_marker_still_provisions_labels_before_setting_one(self):
+        order = []
+        with (
+            mock.patch.object(approve_issues, "blocking_pipeline_incident", return_value=None),
+            mock.patch.object(
+                approve_issues, "get_issue", return_value={"number": 9, "body": "x", "labels": []}
+            ),
+            mock.patch.object(approve_issues, "get_comments", return_value=[]),
+            mock.patch.object(approve_issues, "issue_origin", return_value="claude"),
+            mock.patch.object(
+                approve_issues, "reviewers_for_origin",
+                return_value=[approve_issues.CODEX_REVIEWER],
+            ),
+            mock.patch.object(
+                approve_issues, "latest_review_record",
+                return_value=({"id": 1}, {"verdict": "APPROVE"}),
+            ),
+            mock.patch.object(approve_issues, "review_record_matches", return_value=True),
+            mock.patch.object(
+                approve_issues, "ensure_verdict_labels",
+                side_effect=lambda *a: order.append("ensure"),
+            ),
+            mock.patch.object(
+                approve_issues, "set_verdict_label",
+                side_effect=lambda *a: order.append("set"),
+            ),
+            mock.patch.object(approve_issues, "process_issue") as process,
+            mock.patch.object(approve_issues, "current_gate_status", return_value={}),
+            mock.patch.object(approve_issues, "apply_pipeline_circuit_breaker", return_value={}),
+            mock.patch.object(approve_issues, "log"),
+        ):
+            approve_issues._review_one_locked(
+                approve_issues.RepoContext(
+                    path=self.work, repo_slug="coghex/kanban", default_branch="master"
+                ),
+                9,
+                legacy_policy="dual",
+            )
+        process.assert_not_called()
+        self.assertEqual(order, ["ensure", "set"])
+
+    # -- malformed results get bounded, scalar-only diagnostics --------------
+
+    HOSTILE = "SECRET-LIST-ITEM"
+
+    def assert_scalar_diagnostic(self, error, *, verdict, summary):
+        text = str(error)
+        self.assertIn(f"verdict={verdict}, summary={summary}", text)
+        self.assertNotIn(self.HOSTILE, text)
+        self.assertNotIn("SECRET-RAW-OUTPUT", text)
+        self.assertNotIn("\n", text)
+        return text
+
+    def test_every_validation_rejection_names_scalar_fields_only(self):
+        good = {**self.STOPPED_REVIEW, "verdict": "APPROVE", "summary": "Line one\nline two."}
+        cases = {
+            "unexpected fields": ({**good, "extra": [self.HOSTILE]}, "'APPROVE'", "'Line one line two.'"),
+            "missing fields": (
+                {"verdict": "APPROVE", "summary": "s", "corrections": [self.HOSTILE]},
+                "'APPROVE'", "'s'",
+            ),
+            "invalid verdict": ({**good, "verdict": "MAYBE"}, "'MAYBE'", "'Line one line two.'"),
+            "list verdict": ({**good, "verdict": [self.HOSTILE]}, "<unavailable: list>", "'Line one line two.'"),
+            "object verdict": ({**good, "verdict": {"k": self.HOSTILE}}, "<unavailable: dict>", "'Line one line two.'"),
+            "number verdict": ({**good, "verdict": 7}, "<unavailable: int>", "'Line one line two.'"),
+            "missing verdict": (
+                {k: v for k, v in good.items() if k != "verdict"} | {"x": [self.HOSTILE]},
+                "<unavailable>", "'Line one line two.'",
+            ),
+            "empty summary": ({**good, "summary": "  "}, "'APPROVE'", "<unavailable: empty>"),
+            "mistyped summary": ({**good, "summary": [self.HOSTILE]}, "'APPROVE'", "<unavailable: list>"),
+            "invalid list": ({**good, "corrections": [self.HOSTILE, 3]}, "'APPROVE'", "'Line one line two.'"),
+            "list not a list": ({**good, "corrections": self.HOSTILE}, "'APPROVE'", "'Line one line two.'"),
+            "approve with decision": ({**good, "open_decisions": [self.HOSTILE]}, "'APPROVE'", "'Line one line two.'"),
+            "changes without blocker": ({**good, "verdict": "CHANGES_REQUESTED", "corrections": [self.HOSTILE]}, "'CHANGES_REQUESTED'", "'Line one line two.'"),
+            "invalid without disposition": ({**good, "verdict": "INVALID", "corrections": [self.HOSTILE]}, "'INVALID'", "'Line one line two.'"),
+            "stopped with list": ({**good, "verdict": "STOPPED", "supporting_context": [self.HOSTILE]}, "'STOPPED'", "'Line one line two.'"),
+        }
+        for name, (value, verdict, summary) in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(approve_issues.ApproveError) as caught:
+                    approve_issues.validate_review(value, approve_issues.CODEX_REVIEWER)
+                self.assertNotIsInstance(caught.exception, approve_issues.ReviewerStopped)
+                self.assert_scalar_diagnostic(caught.exception, verdict=verdict, summary=summary)
+
+    def test_a_non_object_result_gets_unavailable_placeholders(self):
+        for value, shown in (
+            ("SECRET-RAW-OUTPUT", "<unavailable>"),
+            ([{"verdict": "APPROVE"}, self.HOSTILE], "<unavailable>"),
+            (None, "<unavailable>"),
+            (42, "<unavailable>"),
+        ):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(approve_issues.ApproveError) as caught:
+                    approve_issues.validate_review(value, approve_issues.CLAUDE_REVIEWER)
+                text = self.assert_scalar_diagnostic(
+                    caught.exception, verdict=shown, summary=shown
+                )
+                self.assertIn("non-object review", text)
+
+    def test_unparseable_claude_output_never_copies_the_raw_output(self):
+        raw = "SECRET-RAW-OUTPUT " + self.HOSTILE
+        for stdout in (raw, json.dumps({"result": raw}), json.dumps({"result": "[" + raw})):
+            with self.subTest(stdout=stdout[:20]):
+                with self.assertRaises(approve_issues.ApproveError) as caught:
+                    approve_issues.parse_claude_output(stdout)
+                self.assert_scalar_diagnostic(
+                    caught.exception, verdict="<unavailable>", summary="<unavailable>"
+                )
+        with self.assertRaises(approve_issues.ApproveError) as caught:
+            approve_issues.parse_claude_output(
+                json.dumps({"is_error": True, "result": "Credit balance\nis too low " + "x" * 900})
+            )
+        text = str(caught.exception)
+        self.assertTrue(text.startswith("Claude reported an error: Credit balance is too low"))
+        self.assertNotIn("\n", text)
+        self.assertLessEqual(len(text), len("Claude reported an error: ") + 500)
+        with self.assertRaises(approve_issues.ApproveError) as caught:
+            approve_issues.parse_claude_output(json.dumps({"is_error": True, "result": [self.HOSTILE]}))
+        self.assertNotIn(self.HOSTILE, str(caught.exception))
+
+    def test_malformed_output_from_a_fake_reviewer_is_a_charged_scalar_failure(self):
+        for fake_mode in ("garbage_output", "non_utf8_output"):
+            for backend in (approve_issues.CODEX_REVIEWER, approve_issues.CLAUDE_REVIEWER):
+                with self.subTest(fake_mode=fake_mode, reviewer=backend.key):
+                    counted = approve_issues.model_invocation_count()
+                    with self.assertRaises(approve_issues.ApproveError) as caught:
+                        self.invoke(backend, "initial", fake_mode=fake_mode)
+                    self.assertEqual(approve_issues.model_invocation_count(), counted + 1)
+                    self.assertIsInstance(caught.exception, approve_issues.ReviewerRunError)
+                    self.assert_scalar_diagnostic(
+                        caught.exception, verdict="<unavailable>", summary="<unavailable>"
+                    )
+
+    def test_a_malformed_list_or_object_verdict_is_an_ordinary_reviewer_failure(self):
+        # Used to be an uncaught TypeError (an unhashable set member).
+        for verdict in ([self.HOSTILE], {"k": 1}):
+            for backend in (approve_issues.CODEX_REVIEWER, approve_issues.CLAUDE_REVIEWER):
+                with self.subTest(verdict=type(verdict).__name__, reviewer=backend.key):
+                    with self.assertRaises(approve_issues.ReviewerRunError) as caught:
+                        self.invoke(
+                            backend, "initial",
+                            fake_review={**self.STOPPED_REVIEW, "verdict": verdict},
+                        )
+                    self.assert_scalar_diagnostic(
+                        caught.exception,
+                        verdict=f"<unavailable: {type(verdict).__name__}>",
+                        summary=repr(self.STOPPED_REVIEW["summary"]),
+                    )
+
+    # -- reviewer preparation happens before the counter ---------------------
+
+    def test_a_temporary_directory_failure_is_a_controlled_refusal_with_no_count(self):
+        counted = approve_issues.model_invocation_count()
+        with (
+            mock.patch.object(
+                approve_issues.tempfile, "TemporaryDirectory", side_effect=OSError("no space")
+            ),
+            self.assertRaises(approve_issues.ApproveError) as caught,
+        ):
+            self.invoke(approve_issues.CODEX_REVIEWER, "initial")
+        self.assertNotIsInstance(caught.exception, OSError)
+        self.assertNotIsInstance(caught.exception, approve_issues.ReviewerRunError)
+        self.assertIn("could not be prepared", str(caught.exception))
+        self.assertIn("no model was invoked", str(caught.exception))
+        self.assertEqual(approve_issues.model_invocation_count(), counted)
+        self.assertEqual(self.invocations(), [])
+        self.assertEqual(self.receipts(), [], "no receipt for a launch that never reached the spawn")
+
+    def test_a_schema_write_failure_is_a_controlled_refusal_and_removes_the_directory(self):
+        made = []
+        real = tempfile.TemporaryDirectory
+
+        def tracking(*args, **kwargs):
+            directory = real(*args, **kwargs)
+            made.append(directory.name)
+            return directory
+
+        counted = approve_issues.model_invocation_count()
+        with (
+            mock.patch.object(approve_issues.tempfile, "TemporaryDirectory", tracking),
+            mock.patch.object(Path, "write_text", side_effect=OSError("disk full")),
+            self.assertRaises(approve_issues.ApproveError) as caught,
+        ):
+            self.invoke(approve_issues.CODEX_REVIEWER, "initial")
+        self.assertIn("could not be prepared", str(caught.exception))
+        self.assertEqual(approve_issues.model_invocation_count(), counted)
+        self.assertEqual(self.invocations(), [])
+        self.assertEqual(len(made), 1)
+        self.assertFalse(Path(made[0]).exists(), "the partly built directory is removed")
+
+    def test_the_counter_moves_immediately_before_the_spawn(self):
+        order = []
+        real_run = approve_issues.subprocess.run
+        original_note = approve_issues.note_model_invocation
+
+        def note():
+            order.append("count")
+            original_note()
+
+        def spawn(*args, **kwargs):
+            order.append("spawn")
+            return real_run(*args, **kwargs)
+
+        with (
+            mock.patch.object(approve_issues, "note_model_invocation", note),
+            mock.patch.object(approve_issues.subprocess, "run", spawn),
+        ):
+            self.invoke(approve_issues.CODEX_REVIEWER, "initial")
+        self.assertEqual(order, ["count", "spawn"])
 
     # -- C3: hashes and the receipt ----------------------------------------
 

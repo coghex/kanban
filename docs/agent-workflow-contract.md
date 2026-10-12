@@ -792,13 +792,17 @@ existing coordinator error path rather than retrying with another identity.
     transcoding, through a reviewer-only spawn path; `gh`, `git`, and every
     other command keep their text-mode `run`. The order inside one launch is
     the contract: the model roster is checked; the reviewer executable
-    (`codex` or `claude`) is resolved on `PATH`; the stdin bytes, the hashes
-    and the receipt are built, and the receipt is written, flushed, and
-    fsynced to the backend log; only then does the actual-model counter move; and the canonical, unchanged bare `codex` / `claude` argv is
+    (`codex` or `claude`) is resolved on `PATH`; the stdin bytes and the hashes
+    are built; the reviewer-specific command is prepared (for Codex, its
+    temporary directory with the output schema and the result path; removed on
+    every exit); the receipt is written, flushed, and fsynced to the backend
+    log; only then does the actual-model counter move, immediately before the
+    spawn; and the canonical, unchanged bare `codex` / `claude` argv is
     spawned. A roster refusal, an executable that does not resolve, a
-    prompt that cannot be encoded, or a receipt that cannot be persisted is an
-    `ApproveError` with **zero subprocesses and the counter at its prior
-    value**. A spawn-time failure after the count
+    prompt that cannot be encoded, a command that cannot be prepared, or a
+    receipt that cannot be persisted is an `ApproveError` with **zero
+    subprocesses and the counter at its prior value** (a preparation failure
+    writes no receipt, since no launch reached the spawn). A spawn-time failure after the count
     (the resolved file vanished, a bad interpreter) is a *charged* failure and
     is never retried.
   - **Preflight versus the actual-model counter.** The counter behind the
@@ -869,7 +873,14 @@ existing coordinator error path rather than retrying with another identity.
   never a verdict. The backend publishes **no** comment, label, marker, or
   review record for it and fabricates no `CHANGES_REQUESTED`: it ends through
   the same terminal reviewer failure as any other model failure, with no retry
-  or fallback inside the run and the model invocation still counted. The
+  or fallback inside the run and the model invocation still counted. It also
+  writes **no label**: the stale verdict label is cleared and the repository's
+  verdict labels are provisioned only at publication, after every reviewer of
+  the run (both, in a dual review) has returned a verdict, so a stop or any
+  reviewer failure — including a second reviewer's after the first succeeded,
+  which publishes nothing of the first — leaves the issue's labels and the
+  repository's label set exactly as they were. Reconciling a current marker is
+  a publication and provisions the labels it writes. The
   reviewer reports the denial as the verdict `STOPPED`. `validate_review`
   accepts it only with a non-empty `summary` (naming the denied operation) and
   every list empty — a `STOPPED` with a non-empty list, or with an empty
@@ -885,8 +896,13 @@ existing coordinator error path rather than retrying with another identity.
   reached. A result `validate_review` rejects for any other reason names its
   verdict and a bounded summary — one line, at most 500 characters, control
   characters collapsed — in the `ApproveError` text and therefore in the backend
-  log line, never the prompt, the dossier, or any list, so a rejected
-  `INVALID` is distinguishable from a stop expressed as one. That includes one
+  log line, never the prompt, the dossier, any list, or raw output, so a
+  rejected `INVALID` is distinguishable from a stop expressed as one. Only
+  strings are ever shown: a missing, blank, or mistyped (number, list, object)
+  field is replaced by an `<unavailable…>` placeholder naming at most its
+  type, and output that never parsed (malformed JSON, a result that is not an
+  object, an output file that is not UTF-8) reports `verdict=<unavailable>,
+  summary=<unavailable>` and never copies the output into the message. That includes one
   known startup case: a reviewer whose own stderr *begins* with the
   pinned Codex helper's `WARNING: proceeding, even though we could not …`
   line carrying a permission-denial wording is a STOP even when it exits zero
@@ -934,8 +950,9 @@ existing coordinator error path rather than retrying with another identity.
 A raw `reviewed:approve` label is not evidence that an issue is approved now.
 Canonical approval binds an issue to its current specification fingerprint
 through the latest `issue-review:v2` marker, and the backend removes a stale
-verdict label only once an issue enters `process_issue` — so until review
-begins, a label can advertise readiness to any label-only reader against a
+verdict label only when a review is about to publish a verdict — after every
+reviewer has returned one, immediately before the comment — so until a review
+publishes, a label can advertise readiness to any label-only reader against a
 specification no reviewer saw. `--reconcile-approvals` is the bounded authority
 that corrects that, and it is the only one: label-only consumers do not
 reimplement the removal, and `--check` remains read-only.
