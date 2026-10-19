@@ -26,6 +26,8 @@ created above it.
   with a code change with `docs-push` and link it from the pull request body
   instead of committing it to the branch. `/push-docs` remains for draining
   documents already left in `docs-wip`. (Codex: the same, with `$`.)
+  These landings use `docs-push --expect` and `--keep`, so they need the
+  owner's `docs-push` at `~/.codex/skills` revision 024f942 or later.
 - The project-review liveness hooks no longer block a session whose plugin
   bundle has gone. Reinstalling the Codex bundle deletes the cache directory a
   running session's hooks point at; `python3` then exits 2 on the missing
