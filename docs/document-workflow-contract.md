@@ -542,25 +542,16 @@ same run that mutates it, rather than left for a later manual commit.
 - The four **drafting** assets — `/design-epic`, `$design-epic`,
   `/draft-report`, and `$draft-report` — publish nothing through this module.
   A document one of them newly creates is absent from the publication tip, and
-  the module never creates a document (§9.4), so a new document lands through
-  the owning repository's own documentation-landing lane instead: `/push-docs`
-  or `$push-docs` running `tools/docs_land.sh`, whose gate decides whether the
-  path may land directly. For `coghex/kanban` that gate is §7 as
-  `tools/docs_land_paths.py` reads it from the publication tip, so a path no
-  row covers is `pr-atomic` and is refused until a pull request adds the
-  document and its `coordination` classification; only after that pull request
-  lands may a later processing run publish direct-to-`master` mutations to it,
-  and automating that enrollment pull request is outside this contract. A
-  consuming repository whose helper declares no lane split lands the new
-  document directly. `/draft-report` and `$draft-report` invoke that landing
-  once, immediately after the approved report is written: their approval gate
-  announces the landing before the user answers, so the approval of the
-  displayed draft is the user-directed request `push-docs` requires. A run
-  that skipped that gate at the user's instruction has no approval to stand
-  on and lands only if the bypass instruction itself asked for the landing.
-  `/design-epic` and `$design-epic` land nothing on their own, because a design
-  is edited across many conversations and the user chooses when a state of it
-  is worth publishing.
+  the module never creates a document (§9.4), so a new document lands with
+  the owner's `docs-push` tool instead, which puts documentation on the default
+  branch with no review, pull request, or separate landing request.
+  `/draft-report` and `$draft-report` land the report once, immediately after
+  the approved report is written. A run that skipped that gate at the user's
+  instruction lands the same way, because the bypass approved the content.
+  `/design-epic` and `$design-epic` land the design document after every write
+  they make to it, so a design is resumable from any checkout. A document
+  `docs-push` refuses or cannot merge stays in the docs worktree, and the run
+  says so.
 
 The split follows from §9.4 rather than from convenience: the module writes only
 over a document the tip carries or its own recorded predecessor, so a document a
@@ -643,6 +634,11 @@ on it without narrating it: the approved mutation is applied and recorded, the
 run reports its own disposition or capture, and the absent lane, the write root
 and the preserved blob are not recited to the user on every pass. What is
 ordinary here is the configuration, so what the run says about it is nothing.
+An absent lane never leaves the document waiting for a batch: the run then
+lands the applied document itself with `docs-push`, the owner's documentation
+tool, naming that document alone. A document `docs-push` refuses, a conflict,
+or a missing tool leaves it in the docs worktree, and that is reported out
+loud.
 
 ### 9.3 What a publication may contain
 
@@ -768,7 +764,7 @@ seeing no file is the price of never destroying somebody else's write.
 
 **A document that publishes nowhere still takes more than one disposition.**
 Writing only over the publication tip's own baseline is correct exactly once.
-The second approved mutation to a document whose owner lands it out of band
+The second approved mutation to a document that has not landed yet
 arrives to find the first one unlanded in the working copy, and a decline there
 strands the run's tracker transaction where no later run can get past it — the
 defect issue #385 was filed for, observed end to end. So the module says which
@@ -786,10 +782,9 @@ was written; or the working copy is none of those — neither the tip's content,
 this module's own last write, nor the copy the preflight observed — in which
 case it is somebody else's and is never overwritten.
 
-The third is issue #605, and for an owner that lands out of band it is the
-ordinary case rather than the exotic one: every report is processed before its
-first batch landing, so the first disposition of every report arrives at a
-document that has never been on the branch. There is no tip blob to guard that
+The third is issue #605: a report processed before it first lands — a new
+report whose landing failed, or one written by hand and never landed — arrives
+at its first disposition as a document that has never been on the branch. There is no tip blob to guard that
 write with, so the guard is the run's own preflight — `--check-pending` reports
 the working copy's blob as `working_copy_blob`, the asset passes it back as
 `--expected-working-copy`, and the write goes over exactly those bytes or not at
@@ -1194,10 +1189,12 @@ which is a different disposition from the one the record holds. Every
 transaction's disposition is a linked one, since the two that mutate no tracker
 acquire no transaction. Where the module reports `not-published` with
 the approved content applied locally — the ordinary outcome for a `pr-atomic`,
-unmatched, or not-yet-tracked document under §9.1 and §9.2 — the same
-verification runs against the applied local document, which is the only evidence
-there is and a legitimate terminal state for such a document. §9.5's silence
-does not reach this step: the local resolution still runs on that outcome, and
+unmatched, or not-yet-tracked document under §9.1 and §9.2 — the run lands the
+document with `docs-push` and the same verification then runs against the
+branch. Only when `docs-push` could not land it does the verification run
+against the applied local document, which is then the only evidence there is.
+§9.5's silence does not reach this step: the resolution still runs on that
+outcome, and
 only a resolution that succeeds licenses a quiet close. A record this run could
 not resolve keeps its full failure and recovery report however ordinary the
 publication result was — that report is the one thing the ordinary outcome never
@@ -1218,8 +1215,8 @@ or having written it without being able to record that it did — the record
 stays outstanding and the run reports it. That is bounded rather than
 terminal, and the bound is named so no state needs a hand-edited reference to
 leave: the approved content is recovered from the object database, the
-terminal document is reconciled and landed through the owner's ordinary lane,
-out of band or by pull request, and the existing record is then resolved from
+terminal document is reconciled and landed with `docs-push` (or by pull
+request when `docs-push` refuses the path), and the existing record is then resolved from
 the branch. No confirmed tracker mutation is repeated and no reference is
 cleared by hand while that recovery is pending — the record already carries
 every identity the recovered document must name.

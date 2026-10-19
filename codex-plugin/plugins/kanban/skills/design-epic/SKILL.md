@@ -327,20 +327,23 @@ Do not call an unfinished design ready merely so processing can begin.
 
 A document this workflow newly creates never goes through the publication
 module the processing assets invoke: that module publishes an approved mutation
-to a document the publication tip already carries, and never creates one. A new
-design document lands through the owning repository's own documentation-landing
-lane instead — $push-docs and the `tools/docs_land.sh` helper it runs, run from
-`$DOC_ROOT` so the helper it resolves is the owning repository's — whose gate
-decides whether the path may land directly, and only when the user asks for
-that landing. This workflow lands nothing on its own: a design is edited across
-many conversations, and the user chooses when a state of it is worth
-publishing. In `coghex/kanban` an unclassified path is `pr-atomic` and the
-helper refuses it until a pull request adds it and its §7 classification;
-opening that pull request is not this workflow's job. Until it lands, the
-document lives in the docs worktree, and $process-design-doc resumes it there.
+to a document the publication tip already carries, and never creates one. The
+design document lands with the owner's `docs-push` tool instead, which puts
+documentation on the default branch with no review, pull request, or separate
+landing request.
 
-An existing document this workflow resumes is unaffected by the above: whether
-its edits publish is the processing workflows' question.
+After every write this workflow makes to the design document — creating it, and
+each later revision the user accepts — land it from the docs worktree, naming
+that document and nothing else:
+
+```bash
+(cd "$DOCS_WT" && docs-push -m "Design: <subject>" "<path>")
+```
+
+A landed design is resumable from any checkout. When `docs-push` refuses the
+path (the repository lists it as code in its docs-push configuration), stops on
+a conflict, or is not installed, the document stays in the docs worktree: say
+so and quote the message, and $process-design-doc resumes it there.
 
 ## Boundaries and handoff
 

@@ -365,7 +365,7 @@ class RegistrationTests(unittest.TestCase):
         # and no unresolved directive.
         self.assertEqual(
             REFERENCED_WORKFLOWS,
-            {"solve", "pr-review", "pr-rereview", "finalize", "autosolve", "push-docs"},
+            {"solve", "pr-review", "pr-rereview", "finalize", "autosolve"},
         )
         for relative_path, brand in BRAND_OF.items():
             text = read(relative_path)
@@ -577,7 +577,7 @@ class DelegationOverrideTests(unittest.TestCase):
 
 class DocsOnlyLaneTests(unittest.TestCase):
     """Step 3: the judgment call between opening a pull request anyway and
-    landing a documentation-only issue directly through {{cmd:push-docs}},
+    landing a documentation-only issue directly with `docs-push`,
     for an issue whose effective spec routes it away from a pull request.
 
     A third override alongside the two `DelegationOverrideTests` and
@@ -614,33 +614,26 @@ class DocsOnlyLaneTests(unittest.TestCase):
                 )
                 self.assertIn("**Simple**", squashed)
                 self.assertIn(
-                    "land it with {{cmd:push-docs}}", squashed
+                    "land exactly the file or files this issue's trusted spec "
+                    "names with `docs-push`", squashed
                 )
 
-    def test_both_renderings_authorize_the_push_docs_override(self):
-        # push-docs's own contract refuses unprompted publication and demands
-        # a current user-directed request, not an inference from the issue's
-        # wording. The grounding is this command's own advertised
-        # description, per the second-round review, not an ad hoc claim
-        # invented mid-document.
+    def test_both_renderings_bound_the_direct_landing(self):
+        # Documentation lands with docs-push without a separate request, so
+        # the bound that matters is scope: only the files the trusted spec
+        # names, never another document folded in.
         for relative_path, brand in BRAND_OF.items():
             squashed = flat(neutralize(read(relative_path), brand))
             with self.subTest(asset=relative_path):
                 self.assertIn(
-                    "Invoking {{cmd:autosolve}} for this issue is the "
-                    "user-directed publication request {{cmd:push-docs}} "
-                    "requires: this command's own description names direct "
-                    "documentation landing as one of its outcomes",
+                    "Documentation needs no separate landing request, but this "
+                    "landing reaches only those files", squashed
+                )
+                self.assertIn(
+                    "do not fold any other document in while doing this",
                     squashed,
                 )
-                self.assertIn(
-                    "never a request this session inferred on its own from "
-                    "the issue's wording", squashed
-                )
-                self.assertIn(
-                    "That authorization reaches only the file or files this "
-                    "issue's trusted spec names", squashed
-                )
+                self.assertNotIn("{{cmd:push-docs}}", squashed)
 
     def test_both_renderings_describe_the_direct_land_outcome_up_front(self):
         # The grounding above only holds if the command's own description --
@@ -723,7 +716,7 @@ class DocsOnlyLaneTests(unittest.TestCase):
                 )
 
     def test_both_renderings_gate_simple_on_the_checkout_matching_repo(self):
-        # PR #623 review: push-docs always lands on this checkout's own
+        # PR #623 review: docs-push always lands on this checkout's own
         # origin/master, which is not `$REPO` when solve is pointed at an
         # upstream from a fork checkout. Direct landing must refuse that
         # case instead of publishing to the wrong repository and then
@@ -732,9 +725,9 @@ class DocsOnlyLaneTests(unittest.TestCase):
             squashed = flat(neutralize(read(relative_path), brand))
             with self.subTest(asset=relative_path):
                 self.assertIn(
-                    "`{{cmd:push-docs}}`'s landing helper always publishes to "
-                    "this checkout's own `origin/master`, never to a `$REPO` "
-                    "a fork checkout only reaches by the pull request path's "
+                    "`docs-push` always publishes to this checkout's own "
+                    "`origin` default branch, never to a `$REPO` a fork "
+                    "checkout only reaches by the pull request path's "
                     "owner-qualified head", squashed
                 )
                 self.assertIn(

@@ -1,6 +1,6 @@
 ---
 name: push-docs
-description: Land documentation from the docs worktree straight onto master through the tracked tools/docs_land.sh helper — named paths land exactly, an explicit all-docs request lands every eligible candidate, and a request with no selection produces an inventory to choose from. Use when the user invokes {{cmd:push-docs}} or asks to land, publish, or batch documentation from the docs-wip worktree.
+description: Drain documentation left over in the docs-wip worktree onto master through the tracked tools/docs_land.sh helper — named paths land exactly, an explicit all-docs request lands every eligible candidate, and a request with no selection produces an inventory to choose from. New documentation lands with docs-push as soon as it is ready and never waits for this. Use when the user invokes {{cmd:push-docs}} or asks to land or batch documentation already sitting in the docs-wip worktree.
 argument-hint: "[docs/<file>.md ... | all docs] — repository-relative Markdown paths, an explicit broad selection, or empty for the inventory"
 ---
 
@@ -9,6 +9,12 @@ argument-hint: "[docs/<file>.md ... | all docs] — repository-relative Markdown
 Run this in a **Class B** session (see the `model-classes` skill).
 
 ## Goal
+
+New documentation never waits for this workflow: every workflow lands what it
+writes with the owner's `docs-push` tool as soon as it is ready, from whatever
+worktree it is in. This workflow exists to drain documentation that was left in
+the `docs-wip` worktree before that rule, or by a run whose `docs-push` landing
+failed.
 
 Land one or more documentation files from the `docs-wip` worktree straight
 onto `master` through the repository's tracked landing helper,
@@ -21,8 +27,8 @@ checkout only when it is clean and unobstructed. This workflow's job is to
 choose the paths,
 write the commit subject, and relay the helper's answers faithfully.
 
-This lane is user-directed publication. Never run a landing the user did not
-ask for, and never use it to publish your own work unprompted.
+Run it when the user invokes it or asks to land the docs worktree's backlog;
+your own new documents land with `docs-push` instead.
 
 ## Preconditions
 

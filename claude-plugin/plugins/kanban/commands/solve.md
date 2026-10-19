@@ -118,14 +118,14 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 ## Ship
 
 1. Review `git status` and the diff in the worktree. Do not include unrelated user changes.
-2. Commit the implementation, splitting only genuinely separate concerns into separate commits.
+2. Commit the implementation, splitting only genuinely separate concerns into separate commits. Documentation that goes with the change — design notes, contracts, verdicts, evidence write-ups — is not committed to the branch: once it is final, land it from this worktree with `docs-push -m <message> <paths>` and link each landed file from the PR body as `Docs: <path> @ <commit>`, so a docs fix never costs a re-review or a CI run. Markdown that is code — skill and command files, plugin bundles, `.github/`, documents a test reads — stays on the branch; `docs-push` refuses those and says why.
 3. Push the branch with `-u` to the worked checkout's own push remote, then open the PR in the established repository:
 
    ```bash
    gh pr create -R "$REPO" --base <default-branch> --head <push-owner>:<branch> --title <title> --body <body>
    ```
 
-   `$REPO` scopes pull-request metadata only; the branch itself still goes to the checkout's push remote, and the base is `$REPO`'s branch of the same name the worktree branched from. Supply the owner-qualified `--head <push-owner>:<branch>` whenever that push remote is a repository other than `$REPO`, since GitHub needs it to open the cross-repository pull request; if GitHub cannot open one at all (unrelated repositories, no fork relationship), stop and report the pushed branch rather than opening a pull request in the push remote's repository. Confirm the returned pull-request URL names `$REPO`. The body must include `Closes #<issue>`, a short approach summary, the exact checks run, and `<!-- pr-origin:claude -->` as the final line for opposite-brand review routing. If authoritative comments amended or clarified the body, include a concise spec note identifying what comment-derived requirements were implemented.
+   `$REPO` scopes pull-request metadata only; the branch itself still goes to the checkout's push remote, and the base is `$REPO`'s branch of the same name the worktree branched from. Supply the owner-qualified `--head <push-owner>:<branch>` whenever that push remote is a repository other than `$REPO`, since GitHub needs it to open the cross-repository pull request; if GitHub cannot open one at all (unrelated repositories, no fork relationship), stop and report the pushed branch rather than opening a pull request in the push remote's repository. Confirm the returned pull-request URL names `$REPO`. The body must include `Closes #<issue>`, a short approach summary, the exact checks run, any `Docs:` lines, and `<!-- pr-origin:claude -->` as the final line for opposite-brand review routing. If authoritative comments amended or clarified the body, include a concise spec note identifying what comment-derived requirements were implemented.
 4. If the work is abandoned before opening the PR, release the issue claim.
 
 ## Stop Condition

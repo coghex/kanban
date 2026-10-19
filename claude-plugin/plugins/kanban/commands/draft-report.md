@@ -216,7 +216,7 @@ not a request that must already be organized or precisely worded.
    final response. Do not summarize in place of the draft or omit chapters for
    length.
 2. State explicitly that no report file has been written yet and that approval
-   also lands the written report through /push-docs, as Landing describes,
+   also lands the written report with `docs-push`, as Landing describes,
    then ask the user to approve the draft or request changes.
 3. Do not create or edit the report before explicit approval. The initial
    request to run `/draft-report`, create a report, or investigate a subject is
@@ -225,8 +225,8 @@ not a request that must already be organized or precisely worded.
    updated version again. Approval applies only to the latest version the user
    has seen.
 5. Skip this gate only when the user explicitly instructs this invocation to
-   bypass draft review and write without approval. A skipped gate authorizes
-   no landing; Landing says what a bypassed run may do.
+   bypass draft review and write without approval; Landing says how a
+   bypassed run lands.
 
 ## Write the approved report
 
@@ -244,30 +244,28 @@ not a request that must already be organized or precisely worded.
 A document this workflow newly creates never goes through the publication
 module the processing assets invoke: that module publishes an approved mutation
 to a document the publication tip already carries, and never creates one. A new
-report lands through the owning repository's own documentation-landing lane
-instead — /push-docs and the `tools/docs_land.sh` helper it runs, run from
-`$DOC_ROOT` so the helper it resolves is the owning repository's — whose gate
-decides whether the path may land directly.
+report lands with the owner's `docs-push` tool instead, which puts
+documentation on the default branch with no review, pull request, or separate
+landing request.
 
-The user's approval of the displayed draft is the user-directed landing request
-/push-docs requires, because the approval gate announces the landing before the
-user answers: approving the exact content shown is approving that it lands. So
-once the report is written and verified, invoke /push-docs with the report's
-repository-relative path and nothing else — the landing reaches only this
-report, never another document waiting in the docs worktree — and relay its
-answer. A run that skipped the approval gate has no approval to stand on: land
-only when the bypass instruction itself explicitly asked for the landing as
-well, and otherwise leave the report in the docs worktree, unlanded, and say
-so in the handoff. The answer to relay:
+Once the approved report is written and verified, land it from the docs
+worktree with the report's repository-relative path and nothing else — the
+landing reaches only this report, never another document waiting in the docs
+worktree:
+
+```bash
+(cd "$DOCS_WT" && docs-push -m "Add findings report <path>" "<path>")
+```
+
+A run that skipped the approval gate at the user's instruction lands the same
+way once the report is written: the bypass approved the content. Relay the
+answer:
 
 - landed: quote the landing commit;
-- refused by the helper's gate, or stopped by one of its warnings: the report
-  stays in the docs worktree; say so and quote the refusal. In `coghex/kanban`
-  an unclassified path is `pr-atomic` and the helper refuses it until a pull
-  request adds it and its §7 classification; opening that pull request is not
-  this workflow's job;
-- no landing helper in `$DOC_ROOT`: the report stays in the docs worktree,
-  unlanded; say so.
+- refused because the repository lists the path as code in its docs-push
+  configuration, stopped by a conflict, or `docs-push` is not
+  installed: the report stays in the docs worktree; say so and quote the
+  message.
 
 A report that stays in the docs worktree is still complete: /process-report
 resumes it there. An existing document this workflow resumes is unaffected by

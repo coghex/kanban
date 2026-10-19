@@ -456,6 +456,10 @@ the changed paths and that obstacle actually select. Commit that fix as a
 focused commit before pushing — an uncommitted working tree pushes nothing — and
 leave any recovered work from a reused worktree intact rather than reverting it
 or folding it into the fix.
+A fix to documentation that goes with the change is landed with `docs-push` and
+linked from the PR body as `Docs: <path> @ <commit>`, placed before the origin
+marker, instead of being committed to the branch — unless `docs-push` refuses
+the path as code.
 
 Before pushing, re-fetch the pull request branch from the recorded head
 repository and verify its remote head still equals the recorded SHA. If the

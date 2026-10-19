@@ -422,11 +422,10 @@ PREFLIGHT_COPY="$(PREFLIGHT="$PREFLIGHT" python3 -c \
 `$PREFLIGHT_COPY` is the `working_copy_blob` the same preflight reported: the
 exact bytes the document holds in the working copy at this moment. It is what
 lets a document that has never been on the branch take its disposition — the
-ordinary case for an owner whose documents accumulate in the docs worktree
-until a batch landing — because for such a document there is no publication
-tip blob to guard the write with, and the helper applies the mutation over the
-working copy only while it still holds exactly those bytes. Extract it beside
-the tip, and pass it back unchanged.
+case of a document that has not reached the branch yet — because for such a
+document there is no publication tip blob to guard the write with, and the
+helper applies the mutation over the working copy only while it still holds
+exactly those bytes. Extract it beside the tip, and pass it back unchanged.
 
 `$PREFLIGHT_TIP` must be extracted, not assumed: publication refuses to run
 without it, and an empty one is a failure rather than a publication with the
@@ -749,12 +748,11 @@ batched or deferred merely to reduce commit or push frequency.
 **This step is not a push.** It is how the document gets written at all — the
 helper is the document's only writer. Whether that write ALSO lands on
 `$DOC_BRANCH` is the helper's decision and not yours, and for most repositories
-the answer is no: the mutation is applied to the docs worktree and left sitting
-there, and the owner lands the accumulated edits in one batch later. That is the
-designed outcome rather than a shortfall, so run this step even when you already
-know publication will be declined. Skipping it leaves the entry unmarked and the
-tracker transaction stranded, which is strictly worse than the thing you were
-trying to avoid.
+the answer is no: the mutation is applied to the docs worktree, and this run
+then lands it itself with `docs-push` (see "Land the document with docs-push"
+below). Run this step even when you already know publication will be declined.
+Skipping it leaves the entry unmarked and the tracker transaction stranded,
+which is strictly worse than the thing you were trying to avoid.
 
 When a tracker transaction is open, record that it is being handed to
 publication before you hand it over, so an interruption inside publication is
@@ -815,11 +813,11 @@ and for every other owner it is that repository's own
 repository sets it — and NOT `workflow.coordination_paths`, which is the PR
 drainer's merge exception and grants no publication lane. An empty lane is the
 ordinary, intended configuration: it yields `not-published`, the approved
-mutation is applied to the working copy and recorded, and the edits accumulate
-in the docs worktree for a human to land in one batch. Do not treat that as a
-failure of the run, never publish by hand to compensate for it, and do not
-narrate it to the user. Do not reimplement, precede, or compensate for any part
-of it. Act on the one structured result it returns:
+mutation is applied to the working copy and recorded, and this run lands it with
+`docs-push` as the next step. Do not treat that as a failure of the run, never
+land it any other way, and do not narrate it to the user. Do not reimplement,
+precede, or compensate for any part of it. Act on the one structured result it
+returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
   with its changed-line summary. Check that summary against the disposition you
@@ -872,16 +870,18 @@ of it. Act on the one structured result it returns:
   it. Silence is what the run says at the end, never a step it skips.
 
   **Silence waits for the transaction.** An ordinary helper result does not end
-  the run: the tracker transaction below is still resolved with `--resolve
-  --source local`, and only a resolution that succeeds licenses the quiet
+  the run: the tracker transaction below is still resolved — with `--resolve
+  --source branch` once `docs-push` has landed the document, otherwise with
+  `--source local` — and only a resolution that succeeds licenses the quiet
   report. A transaction this run could not resolve keeps its full failure and
   recovery report, however ordinary the publication result was.
 
-  **An applied mutation is not durable until the document's owner lands it on
-  the publication branch.** That fact governs what this workflow may do, not
-  what it tells the user: it is why publishing by hand to compensate is
-  forbidden and why every outcome named below is reported out loud. On the
-  ordinary outcome it is not part of the report.
+  **An applied mutation is not durable until it lands on the publication
+  branch.** That fact governs what this workflow may do, not what it tells the
+  user: it is why this run lands the document with `docs-push` and never any
+  other way, and why every outcome named below, and every `docs-push` failure,
+  is reported out loud. On the ordinary outcome, once `docs-push` has landed it,
+  it is not part of the report.
 
   **Every other outcome keeps its full report.** A `write_outcome` of
   `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
@@ -903,6 +903,26 @@ of it. Act on the one structured result it returns:
   remote publication branch contains it — and say plainly which one applies.
   Leave the document as the helper left it.
 
+### Land the document with docs-push
+
+Documentation never waits for a batch, a review, or a request. On the ordinary
+`not-published` outcome above, land the applied document on `$DOC_BRANCH` now
+with the owner's `docs-push` tool, naming this document and nothing else:
+
+```bash
+(cd "$DOCS_WT" && docs-push -m "$DOC_RELATIVE_PATH: <entry key> <disposition>" \
+  "$DOC_RELATIVE_PATH")
+```
+
+`docs-push` merges the document three ways against the branch's current copy
+and pushes only the named file; a real conflict publishes nothing. When it
+reports the landed commit, the document is on the branch, so the transaction
+below resolves with `--source branch`. When it refuses the path (the repository lists it as code in its docs-push configuration), reports a conflict, or is not
+installed, the edit has not landed: say so with its exact message, resolve the
+transaction with `--source local` as described below, and leave the document as
+it is. A `"published"` result needs no landing, and any other result is not
+landed by this step.
+
 ### Resolve the tracker transaction
 
 A tracker transaction is cleared by the published entry itself, never by the
@@ -920,36 +940,36 @@ the document's at-a-glance index on `$DOC_BRANCH` carries the recorded
 disposition and every exact tracker identity that disposition requires the
 document to name, and clears the record only then. It looks in that index alone,
 because a checked task in a finding's body, in a fenced example, or nested
-beneath the real entry is not the cursor. An entry still `- [ ]`, an incidental mention in prose, and a
-terminal entry carrying `[no-issue]` or `[deferred]` beside the link are each
-refused: the first is the interrupted run's own signature, the second is not the
-cursor at all, and the third is a different disposition from the recorded one. On a `not-published`
-result whose `applied_record` is `"recorded"` — the ordinary outcome for a
-`pr-atomic`, unmatched, or not-yet-tracked document — run the same verification
-against the applied local document with `--source local --branch
-"$DOC_BRANCH"`, which is the only evidence there is and a legitimate terminal
-state for such a document.
-Whether the working tree is admissible at all is the module's decision, not
-yours. It classifies the document itself and refuses a local resolution for one
-that publishes to the branch, because clearing such a record from a locally
-edited cursor would leave the next preflight clear while the entry never landed.
-It also checks the document against the publication module's own record of what
-that module applied, since classification says only that publication *would* be
-declined — a file somebody edited by hand looks the same from there. A document
-the module never wrote, or one changed since it did, resolves nothing — and a
-write the module could not record is one it can no longer prove it wrote,
-however plainly this run watched itself make it. When `document_written`
-is false, nothing carries the disposition anywhere: the record stays
-outstanding, and this run reports it; an `applied_record` of `"unrecorded"`
-leaves it exactly as outstanding.
+beneath the real entry is not the cursor. An entry still `- [ ]`, an incidental
+mention in prose, and a terminal entry carrying `[no-issue]` or `[deferred]`
+beside the link are each refused: the first is the interrupted run's own
+signature, the second is not the cursor at all, and the third is a different
+disposition from the recorded one. Once `docs-push` has landed the document,
+that is the resolution to run. Only when `docs-push` could not land a
+`not-published` result whose `applied_record` is `"recorded"`, run the same
+verification against the applied local document with `--source local --branch
+"$DOC_BRANCH"`, which is then the only evidence there is. Whether the working
+tree is admissible at all is the module's decision, not yours. It classifies the
+document itself and refuses a local resolution for one that publishes to the
+branch, because clearing such a record from a locally edited cursor would leave
+the next preflight clear while the entry never landed. It also checks the
+document against the publication module's own record of what that module
+applied, since classification says only that publication *would* be declined — a
+file somebody edited by hand looks the same from there. A document the module
+never wrote, or one changed since it did, resolves nothing — and a write the
+module could not record is one it can no longer prove it wrote, however plainly
+this run watched itself make it. When `document_written` is false, nothing
+carries the disposition anywhere: the record stays outstanding, and this run
+reports it; an `applied_record` of `"unrecorded"` leaves it exactly as
+outstanding.
 
 **A stranded transaction has a bounded recovery.** Reporting it is not the end
 of the line, and hand-editing a reference is never how it ends. Recover the
-`approved_blob`, land the terminal document through the owner's ordinary
-out-of-band or pull-request lane, and then resolve the record with `--source
-branch`. Never repeat a confirmed tracker mutation and never clear a reference
-by hand while that recovery is pending: the record already carries every
-identity the recovered document must name, and a repeated mutation files a
+`approved_blob`, land the terminal document with `docs-push` (or through a pull
+request when `docs-push` refuses the path), and then resolve the record with
+`--source branch`. Never repeat a confirmed tracker mutation and never clear a
+reference by hand while that recovery is pending: the record already carries
+every identity the recovered document must name, and a repeated mutation files a
 second artifact nobody can take back.
 
 A record this run could not resolve stops the next one, which is what it is for.

@@ -245,11 +245,11 @@ observation as captured.
 **This step is not a push.** It is how the document gets written at all — the
 helper is the document's only writer. Whether that write ALSO lands on
 `$DOC_BRANCH` is the helper's decision and not yours, and for most repositories
-the answer is no: the mutation is applied to the docs worktree and left sitting
-there, and the owner lands the accumulated edits in one batch later. That is the
-designed outcome rather than a shortfall, so run this step even when you already
-know publication will be declined. Skipping it leaves the observation
-uncaptured, which is strictly worse than the thing you were trying to avoid.
+the answer is no: the mutation is applied to the docs worktree, and this run
+then lands it itself with `docs-push` (see "Land the document with docs-push"
+below). Run this step even when you already know publication will be declined.
+Skipping it leaves the observation uncaptured, which is strictly worse than the
+thing you were trying to avoid.
 
 **Resolve this bundle's own mechanism first.** The helper ships with this
 plugin rather than with the repository being worked, so it is resolved against
@@ -283,11 +283,10 @@ PREFLIGHT_COPY="$(PREFLIGHT="$PREFLIGHT" python3 -c \
 `$PREFLIGHT_COPY` is the `working_copy_blob` the same preflight reported: the
 exact bytes the document holds in the working copy at this moment. It is what
 lets a document that has never been on the branch take its disposition — the
-ordinary case for an owner whose documents accumulate in the docs worktree
-until a batch landing — because for such a document there is no publication
-tip blob to guard the write with, and the helper applies the mutation over the
-working copy only while it still holds exactly those bytes. Extract it beside
-the tip, and pass it back unchanged.
+case of a document that has not reached the branch yet — because for such a
+document there is no publication tip blob to guard the write with, and the
+helper applies the mutation over the working copy only while it still holds
+exactly those bytes. Extract it beside the tip, and pass it back unchanged.
 
 `$PREFLIGHT_TIP` must be extracted, not assumed: publication refuses to run
 without it, and an empty one is a failure rather than a publication with the
@@ -353,11 +352,11 @@ and for every other owner it is that repository's own
 repository sets it — and NOT `workflow.coordination_paths`, which is the PR
 drainer's merge exception and grants no publication lane. An empty lane is the
 ordinary, intended configuration: it yields `not-published`, the approved
-mutation is applied to the working copy and recorded, and the edits accumulate
-in the docs worktree for a human to land in one batch. Do not treat that as a
-failure of the run, never publish by hand to compensate for it, and do not
-narrate it to the user. Do not reimplement, precede, or compensate for any part
-of it. Act on the one structured result it returns:
+mutation is applied to the working copy and recorded, and this run lands it with
+`docs-push` as the next step. Do not treat that as a failure of the run, never
+land it any other way, and do not narrate it to the user. Do not reimplement,
+precede, or compensate for any part of it. Act on the one structured result it
+returns:
 
 - **`"status": "published"`.** Say so, and quote the commit it reports together
   with its changed-line summary. Check that summary against the observation you
@@ -410,11 +409,12 @@ of it. Act on the one structured result it returns:
   result is still inspected — and so does every step this workflow takes after
   it. Silence is what the run says at the end, never a step it skips.
 
-  **An applied mutation is not durable until the document's owner lands it on
-  the publication branch.** That fact governs what this workflow may do, not
-  what it tells the user: it is why publishing by hand to compensate is
-  forbidden and why every outcome named below is reported out loud. On the
-  ordinary outcome it is not part of the report.
+  **An applied mutation is not durable until it lands on the publication
+  branch.** That fact governs what this workflow may do, not what it tells the
+  user: it is why this run lands the document with `docs-push` and never any
+  other way, and why every outcome named below, and every `docs-push` failure,
+  is reported out loud. On the ordinary outcome, once `docs-push` has landed it,
+  it is not part of the report.
 
   **Every other outcome keeps its full report.** A `write_outcome` of
   `no-baseline` or `unrecognized-working-copy` means nothing was applied and the
@@ -435,6 +435,25 @@ of it. Act on the one structured result it returns:
   path, whether a local publication commit exists and its ID, and whether the
   remote publication branch contains it — and say plainly which one applies.
   Leave the document as the helper left it.
+
+### Land the document with docs-push
+
+Documentation never waits for a batch, a review, or a request. On the ordinary
+`not-published` outcome above, land the applied document on `$DOC_BRANCH` now
+with the owner's `docs-push` tool, naming this document and nothing else:
+
+```bash
+(cd "$DOCS_WT" && docs-push -m "$DOC_RELATIVE_PATH: note <key>" \
+  "$DOC_RELATIVE_PATH")
+```
+
+`docs-push` merges the document three ways against the branch's current copy and
+pushes only the named file; a real conflict publishes nothing. When it reports
+the landed commit, the document is on the branch. When it refuses the path (the
+repository lists it as code in its docs-push configuration), reports a conflict,
+or is not installed, the edit has not landed: say so with its exact message, and
+leave the document as it is. A `"published"` result needs no landing, and any
+other result is not landed by this step.
 
 ## Boundaries
 
@@ -461,9 +480,11 @@ only two of them left an observation in the report:
   outstanding checkbox count, and that the observation is captured unprocessed
   for `/process-report` to dispose of, one finding per invocation.
 - **Not published, but the document was written and recorded.** This is the
-  ordinary outcome, and the observation is captured exactly where its owner
-  wants it — in the report, in the docs worktree, waiting to be batched. Report
-  exactly what a published run reports, minus the commit and its summary: the
+  ordinary outcome, and once `docs-push` has landed it the observation is
+  captured on the branch; if `docs-push` could not land it, say so with its
+  exact message, because the observation is then in the docs worktree only.
+  Report exactly what a published run reports, minus the commit and its
+  summary: the
   key, the classification, the chapter, the outstanding checkbox count, and
   that the observation is captured unprocessed for `/process-report` to dispose
   of. Say nothing about publication, eligibility, lanes, write roots, or blobs.

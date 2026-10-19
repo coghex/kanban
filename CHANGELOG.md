@@ -15,6 +15,17 @@ created above it.
 
 ### Unreleased
 
+- Documentation now lands with the owner's `docs-push` tool as soon as it is
+  ready, instead of waiting in the `docs-wip` worktree for a batch landing.
+  `/process-report`, `/process-design-doc` and `/note-problem` land the
+  document they just wrote when the publication helper reports
+  `not-published`, then resolve the tracker transaction from the branch;
+  `/draft-report` lands the approved report and `/design-epic` lands every
+  write. `/autosolve`'s documentation-only lane lands with `docs-push`.
+  `/solve`, `/pr-revise`, `/repair` and `/fix` land documentation that goes
+  with a code change with `docs-push` and link it from the pull request body
+  instead of committing it to the branch. `/push-docs` remains for draining
+  documents already left in `docs-wip`. (Codex: the same, with `$`.)
 - The project-review liveness hooks no longer block a session whose plugin
   bundle has gone. Reinstalling the Codex bundle deletes the cache directory a
   running session's hooks point at; `python3` then exits 2 on the missing
