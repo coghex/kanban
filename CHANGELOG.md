@@ -15,6 +15,13 @@ created above it.
 
 ### Unreleased
 
+- The project-review liveness hooks no longer block a session whose plugin
+  bundle has gone. Reinstalling the Codex bundle deletes the cache directory a
+  running session's hooks point at; `python3` then exits 2 on the missing
+  script, which the hook protocol reads as "block", so every tool call and
+  every Stop was refused and Codex sessions retried in a loop. Each hook
+  command now ends in `|| exit 0`. Codex users re-trust the five kanban hooks
+  once (`/hooks`), because their trust hashes changed.
 - `/process-report`, `$process-report`, `/process-design-doc`, and
   `$process-design-doc` now create every child issue and umbrella epic through
   one invocation of the bundled `tracked_issue_create.py`, instead of chaining
