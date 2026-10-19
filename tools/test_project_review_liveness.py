@@ -74,17 +74,18 @@ RENEWAL = 0.25
 EXPIRY = 1.5
 SETTLE = 15.0
 
-# The trust hashes codex-cli 0.154.0 itself recorded for this bundle's
-# hooks.json when its hooks were trusted during the smoke runs
-# (tools/project-review-liveness-evidence.md). A hooks.json edit changes them,
+# The trust hashes codex-cli itself recorded for this bundle's hooks.json:
+# first during the smoke runs (tools/project-review-liveness-evidence.md),
+# re-recorded by codex-cli 0.162.0 from "Trust all and continue" in an isolated
+# CODEX_HOME when the commands gained `|| exit 0`. A hooks.json edit changes them,
 # and must be trusted again by every Codex user; update these from a real
 # `/hooks` trust, never from the adapter's own hash function.
 CODEX_RECORDED_TRUST = {
-    "kanban@kanban:hooks/hooks.json:pre_tool_use:0:0": "sha256:c09a9f901e7eb20ae2c00046a0fb4a5293658dd53ac29fc707df1d942e7eaa50",
-    "kanban@kanban:hooks/hooks.json:post_tool_use:0:0": "sha256:d90f39d6b63b14c4f7270f7f97f89f05c845c3098707c6f5a102fbf9f145a09a",
-    "kanban@kanban:hooks/hooks.json:stop:0:0": "sha256:546f5ba1b1d282cd7da83fba348cfdfdfb43bd5b8b13fe7d025f11c71d2948a6",
-    "kanban@kanban:hooks/hooks.json:interrupt:0:0": "sha256:327a0fe09a52c33fa91de7585b50701785559d59efe8e3a18577204c3dea3d9c",
-    "kanban@kanban:hooks/hooks.json:session_end:0:0": "sha256:dd818de264b9328c3677496b97cb709bec54b2047c4ab445d2efc72c59d7a454",
+    "kanban@kanban:hooks/hooks.json:pre_tool_use:0:0": "sha256:1e6856cfa4e922177da18494115323bae0311cdb42727f299525bb6171f3f0c5",
+    "kanban@kanban:hooks/hooks.json:post_tool_use:0:0": "sha256:afe8768d71f7ed44c7e8cd920aaa7d07bbefbc052eebc6307f96a7876d0e568b",
+    "kanban@kanban:hooks/hooks.json:stop:0:0": "sha256:d47b4967d95fc7f4f18539aa08e0e8e52e761d49279f0d896acdd9ab79e3e72d",
+    "kanban@kanban:hooks/hooks.json:interrupt:0:0": "sha256:06d3511e30f561def067ead97e56cb7ee2cf432bc57f5200ebf6932283b66ec7",
+    "kanban@kanban:hooks/hooks.json:session_end:0:0": "sha256:c5809aaccaa8e435edf00a7a8f0875857924ad45271d03ab5001c972358e0013",
 }
 
 
@@ -977,7 +978,7 @@ class Packaging(unittest.TestCase):
                         for handler in group["hooks"]:
                             self.assertEqual(
                                 handler["command"],
-                                f'python3 "{spec["root_variable"]}/{relative}" hook --runtime {brand}',
+                                f'python3 "{spec["root_variable"]}/{relative}" hook --runtime {brand} || exit 0',
                             )
                             if brand == "codex" and event in ("SessionEnd", "Interrupt"):
                                 self.assertLessEqual(handler["timeout"], 3)
@@ -991,6 +992,40 @@ class Packaging(unittest.TestCase):
                         input=text, capture_output=True, text=True, timeout=60,
                     )
                     self.assertEqual((completed.returncode, completed.stdout), (0, ""))
+
+    def test_the_hook_never_blocks_when_its_bundle_is_gone(self):
+        # Reinstalling the Codex bundle deletes the cache directory a live
+        # session's plugin root names. `python3` exits 2 on a missing script,
+        # which the hook protocol reads as "block": unguarded, every tool call
+        # and every Stop in that session is refused and the agent loops.
+        for brand, spec in BRANDS.items():
+            hooks = json.loads((REPO_ROOT / spec["hooks"]).read_text(encoding="utf-8"))["hooks"]
+            commands = {
+                handler["command"]
+                for groups in hooks.values()
+                for group in groups
+                for handler in group["hooks"]
+            }
+            variable = spec["root_variable"].strip("${}")
+            with tempfile.TemporaryDirectory() as gone:
+                env = {**os.environ, variable: gone}
+                for command in commands:
+                    with self.subTest(brand=brand):
+                        completed = subprocess.run(
+                            ["/bin/sh", "-c", command],
+                            input=json.dumps({"hook_event_name": "Stop"}),
+                            capture_output=True, text=True, env=env, timeout=60,
+                        )
+                        self.assertEqual((completed.returncode, completed.stdout), (0, ""))
+                        # Negative control: the same command without its guard
+                        # blocks, so the assertion above exercised the missing file.
+                        unguarded = command.removesuffix(" || exit 0")
+                        self.assertNotEqual(unguarded, command)
+                        completed = subprocess.run(
+                            ["/bin/sh", "-c", unguarded],
+                            input="", capture_output=True, text=True, env=env, timeout=60,
+                        )
+                        self.assertEqual(completed.returncode, 2)
 
     def test_the_installed_project_review_workflow_registers_before_it_claims(self):
         # #684 performed the switch-over: the installed workflow's PR mode

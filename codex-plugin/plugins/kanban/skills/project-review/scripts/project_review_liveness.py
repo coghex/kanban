@@ -98,6 +98,13 @@ LEDGER_FILENAME = "project_review_ledger.py"
 # The minimum verified version of each runtime is the version the smoke-test
 # evidence (tools/project-review-liveness-evidence.md) was collected on; an
 # older or unparseable version refuses, a newer one is accepted.
+#
+# Each hook command ends in `|| exit 0`. `run_hook` already returns 0, so the
+# guard only matters when this file cannot run at all: reinstalling the Codex
+# bundle deletes the cache directory a live session's `$PLUGIN_ROOT` names, and
+# `python3` exits 2 on a missing script -- the hook protocol's "block" code.
+# Unguarded, every tool call and every Stop in that session is blocked, and
+# the agent retries forever.
 RUNTIMES = {
     "claude": {
         "executable": "claude",
@@ -108,7 +115,7 @@ RUNTIMES = {
         "invocation_terminal_events": ("Stop", "StopFailure"),
         # scripts/project_review_liveness.py below the bundle root
         "bundle_depth": 1,
-        "hook_command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py" hook --runtime claude',
+        "hook_command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py" hook --runtime claude || exit 0',
     },
     "codex": {
         "executable": "codex",
@@ -119,7 +126,7 @@ RUNTIMES = {
         "invocation_terminal_events": ("Stop", "Interrupt"),
         # skills/project-review/scripts/project_review_liveness.py below the bundle root
         "bundle_depth": 3,
-        "hook_command": 'python3 "$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py" hook --runtime codex',
+        "hook_command": 'python3 "$PLUGIN_ROOT/skills/project-review/scripts/project_review_liveness.py" hook --runtime codex || exit 0',
     },
 }
 SESSION_TERMINAL_EVENTS = ("SessionEnd",)
