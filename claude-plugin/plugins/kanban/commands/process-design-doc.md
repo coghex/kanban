@@ -775,10 +775,10 @@ document there, and hand it back:
 APPROVED="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --root "$DOCS_WT" --path "$DOC_RELATIVE_PATH" \
   --new-content-file)"
-python3 "$PUBLISH_DOC" \
+RESULT="$(python3 "$PUBLISH_DOC" \
   --repo "$DOC_REPO" --branch "$DOC_BRANCH" --root "$DOCS_WT" \
   --path "$DOC_RELATIVE_PATH" --content "$APPROVED" \
-  --expected-tip "$PREFLIGHT_TIP" --expected-working-copy "$PREFLIGHT_COPY"
+  --expected-tip "$PREFLIGHT_TIP" --expected-working-copy "$PREFLIGHT_COPY")"
 ```
 
 `$PREFLIGHT_TIP` is the `publication_tip` the preflight reported. Always pass
@@ -910,18 +910,28 @@ Documentation never waits for a batch, a review, or a request. On the ordinary
 with the owner's `docs-push` tool, naming this document and nothing else:
 
 ```bash
-(cd "$DOCS_WT" && docs-push -m "$DOC_RELATIVE_PATH: <entry key> <disposition>" \
-  "$DOC_RELATIVE_PATH")
+APPROVED_BLOB="$(RESULT="$RESULT" python3 -c \
+  'import json, os; print(json.loads(os.environ["RESULT"])["approved_blob"])')"
+(cd "$DOCS_WT" && docs-push --expect "$APPROVED_BLOB" --keep \
+  -m "$DOC_RELATIVE_PATH: <entry key> <disposition>" "$DOC_RELATIVE_PATH")
 ```
 
-`docs-push` merges the document three ways against the branch's current copy
-and pushes only the named file; a real conflict publishes nothing. When it
-reports the landed commit, the document is on the branch, so the transaction
-below resolves with `--source branch`. When it refuses the path (the repository lists it as code in its docs-push configuration), reports a conflict, or is not
-installed, the edit has not landed: say so with its exact message, resolve the
-transaction with `--source local` as described below, and leave the document as
-it is. A `"published"` result needs no landing, and any other result is not
-landed by this step.
+`--expect` lands exactly the bytes the helper wrote for this approval — its
+`approved_blob` — and refuses when the document changed after the helper wrote
+it, so an edit made beside this run never lands with it. `--keep` leaves the
+landed copy in the docs worktree, where the next run reads the document, even
+when that worktree's branch carries commits of its own.
+
+`docs-push` merges the document three ways against the branch's current copy and
+pushes only the named file; a real conflict publishes nothing. When it reports
+the landed commit, the document is on the branch, so the transaction below
+resolves with `--source branch`. When it refuses the path (the repository lists
+it as code in its docs-push configuration), reports a conflict, finds the
+document changed since the helper wrote it, or is not installed, the edit has
+not landed: say so with its exact message, resolve the transaction with
+`--source local` as described below, and leave the document as it is. A
+`"published"` result needs no landing, and any other result is not landed by
+this step.
 
 ### Resolve the tracker transaction
 

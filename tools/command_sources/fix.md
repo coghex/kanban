@@ -459,7 +459,9 @@ or folding it into the fix.
 A fix to documentation that goes with the change is landed with `docs-push` and
 linked from the PR body as `Docs: <path> @ <commit>`, placed before the origin
 marker, instead of being committed to the branch — unless `docs-push` refuses
-the path as code.
+the path as code, or this checkout's own `origin` is not the pull request's base
+repository (a fork checkout): `docs-push` publishes to `origin`, so in either
+case the documentation is committed to the branch like the code.
 
 Before pushing, re-fetch the pull request branch from the recorded head
 repository and verify its remote head still equals the recorded SHA. If the

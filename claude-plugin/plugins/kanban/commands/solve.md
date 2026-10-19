@@ -118,7 +118,7 @@ Kanban can point a solve at a repository the worked checkout's own remote does n
 ## Ship
 
 1. Review `git status` and the diff in the worktree. Do not include unrelated user changes.
-2. Commit the implementation, splitting only genuinely separate concerns into separate commits. Documentation that goes with the change — design notes, contracts, verdicts, evidence write-ups — is not committed to the branch: once it is final, land it from this worktree with `docs-push -m <message> <paths>` and link each landed file from the PR body as `Docs: <path> @ <commit>`, so a docs fix never costs a re-review or a CI run. Markdown that is code — skill and command files, plugin bundles, `.github/`, documents a test reads — stays on the branch; `docs-push` refuses those and says why.
+2. Commit the implementation, splitting only genuinely separate concerns into separate commits. Documentation that goes with the change — design notes, contracts, verdicts, evidence write-ups — is not committed to the branch: once it is final, land it from this worktree with `docs-push -m <message> <paths>` and link each landed file from the PR body as `Docs: <path> @ <commit>`, so a docs fix never costs a re-review or a CI run. Markdown that is code — skill and command files, plugin bundles, `.github/`, documents a test reads — stays on the branch; `docs-push` refuses those and says why. `docs-push` publishes to this checkout's own `origin`, so all of this applies only when `gh repo view "$(git remote get-url origin)" --json nameWithOwner --jq .nameWithOwner` names `$REPO`; from a fork checkout, commit the documentation to the branch like the code.
 3. Push the branch with `-u` to the worked checkout's own push remote, then open the PR in the established repository:
 
    ```bash

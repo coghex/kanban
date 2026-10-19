@@ -254,8 +254,11 @@ landing reaches only this report, never another document waiting in the docs
 worktree:
 
 ```bash
-(cd "$DOCS_WT" && docs-push -m "Add findings report <path>" "<path>")
+(cd "$DOCS_WT" && docs-push --keep -m "Add findings report <path>" "<path>")
 ```
+
+`--keep` leaves the landed copy in the docs worktree, where later runs read it,
+even when that worktree's branch carries commits of its own.
 
 A run that skipped the approval gate at the user's instruction lands the same
 way once the report is written: the bypass approved the content. Relay the

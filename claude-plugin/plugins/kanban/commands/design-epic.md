@@ -338,8 +338,11 @@ each later revision the user accepts — land it from the docs worktree, naming
 that document and nothing else:
 
 ```bash
-(cd "$DOCS_WT" && docs-push -m "Design: <subject>" "<path>")
+(cd "$DOCS_WT" && docs-push --keep -m "Design: <subject>" "<path>")
 ```
+
+`--keep` leaves the landed copy in the docs worktree, where later runs read it,
+even when that worktree's branch carries commits of its own.
 
 A landed design is resumable from any checkout. When `docs-push` refuses the
 path (the repository lists it as code in its docs-push configuration), stops on
