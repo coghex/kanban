@@ -290,20 +290,22 @@ CONTRACT_STATEMENTS = {
         "/draft-report, and $draft-report — publish nothing through this module"
     ),
     "publication-drafting-assets-land-through-the-lane": (
-        "a new document lands through the owning repository's own "
-        "documentation-landing lane instead"
+        "a new document lands with the owner's docs-push tool instead"
     ),
     "publication-report-pair-lands-on-approval": (
-        "/draft-report and $draft-report invoke that landing once, immediately "
+        "/draft-report and $draft-report land the report once, immediately "
         "after the approved report is written"
     ),
     "publication-design-pair-lands-nothing": (
-        "/design-epic and $design-epic land nothing on their own"
+        "/design-epic and $design-epic land the design document after every "
+        "write they make to it"
     ),
     "publication-bypassed-gate-lands-nothing": (
-        "A run that skipped that gate at the user's instruction has no approval "
-        "to stand on and lands only if the bypass instruction itself asked for "
-        "the landing"
+        "A run that skipped that gate at the user's instruction lands the same "
+        "way, because the bypass approved the content"
+    ),
+    "publication-ordinary-outcome-lands-with-docs-push": (
+        "the run then lands the applied document itself with docs-push"
     ),
     "publication-unmatched-fails-closed": (
         "pr-atomic is the fail-closed default for an unmatched path"
@@ -711,9 +713,17 @@ PUBLICATION_CLAUSES = {
     # that presented that as a finished journey is exactly how the observed
     # wedge went unnoticed for a whole disposition.
     "applied-is-not-landed": (
-        "an applied mutation is not durable until the document's owner lands it "
-        "on the publication branch"
+        "an applied mutation is not durable until it lands on the publication "
+        "branch"
     ),
+    # Documentation lands as soon as it is ready: the ordinary not-published
+    # outcome is landed by the run itself with the owner's docs-push tool,
+    # never left in the docs worktree for a later batch.
+    "lands-the-ordinary-outcome-with-docs-push": (
+        "land the applied document on $doc_branch now with the owner's "
+        "docs-push tool, naming this document and nothing else"
+    ),
+    "only-docs-push-lands-it": "never land it any other way",
     "names-the-write-root-and-the-blob": (
         "needs the write root, the document path, and the preserved "
         "approved_blob named plainly"
@@ -852,8 +862,9 @@ QUIET_TRANSACTION_CLAUSES = {
         "an ordinary helper result does not end the run"
     ),
     "local-resolution-still-runs": (
-        "the tracker transaction below is still resolved with --resolve "
-        "--source local"
+        "the tracker transaction below is still resolved — with --resolve "
+        "--source branch once docs-push has landed the document, otherwise "
+        "with --source local —"
     ),
     "only-a-resolved-transaction-is-quiet": (
         "only a resolution that succeeds licenses the quiet report"
@@ -1042,9 +1053,9 @@ TRANSACTION_CLAUSES = {
     # owner's own lane — was in nobody's instructions. Naming it is what keeps a
     # stranded transaction from being left to somebody editing a reference.
     "a-stranded-transaction-has-a-bounded-recovery": (
-        "recover the approved_blob, land the terminal document through the "
-        "owner's ordinary out-of-band or pull-request lane, and then resolve "
-        "the record with --source branch"
+        "recover the approved_blob, land the terminal document with docs-push "
+        "(or through a pull request when docs-push refuses the path), and then "
+        "resolve the record with --source branch"
     ),
     "recovery-repeats-no-confirmed-mutation": (
         "never repeat a confirmed tracker mutation and never clear a reference "
@@ -1323,50 +1334,41 @@ LANDING_CLAUSES = {
         "never goes through the publication module the processing assets invoke"
     ),
     "the-module-creates-nothing": "and never creates one",
-    "lands-through-the-repository-lane": (
-        "lands through the owning repository's own documentation-landing lane "
-        "instead"
-    ),
-    "the-gate-decides": "whose gate decides whether the path may land directly",
-    "kanban-refuses-unclassified": (
-        "an unclassified path is pr-atomic and the helper refuses it until a "
-        "pull request adds it and its §7 classification"
-    ),
-    "enrollment-is-out-of-scope": (
-        "opening that pull request is not this workflow's job"
+    "lands-with-docs-push": "lands with the owner's docs-push tool instead",
+    "no-review-or-request": (
+        "which puts documentation on the default branch with no review, pull "
+        "request, or separate landing request"
     ),
 }
 
-# The report pair lands on approval; the design pair deliberately does not.
+# The report pair lands its report once written; the design pair lands every
+# write.
 # Each half is the other's negative control below, so a fragment vague enough
 # to match both drafting kinds fails rather than asserting nothing.
 REPORT_LANDING_CLAUSES = {
-    "approval-is-the-landing-request": (
-        "the user's approval of the displayed draft is the user-directed "
-        "landing request"
-    ),
-    "approval-is-announced-first": (
-        "approving the exact content shown is approving that it lands"
+    "lands-once-written": (
+        "once the approved report is written and verified, land it from the "
+        "docs worktree"
     ),
     "lands-only-this-report": (
         "with the report's repository-relative path and nothing else"
     ),
     "a-refusal-keeps-it-local": "the report stays in the docs worktree",
-    # The bypass path: a run the user told to write without approval has no
-    # approval exchange to read as a landing request, so it lands only when
-    # that same instruction asked for the landing too.
-    "bypass-authorizes-no-landing": (
-        "a run that skipped the approval gate has no approval to stand on"
+    # A run the user told to write without approval approved the content by
+    # that instruction, so it lands like any other.
+    "bypass-lands-the-same-way": (
+        "lands the same way once the report is written: the bypass approved the "
+        "content"
     ),
-    "bypass-lands-only-on-request": (
-        "land only when the bypass instruction itself explicitly asked for the "
-        "landing as well"
-    ),
-    "skipped-gate-is-said-at-the-gate": "a skipped gate authorizes no landing",
 }
 
 DESIGN_LANDING_CLAUSES = {
-    "lands-nothing-on-its-own": "this workflow lands nothing on its own",
+    "lands-every-write": (
+        "after every write this workflow makes to the design document"
+    ),
+    "a-landed-design-resumes-anywhere": (
+        "a landed design is resumable from any checkout"
+    ),
 }
 
 PROCESSING_ASSETS = DISPOSITION_APPLYING_ASSETS
@@ -2967,8 +2969,8 @@ class PublicationTests(unittest.TestCase):
                 self.assertEqual(
                     missing,
                     [],
-                    f"{path} no longer states that its novel output lands through "
-                    f"the repository's documentation-landing lane: {missing}",
+                    f"{path} no longer states that its novel output lands with "
+                    f"docs-push: {missing}",
                 )
 
     def test_removing_the_landing_rule_from_an_asset_is_reported(self):
@@ -3042,7 +3044,7 @@ class PublicationTests(unittest.TestCase):
                             [key],
                         )
 
-    def test_the_design_pair_lands_nothing_on_its_own(self):
+    def test_the_design_pair_lands_every_write(self):
         self.assertEqual(len(DESIGN_DRAFTING_ASSETS), 2)
         for path in DESIGN_DRAFTING_ASSETS:
             with self.subTest(path=path):

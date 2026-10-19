@@ -42,7 +42,7 @@ Address every canonical blocker, including the previous review's requested regre
 
 Run the narrowest relevant tests while iterating, then the repository's required validation commands or their closest local equivalents. Review the complete diff, run `git diff --check`, and ensure the change does not leave generated files, credentials, or unrelated edits.
 
-Commit the focused fix with a clear message. Before push, fetch the PR branch and verify its remote SHA still matches the recorded head. Push the new commit to that exact PR branch without force. If the verification fails, stop and report the competing update.
+Commit the focused fix with a clear message. A fix to documentation that goes with the change is landed with `docs-push` and linked from the PR body as `Docs: <path> @ <commit>`, placed before the origin marker, instead of being committed to the branch — unless `docs-push` refuses the path as code, or this checkout's own `origin` is not the pull request's base repository (a fork checkout): `docs-push` publishes to `origin`, so in either case the documentation is committed to the branch like the code. Before push, fetch the PR branch and verify its remote SHA still matches the recorded head. Push the new commit to that exact PR branch without force. If the verification fails, stop and report the competing update.
 
 ## 4. Wait for CI and rerun canonical review
 

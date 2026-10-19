@@ -115,8 +115,7 @@ asset, an unresolved open decision — ends this run; report it.
 ## 3. Documentation-only issues without a pull-request lane
 
 **Override, not a stop.** Some issues' effective spec states that the change
-must land through the target repository's own direct-publication tooling — a
-documentation worktree and a landing script such as `tools/docs_land.sh` —
+must land directly as documentation — with the owner's `docs-push` tool —
 rather than through a pull request. {{cmd:solve}}'s own contract only knows
 how to open a pull request, so left alone it treats that instruction as a
 conflict and releases the claim without implementing anything. This step
@@ -146,9 +145,9 @@ gh issue edit -R "$REPO" "$ISSUE" --add-assignee @me
 ```
 
 Then check whether this checkout can reach `$REPO` directly at all.
-`{{cmd:push-docs}}`'s landing helper always publishes to this checkout's own
-`origin/master`, never to a `$REPO` a fork checkout only reaches by the pull
-request path's owner-qualified head, so a mismatch here rules out landing
+`docs-push` always publishes to this checkout's own `origin` default branch,
+never to a `$REPO` a fork checkout only reaches by the pull request path's
+owner-qualified head, so a mismatch here rules out landing
 directly from here regardless of how simple the change otherwise looks:
 
 ```bash
@@ -172,21 +171,20 @@ the issue:
   issue names, and every acceptance check the issue lists can be run and
   confirmed to pass before landing. Do not open a pull request.
 
-  Implement the fix in the repository's own documentation worktree, run every
-  acceptance check the issue lists and confirm each one passes, then land it
-  with {{cmd:push-docs}}. Invoking {{cmd:autosolve}} for this issue is the
-  user-directed publication request {{cmd:push-docs}} requires: this
-  command's own description names direct documentation landing as one of
-  its outcomes, so choosing to run it for this issue is choosing to
-  authorize exactly that outcome — never a request this session inferred on
-  its own from the issue's wording. That authorization reaches only the
-  file or files this issue's trusted spec names; {{cmd:push-docs}}'s default
-  caution against a broader or unprompted landing still applies to every
-  other document, so do not fold any of them in while doing this.
+  Implement the fix in a worktree of this checkout, run every acceptance
+  check the issue lists and confirm each one passes, then land exactly the
+  file or files this issue's trusted spec names with `docs-push`:
 
-  Close the issue only after {{cmd:push-docs}} reports the landing verified
-  with no refusal and no warning, quoting the landing commit and confirming
-  each acceptance check by name:
+  ```bash
+  docs-push -m "$SUMMARY (#$ISSUE)" "$DOC_PATH"  # every path the spec names
+  ```
+
+  Documentation needs no separate landing request, but this landing reaches
+  only those files: do not fold any other document in while doing this.
+
+  Close the issue only after `docs-push` reports the landed commit with no
+  refusal and no conflict, quoting the landing commit and confirming each
+  acceptance check by name:
 
   ```bash
   gh issue close -R "$REPO" "$ISSUE" --reason completed --comment "<landing commit and confirmed acceptance checks>"

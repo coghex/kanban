@@ -930,11 +930,13 @@ JANITOR_SURFACE_EXPECTED_COMMANDS = {
 # the issue worktree.
 AUTOSOLVE_SURFACE_EXPECTED_COMMANDS = {
     "claude-plugin/plugins/kanban/commands/autosolve.md": {
+        "docs-push",
         "gh",
         "git",
         "python3",
     },
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md": {
+        "docs-push",
         "find",
         "gh",
         "git",
@@ -3421,7 +3423,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertIn(
                     row["id"],
-                    {"gh-cli", "git-cli", "python3-cli", "find-cli", "head-cli"},
+                    {"gh-cli", "git-cli", "python3-cli", "find-cli", "head-cli", "docs-push"},
                 )
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 

@@ -27,59 +27,34 @@ for `tools/` — and leave the full sweep to CI unless asked for more.
   authority, and durable state the solve, review, and drainer actions depend on.
 - `docs/development.md` has the build, test, and layout basics; `docs/pr-drainer.md` and
   `docs/workflow-setup.md` cover the optional local components.
-- Every tracked Markdown file takes one of two publication lanes, classified in
-  `docs/agent-workflow-contract.md` section 7. The coordination
-  documents publish straight to master, bypassing the PR lane: the findings
-  and code-health documents and the vision (`docs/vision.md`) that section 7's
-  `coordination` rows name by exact path, plus every tracked Markdown file
-  under `docs/coordination/`, every design document under `docs/designs/`, and
-  the project-review ledger and reports under `docs/project_review/` — those
-  directory rows cover new documents as they are added, with no
-  classification edit anywhere. Everything else is pr-atomic and
-  lands with its implementation through a pull request. Anything unclassified is
-  pr-atomic too — that default fails closed, so a new document never publishes directly
-  until section 7 says it may.
+- Documentation lands with `docs-push`; Markdown that is code goes through a pull
+  request. See "Markdown changes" below.
 
 ### Markdown changes
 
-- Choose the lane by task, not by file type. Documentation that belongs to a code
-  change, including any contract, design note or verdict that change needs, is written in
-  that change's own worktree and travels in its pull request, whether or not a test parses
-  it. Author standalone documentation (no accompanying code change) in the `docs-wip`
-  worktree, never in the primary checkout. Resolve it by branch rather than a hard-coded
-  path: the PR drainer fast-forwards the
-  primary after every merge and autostashes whatever it finds there, and a restore that
-  conflicts wedges post-merge cleanup until a human clears it.
-- Leave a standalone Markdown change committed in that worktree and unpushed. The
-  maintainer batches those to `master` with `/push-docs` (Codex: `$push-docs`), which
-  runs the tracked `tools/docs_land.sh` to land exactly the named paths. That helper
-  refuses a path a test parses or an implementation is coupled to, naming the reason
-  and the gate — `docs/design.md` and the plugin bundles stay in the pull-request
-  lane — with the root instruction documents `CLAUDE.md` and its `AGENTS.md` alias as
-  the sole exception. Do not push one yourself, do not run a landing the user did not
-  explicitly request, and do not open a pull request for it; the subsection below is
-  the exception, and it needs an explicit request.
-- Markdown travels inside a pull request whenever it belongs to the same issue or change
-  as that pull request's code, even if no test parses it, and always when a test parses
-  it or an implementation is coupled to it. A plugin command file is held to its bundle version by
-  `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is compared against
-  `Kanban.UI.Keys` by `Spec.UI.Keys`; splitting either from what gates it leaves `master`
-  red between the two landings.
-- Documentation does not carry code's review burden. A documentation-only change needs
-  neither a canonical review nor the verification depth a behavior change does — most of
-  these documents record the project's current state of mind rather than something a
-  runtime reads. That is a statement about process, not licence to leave the contracts in
-  "The contract" above inconsistent with the behavior they describe.
-
-### Manual docs-worktree publication
-
-- A user-directed request to publish the docs worktree is an explicit exception to the
-  publication lanes above. When its diff is documentation-only, integrate the docs
-  commit into an up-to-date local `master` and push `master` straight to
-  `origin/master`; do not open a pull request or require a review. This exception
-  includes `docs/design.md` and root instruction documents. If the diff contains source,
-  application, test, tooling, workflow, or other implementation changes, keep those
-  changes in the normal pull-request lane instead.
+- Documentation lands with the owner's `docs-push` tool as soon as it is ready,
+  from whatever worktree you are in: `docs-push [-m "message"] <paths...>`. It
+  needs no owner request, review, pull request or `docs-wip` worktree. That
+  includes documentation that goes with a code change: land it with `docs-push`
+  and link it from the pull request body (`Docs: docs/x.md @ <commit>`), so a
+  docs fix never costs a re-review or a CI run.
+- Markdown that is code goes through the pull request with its code: the plugin
+  bundles, `tools/command_sources/`, `.github/`, `CLAUDE.md`/`AGENTS.md`, and the
+  documents a test parses or an implementation is coupled to
+  (`docs/design.md`, the three workflow contracts). `docs-push` refuses those
+  and says why; the list is `coghex/kanban` in `~/.config/docs-push.json`. A
+  plugin command file is held to its bundle version by
+  `BundleVersionGateTests`, and `docs/design.md`'s section 7 key table is
+  compared against `Kanban.UI.Keys` by `Spec.UI.Keys`; splitting either from
+  what gates it leaves `master` red between the two landings.
+- `docs/agent-workflow-contract.md` section 7 classifies Kanban's own documents
+  for the processing workflows' publication helper: coordination documents
+  publish straight to master through it, everything else is pr-atomic to it,
+  and the workflow then lands the document with `docs-push`. Anything
+  unclassified is pr-atomic.
+- Documentation does not carry code's review burden. That is a statement about
+  process, not licence to leave the contracts in "The contract" above
+  inconsistent with the behavior they describe.
 
 ## Quality gates
 
