@@ -27,8 +27,7 @@ EXPECTED_CLASS = {
     # S: the hardest judgment calls -- drafting, design, and canonical review.
     "issue": "S", "autoissue": "S", "draft-issues": "S", "design-epic": "S",
     "draft-report": "S", "issue-review": "S", "issue-rereview": "S",
-    "pr-review": "S", "pr-rereview": "S", "project-review": "S",
-    "auto-project-review": "S",
+    "pr-review": "S", "pr-rereview": "S",
     # A: most work -- implementing, repairing, processing.
     "solve": "A", "autosolve": "A", "pr-revise": "A", "fix": "A", "repair": "A",
     "process-design-doc": "A", "process-report": "A", "note-problem": "A",

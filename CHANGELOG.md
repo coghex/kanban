@@ -15,6 +15,11 @@ created above it.
 
 ### Unreleased
 
+- Removed `/project-review` and `/auto-project-review` (Codex: `$project-review`,
+  `$auto-project-review`), with their ledger helper, session liveness adapter and
+  the lifecycle hooks that ran it. Both bundles now ship no hooks. `/janitor`'s
+  census no longer inventories project-review attempt directories; any left
+  under `<git common dir>/kanban-project-review/` can be deleted by hand.
 - Documentation now lands with the owner's `docs-push` tool as soon as it is
   ready, instead of waiting in the `docs-wip` worktree for a batch landing.
   `/process-report`, `/process-design-doc` and `/note-problem` land the

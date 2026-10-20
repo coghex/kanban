@@ -2350,11 +2350,7 @@ mutation reappear on the other (issues #544/#575, #608).
   `claude-plugin/plugins/kanban/commands/janitor.md`), both rendered from the
   one authored source `tools/command_sources/janitor.md` by
   `tools/render_command_sources.py`, reasoning over the `janitor-census/v1`
-  document both bundles' `scripts/census.py` emits (§4, issue #574) — a document
-  that since issue #706 also carries every project-review attempt directory
-  (§2.13, issue #684) with the state §2.13's adapter gives it, read through that
-  adapter's `status` subcommand and resolved from the census's own bundle rather
-  than from the audited checkout. There is
+  document both bundles' `scripts/census.py` emits (§4, issue #574). There is
   no Haskell invocation, so `janitor` is deliberately absent from the
   name-parity sets in `tools/test_codex_plugin.py` and
   `tools/test_claude_plugin.py`. It is not a drafting workflow, and is not part
@@ -2381,46 +2377,13 @@ mutation reappear on the other (issues #544/#575, #608).
   nothing else. No branch is deleted, no remote configuration is touched, and
   the branch is reported as visible cleanup debt naming the destination that
   failed the proof. An empty answer is a refusal, not a pass.
-- **Gate for a project-review attempt directory removal** (issue #706): the
-  census reports that attempt `cleanable`, which is §2.13's adapter having
-  established both halves through its own `status` subcommand — the attempt
-  `ended`, or `active` with its keeper positively `gone`, *and* an explicitly
-  empty `unfinished_launches` — the report records the attempt id and the
-  directory path, that path lies directly under the attempt root the census
-  named, no component of that root from the Git common directory down is a
-  symlink — the census refuses the whole inventory as unreadable when one is,
-  because a link there redirects every attempt under it while each still spells
-  as one of this repository's own — the attempt's `tree/` is registered at that
-  exact path in `git worktree list --porcelain`, its status is empty including
-  untracked files, and the user approves that item on its own. Only then is the chain
-  run: `git worktree remove --force` on the `tree/`, a recursive removal of that
-  one directory, and — only if a worktree record for that `tree/` survived — the
-  metadata prune below, with that one record name as the whole of its approved
-  set. `--force` waives nothing the empty-status condition has not already
-  proved, and the recursive removal is this workflow's only one: it is confined
-  to the approved path by testing that path against the census's own attempt
-  root and attempt id, and by testing that neither the root nor the attempt
-  directory is a symlink, before anything is deleted: that equality compares
-  strings, and a link anywhere along the path satisfies it exactly while the
-  removal follows the link off the repository. An `attempt-unknown` refusal,
-  an `unverifiable` keeper, an unreadable launch inventory, and a state the
-  adapter did not report are `over` at most and never `cleanable`; each is
-  reported by path with its reason and retained. An `active` attempt with a
-  live keeper is a running invocation and is not reported as an anomaly at all.
-- **Refusal for that removal:** a step that fails stops the chain. A refused `worktree remove`
-  never reaches the removal, so the directory is retained whole and reported
-  with the step that failed; a removal that fails after the checkout came out is
-  reported as the partial result it is, naming what is still on disk, rather
-  than as a retained directory.
 - **Required authority:** GitHub read on the audited issues, pull requests,
   comment feeds and checks; GitHub write only to release a stale claim, which
   is its assignees and its `wip` label and nothing else. Local write, per
   approved item, to remove a worktree, delete a local branch, delete a ref or a
   stale tracking ref through `git update-ref -d <ref> <old-value>`, drop a
-  stash, prune worktree metadata, remove one approved project-review attempt's
-  pinned worktree and recursively remove that one attempt directory, and
-  fast-forward the default branch. Remote write to exactly one endpoint: the
-  one the branch-deletion gate above proved.
+  stash, prune worktree metadata, and fast-forward the default branch. Remote
+  write to exactly one endpoint: the one the branch-deletion gate above proved.
 - **Durable state:** none of its own beyond the repository-local retention
   ledger `janitor-retain.json` in the Git common directory, which records
   machine-local keep decisions outside every worktree and is mutated only with
@@ -2719,209 +2682,6 @@ report did not name.
 - **Mandatory/optional:** optional. A Kanban that never runs a mission runner
   never resolves `kanban` as an external command and writes none of this state.
 
-### 2.13 Project-review session liveness (lifecycle hooks)
-
-The prerequisite design D-17's 2026-09-17 amendment names (issue #687). It
-consumes #682's lease, and since #684 the installed `project-review` workflow is
-its caller: that workflow registers an attempt, and passes the keeper's pid to
-`project_review_ledger.py claim --owner-pid`, before it claims a pull request.
-A registration refusal stops that run before any claim.
-
-- **Owning source:** `project_review_liveness.py`, shipped identically as
-  `claude-plugin/plugins/kanban/scripts/project_review_liveness.py` and
-  `codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py`.
-  Each bundle runs it through its own `hooks/hooks.json`:
-  `claude-plugin/plugins/kanban/hooks/hooks.json` through
-  `${CLAUDE_PLUGIN_ROOT}`, and `codex-plugin/plugins/kanban/hooks/hooks.json`
-  through `$PLUGIN_ROOT`. Both runtimes set that variable to the installed bundle
-  each time a hook fires, so no hook names a versioned cache path.
-- **Mechanism:** the lease `project_review_ledger.py claim` takes renews while
-  its `--owner-pid` process lives. `register` starts that process, the *keeper*,
-  and the keeper stays alive exactly while the registering invocation shows
-  progress:
-  - **Progress:** a tool-start, tool-finish or tool-failure event from that
-    invocation within the silence window (default 600 seconds, never shorter
-    than the renewal interval the claim will record). A command started through
-    `run` also counts, while its wrapper process is live (the ledger's
-    `holder_standing` test) and its launching tool call is still in flight.
-  - **Immediate end:** turn completion (`Stop`, and Claude's `StopFailure`),
-    Codex's `Interrupt`, `SessionEnd`, an explicit `complete`, a newer
-    registration by the same session, and unreadable bookkeeping.
-  - **Silence:** otherwise the keeper ends when the silence window passes.
-
-  Claude Code documents no interrupt event, and none fires. A Claude
-  cancellation therefore lapses after at most the silence window, plus one
-  keeper poll, plus one renewal interval, plus the lease expiry — **provided no
-  wrapped command is still running**. The renewal interval is in that chain for
-  the same reason it is in the longer one below: the renewer follows the keeper
-  rather than ending with it, and looks at its liveness signal at least once
-  per renewal interval, so it can stamp one last renewal after the keeper is
-  gone. A live wrapper holds its launch exempt from that window by design,
-  and on Claude Code 2.1.276 an interrupt no longer kills a foreground wrapped
-  command as it did on 2.1.274. The bound then is not the window alone: that
-  command's tool-finish event is itself a progress event, so it refreshes the
-  window rather than ending it, and the keeper waits it out afresh afterwards.
-  The bound becomes the command's remaining run time, plus a silence window,
-  plus a keeper poll, plus one renewal interval, plus the lease expiry — or the
-  end of the session, whichever comes first. The renewal interval is a phase of
-  its own because the renewer follows the keeper rather than ending with it: it
-  looks at its liveness signal at least once per renewal interval, so it may
-  write one further renewal after the keeper is gone, and the expiry that then
-  runs down is the one that renewal stamped. This implementation looks once per
-  renewer poll — a second — which is why a measured lapse is shorter than the
-  interval this contract promises, and the promise is what a reader may rely
-  on. The
-  measurement and its consequences are in
-  `tools/project-review-liveness-evidence.md`; the minimum verified versions
-  below are what each behaviour was measured on, not a guarantee that a newer
-  runtime still behaves that way.
-- **Hook events:** Claude Code 2.1.274 or newer: `PreToolUse`, `PostToolUse`,
-  `PostToolUseFailure`, `Stop`, `StopFailure`, `SessionEnd`. codex-cli 0.154.0
-  or newer: `PreToolUse`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd`,
-  the last two within Codex's 3-second hook limit.
-  - **Binding:** events are bound to the invocation by the payload's
-    `session_id` and `prompt_id` (Claude) or `turn_id` (Codex). `SessionEnd`,
-    which carries no invocation id, is bound by session alone.
-  - **No attempt, no write:** an event matching no current attempt writes
-    nothing. One matching an ended attempt is discarded and logged in that
-    attempt's `discarded.jsonl`.
-  - **Output:** the hook exits 0 with nothing on standard output, even on input
-    it cannot read.
-- **Interface:**
-  - `nonce` prints a registration nonce.
-  - `register --runtime <claude|codex> --root <path> --repo <owner/name>
-    --nonce <hex> [--silence <s>] [--renewal <s>]` prints the attempt id and the
-    keeper pid to pass as `claim --owner-pid`.
-  - `run --root <path> --attempt <id> --launch <label> -- <command…>` runs a
-    long command as an exempt launch and exits with its status. **The label is
-    the caller's to keep unique within one attempt.** The exemption belongs to
-    the first wrapper that claims a label; a second `run` under a label already
-    taken starts its command, earns no exemption, and says so on standard
-    error, naming the launch and both reasons a launch can be un-exempt. It is
-    reported rather than refused, and the reported form is recorded under a
-    name of its own so cleanup can still see the process — refusing it before
-    the spawn would be a change to this adapter's execution model. `project-review`
-    is the caller that carries the discipline, and says so where it starts a
-    wrapped command.
-  - `complete --root <path> --attempt <id>` ends an attempt.
-  - `status --root <path> --attempt <id>` reports its state, and answers two
-    different questions about the commands `run` started. `exempt_launches`
-    names the ones holding the silence window open, which skips any launch
-    whose tool call has finished. `unfinished_launches` names the ones that
-    cannot be established to have ended, finished or not. It decides on the
-    command rather than on the wrapper around it, because a wrapper killed with
-    `SIGKILL` runs no forwarding handler and dies leaving its command running:
-    `run` records the command's own process as soon as it has one and records
-    the launch's end once it has waited that process out, and this report calls
-    a launch gone only on one of those two positives. It fails closed on a
-    record it cannot read, a process on another host, and a launch that
-    recorded neither a command nor an end — a wrapper killed before it spawned
-    and one killed just after are indistinguishable from the record. The
-    second report is what a caller about to delete that attempt's working
-    directory asks: the runtime-backgrounded command that outlives a cancelled
-    attempt is exactly the one the first can never name, because Claude Code
-    reports its call finished about eighty milliseconds after it starts.
-
-  A refusal exits 2 with `refused (<reason>)` on standard error.
-- **Refusals before any claim:** `register` refuses before it starts a keeper.
-  Each refusal names what it observed:
-  - `runtime-unavailable` or `runtime-unsupported`: `claude --version` or
-    `codex --version` is missing, unreadable, or older than the minimum.
-  - `hooks-not-observed`: no handshake arrived, so the hooks are not running at
-    all. For Codex the refusal names the `[features] hooks` state
-    `codex features list` reports and the kanban hook trust entries in
-    `$CODEX_HOME/config.toml`.
-  - `hooks-incomplete`: the running bundle's own `hooks/hooks.json` does not run
-    this adapter on every required event. One `PreToolUse` handshake proves
-    hooks run; it does not prove the terminal ones do, so the whole set is
-    checked before a keeper exists.
-  - `hooks-disabled` and `hooks-untrusted` (Codex only): the `[features] hooks`
-    flag is off, or a required hook is disabled, never trusted, or changed since
-    it was trusted. Codex enables and trusts each hook separately, so the
-    adapter recomputes each required hook's trust hash the way codex-cli does —
-    the key label, matcher and normalized handler as key-sorted compact JSON
-    under SHA-256 — and compares it with the recorded one.
-  - `plugin-unresolved` (Codex only): the bundle is not installed under a
-    `plugins/cache/<marketplace>/<plugin>/<version>` directory, so its hooks'
-    trust records cannot be named.
-  - `bundle-mismatch` and `bundle-ambiguous`: the hook that fired is a different
-    installed copy, or more than one enabled copy answered. Each responding copy
-    writes its own handshake record, so a second enabled bundle is detected
-    rather than losing a race to the first.
-  - `binding-unavailable`: the payload carried no session or invocation id.
-  - `silence-too-short`: the silence window is shorter than the renewal
-    interval.
-- **Setup and trust:** Claude Code needs the kanban plugin installed and
-  enabled, and `disableAllHooks` unset; plugin hooks need no trust step. Codex
-  needs `[features] hooks = true`, the kanban plugin installed, and its hooks
-  trusted through `/hooks` (or the launch-time "Hooks need review" prompt).
-  Trust is recorded per hook against a hash of its definition, so a bundle
-  upgrade needs re-trusting only when `hooks.json` changes. Registration checks
-  every required hook, not just the one that fired.
-- **Authority:** none over GitHub, any working tree, or the lease. The adapter
-  never claims, renews, releases or records; its keeper's exit is the only thing
-  the ledger's renewer observes. It spawns `claude` or `codex` (version and
-  feature state), `python3` through `sys.executable` (the keeper), and the
-  caller's own command under `run`.
-- **Durable state:** `<git common dir>/kanban-project-review/liveness/`, beside
-  the ledger's `leases/` and `checkpoints/`: `handshakes/<nonce>/` — one record
-  per responding bundle copy, named for that copy's own path, which is what
-  makes a second enabled copy detectable — and `attempts/<attempt>/`
-  (`attempt.json`, `progress.json`, `ended.json`, `launches/`,
-  `discarded.jsonl`). Registration removes a nonce's directory once it has read
-  every record in it. Nothing is written to a working tree or
-  `docs/`. Registration prunes ended attempts after seven days.
-- **Evidence:** `tools/project-review-liveness-evidence.md` records the probes,
-  the smoke-test procedure, and the observed timings on both installed runtimes.
-- **Mandatory/optional:** optional. The only caller is `project-review`'s PR
-  mode, which is a user-invoked action; its explicit-only direct-commit mode
-  takes no claim, so it registers nothing and resolves this adapter nowhere
-  (issue #686). A session that never registers an attempt pays a short hook
-  process on each tool event and writes nothing.
-
-### 2.14 Serial project review (`$auto-project-review` / `/auto-project-review`)
-
-The repetition §2.13's caller deliberately does not perform (issue #685,
-design `docs/designs/project_review_ledger_design.md` D-6, D-12 and D-17). One
-`project-review` invocation reviews exactly one merged pull request and starts
-no other; this workflow is what runs that invocation a counted or open-ended
-number of times.
-
-- **Owning source:** `tools/command_sources/auto-project-review.md`, rendered
-  into `claude-plugin/plugins/kanban/commands/auto-project-review.md` and
-  `codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md` by
-  `tools/render_command_sources.py`. User-invoked only; no Kanban action
-  spawns it, and nothing schedules it.
-- **Authority:** none of its own. Every step of an iteration is
-  `project-review`'s — the merged-pull-request inventory, the liveness
-  registration §2.13 describes, the claim and its lease, the pinned worktree,
-  the report the ledger allocates, the `record` checkpoint, and the every-exit
-  cleanup. This workflow takes no claim, writes no ledger, allocates no
-  report, commits nothing, pushes nothing, and creates or edits no tracker
-  issue. It is therefore the one packaged workflow that names no external
-  executable at all, and it appears in no `files` column of §4's manifest;
-  `tools/test_agent_workflow_contract.py` pins that emptiness from both sides.
-- **Argument:** one nonnegative decimal integer, or none. `N` runs at most `N`
-  iterations, `0` delegates nothing, and an absent argument runs open-ended
-  until the user stops the run. Anything else — a negative number, a fraction,
-  a second argument, any other text — is refused before the first iteration.
-- **Counting:** an iteration counts toward `N` only when the delegate reported
-  a successfully recorded completed review, `clean` or `findings` alike. An
-  iteration that ended any other way is not counted and ends the run, and no
-  iteration begins until the one before it has ended. One of those endings —
-  a cleanup that failed after `record` published its checkpoint — leaves a
-  completed row behind all the same. It still does not count and still ends the
-  run; what it adds is a disclosure, never an exception.
-- **Stops:** the count is reached; the delegate reports
-  `"status": "no-selectable-row"`, which is an ordinary end rather than a
-  failure; the user stops an open-ended run; or an iteration did not record a
-  review. Every one of them ends with a progress report naming the recorded
-  count against the target, each reviewed pull request with its outcome,
-  verification commit and report path or existing-finding links, any review the
-  uncounted last iteration had already recorded together with every path the
-  delegate retained, and the reason the run ended.
-- **Mandatory/optional:** optional, and it starts no run of its own accord.
-
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -3088,12 +2848,12 @@ file rather than per definition.
 ```text
 docs-push | executable | docs-push | claude-plugin/plugins/kanban/commands/autosolve.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md | external | supported | no
 project-chat | executable | pchat | codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py | external | supported | no
-codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
-claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
+codex-cli | executable | codex | src/Kanban/Codex.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
+claude-cli | executable | claude | src/Kanban/Claude.hs;src/Kanban/ProviderAdapter.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;claude-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py | kanban | supported | no
 claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | supported | no
-gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py;claude-plugin/plugins/kanban/scripts/tracked_issue_create.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
-git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py | kanban | supported | yes
-python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_ledger.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | kanban | supported | no
+gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py;claude-plugin/plugins/kanban/scripts/tracked_issue_create.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
+git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
+python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 ps-cli | executable | ps | src/Kanban/Process.hs;tools/mission_runner_service.py | kanban | supported | yes
 posix-shell-cli | executable | /bin/sh | tools/mission_runner_service.py | kanban | supported | no
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
@@ -3121,23 +2881,22 @@ issue-approval-log-dir | personal-path | /Library/Logs/kanban/issue-approval | d
 managed-job-path-entry | personal-path | /.local/bin | docs/issue-approval.md | kanban | supported | no
 launchagents-dir | personal-path | /Library/LaunchAgents | tools/service_manager.py | kanban | supported | no
 systemd-user-unit-dir | personal-path | /.config/systemd/user | tools/service_manager.py | kanban | supported | no
-find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
+find-cli | executable | find | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
+head-cli | executable | head | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
 worktrees-root | personal-path | /worktrees | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/scripts/project_review_liveness.py;codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py | external | supported | no
+codex-plugin-cache-root | personal-path | /.codex | codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 grok-plugin-cache-root | personal-path | /.grok | grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 kimi-plugin-cache-root | personal-path | /.copilot | kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 google-plugin-cache-root | personal-path | /.copilot | google-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
 claude-copilot-plugin-cache-root | personal-path | /.copilot | claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | external | supported | no
-awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
+awk-cli | executable | awk | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 rg-cli | executable | rg | codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/note-problem.md | kanban | supported | no
-sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
+sed-cli | executable | sed | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 tr-cli | executable | tr | tools/docs_land.sh | kanban | supported | no
 grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
-rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
+rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
-mkdir-cli | executable | mkdir | codex-plugin/plugins/kanban/skills/project-review/SKILL.md;claude-plugin/plugins/kanban/commands/project-review.md | kanban | supported | no
 kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
@@ -3453,22 +3212,8 @@ which is why it is `mandatory: no`.
 declares that Kanban does not own: `$CODEX_HOME` (default `~/.codex`) is Codex's
 own directory, and the Codex bundle's `find`-based lookups below are rooted at
 the `plugins/cache` tree inside it. Every Codex skill that resolves a bundled
-script that way is a consumer and appears in the row, `$project-review`
-included — and that one lookup locates the `scripts` **directory** its two
-vendored modules share, never one of the modules. Each mode then resolves the
-modules it calls from that directory and checks only those: the ledger helper
-and the session liveness adapter for PR mode, the ledger helper alone for the
-explicit-only direct mode, which takes no claim and so needs no adapter. A
-lookup that went through one module would make every mode of that skill depend
-on that module being installed, including the mode that never calls it (issue
-#684). Issue #686 retired the third module, the #548 sweep cursor: direct-commit
-progress is the ledger's `direct` key, and
-`docs/project_review_boundaries.md` survives only as an input the ledger
-module's own parsers read. So is each copy of the project-review liveness adapter
-(§2.13): it resolves nothing under the cache root, but its `hooks-not-observed`
-refusal reads `$CODEX_HOME/config.toml` to report the kanban hooks' trust state.
-It is `external`/`mandatory: no` for that
-reason — Kanban never creates it, and every workflow that consults it is an
+script that way is a consumer and appears in the row. It is
+`external`/`mandatory: no`: Kanban never creates it, and every workflow that consults it is an
 optional user- or Kanban-invoked action.
 
 `grok-plugin-cache-root` is the other: `$GROK_HOME` (default `~/.grok`) is Grok's
@@ -3508,11 +3253,7 @@ still declares no `personal-path` row of its own, for the reason the
 `fix` writes the check rollup it diagnoses from to a temporary file OUTSIDE the
 worked checkout and deletes it, `janitor` (issue #575) does the same with the
 `worktree prune --dry-run` listing its metadata-prune gate subtracts the
-approved records from — and since issue #706 reaches `rm` for a second purpose
-that is not a scratch file at all: the recursive removal of one approved,
-revalidated project-review attempt directory, which §2.11's gate confines to a
-path the census named by testing it against that census's own attempt root and
-attempt id first, and which is this workflow's only recursive removal — a pipe would have discarded the dry run's own exit
+approved records from — a pipe would have discarded the dry run's own exit
 status, which the gate's `&&` chain has to test, since a failed dry run and a
 listing with nothing unapproved in it produce the same empty result — and
 `finalize` (issue #544) does the same with
@@ -3531,8 +3272,7 @@ install location — the shared review coordinator for `$pr-review`,
 `$pr-rereview`, `$pr-revise`, `$repair`, and `$fix`, the trusted-comment issue-spec
 helper for `$solve` (§2.1) and `$issue-rereview`, and the publication and
 tracker-transaction modules for `$process-report`, `$process-design-doc`, and
-`$note-problem`, the project-review ledger module for `$project-review` — with
-its sibling session liveness adapter — and the census
+`$note-problem`, and the census
 program for `$janitor` (issue #575) — themselves optional AI
 actions, and every supported macOS/Linux shell already provides both. The Claude plugin's equivalent workflows need neither: Claude
 Code exposes `${CLAUDE_PLUGIN_ROOT}` inside a plugin's own commands, so
@@ -3544,10 +3284,7 @@ workflows their bundled mechanism at
 `${CLAUDE_PLUGIN_ROOT}/scripts/publish_coordination_doc.py` and
 `${CLAUDE_PLUGIN_ROOT}/scripts/tracker_transaction.py` (and the two processing
 workflows their tracked issue creation at
-`${CLAUDE_PLUGIN_ROOT}/scripts/tracked_issue_create.py`), `/project-review`
-its bundled ledger and session liveness adapter at
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_ledger.py` and
-`${CLAUDE_PLUGIN_ROOT}/scripts/project_review_liveness.py`, and `/janitor` its
+`${CLAUDE_PLUGIN_ROOT}/scripts/tracked_issue_create.py`), and `/janitor` its
 bundled census at `${CLAUDE_PLUGIN_ROOT}/scripts/census.py`, without a
 filesystem search. That plugin bundles its own copy of each, so it never depends on the
 Codex plugin being installed, and it declares no `personal-path` row of its
@@ -3575,44 +3312,9 @@ observation is about. It is the one entry in this manifest that a stock system
 may genuinely lack. That costs an installation without it those four workflows'
 search step and nothing else, which is what `mandatory: no` records.
 
-`mkdir-cli` is `project-review`'s alone (issue #684), and it makes exactly one
-directory: `<git common dir>/kanban-project-review/worktrees/<attempt>/`, named
-for the liveness attempt that will own it. Everything one invocation of that
-workflow creates goes in there — its merged-pull-request inventory and the
-detached worktree it pins the review to — so it is OUTSIDE the reviewed
-checkout and the docs worktree, where a review artifact under
-`docs/project_review/` would publish with the report beside it, and an exit that
-reaches its own cleanup removes it as one directory. Naming it for the attempt
-is what makes a cancellation recoverable, and it is equally what makes the
-recovery safe to refuse: the next invocation asks the liveness adapter about
-each sibling and removes one only on positive evidence that nothing is using
-it — the attempt still known to the adapter, its keeper reported ended or
-positively gone, its launch records readable, and no launch of it unfinished.
-Anything else retains the directory by name and with the reason, for a later
-pass or for `janitor`, whose census carries these directories and whose own
-removal gate §2.11 states (#706): an attempt the adapter no longer knows, a
-keeper whose standing it cannot establish, a launch record it cannot read, or a
-wrapped command that outlived the cancellation. `janitor` refuses that first
-class exactly as this pass does — an attempt the adapter cannot place is `over`
-without being cleanable there too — so what the operator gets is the schedule,
-not a weaker rule. Removing a worktree a live process is
-working in is the one outcome nothing later repairs, so the pass fails closed
-and a cancellation's directory is taken by the first invocation that can prove
-otherwise — the next one in the ordinary case, and not in every case. It is
-`mandatory: no` for the reason the other utilities here are.
-
 `tr-cli` is the documentation-landing helper's own utility (issue #410):
 `tools/docs_land.sh` reaches it and nothing else in this repository does.
-`dirname-cli` is that helper's alone as well. #684 gave it a second consumer and
-then took it back: the Codex `project-review` skill now locates the directory
-its modules share directly — the ledger helper and the session liveness
-adapter, since #686 retired the sweep cursor — rather than taking the directory
-of one of them, because a lookup routed through one module made every mode of
-that workflow depend on that module being installed — including the mode that
-never calls it. Neither `project-review` asset derives a path that way now, and
-neither derives a *removal* target from another path at all: each scratch
-directory cleanup removes is held in a variable of its own, because the parent
-of a variable an early exit never set is the working directory.
+`dirname-cli` is that helper's alone as well.
 `tools/docs_land.sh` also spawns `git`, `awk`, `sed`, `grep`, `mktemp`, and
 `python3` — the last to reach `tools/docs_land_paths.py`, which itself spawns
 only `git`. All are `mandatory: no` because landing documentation is an optional
@@ -3629,9 +3331,7 @@ on empty for every other branch and for a detached HEAD.
 
 `sed-cli` outgrew that helper as the vendored workflows landed, and its row
 records it: `retriage` and `backlog-review` rewrite roadmap and report text with
-it, `project-review` reduces a remote URL to one `owner/name` with it and strips
-the `origin/` prefix off the remote default branch it pins its review worktree
-to, `drain-prs` reduces a remote URL to one `owner/name`
+it, `drain-prs` reduces a remote URL to one `owner/name`
 with it, and `finalize` does both — the same remote reduction, plus the
 `git worktree list --porcelain` reads that name the primary checkout and the
 merged pull request's own worktree. It stays `mandatory: no` for the reason the
@@ -4343,27 +4043,6 @@ runs) parses the manifest in §4 and:
   that writes those two literals down and the tokens are gone from the file,
   which proves the row is grounded by a written declaration rather than by a
   hardcoded path the census resolves through;
-- fails if either bundle's copy of the project-review ledger helper
-  (`claude-plugin/plugins/kanban/scripts/project_review_ledger.py` or
-  `codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py`,
-  issue #682) spawns a program this manifest does not declare. The literal
-  extractor reconciles its `git` calls, which resolve the Git common directory,
-  hold the lease's lock reference, and build and publish `record`'s checkpoint
-  commit (issue #683); the renewer `claim` starts is the helper
-  itself run through `sys.executable`, which that extractor cannot see. So the
-  non-literal spellings in each copy are pinned by name and required to be
-  present at all, the command they resolve to must carry an `executable` row,
-  and both copies must appear in `git-cli` and `python3-cli`;
-- fails if either bundle's copy of the project-review liveness adapter
-  (`claude-plugin/plugins/kanban/scripts/project_review_liveness.py` or
-  `codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py`,
-  issue #687) spawns a program this manifest does not declare. The literal
-  extractor reconciles `claude` and `codex`, whose versions registration reads.
-  The keeper is the adapter itself run through `sys.executable`, pinned like the
-  ledger's renewer. `run`'s spawn of the caller's own command is the one spawn
-  whose argument is not a list, and its spelling is pinned so a second one
-  cannot hide behind it. Both copies must appear in `claude-cli`, `codex-cli`,
-  `python3-cli` and `codex-plugin-cache-root`;
 - fails if any of the Haskell source files in the first bullet build a
   home-relative path segment that has no matching `personal-path` manifest
   entry;
@@ -4457,21 +4136,6 @@ lane:
   directory.
   Eligible for direct publication to `master`, bypassing the pull-request lane.
 
-  "Nothing in this repository" is the whole of the test, and it is deliberately
-  narrower than "nothing at all". A packaged workflow may read and write a
-  coordination document — `project_review_ledger.py` parses, rewrites and
-  checkpoints `docs/project_review/ledger.md` on every review, so that document
-  is machine-readable workflow state rather than prose nobody parses — and the
-  lane still holds, because what it protects is the tree: this repository's
-  build, its tests, its installers and its executable read none of it, so a
-  change to it alone can invalidate nothing and `build-test` cannot notice it
-  either way. The helper that does read it is a bundled asset operating on
-  whichever repository it was pointed at, reading that repository's review state
-  and none of Kanban's own behavior; its tests build their own documents in
-  temporary directories rather than parsing the tracked one, which is why the
-  `test-parsed` reason is absent from that row and would be a contradiction on
-  it. A document any of this repository's own consumers reads is `pr-atomic`
-  however coordination-shaped it looks.
 - `pr-atomic` — a document that lands atomically with its implementation
   through the pull-request lane, because changing it on its own can invalidate
   the tree.
@@ -4484,25 +4148,10 @@ check failure rather than a document that publishes directly.
 The `coordination` documents are
 `docs/code-health-report.md`, `docs/document_workflow_findings.md`,
 `docs/drainer-bugs.md`, `docs/pipeline-hardening.md`, `docs/product_readiness_findings.md`,
-`docs/project_review_183-170.md`, `docs/project_review_195-185.md`,
-`docs/project_review_218-196.md`, `docs/project_review_244-219.md`,
-`docs/project_review_271-251.md`,
-`docs/project_review_297-272.md`, `docs/project_review_314-299.md`,
-`docs/project_review_342-317.md`, `docs/project_review_386-361.md`,
-`docs/project_review_398-353.md`, `docs/project_review_442-411.md`,
-`docs/project_review_456-446.md`, `docs/project_review_463-455.md`,
-`docs/project_review_466-399.md`, `docs/project_review_516-498.md`,
-`docs/project_review_533-517.md`,
-`docs/project_review_561-545.md`,
-`docs/project_review_600-573.md`,
-`docs/project_review_602-562.md`,
-`docs/project_review_660-648.md`,
 `docs/ui-bugs.md`, `docs/vision.md`, `docs/workflow_audit_findings.md`,
 and — through their directory rows,
 with no declaration per file — every tracked Markdown file under
-`docs/coordination/`, every design document under `docs/designs/`, and the
-project-review ledger and every ledger-era findings report under
-`docs/project_review/`. **Every other tracked
+`docs/coordination/` and every design document under `docs/designs/`. **Every other tracked
 Markdown file in this repository is `pr-atomic`.** Those two sentences are the
 human-readable answer to "which lane does this document take", and
 `tools/test_document_classification.py` reconciles them against the rows below,
@@ -4512,19 +4161,7 @@ This classification is Kanban's own. It describes this repository and nothing
 else. A consuming repository declares its own direct-publication lane through
 `workflow.direct_publication_paths`, which ships empty — exact file paths, or
 whole directories through a trailing-slash entry matched by the same
-whole-component rule the rows below use. `docs/project_review/` is what that
-mechanism is for: a consuming repository enrols the project-review ledger and
-every report the workflow will ever write there through **one**
-`workflow.direct_publication_paths` entry naming that directory, and never a
-declaration per report — which is the whole point of a one-pull-request-per-review
-cadence being publishable at all. Nothing that is not a document belongs under
-it: the lease's lock reference and heartbeat records, the liveness adapter's
-handshake and attempt records, and the worktree each review is pinned to all
-live under `kanban-project-review/` in the repository's Git common directory —
-`leases/`, `checkpoints/`, `liveness/`, and `worktrees/<attempt>/` holding both
-the worktree and that invocation's merged-pull-request inventory. All of them
-are outside every working tree, because a directory that publishes publishes
-whatever is left in it. The drainer's separate
+whole-component rule the rows below use. The drainer's separate
 `workflow.coordination_paths` key
 ([pr-drainer.md](pr-drainer.md#merging-past-a-coordination-only-base-advance))
 grants only its base-advance exception and never a publication lane. Kanban
@@ -4575,10 +4212,8 @@ recording only one would understate what a change to it can break:
   file to stay consistent with behavior in the same pull request.
 - `audit-report` — a findings, code-health, or design document carrying its
   own status ledger, which `tools/test_source_distribution.py` lists in
-  `EXCLUDED_TRACKED_PATHS`. The ledger may be machine-readable and a packaged
-  workflow may maintain it, as the `docs/project_review/` row's is: the reason
-  is about what the document records and who in this repository reads it, per
-  the `coordination` definition above, not about whether a human typed it.
+  `EXCLUDED_TRACKED_PATHS`. The reason is about what the document records and
+  who in this repository reads it, per the `coordination` definition above.
 - `coordination-note` — a free-form note, roadmap sketch, the owner's vision
   (`docs/vision.md`), or other non-authoritative coordination document whose
   content no runtime, installer, or test reads, covered by an `EXCLUDED_TRACKED_PATHS`
@@ -4617,27 +4252,6 @@ docs/media/README.md | pr-atomic | test-parsed;release-document
 docs/pipeline-hardening.md | coordination | audit-report
 docs/pr-drainer.md | pr-atomic | release-document
 docs/product_readiness_findings.md | coordination | audit-report
-docs/project_review/ | coordination | audit-report
-docs/project_review_183-170.md | coordination | audit-report
-docs/project_review_195-185.md | coordination | audit-report
-docs/project_review_218-196.md | coordination | audit-report
-docs/project_review_244-219.md | coordination | audit-report
-docs/project_review_271-251.md | coordination | audit-report
-docs/project_review_297-272.md | coordination | audit-report
-docs/project_review_314-299.md | coordination | audit-report
-docs/project_review_342-317.md | coordination | audit-report
-docs/project_review_386-361.md | coordination | audit-report
-docs/project_review_398-353.md | coordination | audit-report
-docs/project_review_442-411.md | coordination | audit-report
-docs/project_review_456-446.md | coordination | audit-report
-docs/project_review_463-455.md | coordination | audit-report
-docs/project_review_466-399.md | coordination | audit-report
-docs/project_review_516-498.md | coordination | audit-report
-docs/project_review_533-517.md | coordination | audit-report
-docs/project_review_561-545.md | coordination | audit-report
-docs/project_review_600-573.md | coordination | audit-report
-docs/project_review_602-562.md | coordination | audit-report
-docs/project_review_660-648.md | coordination | audit-report
 docs/releasing.md | pr-atomic | test-parsed;release-document
 docs/ui-bugs.md | coordination | audit-report
 docs/user-guide.md | pr-atomic | release-document

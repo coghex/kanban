@@ -13,9 +13,8 @@ snapshot and reads open pull requests to decide what is in flight, and
 backlog-review draws an oldest-first batch from a newest-first listing, which
 inverts rather than merely truncates the audit it exists to perform.
 
-`project-review` had the same defect corrected first, and
-`tools/test_project_review_workflow.py` is the pattern these assertions follow:
-refuse the constant, and require the workflow to check that the listing it took
+`project-review` (since removed) had the same defect corrected first, and its
+test was the pattern these assertions follow: refuse the constant, and require the workflow to check that the listing it took
 actually reached what it promised, before anything is selected from it. The
 triage family was not swept then. `TriageAssetTests` and `RetriageAssetTests`
 in `tools/test_reconcile_approvals.py` and the classes in
