@@ -1752,7 +1752,6 @@ reimplement the removal, and `--check` remains read-only.
 | `ps` | Yes | Kanban's own worker/job-liveness snapshot (`src/Kanban/Process.hs`, which `src/Kanban/Worker.hs` consumes rather than spawns) runs it unconditionally. |
 | `launchctl` | No | Only needed to install and control an optional service's LaunchAgent on macOS — the PR drainer's (§2.4), the issue approval service's (§2.8), or the mission runner's (§2.12); `/usr/bin/plutil` below only reads the jobs it installs. |
 | `/usr/bin/plutil` | No | Only needed to read those three services' LaunchAgent definitions on macOS. |
-| `/bin/sh` | No | Only needed by the optional mission runner (§2.12), whose every scheduler pass starts as a shell waiting at its gate until the pass is recorded. |
 | `systemctl`, with a live `systemctl --user` session | No | The Linux counterpart of the two rows above: only needed to install and control any of those optional services' user units. Kanban reads a unit's own file directly, so Linux needs no reader alongside it. |
 | GHC + Cabal | Build-time only | Not invoked by any runtime workflow. |
 
@@ -2404,284 +2403,6 @@ approved item itself, so the destination is proved instead. The outcomes
 differ; the analysis does not, and neither action may write to an endpoint its
 report did not name.
 
-### 2.12 Unattended capability — the mission runner
-
-- **Owning source:** `tools/mission_runner_service.py` (the foreground `run`
-  that supervises repeated scheduler passes, the read-only `status`, the
-  bookkeeping `ack`, and the durable status and incident documents), over
-  `src/Kanban/Mission/Scheduler.hs` (one bounded repository-wide pass),
-  `src/Kanban/Mission/Pass.hs` (the two machine-readable documents a pass is
-  made of), `src/Kanban/Mission/Notify.hs` (the attention notification and
-  its durable suppression record), and `src/Kanban/Mission/Seal.hs` (sealing a
-  finished session's logs into its mission's archive, and the retention rule
-  the worker-cache collector asks before removing a mission worker's records).
-  The in-app surface is
-  `src/Kanban/MissionRunnerService.hs`: it resolves this host's discovery
-  record through `src/Kanban/ManagedPaths.hs`, reads the installed job's
-  command out of the definition that record names on either service manager,
-  decodes the status document and the incidents beside it against their pinned
-  schema and version, and starts and stops the job through the same bounded,
-  process-grouped invocation §2.4's and §2.8's dashboards use. It also replays
-  a mission's own journal and session tree from a caller-supplied cursor. It
-  renders nothing, starts no thread, and installs no recurring poll of its own:
-  console rendering and a cadence are a later slice's, and the caller decides
-  when to read.
-  Within it the runtime commands divide as the Commands bullet below sets out:
-  `run` writes the status document and opens incidents, `status` only reads,
-  and `ack` reads the incidents to find the open one it then rewrites. The four
-  lifecycle commands beside them act on the managed job rather than on that
-  runtime, and are the ones the installer calls.
-- **Installation:** `tools/install_mission_runner.py`, on §2.8's shape. It
-  loads one stopped job per canonical GitHub repository in a `mission-runner`
-  service-manager namespace of its own, installs the shared script links every
-  such job runs from, and records the installation in `config.json` in this
-  service's own resolved directory — the `mission-runner-discovery-record` rows
-  in §4, probed XDG-first for an occupied location exactly as §2.4's and
-  §2.8's records are, and never moved by `--install-dir` or
-  `KANBAN_MISSION_RUNNER_INSTALL_DIR`. It never starts the service. The
-  capability is still invoked directly as well: the wrapper runs in a terminal
-  or under whatever supervisor the operator already has, and a foreground run
-  and an installed job contend for the same per-identity run lock — which is
-  why a `start` writes a fresh token into the definition it kicks and accepts
-  no status document that does not carry it, rather than reading a live status
-  as proof that the job it started is the run that published one, and why every
-  mutation the installer makes is held under that same lock rather than under
-  the transition locks a foreground run does not take. What this
-  entry does not yet state is the authority and ownership of the installed
-  component, the operator's installing, operating, and recovering guide, and
-  the dependency and packaging inventory; those are a later slice's. What is
-  already true is that this job is *discovered from Kanban* the way §2.4's and
-  §2.8's are, by the reader the Owning source bullet names; what that reader
-  may not do — advance a mission, or take the lease that would let it — is
-  stated there rather than assumed here.
-- **Invocation:** the controller never imports Haskell. Every pass is a child
-  process running `kanban --mission-scheduler` — resolved from `PATH` unless
-  `--kanban` names one, and refused by name when neither is usable — in the
-  checkout it was started for, carrying that checkout's canonical `--repo`
-  identity and, when one was given, an absolute `--config`. It starts as
-  `/bin/sh` waiting at a gate on its standard input and `exec`s the scheduler,
-  with the null device as standard input, only once the controller has recorded
-  its identity; a controller that dies first closes the gate and the pass runs
-  nothing. The environment is
-  inherited whole, because `$XDG_DATA_HOME` and `$XDG_STATE_HOME` are what
-  decide which mission store a pass advances and which runtime describes it.
-  An installed job inherits nothing, so its definition carries those two when
-  they name absolute directories and pins `$XDG_CONFIG_HOME` to the resolved
-  base the installer read the shared configuration from — resolved rather than
-  forwarded, because that variable admits a relative value and otherwise falls
-  back to `$HOME`, neither of which the installer and the job read the same
-  way.
-- **The pass contract:** one JSON document on stdout and narration on stderr,
-  carrying `kanban-mission-scheduler-pass` version 2, the repository identity,
-  each admitted mission and its disposition, each outstanding attention
-  identity with the typed items it is about and what became of its
-  notification, the mission-dispatched agents it saw live against the ceiling
-  it applied (`agents`, or `null` when it counted none), and a termination
-  reason of `completed`, `refused`, or `failed` — exiting 0, 2, and 1
-  respectively. Two dispositions are neither progress nor failure: `awaiting`,
-  a mission whose only eligible work was watching its own live worker, and
-  `deferred`, one the agent ceiling held back; the controller waits its
-  interval after a pass that did nothing else, and opens no incident for one.
-  There is no limit on how many missions one report may name. A pass fails for
-  reasons of its own as well as for a mission's: a snapshot that will not
-  decode, one recorded against another repository, a store or legacy root it
-  cannot enumerate, a specification that cannot be read behind a waiting
-  mission, a provider-capacity wait whose retry time cannot be read, an agent
-  rotation it cannot enter or live agents it cannot count, a
-  child that refused for any reason other than losing the advancement lease,
-  and a scratch directory it could not prepare each produce a `failed` pass. That last child
-  case is the only place a mission whose *specification* is unreadable or
-  foreign is found at all — the inventory reads snapshots, so such a mission has
-  a perfectly runnable one and is admitted. Only the last
-  admits nothing by construction — it happens before the pass begins. The
-  others are found while the pass is under way, so a failed pass may well carry
-  dispositions for the missions it did advance, and a supervisor must read the
-  termination rather than infer it from an empty `admitted` list. A `refused`
-  pass is the one that observed nothing at all: it returns before the inventory
-  is read, so both its admitted and its attention lists are empty and its
-  agent count is `null`. An agent ceiling that is not a positive whole number
-  refuses the pass, as an enabled notification with no command does. The
-  schema, the version, the three vocabularies and that exit mapping are
-  declared once in `Kanban.Mission.Pass` and mirrored as constants in the
-  controller, which cannot import them;
-  `tools/test_mission_runner_service.py` holds the mirror equal to the
-  declaration. A report that is absent, unreadable, of another schema or
-  version, about another repository, carrying an unknown disposition or
-  notification state, or contradicting the status its child exited with is a
-  failed pass, never a quiet one.
-- **Authority:** none beyond what a mission already had. A pass admits every
-  runnable mission and advances each by one transition through its own
-  `kanban --mission` child, which dispatches through the workflow action
-  registry exactly as a board key press does. What is capped is agents: at
-  most `[missions] agent_ceiling` (default two) mission-dispatched agents may be
-  live at once for one repository, counted from the worker cache across every
-  mission, pass, and checkout and claimed under a lock in
-  `missions/.admission/<owner>/<repo>/` before a launch is journaled, with free
-  slots shared by a durable round-robin (`docs/design.md` §5). The ceiling adds
-  no authority and removes none: the per-target worker lease and the canonical
-  approval lock still decide beneath it whether a granted launch may happen.
-  A step whose agent session failed at a provider rate or usage limit, as
-  that provider's own structured evidence identifies it (`Kanban.ProviderLimit`,
-  the mission runner design's D-18), is `waiting_capacity` rather than failed:
-  Claude's recorded stream, where the final `result` reports `is_error` and the
-  latest `rate_limit_event` is `rejected` without overage covering it, or a 429
-  `api_error_status` with no such event; or, for Codex, a failed final turn
-  beside an account snapshot naming `rate_limit_reached` or a workspace usage
-  limit, or a final app-server turn whose `codexErrorInfo` is
-  `usageLimitExceeded` or `rateLimitExceeded`. Error text is never matched. Depleted credits, and every
-  failure that evidence does not identify as a limit, still stop the mission as
-  failures. The wait records its retry time — the provider's reset, or a backoff
-  from one minute doubling to an hour per consecutive wait of the step — on the
-  step, holds no agent slot, and admits the mission to no pass before that time;
-  from it, the mission is runnable again and the step is dispatched afresh
-  through every check above. A wait whose retry time cannot be read is never
-  retried automatically, and every pass reports it and fails (`docs/design.md`
-  §5, §16). An `interrupted` mission — one whose step was cut off
-  mid-flight, its launch journaled by a `--mission` child that died before any
-  worker or result was recorded — is not runnable: no pass and no restarted
-  service retries it, and only the runner console's `override` replans the
-  step. Neither the scheduler nor the controller merges a pull
-  request, applies a verdict label, or reports an indeterminate result as a
-  success, and neither performs a GitHub request of its own — a pass with
-  nothing runnable makes none at all.
-- **Durable state:** a status document, a pass record, and an incident
-  directory per canonical repository under the runtime root §4's
-  `mission-runner-runtime-dir` rows name. The pass record (`pass.json`) names the
-  one scheduler pass a run may have out, by process identifier and start time,
-  with every member of its process group the run has seen — each identity
-  observed after its start second ended, since `ps` reports start times to the
-  second (read in UTC and the C locale, whatever the controller's environment) and only such an observation rules out a same-second reuse; a pass
-  waits at its gate until its own can be recorded that way. The next `run` for
-  the repository settles what it names under the run lock before starting a
-  pass: verified processes still in the pass's group are stopped and then
-  killed, one that has left it for a session of its own is not the pass's, a
-  process named only by
-  identifier — including the bare `pass_pid` an earlier release left in its
-  status document, adopted into a record marked legacy — is never signalled,
-  and a survivor that cannot be verified gone fails the run with a
-  `mission-runner-unsettled-pass` incident, leaving the record for every later
-  start. It never reaches a detached worker, which leads a session of its own.
-  Nor does the service manager. A new session leaves the process group but not
-  a systemd unit's cgroup, so the mission runner's unit alone is rendered with
-  `KillMode=process` (`tools/service_manager.py`'s `ServiceNamespace.kill_mode`):
-  systemd signals only the wrapper and kills nothing else once it is gone. A
-  stop, a restart, or a crash of the runner on Linux therefore leaves every
-  mission-dispatched worker and its agent running, as launchd — which kills only
-  the job's own process group — already did, and whatever of the runner's own
-  chain a crash leaves behind is settled by the rule above on the next start.
-  The PR drainer's and the issue approval service's units keep `KillMode=mixed`.
-  The mission runner's unit alone also declares `TimeoutStopSec=420`
-  (`ServiceNamespace.stop_timeout_seconds`), longer than its drain's
-  five-minute grace plus the escalation and settlement after it, so systemd
-  never SIGKILLs a drain the wrapper is still inside; the other two keep
-  systemd's default.
-  An installation made before this is upgraded by no migration: `start`
-  rewrites and reloads the definition before it kicks the job, so the next
-  start of a *stopped* runner carries the new kill mode. A start that finds the
-  runner already running refreshes nothing, so that run's own stop is still
-  governed by the definition it was started from, and its workers are not
-  protected until it has been stopped and started again.
-  Beside these, a per-identity run lock under `mission-runner-lock-dir`, beside the
-  per-identity transition lock and the per-installation link lock a managed
-  transition is performed under; and — inside each mission's own record in the
-  mission store — one notification suppression record per attention identity.
-  The suppression record is written before the configured command is launched
-  and is never retried afterwards, so delivery is at most once per waiting
-  episode and a crash between the record and the launch loses that notification
-  by design. Every pass also seals, into each mission's own archive, whatever
-  logs any mission's finished sessions still owe — an event stream, and a raw
-  provider log where the worker recorded one — whatever that mission's
-  lifecycle, without admitting it; a seal that fails is carried in the pass's
-  detail and retried by the next pass, and never fails the pass; an existing
-  seal is verified on every attempt and reported, never replaced, when it no
-  longer holds. The worker cache keeps a mission-launched worker's records until
-  a verified seal covers every log it owes.
-
-  Installation adds four more. The discovery record §4's
-  `mission-runner-discovery-record` rows name holds one entry per installed
-  repository — the backend that wrote it, that job's identifier, its
-  definition's absolute path, the installed checkout, the install directory, and
-  the `--config` it was installed with. The service manager holds the definition
-  itself, in the directory its own §4 row names. `service.out` and `service.err`
-  under `mission-runner-log-dir` are where that manager sends an installed job's
-  output. And a `dependants` directory inside the install directory carries one
-  marker per installed identity, which is half of how an uninstall decides
-  whether the shared script links may go — the other half being the discovery
-  record, unioned with it rather than trusted instead of it, because each can be
-  destroyed or laundered in ways the other cannot.
-- **Commands:** seven, in two groups. Three are about a repository's runtime:
-  `run` is the supervisor; `status` reads and repairs
-  nothing — no directory created, no document rewritten, no incident opened or
-  resolved — because it is the diagnostic reached for when the runtime is
-  already in a bad state, and a reader that repaired what it read would destroy
-  the evidence it was called to show; and `ack` changes only bookkeeping,
-  marking one open incident resolved, writing no status document, creating
-  nothing, and refusing an identifier naming no open incident. It is
-  deliberately powerless over the service, so acknowledging the incident a
-  failed pass opened does not make the next pass succeed.
-
-  The other four are about the managed job, and are what
-  `tools/install_mission_runner.py` calls rather than spawns: `install` loads a
-  stopped job and records it, `uninstall` unloads it and drops its entry,
-  `start` kicks it and confirms the run it launched really is the one that
-  published a status — and refuses to run against any directory but the one the
-  record names, because relocating an installation is the installer's operation
-  and only it takes back what the old directory is left holding — and `stop`
-  asks it to end and waits until the status document reports `draining`, or,
-  when there was nothing to drain, until the manager agrees the run is gone;
-  its result's `draining` says which. A `start` during a drain starts nothing
-  and says so. None of them takes an install-directory option: the copy that
-  runs them is the installation they are about, and it reads its own location
-  from the environment that launched it. Three of the four refuse a location
-  the discovery record does not name, because writing a definition or a record
-  entry somewhere else moves an installation and only the installer takes back
-  what the old directory is left holding; `stop` needs no such refusal, because
-  it writes neither.
-- **Stop and upgrade:** a normal stop drains (the mission runner design's D-15
-  and D-19). The status document's states are `running`, `idle`, `waiting`,
-  `draining`, `stopped`, and `failed`, and `status` synthesizes `unknown` for a
-  document it cannot believe. `draining` is live, held to the runner's
-  identity like the other three, and decoded by `Kanban.MissionRunnerService`
-  as an activity of its own. On the first stop signal the wrapper starts no
-  further pass. With none in flight it stops at once, and a pass still
-  waiting at its gate is ended there, having run nothing. With one in flight it
-  signals nothing, publishes `draining`, and lets that pass and its `--mission`
-  children finish their step. It records `stopped` and exits, releasing the
-  run lock exactly once, when the pass has finished. A pass that fails on its
-  own while draining still fails the run with its incident. It never waits for
-  a detached worker: those keep running and the next runner's controller
-  iterations adopt them. A command under the mission store's
-  `control/requests/` that the draining pass did not consume is left for the
-  next runner. The drain's grace is five minutes from the first stop, never
-  reset. When it runs out, or a second stop signal arrives, the wrapper
-  escalates exactly as a forced stop: the pass's process group is signalled,
-  then killed ten seconds later, reaching a mission child that still holds the
-  pass's output after the scheduler itself has exited. A mission whose step that cuts off is left
-  `interrupted` by the next runner's reconciliation (§2.12's Authority
-  bullet), and a `mission-runner-drain-escalated` incident and the terminal
-  status message both report the escalation. A `stop` issued while the status
-  document reports `draining` is that second signal, delivered to the wrapper
-  itself through the backend's `repeat_stop_signal` (`launchctl kill SIGTERM`,
-  or `systemctl --user kill --kill-whom=main --signal=SIGTERM`, since systemd
-  merges a second stop request into the one in progress), and it waits for the
-  run to be gone. An upgrade is the operator's stop, install, and start:
-  install and uninstall are refused while the draining run holds its lock, and
-  succeed once it has ended.
-- **Notifications:** off by default, and when enabled the operator's own
-  configured command is run through the bounded command-capture seam with two
-  fixed values appended — the repository identity and `attention-required` —
-  followed by zero or more typed items, one argument each. Every one of those
-  is appended *after* whatever arguments the configured command itself carries,
-  so their absolute positions depend on that prefix and only their order is
-  fixed. No title, summary, recommendation, or filesystem path is ever passed,
-  and nothing at all is launched for an episode whose mission specification
-  cannot be read. The command runs in its own process group and that group is
-  swept on every path out, so neither a command that outlived its bound nor a
-  descendant it backgrounded survives the pass. A zero exit establishes that
-  the command completed and nothing more.
-- **Mandatory/optional:** optional. A Kanban that never runs a mission runner
-  never resolves `kanban` as an external command and writes none of this state.
-
 ## 3. Migration boundary
 
 Kanban owns the canonical issue-review backend, fully: its path convention,
@@ -2854,8 +2575,7 @@ claude-script-wrapper | executable | script | src/Kanban/Claude.hs | kanban | su
 gh-cli | executable | gh | src/Kanban/GitHub/Run.hs;src/Kanban/Review/Tools.hs;src/Kanban/Preflight/Environment.hs;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/issue/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/issue.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/draft-issues.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py;claude-plugin/plugins/kanban/scripts/tracked_issue_create.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;claude-copilot-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 git-cli | executable | git | src/Kanban/Repository.hs;tools/setup_workflows.py;tools/plugin_bundle_gate.py;tools/docs_land.sh;tools/docs_land_paths.py;codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;codex-plugin/plugins/kanban/skills/design-epic/SKILL.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/draft-report/SKILL.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;codex-plugin/plugins/kanban/skills/push-docs/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;claude-plugin/plugins/kanban/commands/design-epic.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/draft-report.md;claude-plugin/plugins/kanban/commands/note-problem.md;claude-plugin/plugins/kanban/commands/process-report.md;claude-plugin/plugins/kanban/commands/triage.md;claude-plugin/plugins/kanban/commands/push-docs.md;claude-plugin/plugins/kanban/scripts/review_pr.py;tools/publish_coordination_doc.py;tools/tracker_transaction.py;codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py;codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py;claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py;claude-plugin/plugins/kanban/scripts/tracker_transaction.py;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md;claude-plugin/plugins/kanban/commands/backlog-review.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/scripts/review_pr.py;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/scripts/review_pr.py;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/scripts/review_pr.py;claude-copilot-plugin/plugins/kanban/scripts/review_pr.py;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | yes
 python3-cli | executable | python3 | src/Kanban/Review/Canonical.hs;src/Kanban/Preflight/Environment.hs;src/Kanban/Drainer.hs;tools/docs_land.sh;codex-plugin/plugins/kanban/skills/solve/SKILL.md;codex-plugin/plugins/kanban/skills/pr-review/SKILL.md;codex-plugin/plugins/kanban/skills/pr-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/pr-revise/SKILL.md;codex-plugin/plugins/kanban/skills/issue-review/SKILL.md;codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md;codex-plugin/plugins/kanban/skills/repair/SKILL.md;claude-plugin/plugins/kanban/commands/solve.md;claude-plugin/plugins/kanban/commands/pr-review.md;claude-plugin/plugins/kanban/commands/pr-rereview.md;claude-plugin/plugins/kanban/commands/pr-revise.md;claude-plugin/plugins/kanban/commands/issue-review.md;claude-plugin/plugins/kanban/commands/issue-rereview.md;claude-plugin/plugins/kanban/commands/repair.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-report.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;codex-plugin/plugins/kanban/skills/note-problem/SKILL.md;claude-plugin/plugins/kanban/commands/note-problem.md;codex-plugin/plugins/kanban/skills/triage/SKILL.md;claude-plugin/plugins/kanban/commands/triage.md;codex-plugin/plugins/kanban/skills/retriage/SKILL.md;claude-plugin/plugins/kanban/commands/retriage.md;codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md;claude-plugin/plugins/kanban/commands/drain-prs.md;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;claude-plugin/plugins/kanban/scripts/census.py;codex-plugin/plugins/kanban/skills/janitor/scripts/census.py;codex-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-plugin/plugins/kanban/commands/autosolve.md;grok-plugin/plugins/kanban/skills/solve/SKILL.md;grok-plugin/plugins/kanban/skills/autosolve/SKILL.md;kimi-plugin/plugins/kanban/skills/solve/SKILL.md;kimi-plugin/plugins/kanban/skills/autosolve/SKILL.md;google-plugin/plugins/kanban/skills/solve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/solve/SKILL.md;google-plugin/plugins/kanban/skills/autosolve/SKILL.md;claude-copilot-plugin/plugins/kanban/skills/autosolve/SKILL.md | kanban | supported | no
-ps-cli | executable | ps | src/Kanban/Process.hs;tools/mission_runner_service.py | kanban | supported | yes
-posix-shell-cli | executable | /bin/sh | tools/mission_runner_service.py | kanban | supported | no
+ps-cli | executable | ps | src/Kanban/Process.hs | kanban | supported | yes
 plutil-cli | executable | /usr/bin/plutil | src/Kanban/Drainer.hs;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
 launchctl-cli | executable | launchctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
 systemctl-cli | executable | systemctl | tools/service_manager.py;src/Kanban/ApprovalService.hs;src/Kanban/MissionRunnerService.hs | kanban | supported | no
@@ -2897,18 +2617,9 @@ grep-cli | executable | grep | tools/docs_land.sh;codex-plugin/plugins/kanban/sk
 mktemp-cli | executable | mktemp | tools/docs_land.sh;codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md;codex-plugin/plugins/kanban/skills/process-design-doc/SKILL.md;codex-plugin/plugins/kanban/skills/process-report/SKILL.md;claude-plugin/plugins/kanban/commands/process-design-doc.md;claude-plugin/plugins/kanban/commands/process-report.md | kanban | supported | no
 rm-cli | executable | rm | codex-plugin/plugins/kanban/skills/fix/SKILL.md;claude-plugin/plugins/kanban/commands/fix.md;codex-plugin/plugins/kanban/skills/finalize/SKILL.md;claude-plugin/plugins/kanban/commands/finalize.md;codex-plugin/plugins/kanban/skills/janitor/SKILL.md;claude-plugin/plugins/kanban/commands/janitor.md | kanban | supported | no
 dirname-cli | executable | dirname | tools/docs_land.sh | kanban | supported | no
-kanban-cli | executable | kanban | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-service-root | personal-path | /Library/Application Support/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-service-root-xdg | personal-path | /.local/share/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-runtime-dir | personal-path | /Library/Application Support/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-runtime-dir-xdg | personal-path | /.local/share/kanban/mission-runner/runtime | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-lock-dir | personal-path | /Library/Application Support/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-lock-dir-xdg | personal-path | /.local/share/kanban/mission-runner/locks | tools/mission_runner_service.py | kanban | supported | no
 mission-runner-job-label | personal-path | com.coghex.mission-runner | tools/service_manager.py | kanban | supported | no
-mission-runner-discovery-record | personal-path | /Library/Application Support/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs;tools/mission_runner_service.py | kanban | supported | no
-mission-runner-discovery-record-xdg | personal-path | /.local/share/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs;tools/mission_runner_service.py | kanban | supported | no
-mission-runner-log-dir | personal-path | /Library/Logs/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
-mission-runner-log-dir-xdg | personal-path | /.local/state/kanban/mission-runner | tools/mission_runner_service.py | kanban | supported | no
+mission-runner-discovery-record | personal-path | /Library/Application Support/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
+mission-runner-discovery-record-xdg | personal-path | /.local/share/kanban/mission-runner/config.json | src/Kanban/ManagedPaths.hs | kanban | supported | no
 ```
 
 The six issue-review `personal-path` rows are three locations times two
@@ -3037,17 +2748,10 @@ them yet.
 `managed-job-path-entry` is not state at all: it is the one home-relative entry
 of the fixed `PATH` every managed service's job definitions carry, declared
 because a job's ability to find `gh`, `codex`, `claude`, and `kanban` depends on
-it, and found by the scan below in `tools/approve_issues_service.py` and
-`tools/mission_runner_service.py`. That second module reaches
-`systemd-user-unit-dir`'s `~/.config` for a reason of its own and writes nothing
-there: a mission runner job's definition *pins* the XDG config base its
-installer resolved the repository identity through, because the child
-re-resolves an identity at launch and refuses to act when it disagrees with the
-`--repo` the definition records — so a job that read a different shared
-configuration would refuse itself and never start.
+it, and found by the scan below in `tools/approve_issues_service.py`.
 `tools/drain_prs_service.py` builds the same entry for the drainer's own
 definitions and is not on that scan's surface, so this one row covers a location
-three modules write and two of them are policed for.
+two modules write and one of them is policed for.
 
 Four of the five — `issue-approval-install-dir`, `issue-approval-runtime-dir`,
 `issue-approval-lock-dir`, and `issue-approval-log-dir` — declare
@@ -3075,92 +2779,26 @@ their `-xdg` counterparts, name `src/Kanban/ManagedPaths.hs` on the same terms �
 there the literal carries the leading separator, so no reconciling comment is
 needed.
 
-The ten `mission-runner` `personal-path` rows are five locations times two
-platform conventions, as the issue-review and drainer rows are and unlike the
-issue-approval ones: `tools/mission_runner_service.py` resolves its root
-through `kanban_config.is_macos()`, taking `~/Library/Application
-Support/kanban/mission-runner` on macOS and the XDG data root — `$XDG_DATA_HOME`
-when it names an absolute directory, and `~/.local/share/kanban/mission-runner`
-when it does not — everywhere else. That absolute-only rule is the drainer's
-rather than issue-review's, and for the drainer's stated reason: the systemd
-unit that runs this job and the paths that locate it have to read the
-environment identically. `mission-runner-service-root` is the service root, the
-parent of every other location under the data root, and the *default* install
-directory — `--install-dir` and `KANBAN_MISSION_RUNNER_INSTALL_DIR` place the
-shared script links elsewhere and move nothing else, which is why no install
-directory is spelled a second time, and the variable is refused unless it names
-an absolute directory, on the same reasoning as the XDG rule above: the
-installer and the job a service manager launches read it with different working
-directories;
-`mission-runner-discovery-record` is the record inside it, whose own path
-neither of those may move, because it is what lets a dashboard that never saw
-`--install-dir` find an installation made with it;
-`mission-runner-runtime-dir` is the runtime root,
-one directory per identity beneath it holding that identity's status document
-and incident directory; `mission-runner-lock-dir` holds the per-identity run,
-transition, and per-installation link locks; and `mission-runner-log-dir` is
-the log root an installed job's output is redirected into, one directory per
-identity, which follows `$XDG_STATE_HOME` on the same absolute-only terms and
-which no option moves. `mission-runner-job-label` is the eleventh row and is
-not a location at all: it is the identifier prefix
-`tools/service_manager.py` derives an installed job's identifier from, on the
-terms `drainer-launchagent-label` and `issue-approval-job-label` are described
-under above. The `dependants` directory each installation keeps beside its
-script links — one marker per installed identity, naming which repositories
-still run from them — declares no row of its own: it is composed from whatever
-`--install-dir` resolved to rather than spelled, so there is no literal for a
-row to be grounded in, and it sits inside the install directory
-`mission-runner-service-root` already declares.
+`mission-runner-job-label` is not a location at all: it is the identifier prefix
+`tools/service_manager.py` still derives a job's identifier from, on the terms
+`drainer-launchagent-label` and `issue-approval-job-label` are described under
+above. The mission runner scripts that used it were removed, but
+`tools/service_manager.py` is outside that removal, so the prefix and its row
+stay with it.
 
-All ten name `tools/mission_runner_service.py`, and that is the same
-statement the four issue-approval rows make: the module composes each location
-segment by segment, so a `files` entry can only be grounded in the module if the
-literals are written down there. Six of them are, by the scan below —
-`mission-runner-service-root` and `mission-runner-log-dir` in both spellings,
-and the XDG runtime and lock
-trees the scan resolves the service root to — and each of the remaining four
-spellings is written out in the docstring of the helper that
-builds it, because the scan follows exactly one of a helper's returns and the
-row still has to be grounded in the module that owns it. The two record rows
-name `src/Kanban/ManagedPaths.hs` as well, and that file is where each is
-spelled whole rather than composed, exactly as it is for the drainer's and the
-issue-review backend's record rows.
-
-The mission runner is also the one managed component whose Python locations are
-*not* spelled in `tools/kanban_config.py`. They are spelled in the controller
-that owns them, because that module resolves the account root from the passwd
-database rather than from `$HOME` — a location a caller's environment can move
-cannot serialize anything — and `tools/kanban_config.py`'s resolvers are
-`Path.home()`-anchored. One spelling per language is the property these rows
-protect; which module carries the Python one is the component's own answer, and
-`src/Kanban/ManagedPaths.hs` is the Haskell counterpart of all three.
-
-That difference reaches the Haskell resolver as well, because *which home* is
-part of the answer: `managedRecordHome` takes the passwd database's home for
-the mission runner and `getHomeDirectory` for the other two. Answering what
-those Python modules answer means carrying the difference rather than picking
-one — on a host whose `$HOME` names something other than its passwd home, a
-single spelling would have the board looking for one of the three records
-where nothing writes it. `test/Spec/ManagedPaths.hs` holds both halves together
-for this component: it compares that home against the tracked controller's own
-account root with nothing patched, and separately runs the tracked Python
-resolver over every combination of occupancy and
-environment and compares its answer with the Haskell one, rather than by
-restating either.
-
-`kanban-cli` is the executable a pass *is*. Every other dependency in this table
-is something Kanban invokes; this one is Kanban, invoked by
-`tools/mission_runner_service.py` as an ordinary external command because the
-controller is a separate process by design — it supervises passes and never
-imports the code that performs them (§2.12). The row is `mandatory | no` for the
-same reason `codex` and `claude` are: a Kanban that never runs a mission runner
-never needs to resolve it.
+`mission-runner-discovery-record` and its `-xdg` counterpart name
+`src/Kanban/ManagedPaths.hs` alone: that file is where each is spelled whole
+rather than composed, exactly as it is for the drainer's and the issue-review
+backend's record rows. `managedRecordHome` there still takes the passwd
+database's home for the mission runner and `getHomeDirectory` for the other two;
+the Python controller whose account root that mirrored was removed with its
+scripts, so `test/Spec/ManagedPaths.hs` holds the Haskell cases alone, with the
+expected paths written out rather than compared against a Python resolver.
 
 What holds the composition to these rows is the Python home-relative-path scan
 in `tools/test_agent_workflow_contract.py`, which resolves
-`tools/approve_issues_service.py`, `tools/install_issue_approval.py`,
-`tools/service_manager.py`, `tools/mission_runner_service.py`, and
-`tools/install_mission_runner.py` as parsed
+`tools/approve_issues_service.py`, `tools/install_issue_approval.py`, and
+`tools/service_manager.py` as parsed
 modules — following a name to its binding
 and a helper to its return — and reconciles every chain that reaches a home root
 against the `personal-path` tokens here. It is the counterpart of the Haskell and
@@ -3185,8 +2823,8 @@ that location's row, because the complete location still has to match on its
 own.
 
 `launchagents-dir` and `systemd-user-unit-dir` are the manager-owned locations
-every managed service's definitions are written into — §2.4's, §2.8's and
-§2.12's alike, because a namespace changes the identifier a job is loaded under
+every managed service's definitions are written into — §2.4's and §2.8's
+alike, because a namespace changes the identifier a job is loaded under
 and not where its definition sits: a LaunchAgent plist under
 `~/Library/LaunchAgents`, a user unit under `~/.config/systemd/user`
 (`$XDG_CONFIG_HOME/systemd/user` when that variable names an absolute
@@ -3946,15 +3584,10 @@ brand's asset speaking a tool its declaration does not carry.
   `python3 tools/install_drainer.py` for the PR drainer,
   `python3 tools/install_issue_review.py` for the canonical issue-review
   backend (`tools/install_issue_approval.py` deliberately installs no backend
-  of its own; it resolves and verifies the one that installer made), and
-  `python3 tools/install_mission_runner.py` for the mission runner, per
-  repository. Until
+  of its own; it resolves and verifies the one that installer made). Until
   then the installed script fails at import against the module set it was
   installed with. Issue #483's `tools/kanban_models.py` joined the first two
-  sets; the mission runner's is the controller, `kanban_config.py` and
-  `service_manager.py`, and `tools/test_install_mission_runner.py` derives that
-  set from the controller's own module-scope imports rather than restating it,
-  so an import added there joins it without anybody remembering to say so.
+  sets.
 
 ## 6. Completeness check
 
@@ -4059,12 +3692,11 @@ runs) parses the manifest in §4 and:
   `tools/fake_cli.py` — that one path, not every module sharing its name —
   are excluded because they construct fake executables rather than depend on
   real ones. That discovered surface is executable-only; the home-relative
-  paths a `tools/` module builds are reconciled only for the five named in
+  paths a `tools/` module builds are reconciled only for the three named in
   the next bullet;
 - fails if `tools/approve_issues_service.py`,
-  `tools/install_issue_approval.py`, `tools/service_manager.py`,
-  `tools/mission_runner_service.py`, or `tools/install_mission_runner.py` —
-  §2.8's and §2.12's owning sources and the installers beside them —
+  `tools/install_issue_approval.py`, or `tools/service_manager.py` —
+  §2.8's owning source and installer, and the shared service manager —
   builds a home-relative path that has no matching
   `personal-path` manifest entry. These are Python, so they need an extractor
   of their own beside the Haskell one, and it resolves the parsed module rather
@@ -4078,9 +3710,9 @@ runs) parses the manifest in §4 and:
   `$HOME/`-prefixed literal, joining the result into the same slash-prefixed
   shape the Haskell and markdown scans compare. Quote style and line wrapping
   are not distinctions the parsed tree makes. What it recovers from each of the
-  five is pinned, so a refactor that stops matching fails here rather than
-  passing with an empty discovered set — including the pin that each of the two
-  installers builds none of its own — and fixture regressions prove that an
+  three is pinned, so a refactor that stops matching fails here rather than
+  passing with an empty discovered set — including the pin that the
+  installer builds none of its own — and fixture regressions prove that an
   undeclared
   segment is reported, that a tail hung off a binding or a helper is recovered
   whole, that a location beneath a declared root is not absorbed into that

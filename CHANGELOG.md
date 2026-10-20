@@ -19,8 +19,8 @@ created above it.
   (child 1 of #794). `kanban --mission`, `--mission-scheduler`,
   `--mission-result` and `--mission-invocation` no longer exist: the parser
   refuses each as an unknown option and starts nothing, and `kanban --help`
-  lists none. `tools/mission_runner_service.py`,
-  `tools/install_mission_runner.py` and their tests are deleted, with the CI
+  lists none. The mission runner service script, its installer
+  and their tests are deleted, with the CI
   step and systemd harness files that exercised the runner; the drainer's
   lifecycle check stays. A repository's worker cache no longer consults a
   mission store, so terminal workers a mission once dispatched are collected

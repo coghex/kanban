@@ -11,13 +11,13 @@ command or home-relative path cannot land undocumented.
 
 Home-relative paths are reconciled over two surfaces with two extractors, since
 the same managed location is spelled differently in each. The Haskell modules
-build one as a single literal hung off `home`; the five Python service modules
-of docs/agent-workflow-contract.md §2.8 and §2.12 (issues #425, #666 and #667)
+build one as a single literal hung off `home`; the three Python service modules
+of docs/agent-workflow-contract.md §2.8 (issue #425)
 compose one from `pathlib`
 segments, often across a bound name or a nullary helper, so they are scanned
 separately for that shape — the way the bundled coordinator is scanned
 separately from the `.md` surfaces — by resolving the parsed module rather than
-by matching text. What the extractor recovers from each of the five is pinned,
+by matching text. What the extractor recovers from each of the three is pinned,
 and fixture regressions prove that an undeclared segment is reported, that a
 tail hung off a binding or a helper is recovered whole rather than only to its
 prefix, and that a module which cannot be parsed fails rather than reporting
@@ -315,7 +315,7 @@ MARKDOWN_RECORD_RESOLVER_FILES = (
 )
 
 # The Python services' own owning sources — the issue approval service's
-# (docs/agent-workflow-contract.md §2.8) and the mission runner's (§2.12) —
+# (docs/agent-workflow-contract.md §2.8) and the shared service manager —
 # scanned for the home-relative paths they build rather than for the external
 # commands they spawn; those are already covered by the discovered tools/
 # surface below. They need an extractor of their own because they are Python:
@@ -332,17 +332,15 @@ PYTHON_SERVICE_SURFACE_FILES = [
     "tools/approve_issues_service.py",
     "tools/install_issue_approval.py",
     "tools/service_manager.py",
-    "tools/mission_runner_service.py",
-    "tools/install_mission_runner.py",
 ]
 
-# What the Python extractor actually recovers from each of the five, pinned the
+# What the Python extractor actually recovers from each of the three, pinned the
 # way the plugin surfaces' command sets are: the completeness loop below
 # reports no undeclared segment for a module the extractor recovers nothing
-# from, for the same reason it reports none for a module it never opened. Each
-# installer's empty set is a pin rather than an omission — both expand whatever
-# `--install-dir` or `--config` they are given and build no managed location of
-# their own — so a future edit that made one construct one would have to
+# from, for the same reason it reports none for a module it never opened. The
+# installer's empty set is a pin rather than an omission — it expands whatever
+# `--install-dir` or `--config` it is given and builds no managed location of
+# its own — so a future edit that made one construct one would have to
 # declare it here as well as in the manifest.
 PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
     "tools/approve_issues_service.py": {
@@ -372,29 +370,6 @@ PYTHON_SERVICE_EXPECTED_HOME_SEGMENTS = {
         "/.config",
         "/.config/systemd/user",
     },
-    # The mission runner's service root and log root in both platform
-    # spellings, the two trees it composes from that root through a nullary
-    # helper each, the one home-relative entry of the fixed PATH an installed
-    # job runs with, and the conventional XDG config base its job definition
-    # pins so the child reads the configuration this installation resolved its
-    # identity through. Only one of a helper's returns is followed —
-    # the extractor takes the first that resolves -- so the `~/Library` runtime
-    # and lock spellings are not recovered here and are grounded in the
-    # module's docstrings instead, as docs/agent-workflow-contract.md §4
-    # records; the record path is composed from the install directory and a
-    # named constant, so it carries no literal for the extractor either and is
-    # grounded the same way.
-    "tools/mission_runner_service.py": {
-        "/Library/Application Support/kanban/mission-runner",
-        "/.local/share/kanban/mission-runner",
-        "/.local/share/kanban/mission-runner/runtime",
-        "/.local/share/kanban/mission-runner/locks",
-        "/Library/Logs/kanban/mission-runner",
-        "/.local/state/kanban/mission-runner",
-        "/.local/bin",
-        "/.config",
-    },
-    "tools/install_mission_runner.py": set(),
 }
 
 # The tracked Codex plugin's own packaged workflows (issue #76): a separate,
@@ -2180,7 +2155,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
 
     def test_every_home_relative_path_segment_is_documented(self):
         # Two surfaces, one reconciliation. The Haskell modules spell a managed
-        # location as one literal and the five Python service modules compose
+        # location as one literal and the three Python service modules compose
         # one from path segments, so each gets its own extractor and both
         # answer to the same `personal-path` rows.
         personal_tokens = [
@@ -2202,7 +2177,7 @@ class AgentWorkflowContractTests(unittest.TestCase):
             )
 
     def test_python_service_home_path_discovery_is_not_vacuous(self):
-        # The five modules reach the loop above by being listed, and a loop
+        # The three modules reach the loop above by being listed, and a loop
         # over a module the extractor recovers nothing from reports no
         # undeclared segment for the same reason a loop over nothing does. Pin
         # what each one actually builds so a refactor that stops matching —
@@ -3447,18 +3422,16 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_tool_surface_reconciles_against_the_existing_executable_rows(self):
         # Adding this surface must not require re-declaring commands that
         # already have rows: the whole eligible surface spawns exactly these
-        # eight, and only launchctl was missing before issue #149 — systemctl
-        # joined it with the systemd backend in issue #329, `ps` with the
-        # mission runner in issue #666, where the controller reads a recorded
-        # runner's start time to tell it from whatever later inherits its
-        # process identifier, and `/bin/sh` in issue #744, as the gate every
-        # scheduler pass waits at until the controller has recorded it.
+        # six, and only launchctl was missing before issue #149 — systemctl
+        # joined it with the systemd backend in issue #329. The `ps` row stays
+        # grounded in src/Kanban/Process.hs, which the tools/ surface does not
+        # scan.
         found = set()
         for path in tool_surface_files():
             found |= discovered_tool_commands(path.read_text(encoding="utf-8"))
         self.assertEqual(
             found,
-            {"gh", "git", "codex", "claude", "launchctl", "systemctl", "ps", "/bin/sh"},
+            {"gh", "git", "codex", "claude", "launchctl", "systemctl"},
         )
 
     def test_each_service_manager_cli_is_declared_and_load_bearing(self):

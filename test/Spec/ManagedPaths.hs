@@ -6,21 +6,14 @@
 -- all four decide the answer and only one of them is the machine the suite
 -- happens to run on. The expected paths are written out rather than
 -- recomputed from the resolver, so a change to either spelling has to be
--- restated here — and they are the paths @tools\/kanban_config.py@'s
--- @issue_review_record_path@ and @drainer_record_path@, and
--- @tools\/mission_runner_service.py@'s @discovery_record_path@, answer with
--- for the same environment, which is the agreement this module exists to
--- hold.
---
--- For the mission runner that agreement is asserted rather than described:
--- the last section below runs the real Python resolver, in the real
--- environment each case sets up, and compares its answer with this module's
--- across the whole occupancy times environment matrix.
+-- restated here — and for the issue-review and drainer records they are the
+-- paths @tools\/kanban_config.py@'s @issue_review_record_path@ and
+-- @drainer_record_path@ answer with for the same environment, which is the
+-- agreement this module exists to hold.
 module Spec.ManagedPaths (spec) where
 
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as ByteString
-import Data.Char (isSpace)
 import Kanban.Drainer (drainerRecordPath)
 import Kanban.ManagedPaths
   ( ManagedComponent (..),
@@ -33,17 +26,14 @@ import Spec.Support.Env
   ( withEnvironmentValue,
     withManagedRecordHome,
     withTemporaryCacheRoot,
-    withoutEnvironmentValue,
   )
 import System.Directory
   ( createDirectoryIfMissing,
     createFileLink,
     withCurrentDirectory,
   )
-import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.Posix.User (getRealUserID, getUserEntryForID, homeDirectory)
-import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
 -- | Every component this module resolves a record for. Written out rather
@@ -146,9 +136,9 @@ spec = describe "Managed discovery record locations" $ do
           -- tools/kanban_config.py's _xdg_drainer_dir takes an absolute base
           -- only, so that the drainer's paths and the systemd unit running it
           -- read the environment identically, while _xdg_issue_review_dir
-          -- takes any non-empty one. tools/mission_runner_service.py's
-          -- _xdg_service_root follows the drainer, and by requirement rather
-          -- than by resemblance. Answering the same as those modules means
+          -- takes any non-empty one. The mission runner's former
+          -- controller followed the drainer, and by requirement rather than by
+          -- resemblance. Answering the same as those modules means
           -- carrying the difference rather than picking one.
           managedRecordPathAt "linux" home (Just "relative-base") DrainerComponent
             `shouldReturn` (home <> "/.local/share/kanban/pr-drainer/config.json")
@@ -235,9 +225,9 @@ spec = describe "Managed discovery record locations" $ do
   describe "the home a record hangs off" $ do
     it "anchors the mission runner to the passwd home rather than to $HOME" $
       withTemporaryCacheRoot $ \home -> do
-        -- The two Python resolvers disagree here on purpose:
-        -- tools/kanban_config.py is `Path.home()`-anchored and
-        -- tools/mission_runner_service.account_home reads the passwd database,
+        -- The two resolvers disagree here on purpose:
+        -- tools/kanban_config.py is `Path.home()`-anchored and the mission
+        -- runner's account root reads the passwd database,
         -- so a host whose $HOME names something else has two homes and this
         -- module has to carry both. A single spelling would send the dashboard
         -- looking for one of the three records where nothing writes it.
@@ -247,173 +237,10 @@ spec = describe "Managed discovery record locations" $ do
           managedRecordHome IssueReviewComponent `shouldReturn` home
           managedRecordHome MissionRunnerComponent `shouldReturn` passwd
 
-    it "agrees with the mission runner controller's own account root" $
-      withTemporaryCacheRoot $ \home ->
-        -- Against the tracked module with nothing patched, so the agreement
-        -- this asserts is between the two real implementations rather than
-        -- between two statements of one rule. Read-only: neither side writes
-        -- anything at the answer.
-        withEnvironmentValue "HOME" home $ do
-          expected <- managedRecordHome MissionRunnerComponent
-          actual <- pythonAccountHome
-          actual `shouldBe` expected
-
-  describe "the mission runner's Python resolver" $
-    -- One answer per host, asserted rather than described. Everything else in
-    -- this module states what tools/ answers and trusts the statement; here the
-    -- real module is run over every combination of occupancy and environment
-    -- above. Two resolvers that agreed on the cases somebody wrote out and
-    -- differed on the rule would pass a restated expectation and fail a host.
-    --
-    -- The account root is redirected in the child, because a fixture cannot
-    -- move a passwd entry; that the two agree on the *unredirected* root is
-    -- what the case above asserts, so between them nothing about this
-    -- component's location is taken on trust.
-    forM_ hostOperatingSystems $ \hostOperatingSystem ->
-      forM_ xdgBaseCases $ \(baseLabel, baseFor) ->
-        forM_ occupancyCases $ \(occupancyLabel, occupy') ->
-          it
-            ( "agrees with this module on "
-                <> hostOperatingSystem
-                <> " with "
-                <> baseLabel
-                <> " and "
-                <> occupancyLabel
-            )
-            $ withTemporaryCacheRoot
-            $ \home -> do
-              let base = baseFor home
-                  (xdgCandidate, libraryCandidate) =
-                    managedRecordCandidates MissionRunnerComponent home base
-              occupy' xdgCandidate libraryCandidate
-              expected <-
-                managedRecordPathAt hostOperatingSystem home base MissionRunnerComponent
-              actual <- pythonRecordPath hostOperatingSystem home base
-              actual `shouldBe` expected
-
-hostOperatingSystems :: [String]
-hostOperatingSystems = ["darwin", "linux"]
-
--- | The @$XDG_DATA_HOME@ values worth crossing with every occupancy: unset,
--- an absolute base, and a relative one the absolute-only rule must refuse.
--- The empty value is left to the pure case above, because @setEnv@ cannot
--- hand a child an explicitly empty variable on every platform and an unset
--- one is what both resolvers would then see.
-xdgBaseCases :: [(String, FilePath -> Maybe String)]
-xdgBaseCases =
-  [ ("no XDG base", const Nothing),
-    ("an absolute XDG base", \home -> Just (home </> "data")),
-    ("a relative XDG base", const (Just "relative-base"))
-  ]
-
--- | How each case occupies the two candidates, given both of them.
-occupancyCases :: [(String, FilePath -> FilePath -> IO ())]
-occupancyCases =
-  [ ("neither occupied", \_ _ -> pure ()),
-    ("only the XDG candidate occupied", \xdgCandidate _ -> occupy xdgCandidate),
-    ("only the ~/Library candidate occupied", \_ libraryCandidate -> occupy libraryCandidate),
-    ( "both occupied",
-      \xdgCandidate libraryCandidate -> occupy xdgCandidate >> occupy libraryCandidate
-    ),
-    ( "a directory where the XDG record belongs",
-      \xdgCandidate libraryCandidate -> do
-        createDirectoryIfMissing True xdgCandidate
-        occupy libraryCandidate
-    ),
-    ( "a dangling link where the XDG record belongs",
-      \xdgCandidate libraryCandidate -> do
-        createDirectoryIfMissing True (takeDirectory xdgCandidate)
-        createFileLink (takeDirectory xdgCandidate </> "gone.json") xdgCandidate
-        occupy libraryCandidate
-    )
-  ]
-
--- | What @tools\/mission_runner_service.py@ answers for this host, home
--- directory and @$XDG_DATA_HOME@.
---
--- The account root is redirected in the child rather than through the
--- environment because the module resolves it from the passwd database on
--- purpose — a location a caller's environment can move cannot serialize
--- anything — which is exactly how that module's own suite redirects it. The
--- host operating system is pinned the same way, through
--- @kanban_config.is_macos@, so this suite can ask about the platform it is
--- not running on.
-pythonRecordPath :: String -> FilePath -> Maybe String -> IO FilePath
-pythonRecordPath hostOperatingSystem home xdgDataHome = do
-  let withBase action = case xdgDataHome of
-        Nothing -> withoutEnvironmentValue "XDG_DATA_HOME" action
-        Just base -> withEnvironmentValue "XDG_DATA_HOME" base action
-  (code, out, err) <-
-    withBase $
-      readProcessWithExitCode
-        "python3"
-        ["-c", pythonProbe, "tools", home, hostOperatingSystem]
-        ""
-  case code of
-    ExitSuccess -> pure (trim out)
-    ExitFailure status -> do
-      expectationFailure
-        ( "tools/mission_runner_service.py could not be asked where its record is "
-            <> "(exit "
-            <> show status
-            <> "): "
-            <> err
-        )
-      -- Unreachable: `expectationFailure` throws. Present because it is typed
-      -- as an assertion rather than as a diverging call.
-      pure ""
-
--- | The probe above, as the child runs it. Deliberately tiny: everything it
--- decides has to be the tracked module's decision rather than this fixture's.
-pythonProbe :: String
-pythonProbe =
-  unlines
-    [ "import sys",
-      "from pathlib import Path",
-      "sys.path.insert(0, sys.argv[1])",
-      "import kanban_config",
-      "import mission_runner_service as service",
-      "home = Path(sys.argv[2])",
-      "macos = sys.argv[3] == 'darwin'",
-      "service.account_home = lambda: home",
-      "kanban_config.is_macos = lambda: macos",
-      "print(service.discovery_record_path())"
-    ]
-
--- | What @tools\/mission_runner_service.account_home@ answers on this host,
--- with nothing patched.
-pythonAccountHome :: IO FilePath
-pythonAccountHome = do
-  (code, out, err) <-
-    readProcessWithExitCode "python3" ["-c", accountHomeProbe, "tools"] ""
-  case code of
-    ExitSuccess -> pure (trim out)
-    ExitFailure status -> do
-      expectationFailure
-        ( "tools/mission_runner_service.py could not be asked for its account "
-            <> "root (exit "
-            <> show status
-            <> "): "
-            <> err
-        )
-      pure ""
-
-accountHomeProbe :: String
-accountHomeProbe =
-  unlines
-    [ "import sys",
-      "sys.path.insert(0, sys.argv[1])",
-      "import mission_runner_service as service",
-      "print(service.account_home())"
-    ]
-
 -- | This account's home directory as the passwd database gives it, which is
 -- what the controller resolves and what @$HOME@ may disagree with.
 passwdHome :: IO FilePath
 passwdHome = homeDirectory <$> (getRealUserID >>= getUserEntryForID)
-
-trim :: String -> String
-trim = dropWhile isSpace . reverse . dropWhile isSpace . reverse
 
 -- | Writes a record at @path@, creating whatever directories it needs. The
 -- contents never matter here: this module is about which location is
