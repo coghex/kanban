@@ -202,7 +202,6 @@ DOCS_WT_COMMANDS = frozenset(
         "note-problem",
         "process-design-doc",
         "process-report",
-        "project-review",
         "retriage",
     }
 )

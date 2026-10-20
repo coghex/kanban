@@ -376,22 +376,6 @@ COMMAND_SOURCES = (
         ),
     ),
     CommandSource(
-        name="project-review",
-        source="tools/command_sources/project-review.md",
-        outputs=BUNDLE_OUTPUTS,
-        note=(
-            "VEND-4, the heaviest reconciliation in the arc: 223 differing "
-            "lines between a 79-line Claude copy that drafted and filed issue "
-            "bodies and a 220-line Codex copy that forbids tracker writes and "
-            "writes a findings report instead. Design D-9 resolved the two "
-            "opposite terminal behaviors in favour of the Codex copy, so the "
-            "rendered command is report-only for both brands. D-10 keeps its "
-            "boundary rule as body prose and ships no auxiliary asset, which "
-            "is why this entry needs nothing from the renderer that the four "
-            "above did not."
-        ),
-    ),
-    CommandSource(
         name="fix",
         source="tools/command_sources/fix.md",
         outputs=BUNDLE_OUTPUTS,
@@ -488,28 +472,6 @@ COMMAND_SOURCES = (
             "value -- is a brand block, because a Codex render telling its "
             "reader to expect pr-origin:claude would route the whole loop to "
             "the wrong reviewer."
-        ),
-    ),
-    CommandSource(
-        name="auto-project-review",
-        source="tools/command_sources/auto-project-review.md",
-        outputs=BUNDLE_OUTPUTS,
-        note=(
-            "LEDGER-7 of docs/designs/project_review_ledger_design.md, and the first "
-            "entry in this registry with no personal copy behind it at all: "
-            "design D-6 assigns repetition to a workflow that did not exist "
-            "in either bundle, so both brands' assets are authored by "
-            "rendering this one source. Like autosolve above it runs another "
-            "vendored workflow as its own step rather than merely naming one "
-            "-- project-review, once per iteration -- but unlike "
-            "autosolve it delegates the whole of the work: D-6 keeps the "
-            "review, the ledger, the claim and the cleanup in the single "
-            "workflow, and what this one contributes is the loop, D-12 and "
-            "D-17's counting rule, and the stop conditions. So it resolves no "
-            "helper, spells no external command, and its only brand block is "
-            "the argument convention each provider supplies -- which is also "
-            "why it is the one shipped entry whose two renderings are "
-            "identical outside that block."
         ),
     ),
     CommandSource(

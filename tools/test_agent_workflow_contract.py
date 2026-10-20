@@ -421,13 +421,11 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/push-docs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/retriage/SKILL.md",
     "codex-plugin/plugins/kanban/skills/backlog-review/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/drain-prs/SKILL.md",
     "codex-plugin/plugins/kanban/skills/fix/SKILL.md",
     "codex-plugin/plugins/kanban/skills/finalize/SKILL.md",
     "codex-plugin/plugins/kanban/skills/janitor/SKILL.md",
     "codex-plugin/plugins/kanban/skills/autosolve/SKILL.md",
-    "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/review_pr.py",
     "codex-plugin/plugins/kanban/skills/pr-review/scripts/kanban_models.py",
     "codex-plugin/plugins/kanban/skills/solve/scripts/trusted_issue_spec.py",
@@ -435,8 +433,6 @@ PLUGIN_SURFACE_FILES = [
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/kanban_config.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/census.py",
     "codex-plugin/plugins/kanban/skills/janitor/scripts/kanban_config.py",
 ]
@@ -466,13 +462,11 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/commands/push-docs.md",
     "claude-plugin/plugins/kanban/commands/retriage.md",
     "claude-plugin/plugins/kanban/commands/backlog-review.md",
-    "claude-plugin/plugins/kanban/commands/project-review.md",
     "claude-plugin/plugins/kanban/commands/drain-prs.md",
     "claude-plugin/plugins/kanban/commands/fix.md",
     "claude-plugin/plugins/kanban/commands/finalize.md",
     "claude-plugin/plugins/kanban/commands/janitor.md",
     "claude-plugin/plugins/kanban/commands/autosolve.md",
-    "claude-plugin/plugins/kanban/commands/auto-project-review.md",
     "claude-plugin/plugins/kanban/scripts/review_pr.py",
     "claude-plugin/plugins/kanban/scripts/trusted_issue_spec.py",
     "claude-plugin/plugins/kanban/scripts/publish_coordination_doc.py",
@@ -480,8 +474,6 @@ CLAUDE_PLUGIN_SURFACE_FILES = [
     "claude-plugin/plugins/kanban/scripts/tracked_issue_create.py",
     "claude-plugin/plugins/kanban/scripts/kanban_config.py",
     "claude-plugin/plugins/kanban/scripts/kanban_models.py",
-    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
-    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
     "claude-plugin/plugins/kanban/scripts/census.py",
 ]
 
@@ -581,10 +573,8 @@ DOCUMENT_MECHANISM_SURFACE_FILES = {
 
 # Both shipped copies of the janitor census, and the manifest rows each one
 # has to carry. `discovered_python_commands` reads a literal first argument
-# only, so the census's three `sys.executable` spawns -- the drainer
-# controller, the optional test coordinator, and since issue #706 the
-# project-review liveness adapter its attempt census reads -- reach no
-# extractor at all; the pin below names the spelling those calls use and the
+# only, so the census's two `sys.executable` spawns -- the drainer
+# controller and the optional test coordinator -- reach no extractor at all; the pin below names the spelling those calls use and the
 # row that covers it, and CensusDynamicExecutableTests holds the tree to both.
 CENSUS_SURFACE_FILES = (
     "claude-plugin/plugins/kanban/scripts/census.py",
@@ -679,101 +669,6 @@ BACKLOG_REVIEW_SURFACE_EXPECTED_COMMANDS = {
         "awk",
     },
 }
-
-# Issue #462's history audit, pinned the same way and for the mirrored reason:
-# design D-9 made it report-only, so its `gh` surface is the whole of its
-# GitHub reach, and an extractor that stopped recovering that surface would
-# leave requirement 7's scoping rule -- `-R "$REPO"` on every call -- resting
-# on nothing discovered. The same four commands appear as backlog-review's,
-# and each is load-bearing for a different rule: `gh` reads the merged pull
-# requests, deduplicates against the tracker, and asks which pull request owns
-# a first-parent commit, `sed` fills `$REPO` from the remote without a GitHub
-# call of its own, `awk` resolves the docs worktree that holds the ledger and
-# the reports, and `git` walks `--first-parent` history in direct mode. The two files are rendered from one
-# source, so they are pinned to the same set: a brand block that leaked a
-# command into one and not the other fails here.
-PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
-    "claude-plugin/plugins/kanban/commands/project-review.md": {
-        "gh",
-        "git",
-        "sed",
-        "awk",
-        "python3",
-        "mkdir",
-        "rm",
-    },
-    "codex-plugin/plugins/kanban/skills/project-review/SKILL.md": {
-        "gh",
-        "git",
-        "sed",
-        "awk",
-        "python3",
-        "mkdir",
-        "rm",
-        "find",
-        "head",
-    },
-}
-
-# Issue #685's serial loop over that same audit, pinned to the empty set --
-# and the empty set is the whole assertion. Design D-6 keeps every step of a
-# review in the single workflow, so this one resolves no helper, reads no
-# repository, and spells no external command at all: the only fenced block in
-# either rendering is the assignment that carries the count. That is why it
-# joins no `files` column in section 4's manifest, where `project-review`
-# appears in ten rows. An extractor that recovered anything here would mean
-# the automation had started doing work of its own, and a manifest row naming
-# it would mean the same, so both are checked -- the discovery below, and the
-# absence of the path from every executable row.
-AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS = {
-    "claude-plugin/plugins/kanban/commands/auto-project-review.md": set(),
-    "codex-plugin/plugins/kanban/skills/auto-project-review/SKILL.md": set(),
-}
-
-# Issue #680's ledger helper and issue #687's liveness adapter, vendored into
-# both bundles and covered the way the trusted-comment helper and the document
-# mechanism above are. The cursor helper that used to sit beside them left both
-# bundles in issue #686. The expectation is an exact set, and that is a
-# pin rather than an omission: a module that started spawning something else
-# would be reaching a checkout its caller never named -- and would owe a
-# manifest row it does not have. The ledger's is `git` since issue #682, which put the lease's
-# lock reference and heartbeat records in the Git common directory; its one
-# other spawn, the renewer, runs through `sys.executable` and is pinned by
-# LEDGER_DYNAMIC_EXECUTABLES below. Issue #687's session liveness adapter reads
-# the installed runtime's version through `claude` and `codex`; its keeper runs
-# through `sys.executable` and its wrapper runs the caller's own command, both
-# pinned by the LIVENESS_* sets below.
-PROJECT_REVIEW_HELPER_SURFACE_FILES = {
-    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py": {"git"},
-    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py": {"claude", "codex"},
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py": {"git"},
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py": {"claude", "codex"},
-}
-
-# Both shipped copies of the ledger helper, and the one non-literal spawn
-# spelling each carries: `claim` starts the renewer by running the helper's own
-# file through `sys.executable`, which the literal extractor above cannot see.
-LEDGER_SURFACE_FILES = (
-    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
-)
-LEDGER_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
-LEDGER_DECLARING_ROWS = ("git-cli", "python3-cli")
-
-# Both shipped copies of issue #687's liveness adapter. Its keeper is the
-# adapter's own file run through `sys.executable`, pinned like the ledger's
-# renewer. Its wrapper runs the command its caller names, which is not an
-# executable the adapter chooses and owes no row; that spawn's spelling is
-# pinned so a second non-literal spawn cannot hide behind it. The rows it
-# owes: the two runtimes whose versions it reads, `python3` for the keeper,
-# and Codex's home, whose `config.toml` its refusal reads for hook trust.
-LIVENESS_SURFACE_FILES = (
-    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
-)
-LIVENESS_DYNAMIC_EXECUTABLES = {"sys.executable": "python3"}
-LIVENESS_CALLER_COMMAND_SPELLINGS = {"list(command)"}
-LIVENESS_DECLARING_ROWS = ("claude-cli", "codex-cli", "python3-cli", "codex-plugin-cache-root")
 
 # Issue #511's drainer control surface, pinned the same way and for the
 # inverted reason: this is the one vendored workflow that makes no GitHub call
@@ -2950,196 +2845,6 @@ class AgentWorkflowContractTests(unittest.TestCase):
                 self.assertIn(row["id"], {"gh-cli", "git-cli", "sed-cli", "awk-cli"})
                 self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
 
-    def test_the_cache_root_row_describes_the_lookup_the_asset_makes(self):
-        # Issue #684 round 9: the rendered Codex skill stopped locating the
-        # ledger module and started locating the directory its vendored
-        # modules share -- the ledger helper and the session liveness adapter,
-        # since issue #686 retired the sweep cursor -- and this paragraph went
-        # on describing the old lookup. Pinned
-        # from both sides so neither can move alone -- the asset's own fence
-        # and the prose that explains it.
-        asset = REPO_ROOT / "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
-        content = asset.read_text(encoding="utf-8")
-        self.assertIn(
-            "-type d -path '*/kanban/*/skills/project-review/scripts'", content
-        )
-        self.assertNotIn(
-            "scripts/project_review_ledger.py' 2>/dev/null", content
-        )
-        contract = (REPO_ROOT / "docs/agent-workflow-contract.md").read_text(
-            encoding="utf-8"
-        )
-        paragraph = next(
-            block
-            for block in contract.split("\n\n")
-            if "`codex-plugin-cache-root` is one of two user-scoped paths" in block
-        )
-        self.assertIn("scripts` **directory**", paragraph)
-        self.assertNotIn(
-            "that one lookup locates `project_review_ledger.py`", paragraph
-        )
-
-    def test_project_review_asset_command_discovery_is_not_vacuous(self):
-        # The counterpart of the two pins above for the one vendored workflow
-        # that is report-only. Requirement 7 of issue #462 is that no `gh`
-        # call in either rendered file omits `-R "$REPO"`, and
-        # tools/test_project_review_workflow.py asserts exactly that -- but
-        # only while `gh` is really discoverable in the asset, so what each
-        # file invokes is pinned exactly rather than merely checked for
-        # undocumented names. `sed` and `awk` are pinned with it because they
-        # are what the repository and docs-worktree resolutions are built
-        # from, and `git` because direct-commit mode walks first-parent
-        # history with it -- a rewrite that reached for `gh repo view` instead
-        # would drop `sed` here rather than passing quietly. Issue #548 added
-        # `python3`, which is how both brands reach the vendored helpers, and
-        # `find` with `head` for the Codex lookup that locates them in the
-        # $CODEX_HOME cache; the Claude lookup is a ${CLAUDE_PLUGIN_ROOT}
-        # substitution and spawns nothing, so those two are Codex-only here
-        # exactly as they are in the rendered asset. `dirname` was Codex-only
-        # here too until issue #684 round 8: the lookup now finds the
-        # directory the vendored modules share rather than taking the
-        # directory of one of them, so nothing derives a path with it. Issue
-        # #686 left that set at two, the ledger helper and the adapter, and
-        # added no executable: the association it asks GitHub for is another
-        # `gh` call rather than anything read off a commit locally.
-        executable_tokens = {
-            row["token"] for row in self.manifest if row["kind"] == "executable"
-        }
-        for relative_path, expected in sorted(
-            PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS.items()
-        ):
-            self.assertTrue(
-                relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES
-                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_COPILOT_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by any plugin surface list",
-            )
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            found = discovered_commands_for_plugin_file(relative_path, content)
-            self.assertEqual(found, expected, relative_path)
-            for name in found:
-                self.assertIn(
-                    name,
-                    executable_tokens,
-                    undocumented_command_message(relative_path, name),
-                )
-            # Grounded in the manifest from the other side too: being scanned
-            # is not the same as being declared, and the ten rows named below
-            # are where a reader looks to find out which assets speak each tool.
-            for name in sorted(expected):
-                row = next(
-                    row
-                    for row in self.manifest
-                    if row["kind"] == "executable" and row["token"] == name
-                )
-                self.assertIn(
-                    row["id"],
-                    {
-                        "gh-cli",
-                        "git-cli",
-                        "sed-cli",
-                        "awk-cli",
-                        "python3-cli",
-                        "find-cli",
-                        "head-cli",
-                        "mkdir-cli",
-                        "rm-cli",
-                        "dirname-cli",
-                    },
-                )
-                self.assertIn(relative_path, row["files"], f"{row['id']}: {name}")
-
-    def test_the_auto_project_review_assets_reach_no_command_at_all(self):
-        # Issue #685. The serial loop's own surface, and the one asset pair in
-        # either bundle whose pinned command set is empty. That is design D-6
-        # read from the packaging side: every step of a review -- the
-        # inventory, the registration, the claim, the pinned worktree, the
-        # report, the checkpoint and the cleanup -- stays in the single
-        # workflow, so the loop over it resolves no helper and shells out for
-        # nothing. Both halves are asserted, because an emptiness that rested
-        # on an extractor alone would pass over an asset that had started
-        # running things: the discovery must be empty, AND no executable row
-        # may name either path, which is how a `python3 "$LEDGER" record` added
-        # here later fails twice rather than once.
-        for relative_path in sorted(AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS):
-            self.assertTrue(
-                relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by any plugin surface list",
-            )
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertEqual(
-                discovered_commands_for_plugin_file(relative_path, content),
-                AUTO_PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS[relative_path],
-                relative_path,
-            )
-            declaring = [
-                row["id"]
-                for row in self.manifest
-                if relative_path in row["files"]
-            ]
-            self.assertEqual(declaring, [], f"{relative_path}: {declaring}")
-
-    def test_the_empty_command_set_is_an_extractor_that_still_works(self):
-        # Non-vacuity for the pair above: the same extractor, over the same
-        # kind of file, recovers the delegate's own commands. An extractor
-        # that had stopped matching would report every asset as reaching
-        # nothing, and the assertion above would pass while asserting it.
-        delegate = "claude-plugin/plugins/kanban/commands/project-review.md"
-        content = (REPO_ROOT / delegate).read_text(encoding="utf-8")
-        self.assertEqual(
-            discovered_commands_for_plugin_file(delegate, content),
-            PROJECT_REVIEW_SURFACE_EXPECTED_COMMANDS[delegate],
-        )
-        # And a planted invocation in the loop's own text is recovered too, so
-        # the empty set above is a fact about the asset rather than about the
-        # path it is read from.
-        planted = (
-            REPO_ROOT
-            / "claude-plugin/plugins/kanban/commands/auto-project-review.md"
-        ).read_text(encoding="utf-8") + '\n```bash\npython3 "$LEDGER" record\n```\n'
-        self.assertEqual(
-            discovered_commands_for_plugin_file(
-                "claude-plugin/plugins/kanban/commands/auto-project-review.md",
-                planted,
-            ),
-            {"python3"},
-        )
-
-    def test_the_vendored_project_review_helpers_are_scanned_and_declared(self):
-        # The counterpart of the two vendored-helper pins above. Each copy is a
-        # member of its brand's surface list, so dropping one from a list fails
-        # here rather than silently un-scanning a shipped asset; what the
-        # extractor recovers is pinned exactly, so the empty set is an
-        # assertion about the module rather than about an extractor that
-        # stopped matching.
-        for relative_path, expected in sorted(
-            PROJECT_REVIEW_HELPER_SURFACE_FILES.items()
-        ):
-            self.assertTrue(
-                relative_path in PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_PLUGIN_SURFACE_FILES
-                or relative_path in GROK_PLUGIN_SURFACE_FILES
-                or relative_path in KIMI_PLUGIN_SURFACE_FILES
-                or relative_path in GOOGLE_PLUGIN_SURFACE_FILES
-                or relative_path in CLAUDE_COPILOT_PLUGIN_SURFACE_FILES,
-                f"{relative_path} is not scanned by any plugin surface list",
-            )
-            content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-            self.assertEqual(
-                discovered_commands_for_plugin_file(relative_path, content),
-                expected,
-                relative_path,
-            )
-        # Non-vacuity is inherent here now that issue #686 has retired the one
-        # module whose expected set was empty: every set above names at least
-        # one executable, so an extractor that had stopped matching would
-        # recover the empty set for each of them and fail the loop rather than
-        # passing it vacuously.
-
     def test_drain_prs_asset_command_discovery_is_not_vacuous(self):
         # The counterpart of the three pins above for the one vendored
         # workflow that reaches GitHub not at all. Issue #511's requirement 9
@@ -3515,39 +3220,6 @@ class AgentWorkflowContractTests(unittest.TestCase):
             REPO_ROOT / "codex-plugin/plugins/kanban/skills/issue-rereview/SKILL.md"
         ).read_text(encoding="utf-8")
         self.assertIn(entry["token"], markdown_home_relative_segments(skill))
-
-    def test_the_codex_project_review_skill_declares_the_plugin_cache_root(self):
-        # Round-1 blocker of issue #548's review. The Codex asset resolves
-        # its vendored modules through `${CODEX_HOME:-$HOME/.codex}`, so it joined the
-        # consumers of `codex-plugin-cache-root` -- and a `personal-path` row
-        # that does not name a consumer is a contract that has stopped
-        # describing the tree. The declaring row is named exactly, for the same
-        # reason the drainer scan above names its two: a scan satisfied by any
-        # `personal-path` row would pass on an asset repointed at some other
-        # user-scoped directory entirely.
-        by_id = {row["id"]: row for row in self.manifest}
-        relative_path = "codex-plugin/plugins/kanban/skills/project-review/SKILL.md"
-        entry = by_id["codex-plugin-cache-root"]
-        self.assertIn(relative_path, entry["files"])
-        segments = markdown_home_relative_segments(
-            (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        )
-        # Load-bearing rather than decorative, and non-vacuous in both
-        # directions: the asset really does name a user-scoped segment, and it
-        # is this row's.
-        self.assertTrue(segments, f"{relative_path} names no user-scoped path")
-        self.assertIn(entry["token"], segments)
-        # The Claude rendering resolves the same helper through
-        # ${CLAUDE_PLUGIN_ROOT} and therefore owes no row at all.
-        self.assertEqual(
-            markdown_home_relative_segments(
-                (
-                    REPO_ROOT
-                    / "claude-plugin/plugins/kanban/commands/project-review.md"
-                ).read_text(encoding="utf-8")
-            ),
-            set(),
-        )
 
     def test_every_declared_document_asset_is_scanned_for_external_commands(self):
         # Requirement 6 of issue #229 and its review correction: the two plugin
@@ -4733,13 +4405,12 @@ class WorkflowActionRegistryBoundaryTests(unittest.TestCase):
 
 
 class CensusDynamicExecutableTests(unittest.TestCase):
-    """Issue #574. The janitor census spawns three programs through
+    """Issue #574. The janitor census spawns two programs through
     `sys.executable` rather than through a literal command name, and
     `discovered_python_commands` deliberately ignores a non-literal first
     argument. So listing the census on a brand surface reconciles its `git` and
-    `gh` calls and reconciles *nothing at all* about the drainer controller, the
-    test-coordinator probe, and the project-review liveness adapter issue #706
-    added -- the spawns the whole slice is about.
+    `gh` calls and reconciles *nothing at all* about the drainer controller and
+    the test-coordinator probe -- the spawns the whole slice is about.
 
     These hold both halves: that the set of non-literal spawns in the shipped
     program is exactly the one spelling pinned above, and that the command that
@@ -4864,119 +4535,6 @@ class CensusDynamicExecutableTests(unittest.TestCase):
                 )
 
 
-class LedgerDynamicExecutableTests(unittest.TestCase):
-    """Issue #682. The ledger helper's renewer is the helper itself, run through
-    `sys.executable`, and `discovered_python_commands` deliberately ignores a
-    non-literal first argument -- so its surface pin above reconciles `git`
-    and says nothing about the renewer, which is the one process the lease's
-    whole liveness contract rests on.
-
-    These hold the same three halves `CensusDynamicExecutableTests` holds for
-    the census: the non-literal spellings in each shipped copy are exactly the
-    pinned one, that spelling resolves to a declared executable, and every row
-    the copy owes names it. The spelling set is asserted non-empty, so a
-    renewer launch the AST walk stopped recognizing fails here rather than
-    passing as "no dynamic spawn".
-    """
-
-    def setUp(self):
-        self.manifest = parse_manifest()
-
-    def test_the_ledger_dynamic_spawns_are_exactly_the_pinned_spelling(self):
-        for relative_path in LEDGER_SURFACE_FILES:
-            with self.subTest(surface=relative_path):
-                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-                spellings = CensusDynamicExecutableTests.dynamic_spawn_spellings(content)
-                self.assertTrue(spellings, f"{relative_path}: the renewer launch is invisible")
-                self.assertEqual(
-                    spellings,
-                    set(LEDGER_DYNAMIC_EXECUTABLES),
-                    f"{relative_path} spawns a program through a spelling this "
-                    "contract does not pin; declare the command it resolves to "
-                    "in docs/agent-workflow-contract.md and name it in "
-                    "LEDGER_DYNAMIC_EXECUTABLES",
-                )
-                self.assertEqual(
-                    discovered_python_commands(content),
-                    PROJECT_REVIEW_HELPER_SURFACE_FILES[relative_path],
-                )
-
-    def test_the_dynamic_spawn_resolves_to_a_declared_executable(self):
-        executable_rows = {
-            row["token"]: row for row in self.manifest if row["kind"] == "executable"
-        }
-        for spelling, command in sorted(LEDGER_DYNAMIC_EXECUTABLES.items()):
-            with self.subTest(spelling=spelling):
-                self.assertIn(command, executable_rows)
-
-    def test_every_row_the_ledger_owes_names_both_shipped_copies(self):
-        rows = {row["id"]: row for row in self.manifest}
-        for row_id in LEDGER_DECLARING_ROWS:
-            for relative_path in LEDGER_SURFACE_FILES:
-                with self.subTest(row=row_id, surface=relative_path):
-                    self.assertIn(
-                        relative_path,
-                        rows[row_id]["files"],
-                        f"{row_id} must declare {relative_path}; the ledger "
-                        "helper spawns what that row names",
-                    )
-
-
-class LivenessDynamicExecutableTests(unittest.TestCase):
-    """Issue #687. The liveness adapter's keeper and wrapper spawns reach no
-    literal extractor, so these pin them the way LedgerDynamicExecutableTests
-    pins the renewer: the dynamic spellings are exactly the pinned ones, the
-    keeper's resolves to a declared executable, the caller's command is the
-    one spawn whose argument is not a list at all, and every row the adapter
-    owes names both shipped copies."""
-
-    def setUp(self):
-        self.manifest = parse_manifest()
-
-    @staticmethod
-    def non_list_spawn_spellings(content):
-        spellings = set()
-        for node in ast.walk(ast.parse(content)):
-            if not isinstance(node, ast.Call) or not node.args:
-                continue
-            function = node.func
-            name = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", None)
-            if name not in {"Popen", "run", "check_call", "check_output", "call"}:
-                continue
-            if not isinstance(node.args[0], (ast.List, ast.Tuple)):
-                spellings.add(ast.unparse(node.args[0]))
-        return spellings
-
-    def test_the_liveness_spawns_are_exactly_the_pinned_spellings(self):
-        for relative_path in LIVENESS_SURFACE_FILES:
-            with self.subTest(surface=relative_path):
-                content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-                spellings = CensusDynamicExecutableTests.dynamic_spawn_spellings(content)
-                self.assertTrue(spellings, f"{relative_path}: the keeper launch is invisible")
-                self.assertEqual(spellings, set(LIVENESS_DYNAMIC_EXECUTABLES))
-                self.assertEqual(
-                    self.non_list_spawn_spellings(content), LIVENESS_CALLER_COMMAND_SPELLINGS
-                )
-                self.assertEqual(
-                    discovered_python_commands(content),
-                    PROJECT_REVIEW_HELPER_SURFACE_FILES[relative_path],
-                )
-
-    def test_the_keeper_spawn_resolves_to_a_declared_executable(self):
-        executable_rows = {
-            row["token"]: row for row in self.manifest if row["kind"] == "executable"
-        }
-        for command in LIVENESS_DYNAMIC_EXECUTABLES.values():
-            self.assertIn(command, executable_rows)
-
-    def test_every_row_the_adapter_owes_names_both_shipped_copies(self):
-        rows = {row["id"]: row for row in self.manifest}
-        for row_id in LIVENESS_DECLARING_ROWS:
-            for relative_path in LIVENESS_SURFACE_FILES:
-                with self.subTest(row=row_id, surface=relative_path):
-                    self.assertIn(relative_path, rows[row_id]["files"])
-
-
 def strip_docstrings(tree):
     """`tree` with every module, class, and function docstring removed.
 
@@ -5072,7 +4630,6 @@ class WorkerDeadlineBoundaryTests(unittest.TestCase):
             "bound; a fixture that cannot choose its own value cannot stage a "
             "deadline that fires inside a test",
         )
-
 
 
 # The mission modules that start a process, and are therefore excused from the
@@ -5344,7 +4901,6 @@ class MissionRunnerAuthorityTests(unittest.TestCase):
             f"{MISSION_NOTIFIER_MODULE} must sweep only through its bracket release; "
             "an inline sweep is skipped by every exception",
         )
-
 
 
 # --- The dashboard's recurring local status checks (issue #668) -------------

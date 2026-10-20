@@ -249,27 +249,6 @@ EXCLUDED_TRACKED_PATHS = (
     "docs/drainer-bugs.md",
     "docs/pipeline-hardening.md",
     "docs/product_readiness_findings.md",
-    "docs/project_review/",
-    "docs/project_review_183-170.md",
-    "docs/project_review_195-185.md",
-    "docs/project_review_218-196.md",
-    "docs/project_review_244-219.md",
-    "docs/project_review_271-251.md",
-    "docs/project_review_297-272.md",
-    "docs/project_review_314-299.md",
-    "docs/project_review_342-317.md",
-    "docs/project_review_386-361.md",
-    "docs/project_review_398-353.md",
-    "docs/project_review_442-411.md",
-    "docs/project_review_456-446.md",
-    "docs/project_review_463-455.md",
-    "docs/project_review_466-399.md",
-    "docs/project_review_516-498.md",
-    "docs/project_review_533-517.md",
-    "docs/project_review_561-545.md",
-    "docs/project_review_600-573.md",
-    "docs/project_review_602-562.md",
-    "docs/project_review_660-648.md",
     "docs/ui-bugs.md",
     "docs/vision.md",
     "docs/workflow_audit_findings.md",
@@ -337,24 +316,6 @@ BUNDLED_MECHANISM_MODULES = (
     "codex-plugin/plugins/kanban/skills/process-report/scripts/publish_coordination_doc.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracker_transaction.py",
     "codex-plugin/plugins/kanban/skills/process-report/scripts/tracked_issue_create.py",
-)
-
-# The project-review workflow's durable-state mechanisms, asserted for the same
-# reason and against the same failure: the workflow's whole resume contract is
-# issue #680's ledger, in both modes since issue #686 moved direct-commit
-# progress onto it and retired the #548 sweep cursor, so a release that shipped
-# the command without it would install a workflow that refuses to start in
-# either mode. Issue #687's session liveness adapter is the lease's owner signal
-# under the same rule, and it is inert without the lifecycle hooks file that
-# runs it, so each bundle's hooks file ships beside it. Two copies of each, one
-# per bundle.
-BUNDLED_PROJECT_REVIEW_MODULES = (
-    "claude-plugin/plugins/kanban/scripts/project_review_ledger.py",
-    "claude-plugin/plugins/kanban/scripts/project_review_liveness.py",
-    "claude-plugin/plugins/kanban/hooks/hooks.json",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_ledger.py",
-    "codex-plugin/plugins/kanban/skills/project-review/scripts/project_review_liveness.py",
-    "codex-plugin/plugins/kanban/hooks/hooks.json",
 )
 
 # What each `tools/setup_workflows.py` component installs from. Keyed to that
@@ -889,17 +850,6 @@ class SourceDistributionTest(unittest.TestCase):
             "reader, and each the janitor census with the configuration "
             "module beside it; a bundle that ships the workflows without them "
             "installs a command that fails closed in every repository.",
-        )
-
-    def test_the_bundled_project_review_state_modules_ship_with_both_bundles(self):
-        self.assert_present(
-            BUNDLED_PROJECT_REVIEW_MODULES,
-            "Both provider bundles must carry the project-review ledger "
-            "helper both of the command's modes resolve before their first "
-            "read, and the session liveness adapter with the hooks file that "
-            "runs it; a bundle that ships the command without one installs a "
-            "workflow that stops at its own helper lookup, or a lease no "
-            "session can keep, in every repository.",
         )
 
     def test_provider_bundle_manifests_ship(self):
